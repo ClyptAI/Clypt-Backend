@@ -1,36 +1,28 @@
 import "./index.css";
 import { Composition, staticFile } from "remotion";
 import { ClyptViralShort } from "./ClyptViralShort";
-import type {
-  CameraKeyframe,
-  SpeakerSegment,
-  TrackingFrame,
-  VideoLetterbox,
-} from "./ClyptViralShort";
+import type { TrackingFrame, VideoLetterbox } from "./ClyptViralShort";
 
 interface Payload {
   clip_start_ms: number;
   clip_end_ms: number;
   tracking_uris?: string[];
-  active_speaker_timeline?: SpeakerSegment[];
   [key: string]: unknown;
 }
 
 interface MergedClipTracking {
   frames?: TrackingFrame[];
-  speaker_word_timeline?: SpeakerSegment[];
-  asd_active_speaker_timeline?: SpeakerSegment[];
-  fused_active_speaker_timeline?: SpeakerSegment[];
-  camera_path?: CameraKeyframe[];
   video_letterbox?: VideoLetterbox | null;
 }
 
 let payloads: Payload[] = [];
 try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const raw = require("./remotion_payloads_array.json");
   payloads = Array.isArray(raw) ? raw : [raw];
 } catch {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const single = require("./remotion_payload.json");
     payloads = [single];
   } catch {
@@ -40,13 +32,12 @@ try {
 
 let allTracking: Record<string, TrackingFrame[] | MergedClipTracking> = {};
 try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   allTracking = require("../public/merged_tracking.json");
 } catch {
   // not yet generated
 }
 
-// Most podcast source videos are 23.976 fps; using 24 fps composition
-// avoids constant cadence judder from 24 -> 30 conversion.
 const FPS = 24;
 
 export const RemotionRoot: React.FC = () => {
@@ -63,20 +54,6 @@ export const RemotionRoot: React.FC = () => {
         const tracking: TrackingFrame[] = Array.isArray(clipTracking)
           ? clipTracking
           : (clipTracking?.frames || []);
-        const speakerTimeline: SpeakerSegment[] =
-          payload.active_speaker_timeline || [];
-        const wordSpeakerTimeline: SpeakerSegment[] = Array.isArray(clipTracking)
-          ? []
-          : (clipTracking?.speaker_word_timeline || []);
-        const asdSpeakerTimeline: SpeakerSegment[] = Array.isArray(clipTracking)
-          ? []
-          : (clipTracking?.asd_active_speaker_timeline || []);
-        const fusedSpeakerTimeline: SpeakerSegment[] = Array.isArray(clipTracking)
-          ? []
-          : (clipTracking?.fused_active_speaker_timeline || []);
-        const cameraPath: CameraKeyframe[] = Array.isArray(clipTracking)
-          ? []
-          : (clipTracking?.camera_path || []);
         const videoLetterbox: VideoLetterbox | null = Array.isArray(clipTracking)
           ? null
           : (clipTracking?.video_letterbox || null);
@@ -95,11 +72,6 @@ export const RemotionRoot: React.FC = () => {
               clipEndMs: payload.clip_end_ms,
               videoSrc: staticFile("video.mp4"),
               tracking,
-              speakerTimeline,
-              wordSpeakerTimeline,
-              asdSpeakerTimeline,
-              fusedSpeakerTimeline,
-              cameraPath,
               videoLetterbox,
             }}
           />

@@ -135,9 +135,7 @@ def download_media(url: str) -> tuple[str, str]:
         if p.exists():
             p.unlink()
             log.info(f"Removed stale downloads/{stale}")
-    for stale in ("phase_1a_visual.json", "phase_1a_audio.json", "phase_1a_speaker_map.json",
-                   "phase_1a_loconet_raw.json", "phase_1a_active_speaker_timeline.json",
-                   "phase_1a_active_speaker_timeline_v2.json",
+    for stale in ("phase_1a_visual.json", "phase_1a_audio.json",
                    "phase_1b_nodes.json", "phase_1c_narrative_edges.json",
                    "phase_2_embeddings.json", "remotion_payloads_array.json", "remotion_payload.json"):
         p = OUTPUT_DIR / stale

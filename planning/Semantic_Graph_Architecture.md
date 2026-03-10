@@ -1,5 +1,9 @@
 # Clypt Semantic Graph Pipeline
 
+> [!WARNING]
+> This document is legacy and does not reflect the current Phase 1A migration plan (Modal GPU extraction, no Phase 1A-R reconciliation stage).
+> Use `planning/01-product-and-demo.md`, `planning/02-system-architecture.md`, `planning/03-agents-and-clipping.md`, and `planning/04-data-integrations-and-reference.md` as the active planning source.
+
 Complete documentation for the Clypt video analysis and clip generation pipeline. This system takes a YouTube URL and produces rendered 9:16 short-form video clips by building a semantic graph of the video's content, storing it in Google Cloud Spanner, and using Gemini to identify viral moments.
 
 ## Architecture Overview

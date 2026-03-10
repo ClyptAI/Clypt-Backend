@@ -4,7 +4,7 @@ Clypt Pipeline Orchestrator
 ============================
 Prompts for a YouTube URL, then runs the full pipeline sequentially:
 
-  Phase 1A  →  Deterministic Extraction (yt-dlp + Video Intelligence + STT)
+  Phase 1A  →  Deterministic Extraction
   FFmpeg    →  Re-encode video for Remotion compatibility
   Phase 1B  →  Content Mechanism Decomposition (Gemini chunked multimodal)
   Phase 1C  →  Narrative Edge Mapping (Gemini text-only)
@@ -31,9 +31,6 @@ FFMPEG_REENCODE_CRF = os.getenv("FFMPEG_REENCODE_CRF", "15")
 FFMPEG_REENCODE_PRESET = os.getenv("FFMPEG_REENCODE_PRESET", "slow")
 REMOTION_CRF = os.getenv("REMOTION_CRF", "16")
 REMOTION_X264_PRESET = os.getenv("REMOTION_X264_PRESET", "slow")
-ENABLE_ASD_V2 = os.getenv("ENABLE_ASD_V2", "1") == "1"
-RUN_TRUE_ASD_INFER = os.getenv("RUN_TRUE_ASD_INFER", "0") == "1"
-ASD_INFER_REUSE_EXISTING = os.getenv("ASD_INFER_REUSE_EXISTING", "1") == "1"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -208,44 +205,6 @@ def main():
     # ── Phase 1A: Deterministic Extraction ──
     from pipeline.phase_1a_extract import main as phase_1a_main
     asyncio.run(phase_1a_main(youtube_url=url))
-
-    # ── Phase 1A-R: Speaker-to-Face Reconciliation ──
-    from pipeline.phase_1a_reconcile import main as phase_1a_reconcile_main
-    phase_1a_reconcile_main()
-
-    # ── Phase 1A-ASD-INFER / Phase 1A-ASD / Phase 1A-FUSE ──
-    if ENABLE_ASD_V2:
-        if RUN_TRUE_ASD_INFER:
-            argv_backup = sys.argv[:]
-            try:
-                from pipeline.phase_1a_asd_infer import main as phase_1a_asd_infer_main
-                sys.argv = [sys.argv[0]]
-                if ASD_INFER_REUSE_EXISTING:
-                    sys.argv.append("--reuse-existing")
-                phase_1a_asd_infer_main()
-                sys.argv = argv_backup
-            except Exception as e:
-                sys.argv = argv_backup
-                log.warning(
-                    "Phase 1A-ASD-INFER failed (%s). Continuing with fallback ASD fusion.",
-                    e,
-                )
-        else:
-            log.info("Skipping true ASD inference (RUN_TRUE_ASD_INFER=0)")
-
-        try:
-            from pipeline.phase_1a_asd import main as phase_1a_asd_main
-            phase_1a_asd_main()
-        except Exception as e:
-            log.warning("Phase 1A-ASD failed (%s). Continuing with STT-only fusion.", e)
-
-        try:
-            from pipeline.phase_1a_fuse import main as phase_1a_fuse_main
-            phase_1a_fuse_main()
-        except Exception as e:
-            log.warning("Phase 1A-FUSE failed (%s). Render will use existing speaker data only.", e)
-    else:
-        log.info("ASD v2 disabled (ENABLE_ASD_V2=0)")
 
     # ── FFmpeg Re-encode ──
     banner("RE-ENCODING VIDEO (FFmpeg)")

@@ -46,8 +46,6 @@ EMBEDDINGS_PATH = ROOT / "outputs" / "phase_2_embeddings.json"
 EDGES_PATH = ROOT / "outputs" / "phase_1c_narrative_edges.json"
 VISUAL_PATH = ROOT / "outputs" / "phase_1a_visual.json"
 AUDIO_PATH = ROOT / "outputs" / "phase_1a_audio.json"
-SPEAKER_MAP_PATH = ROOT / "outputs" / "phase_1a_speaker_map.json"
-ASD_FUSED_PATH = ROOT / "outputs" / "phase_1a_active_speaker_timeline_v2.json"
 
 BATCH_SIZE = 100
 
@@ -145,96 +143,15 @@ def _extract_visual_labels(node_start_ms: int, node_end_ms: int, visual: dict) -
     return sorted(labels)
 
 
-def _extract_word_speaker_timeline(
-    node_start_ms: int,
-    node_end_ms: int,
-    audio: dict,
-) -> list[dict]:
-    """Build a word-level speaker timeline slice for this node."""
-    timeline: list[dict] = []
-    for word in audio.get("words", []):
-        tag = word.get("speaker_tag")
-        if not tag or str(tag) == "unknown":
-            continue
-
-        w_start = int(word.get("start_time_ms", 0))
-        w_end = int(word.get("end_time_ms", w_start))
-        if w_end < w_start:
-            w_end = w_start
-
-        # Keep only overlapping portions with this node window.
-        seg_start = max(node_start_ms, w_start)
-        seg_end = min(node_end_ms, w_end)
-        if seg_end <= seg_start:
-            continue
-
-        timeline.append({
-            "start_ms": seg_start,
-            "end_ms": seg_end,
-            "speaker_tag": str(tag),
-        })
-
-    return timeline
-
-
 def _extract_spatial_tracking(
     node_start_ms: int, node_end_ms: int, visual: dict,
-    audio: dict,
-    speaker_map: dict | None = None,
-    asd_fused: dict | None = None,
 ) -> dict:
     """Slice person_detections and face_detections for this node's time range.
-
-    If speaker_map is provided (from phase_1a_reconcile), each face track
-    is tagged with the corresponding speaker_tag.
     """
-    # Build reverse map: face_track_index → speaker_tag
-    track_to_speaker: dict[int, str] = {}
-    if speaker_map:
-        for tag, track_idx in speaker_map.get("speaker_to_track", {}).items():
-            track_to_speaker[int(track_idx)] = str(tag)
-        for tag, track_indices in speaker_map.get("speaker_to_tracks", {}).items():
-            if not isinstance(track_indices, (list, tuple)):
-                continue
-            for track_idx in track_indices:
-                try:
-                    idx_int = int(track_idx)
-                except (TypeError, ValueError):
-                    continue
-                track_to_speaker.setdefault(idx_int, str(tag))
-
     tracking: dict = {
         "person_detections": [],
         "face_detections": [],
-        "speaker_word_timeline": _extract_word_speaker_timeline(
-            node_start_ms,
-            node_end_ms,
-            audio,
-        ),
-        "asd_active_speaker_timeline": [],
     }
-
-    if asd_fused:
-        segments = asd_fused.get("segments", [])
-        if isinstance(segments, list):
-            for seg in segments:
-                try:
-                    s0 = int(seg.get("start_ms", 0))
-                    s1 = int(seg.get("end_ms", 0))
-                except (TypeError, ValueError):
-                    continue
-                if s1 <= s0:
-                    continue
-                if not _overlaps(s0, s1, node_start_ms, node_end_ms):
-                    continue
-                tracking["asd_active_speaker_timeline"].append({
-                    "start_ms": max(node_start_ms, s0),
-                    "end_ms": min(node_end_ms, s1),
-                    "speaker_tag": seg.get("speaker_tag"),
-                    "track_id": seg.get("track_id"),
-                    "confidence": seg.get("confidence"),
-                    "source": seg.get("source", "asd"),
-                })
 
     for person in visual.get("person_detections", []):
         if not _overlaps(person.get("segment_start_ms", 0),
@@ -271,9 +188,6 @@ def _extract_spatial_tracking(
                 "face_track_index": face_idx,
                 "timestamped_objects": filtered_ts,
             }
-            # Tag with speaker identity from reconciliation
-            if face_idx in track_to_speaker:
-                face_entry["speaker_tag"] = track_to_speaker[face_idx]
             tracking["face_detections"].append(face_entry)
 
     return tracking
@@ -321,28 +235,6 @@ def main():
     with open(AUDIO_PATH) as f:
         audio = json.load(f)
     log.info(f"  Audio ledger loaded ({AUDIO_PATH})")
-
-    asd_fused = None
-    if ASD_FUSED_PATH.exists():
-        with open(ASD_FUSED_PATH) as f:
-            asd_fused = json.load(f)
-        log.info(
-            f"  ASD fused timeline loaded ({ASD_FUSED_PATH}): "
-            f"{len(asd_fused.get('segments', []))} segments"
-        )
-    else:
-        log.warning(f"  No ASD fused timeline at {ASD_FUSED_PATH} — using word timeline only")
-
-    # ── Load speaker-to-face reconciliation map (optional) ──
-    speaker_map = None
-    if SPEAKER_MAP_PATH.exists():
-        with open(SPEAKER_MAP_PATH) as f:
-            speaker_map = json.load(f)
-        log.info(f"  Speaker map loaded ({SPEAKER_MAP_PATH}): "
-                 f"{len(speaker_map.get('speaker_to_track', {}))} mappings")
-    else:
-        log.warning(f"  No speaker map at {SPEAKER_MAP_PATH} — "
-                    "tracking won't include speaker tags")
 
     # ── UUID generation & mapping ──
     log.info("Assigning UUIDs to nodes…")
@@ -527,9 +419,6 @@ def main():
             start_ms,
             end_ms,
             visual,
-            audio,
-            speaker_map,
-            asd_fused,
         )
         blob_name = f"{TRACKING_PREFIX}/{node_id}.json"
         blob = bucket.blob(blob_name)
@@ -548,10 +437,9 @@ def main():
         )
 
         if (i + 1) % 5 == 0 or i == len(nodes) - 1:
-            asd_count = len(tracking.get("asd_active_speaker_timeline", []))
             log.info(
                 f"  [{i + 1}/{len(nodes)}] gs://{GCS_BUCKET}/{blob_name} "
-                f"(faces: {face_count} frames, persons: {person_count} frames, asd: {asd_count} segments)"
+                f"(faces: {face_count} frames, persons: {person_count} frames)"
             )
 
     # ── Summary ──
