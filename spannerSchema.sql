@@ -10,7 +10,7 @@ CREATE TABLE SemanticClipNode (
     objects_present JSON,
     visual_labels JSON,
     content_mechanisms JSON,
-    embedding ARRAY<FLOAT32>(vector_length=>1408),
+    embedding ARRAY<FLOAT32>(vector_length=>3072),
     spatial_tracking_uri STRING(MAX)
 ) PRIMARY KEY (node_id);
 
