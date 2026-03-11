@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Local tooling/editor state
+.claude/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node / frontend build artifacts
+node_modules/
+.next/
+dist/
+build/
+
+# Local pipeline outputs/artifacts
+downloads/
+outputs/
+.parallel_runs/
+
+# Logs
+*.log
