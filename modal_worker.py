@@ -218,11 +218,11 @@ clypt_image = (
 @app.cls(
     image=clypt_image,
     gpu="H100",
-    timeout=1800,
+    timeout=3600,
     max_containers=8,
-    min_containers=1,
+    min_containers=0,
     scaledown_window=900,
-    enable_memory_snapshot=True,
+    enable_memory_snapshot=False,
     secrets=[MODEL_DEBUG_SECRET],
     volumes={"/vol/clypt-chunks": TRACKING_VOLUME},
 )
@@ -1215,7 +1215,7 @@ class ClyptWorker:
         chunk_idx = int(chunk["chunk_idx"])
 
         chunk_video_path = os.path.join(chunk_dir, f"chunk_{chunk_idx:04d}.mp4")
-        subprocess.run(
+        ffmpeg_result = subprocess.run(
             [
                 "ffmpeg", "-y",
                 "-ss", f"{start_s:.3f}",
@@ -1226,10 +1226,11 @@ class ClyptWorker:
                 "-an",
                 chunk_video_path,
             ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
         )
+        if ffmpeg_result.returncode != 0:
+            stderr_msg = ffmpeg_result.stderr.decode(errors='replace')
+            raise RuntimeError(f"ffmpeg chunk failed (exit {ffmpeg_result.returncode}): {stderr_msg}")
 
         model_path = YOLO_ENGINE_PATH if os.path.exists(YOLO_ENGINE_PATH) else YOLO_WEIGHTS_PATH
         model = YOLO(model_path)
@@ -3315,6 +3316,7 @@ class ClyptWorker:
         import os
 
         _ = job_id
+        TRACKING_VOLUME.reload()
         tracker_cfg = self._ensure_botsort_reid_yaml()
         chunk_dir = f"/vol/clypt-chunks/jobs/{job_id}/chunks"
         os.makedirs(chunk_dir, exist_ok=True)

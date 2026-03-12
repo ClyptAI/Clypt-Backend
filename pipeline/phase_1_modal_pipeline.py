@@ -494,7 +494,7 @@ async def call_modal_worker_distributed(
 
     # Best-effort autoscaler cap for chunk tracking method.
     try:
-        worker.track_chunk_from_staged.update_autoscaler(max_containers=max_gpu_workers)
+        await worker.track_chunk_from_staged.update_autoscaler.aio(max_containers=max_gpu_workers)
     except Exception:
         pass
 
@@ -531,8 +531,8 @@ async def call_modal_worker_distributed(
         )
 
         if use_detached:
-            asr_handle = worker.run_asr_only.spawn(audio_wav_bytes=audio_bytes)
-            chunk_obj = worker.track_chunk_from_staged.spawn_map(
+            asr_handle = await worker.run_asr_only.spawn.aio(audio_wav_bytes=audio_bytes)
+            chunk_obj = await worker.track_chunk_from_staged.spawn_map.aio(
                 [job_id] * len(chunks),
                 [staged_video_path] * len(chunks),
                 [meta] * len(chunks),
