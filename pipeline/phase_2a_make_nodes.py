@@ -151,7 +151,30 @@ def _plan_chunks(visual: dict, audio: dict) -> list[Chunk]:
     """Group consecutive shots into chunks that fit within TEXT_TOKEN_BUDGET."""
     shots = visual.get("shot_changes", [])
     if not shots:
-        raise ValueError("No shot changes found in visual ledger")
+        # Fallback: synthesize pseudo-shots from available duration.
+        duration_ms = 0
+        if isinstance(visual.get("video_metadata"), dict):
+            duration_ms = int(visual["video_metadata"].get("duration_ms", 0) or 0)
+        if duration_ms <= 0:
+            words = audio.get("words", []) if isinstance(audio, dict) else []
+            if words:
+                duration_ms = int(words[-1].get("end_time_ms", 0) or 0)
+        if duration_ms <= 0:
+            tracks = visual.get("tracks", [])
+            if tracks and isinstance(visual.get("video_metadata"), dict):
+                fps = float(visual["video_metadata"].get("fps", 25.0) or 25.0)
+                max_fi = max(int(t.get("frame_idx", 0)) for t in tracks)
+                duration_ms = int(round((max_fi / max(1e-6, fps)) * 1000.0))
+        if duration_ms <= 0:
+            duration_ms = 10_000
+        shots = []
+        start = 0
+        while start < duration_ms:
+            end = min(duration_ms, start + 10_000)
+            shots.append({"start_time_ms": start, "end_time_ms": end})
+            if end >= duration_ms:
+                break
+            start = end
 
     budget = TEXT_TOKEN_BUDGET - PROMPT_OVERHEAD_TOKENS
     chunks: list[Chunk] = []
@@ -193,11 +216,29 @@ def _slice_ledger_for_chunk(
     end = chunk.end_ms
 
     sliced_visual: dict = {}
+    fps = 25.0
+    if isinstance(visual.get("video_metadata"), dict):
+        try:
+            fps = float(visual["video_metadata"].get("fps", 25.0) or 25.0)
+        except Exception:
+            fps = 25.0
 
     sliced_visual["shot_changes"] = [
         s for s in visual.get("shot_changes", [])
         if _overlaps(s["start_time_ms"], s["end_time_ms"], start, end)
     ]
+    sliced_visual["video_metadata"] = visual.get("video_metadata", {})
+
+    # Canonical tracks path (absolute xyxy + frame_idx).
+    sliced_tracks = []
+    for t in visual.get("tracks", []):
+        fi = int(t.get("frame_idx", -1))
+        if fi < 0:
+            continue
+        time_ms = int(round((fi / max(1e-6, fps)) * 1000.0))
+        if start <= time_ms < end:
+            sliced_tracks.append(t)
+    sliced_visual["tracks"] = sliced_tracks
 
     sliced_faces = []
     for face in visual.get("face_detections", []):

@@ -9,7 +9,7 @@ Uses Spanner's native multi-model architecture: ScaNN vector search on
 the embedding column, Spanner Graph for edge traversal.
 
 Inputs:
-  - phase_3_embeddings.json          (nodes with 1408-d vectors)
+  - phase_3_embeddings.json          (nodes with 3072-d vectors)
   - phase_2b_narrative_edges.json    (directional edges)
   - phase_1_visual.json             (face/person/object/label data)
   - phase_1_audio.json              (word-level timestamps + speakers)
@@ -48,6 +48,7 @@ VISUAL_PATH = ROOT / "outputs" / "phase_1_visual.json"
 AUDIO_PATH = ROOT / "outputs" / "phase_1_audio.json"
 
 BATCH_SIZE = 100
+EXPECTED_EMBEDDING_DIM = 3072
 
 # ──────────────────────────────────────────────
 # Logging
@@ -143,6 +144,100 @@ def _extract_visual_labels(node_start_ms: int, node_end_ms: int, visual: dict) -
     return sorted(labels)
 
 
+def _ensure_legacy_visual_from_tracks(visual: dict) -> dict:
+    """Build legacy face/person detection blocks from canonical tracks when missing."""
+    if not isinstance(visual, dict):
+        return {"person_detections": [], "face_detections": [], "object_tracking": [], "label_detections": []}
+
+    has_person = isinstance(visual.get("person_detections"), list)
+    has_face = isinstance(visual.get("face_detections"), list)
+    if has_person and has_face:
+        visual.setdefault("object_tracking", [])
+        visual.setdefault("label_detections", [])
+        return visual
+
+    tracks = visual.get("tracks", [])
+    if not isinstance(tracks, list) or not tracks:
+        visual["person_detections"] = visual.get("person_detections", [])
+        visual["face_detections"] = visual.get("face_detections", [])
+        visual.setdefault("object_tracking", [])
+        visual.setdefault("label_detections", [])
+        return visual
+
+    meta = visual.get("video_metadata", {}) if isinstance(visual.get("video_metadata"), dict) else {}
+    width = int(meta.get("width", 1920) or 1920)
+    height = int(meta.get("height", 1080) or 1080)
+    fps = float(meta.get("fps", 25.0) or 25.0)
+
+    by_tid: dict[str, list[dict]] = {}
+    for t in tracks:
+        tid = str(t.get("track_id", ""))
+        if not tid:
+            continue
+        by_tid.setdefault(tid, []).append(t)
+    for tid in list(by_tid.keys()):
+        by_tid[tid].sort(key=lambda x: int(x.get("frame_idx", -1)))
+
+    person_dets = []
+    face_dets = []
+    for idx, (tid, dets) in enumerate(sorted(by_tid.items())):
+        person_ts = []
+        face_ts = []
+        for d in dets:
+            fi = int(d.get("frame_idx", 0))
+            t_ms = int(round((fi / max(1e-6, fps)) * 1000.0))
+            x1 = float(d.get("x1", 0.0))
+            y1 = float(d.get("y1", 0.0))
+            x2 = float(d.get("x2", x1 + 1.0))
+            y2 = float(d.get("y2", y1 + 1.0))
+            bbox = {
+                "left": max(0.0, min(1.0, x1 / max(1, width))),
+                "top": max(0.0, min(1.0, y1 / max(1, height))),
+                "right": max(0.0, min(1.0, x2 / max(1, width))),
+                "bottom": max(0.0, min(1.0, y2 / max(1, height))),
+            }
+            person_ts.append({"time_ms": t_ms, "bounding_box": bbox})
+
+            bw = max(1e-6, bbox["right"] - bbox["left"])
+            bh = max(1e-6, bbox["bottom"] - bbox["top"])
+            face_bbox = {
+                "left": max(0.0, min(1.0, bbox["left"] + 0.18 * bw)),
+                "right": max(0.0, min(1.0, bbox["right"] - 0.18 * bw)),
+                "top": max(0.0, min(1.0, bbox["top"] + 0.02 * bh)),
+                "bottom": max(0.0, min(1.0, bbox["top"] + 0.48 * bh)),
+            }
+            face_ts.append({"time_ms": t_ms, "bounding_box": face_bbox})
+
+        if person_ts:
+            person_dets.append(
+                {
+                    "confidence": float(sum(float(d.get("confidence", 0.0)) for d in dets) / max(1, len(dets))),
+                    "segment_start_ms": int(person_ts[0]["time_ms"]),
+                    "segment_end_ms": int(person_ts[-1]["time_ms"]),
+                    "person_track_index": idx,
+                    "track_id": tid,
+                    "timestamped_objects": person_ts,
+                }
+            )
+        if face_ts:
+            face_dets.append(
+                {
+                    "confidence": float(sum(float(d.get("confidence", 0.0)) for d in dets) / max(1, len(dets))),
+                    "segment_start_ms": int(face_ts[0]["time_ms"]),
+                    "segment_end_ms": int(face_ts[-1]["time_ms"]),
+                    "face_track_index": idx,
+                    "track_id": tid,
+                    "timestamped_objects": face_ts,
+                }
+            )
+
+    visual["person_detections"] = person_dets
+    visual["face_detections"] = face_dets
+    visual.setdefault("object_tracking", [])
+    visual.setdefault("label_detections", [])
+    return visual
+
+
 def _extract_spatial_tracking(
     node_start_ms: int, node_end_ms: int, visual: dict,
 ) -> dict:
@@ -210,6 +305,32 @@ def _write_mutations_batched(database, mutations: list, label: str):
                  f"({len(batch)} rows, {i + len(batch)}/{total})")
 
 
+def _table_exists(database, table_name: str) -> bool:
+    sql = """
+        SELECT TABLE_NAME
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_NAME = @table_name
+    """
+    params = {"table_name": table_name}
+    param_types = {"table_name": spanner.param_types.STRING}
+    with database.snapshot() as snapshot:
+        rows = list(snapshot.execute_sql(sql, params=params, param_types=param_types))
+    return len(rows) > 0
+
+
+def _table_columns(database, table_name: str) -> set[str]:
+    sql = """
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = @table_name
+    """
+    params = {"table_name": table_name}
+    param_types = {"table_name": spanner.param_types.STRING}
+    with database.snapshot() as snapshot:
+        rows = list(snapshot.execute_sql(sql, params=params, param_types=param_types))
+    return {str(r[0]) for r in rows}
+
+
 # ──────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────
@@ -230,6 +351,7 @@ def main():
 
     with open(VISUAL_PATH) as f:
         visual = json.load(f)
+    visual = _ensure_legacy_visual_from_tracks(visual)
     log.info(f"  Visual ledger loaded ({VISUAL_PATH})")
 
     with open(AUDIO_PATH) as f:
@@ -254,8 +376,19 @@ def main():
     instance = spanner_client.instance(SPANNER_INSTANCE)
     database = instance.database(SPANNER_DATABASE)
 
+    semantic_exists = _table_exists(database, "SemanticClipNode")
+    edge_exists = _table_exists(database, "NarrativeEdge")
+    if not semantic_exists:
+        raise RuntimeError("SemanticClipNode table not found in target database")
+    if not edge_exists:
+        raise RuntimeError("NarrativeEdge table not found in target database")
+
+    semantic_cols = _table_columns(database, "SemanticClipNode")
+    edge_cols = _table_columns(database, "NarrativeEdge")
+    log.info(f"SemanticClipNode columns: {sorted(semantic_cols)}")
+    log.info(f"NarrativeEdge columns: {sorted(edge_cols)}")
+
     # ── Clear stale data from previous runs ──
-    # Edges reference nodes via foreign keys in the graph, so delete edges first
     log.info("Clearing previous run data from Spanner…")
     def _clear_tables(transaction):
         transaction.execute_update("DELETE FROM NarrativeEdge WHERE TRUE")
@@ -274,20 +407,28 @@ def main():
     log.info("─" * 50)
     log.info("Preparing SemanticClipNode mutations…")
 
-    node_columns = [
-        "node_id",
-        "video_uri",
-        "start_time_ms",
-        "end_time_ms",
-        "transcript_text",
-        "vocal_delivery",
-        "speakers",
-        "objects_present",
-        "visual_labels",
-        "content_mechanisms",
-        "embedding",
-        "spatial_tracking_uri",
-    ]
+    embedding_col = "embedding"
+    candidate_node_values = {
+        "node_id": lambda ctx: ctx["node_id"],
+        "video_uri": lambda ctx: VIDEO_GCS_URI,
+        "start_time_ms": lambda ctx: ctx["start_ms"],
+        "end_time_ms": lambda ctx: ctx["end_ms"],
+        "transcript_text": lambda ctx: ctx["node"].get("transcript_segment", ""),
+        "visual_description": lambda ctx: ctx["node"].get("visual_description", ""),
+        "vocal_delivery": lambda ctx: ctx["node"].get("vocal_delivery", ""),
+        "speakers": lambda ctx: json.dumps(ctx["speakers"]),
+        "objects_present": lambda ctx: json.dumps(ctx["objects_present"]),
+        "visual_labels": lambda ctx: json.dumps(ctx["visual_labels"]),
+        "content_mechanisms": lambda ctx: json.dumps(ctx["mechanisms"]),
+        "embedding": lambda ctx: ctx["embedding"],
+        "multimodal_embedding": lambda ctx: ctx["embedding"],
+        "spatial_tracking_uri": lambda ctx: ctx["tracking_uri"],
+    }
+    node_columns = [c for c in candidate_node_values.keys() if c in semantic_cols]
+    if "node_id" not in node_columns:
+        raise RuntimeError("SemanticClipNode missing required node_id column")
+    if embedding_col not in node_columns:
+        raise RuntimeError("SemanticClipNode missing required embedding column")
 
     node_mutations: list[dict] = []
 
@@ -302,25 +443,31 @@ def main():
         visual_labels = _extract_visual_labels(start_ms, end_ms, visual)
         mechanisms = node.get("content_mechanisms", {})
         embedding = node.get("multimodal_embedding", [])
+        if not isinstance(embedding, list) or len(embedding) != EXPECTED_EMBEDDING_DIM:
+            raise RuntimeError(
+                f"Node {i + 1} has invalid embedding size "
+                f"({len(embedding) if isinstance(embedding, list) else 'non-list'}); "
+                f"expected {EXPECTED_EMBEDDING_DIM}."
+            )
         tracking_uri = f"gs://{GCS_BUCKET}/{TRACKING_PREFIX}/{node_id}.json"
 
+        ctx = {
+            "node_id": node_id,
+            "node": node,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "speakers": speakers,
+            "objects_present": objects_present,
+            "visual_labels": visual_labels,
+            "mechanisms": mechanisms,
+            "embedding": embedding,
+            "tracking_uri": tracking_uri,
+        }
+        node_values = tuple(candidate_node_values[c](ctx) for c in node_columns)
         node_mutations.append({
             "table": "SemanticClipNode",
             "columns": node_columns,
-            "values": (
-                node_id,
-                VIDEO_GCS_URI,
-                start_ms,
-                end_ms,
-                node.get("transcript_segment", ""),
-                node.get("vocal_delivery", ""),
-                json.dumps(speakers),
-                json.dumps(objects_present),
-                json.dumps(visual_labels),
-                json.dumps(mechanisms),
-                embedding,
-                tracking_uri,
-            ),
+            "values": node_values,
         })
 
         if (i + 1) % 5 == 0 or i == len(nodes) - 1:
@@ -347,7 +494,7 @@ def main():
     log.info("─" * 50)
     log.info("Preparing NarrativeEdge mutations…")
 
-    edge_columns = [
+    all_edge_columns = [
         "edge_id",
         "from_node_id",
         "to_node_id",
@@ -355,6 +502,10 @@ def main():
         "narrative_classification",
         "confidence_score",
     ]
+    edge_columns = [c for c in all_edge_columns if c in edge_cols]
+    if set(all_edge_columns) - set(edge_columns):
+        missing = sorted(set(all_edge_columns) - set(edge_columns))
+        raise RuntimeError(f"NarrativeEdge missing required columns: {missing}")
 
     edge_mutations: list[dict] = []
     skipped = 0
@@ -376,26 +527,32 @@ def main():
         raw_type = edge.get("edge_type", "")
         label = EDGE_TYPE_MAP.get(raw_type, raw_type.upper().replace(" ", "_").replace("/", "_"))
 
+        edge_ctx = {
+            "edge_id": edge_id,
+            "from_node_id": from_id,
+            "to_node_id": to_id,
+            "label": label,
+            "narrative_classification": edge.get("narrative_classification", ""),
+            "confidence_score": edge.get("confidence_score", 0.0),
+        }
         edge_mutations.append({
             "table": "NarrativeEdge",
             "columns": edge_columns,
-            "values": (
-                edge_id,
-                from_id,
-                to_id,
-                label,
-                edge.get("narrative_classification", ""),
-                edge.get("confidence_score", 0.0),
-            ),
+            "values": tuple(edge_ctx[c] for c in edge_columns),
         })
 
     if skipped:
         log.warning(f"  {skipped} edge(s) skipped due to unresolved start_times")
 
+    if not edge_mutations:
+        raise RuntimeError("No NarrativeEdge rows were generated; refusing degraded graph ingestion.")
+
     log.info(f"Writing {len(edge_mutations)} edge mutations to Spanner…")
     total = len(edge_mutations)
     for batch_start in range(0, total, BATCH_SIZE):
         batch = edge_mutations[batch_start : batch_start + BATCH_SIZE]
+        if not batch:
+            continue
         with database.batch() as txn:
             txn.insert_or_update(
                 table="NarrativeEdge",

@@ -4,7 +4,7 @@ Clypt Phase 1 — Modal GPU Worker
 Serverless GPU microservice that performs deterministic multimodal extraction:
 
   1. NVIDIA Parakeet-TDT → word-level ASR with timestamps + punctuation
-  2. YOLOv11 + BoT-SORT  → dense person/face tracking with persistent IDs
+  2. YOLOv26 + BoT-SORT  → dense person tracking with persistent IDs
   3. TalkNet ASD         → active speaker binding (audio-visual sync)
 
 Media is downloaded locally by the calling pipeline and sent to this worker
@@ -20,6 +20,7 @@ import modal
 # App + Image
 # ──────────────────────────────────────────────
 app = modal.App("clypt-sota-worker")
+TRACKING_VOLUME = modal.Volume.from_name("clypt-phase1-tracking", create_if_missing=True)
 MODEL_DEBUG_SECRET = modal.Secret.from_dict(
     {
         "CLYPT_MODEL_DEBUG": "1",
@@ -30,8 +31,15 @@ MODEL_DEBUG_SECRET = modal.Secret.from_dict(
 ASR_MODEL_NAME = "nvidia/parakeet-tdt-1.1b"
 TALKNET_MODEL_PATH = "/root/.cache/clypt/pretrain_TalkSet.model"
 TALKNET_REPO_ROOT = "/root/talknet_asd"
-YOLO_WEIGHTS_PATH = "yolo11s.pt"
-YOLO_ENGINE_PATH = "/root/.cache/clypt/yolo11s.engine"
+YOLO_WEIGHTS_PATH = "yolo26s.pt"
+YOLO_ONNX_PATH = "/root/.cache/clypt/yolo26s.onnx"
+YOLO_ENGINE_PATH = "/root/.cache/clypt/yolo26s.engine"
+YOLO_OPENVINO_DIR = "/root/.cache/clypt/yolo26s_openvino_model"
+PHASE1_SCHEMA_VERSION = "2.0.0"
+PHASE1_TASK_TYPE = "person_tracking"
+PHASE1_COORDINATE_SPACE = "absolute_original_frame_xyxy"
+PHASE1_GEOMETRY_TYPE = "aabb"
+PHASE1_CLASS_TAXONOMY = {"0": "person"}
 
 
 def download_asr_model():
@@ -43,11 +51,62 @@ def download_asr_model():
 
 
 def download_yolo_model():
-    """Download YOLO11 weights at image build time so they're cached."""
+    """Download YOLO26 weights at image build time so they're cached."""
     from ultralytics import YOLO
 
-    print("Downloading YOLO11s weights into container cache...")
+    print("Downloading YOLO26s weights into container cache...")
     YOLO(YOLO_WEIGHTS_PATH)
+
+
+def prepare_yolo_onnx_tensorrt():
+    """Best-effort export to ONNX + TensorRT engine at build time.
+
+    If TensorRT tooling is unavailable during image build, we keep the worker
+    functional by falling back to PyTorch weights at runtime.
+    """
+    import os
+    import subprocess
+    from ultralytics import YOLO
+
+    os.makedirs("/root/.cache/clypt", exist_ok=True)
+    model = YOLO(YOLO_WEIGHTS_PATH)
+
+    if not os.path.exists(YOLO_ONNX_PATH):
+        try:
+            print("Exporting YOLO26s to ONNX...")
+            onnx_out = model.export(format="onnx", dynamic=True, simplify=True, opset=17)
+            if isinstance(onnx_out, str) and os.path.exists(onnx_out) and onnx_out != YOLO_ONNX_PATH:
+                os.replace(onnx_out, YOLO_ONNX_PATH)
+        except Exception as e:
+            print(f"Warning: ONNX export failed ({type(e).__name__}: {e})")
+
+    if not os.path.exists(YOLO_ENGINE_PATH) and os.path.exists(YOLO_ONNX_PATH):
+        try:
+            print("Compiling YOLO26s ONNX -> TensorRT engine...")
+            subprocess.run(
+                [
+                    "trtexec",
+                    f"--onnx={YOLO_ONNX_PATH}",
+                    f"--saveEngine={YOLO_ENGINE_PATH}",
+                    "--fp16",
+                    "--workspace=4096",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            print(
+                "Warning: TensorRT engine compile unavailable; "
+                f"using PyTorch/ONNX fallback ({type(e).__name__}: {e})"
+            )
+
+    if not os.path.exists(YOLO_OPENVINO_DIR):
+        try:
+            print("Exporting YOLO26s to OpenVINO...")
+            model.export(format="openvino")
+        except Exception as e:
+            print(f"Warning: OpenVINO export failed ({type(e).__name__}: {e})")
 
 
 def download_talknet_model():
@@ -130,8 +189,10 @@ clypt_image = (
         "decord",
         "insightface",
         "onnxruntime-gpu",
+        "onnx",
         "python_speech_features",
         "pandas",
+        "scipy",
         "tqdm",
         "matplotlib",
         "imageio",
@@ -145,6 +206,7 @@ clypt_image = (
     # Step 3: Cache model weights at build time
     .run_function(download_asr_model)
     .run_function(download_yolo_model)
+    .run_function(prepare_yolo_onnx_tensorrt)
     .run_function(download_talknet_model)
     .run_function(download_insightface_model)
 )
@@ -153,7 +215,17 @@ clypt_image = (
 # ──────────────────────────────────────────────
 # GPU Worker (class-based for VRAM persistence)
 # ──────────────────────────────────────────────
-@app.cls(image=clypt_image, gpu="H100", timeout=1800, secrets=[MODEL_DEBUG_SECRET])
+@app.cls(
+    image=clypt_image,
+    gpu="H100",
+    timeout=1800,
+    max_containers=8,
+    min_containers=1,
+    scaledown_window=900,
+    enable_memory_snapshot=True,
+    secrets=[MODEL_DEBUG_SECRET],
+    volumes={"/vol/clypt-chunks": TRACKING_VOLUME},
+)
 class ClyptWorker:
 
     @staticmethod
@@ -221,6 +293,59 @@ class ClyptWorker:
         for tid in list(track_to_dets.keys()):
             track_to_dets[tid].sort(key=lambda x: int(x["frame_idx"]))
         return frame_to_dets, track_to_dets
+
+    @staticmethod
+    def _validate_tracking_contract(tracks: list[dict]):
+        """Contract-driven schema validation for phase handoff."""
+        required = (
+            "frame_idx",
+            "track_id",
+            "class_id",
+            "label",
+            "confidence",
+            "x1",
+            "y1",
+            "x2",
+            "y2",
+            "geometry_type",
+        )
+        for i, d in enumerate(tracks):
+            for k in required:
+                if k not in d:
+                    raise RuntimeError(f"Track contract violation at index {i}: missing '{k}'")
+            if float(d["x2"]) <= float(d["x1"]) or float(d["y2"]) <= float(d["y1"]):
+                raise RuntimeError(f"Track contract violation at index {i}: invalid xyxy box")
+
+    @staticmethod
+    def _tracking_contract_pass_rate(tracks: list[dict]) -> float:
+        """Compute explicit schema pass rate for rollout gating metrics."""
+        required = (
+            "frame_idx",
+            "track_id",
+            "class_id",
+            "label",
+            "confidence",
+            "x1",
+            "y1",
+            "x2",
+            "y2",
+            "geometry_type",
+        )
+        if not tracks:
+            return 1.0
+        passed = 0
+        for d in tracks:
+            ok = True
+            for k in required:
+                if k not in d:
+                    ok = False
+                    break
+            if ok:
+                if float(d["x2"]) <= float(d["x1"]) or float(d["y2"]) <= float(d["y1"]):
+                    ok = False
+            if ok:
+                passed += 1
+        return float(passed / max(1, len(tracks)))
 
     def _detect_face_in_person_det(self, frame_rgb, det: dict):
         """Detect a face inside a person bbox and return (112x112 crop, relative anchor)."""
@@ -456,17 +581,17 @@ class ClyptWorker:
 
         self.time_stride = 8 * self.asr_model.cfg.preprocessor.window_stride
 
-        # --- Load YOLOv11 ---
-        print("Loading YOLO11s into GPU VRAM...")
+        # --- Load YOLOv26 ---
+        print("Loading YOLO26s into GPU VRAM...")
         self.yolo_model = YOLO(YOLO_WEIGHTS_PATH)
         try:
             # Avoid runtime TensorRT export on cold start; only load an existing
             # prebuilt engine if it is already present.
             if os.path.exists(YOLO_ENGINE_PATH):
-                print("Loading YOLO11s TensorRT engine...")
+                print("Loading YOLO26s TensorRT engine...")
                 self.yolo_model = YOLO(YOLO_ENGINE_PATH)
             else:
-                print("Using PyTorch YOLO11s weights (no runtime TensorRT export).")
+                print("Using PyTorch YOLO26s weights (no TensorRT engine found).")
         except Exception as e:
             print(
                 "Warning: TensorRT engine load failed; using PyTorch YOLO model "
@@ -627,75 +752,965 @@ class ClyptWorker:
             return h264_path
         return video_path
 
-    def _run_tracking(self, video_path: str) -> list[dict]:
-        """Run YOLO11 + BoT-SORT for dense person tracking with persistent IDs."""
+    @staticmethod
+    def _probe_video_meta(video_path: str) -> dict:
+        """Return fps/size/frame_count metadata for a local video."""
         import cv2
-        import time
 
-        print("Running YOLO11s + BoT-SORT tracking inference...")
-
-        # Ensure OpenCV can decode the video (AV1/VP9 often fail)
-        video_path = self._ensure_h264(video_path)
-
-        total_frames = 0
         cap = cv2.VideoCapture(video_path)
-        if cap.isOpened():
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if not cap.isOpened():
+            return {
+                "fps": 25.0,
+                "width": 0,
+                "height": 0,
+                "total_frames": 0,
+                "duration_s": 0.0,
+            }
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 25.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         cap.release()
+        return {
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "total_frames": total_frames,
+            "duration_s": float(total_frames / max(1e-6, fps)),
+        }
 
-        log_every_n_frames = 600
-        started_at = time.time()
+    @staticmethod
+    def _build_chunk_plan(total_frames: int, fps: float) -> list[dict]:
+        """Build overlapping chunk windows for parallel tracking."""
+        chunk_seconds = 60.0
+        overlap_seconds = 2.0
+        chunk_frames = max(1, int(round(chunk_seconds * fps)))
+        overlap_frames = max(1, int(round(overlap_seconds * fps)))
+        stride = max(1, chunk_frames - overlap_frames)
 
-        # stream=True returns a generator, preventing RAM overload on long videos.
-        # classes=[0] ensures we ONLY track people.
-        results = self.yolo_model.track(
-            source=video_path,
-            tracker="botsort.yaml",
+        plan = []
+        start = 0
+        idx = 0
+        while start < total_frames:
+            end = min(total_frames, start + chunk_frames)
+            plan.append(
+                {
+                    "chunk_idx": idx,
+                    "start_frame": int(start),
+                    "end_frame": int(end),
+                    "overlap_frames": int(overlap_frames),
+                }
+            )
+            if end >= total_frames:
+                break
+            idx += 1
+            start += stride
+        return plan
+
+    @staticmethod
+    def _ensure_botsort_reid_yaml() -> str:
+        """Write a strict BoT-SORT config with ReID + GMC enabled."""
+        import os
+
+        out = "/tmp/clypt/botsort_reid.yaml"
+        os.makedirs("/tmp/clypt", exist_ok=True)
+        if not os.path.exists(out):
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(
+                    "tracker_type: botsort\n"
+                    "track_high_thresh: 0.35\n"
+                    "track_low_thresh: 0.1\n"
+                    "new_track_thresh: 0.6\n"
+                    "track_buffer: 45\n"
+                    "match_thresh: 0.78\n"
+                    "fuse_score: True\n"
+                    "gmc_method: sparseOptFlow\n"
+                    "proximity_thresh: 0.5\n"
+                    "appearance_thresh: 0.25\n"
+                    "with_reid: True\n"
+                    "model: auto\n"
+                )
+        return out
+
+    @staticmethod
+    def _xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float]:
+        w = max(1.0, float(x2) - float(x1))
+        h = max(1.0, float(y2) - float(y1))
+        cx = float(x1) + 0.5 * w
+        cy = float(y1) + 0.5 * h
+        return cx, cy, w, h
+
+    @staticmethod
+    def _xyxy_abs_to_xywhn(
+        x1: float, y1: float, x2: float, y2: float, width: int, height: int
+    ) -> tuple[float, float, float, float]:
+        """Deterministic absolute-xyxy -> normalized-xywh conversion."""
+        w = max(1.0, float(width))
+        h = max(1.0, float(height))
+        cx, cy, bw, bh = ClyptWorker._xyxy_to_xywh(x1, y1, x2, y2)
+        return cx / w, cy / h, bw / w, bh / h
+
+    @staticmethod
+    def _xywhn_to_xyxy_abs(
+        xcn: float, ycn: float, wn: float, hn: float, width: int, height: int
+    ) -> tuple[float, float, float, float]:
+        """Deterministic normalized-xywh -> absolute-xyxy conversion."""
+        w = max(1.0, float(width))
+        h = max(1.0, float(height))
+        cx = float(xcn) * w
+        cy = float(ycn) * h
+        bw = max(1.0, float(wn) * w)
+        bh = max(1.0, float(hn) * h)
+        x1 = cx - 0.5 * bw
+        y1 = cy - 0.5 * bh
+        x2 = cx + 0.5 * bw
+        y2 = cy + 0.5 * bh
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def _compute_letterbox_meta(
+        orig_w: int, orig_h: int, input_w: int, input_h: int
+    ) -> dict:
+        """Cache letterbox scale/padding metadata for explicit inverse-affine writes."""
+        ow = max(1, int(orig_w))
+        oh = max(1, int(orig_h))
+        iw = max(1, int(input_w))
+        ih = max(1, int(input_h))
+        scale = min(iw / float(ow), ih / float(oh))
+        new_w = int(round(ow * scale))
+        new_h = int(round(oh * scale))
+        pad_x = 0.5 * (iw - new_w)
+        pad_y = 0.5 * (ih - new_h)
+        return {
+            "orig_w": ow,
+            "orig_h": oh,
+            "input_w": iw,
+            "input_h": ih,
+            "scale": float(scale),
+            "pad_x": float(pad_x),
+            "pad_y": float(pad_y),
+        }
+
+    @staticmethod
+    def _forward_letterbox_xyxy(
+        x1: float, y1: float, x2: float, y2: float, lb: dict
+    ) -> tuple[float, float, float, float]:
+        """Map absolute box coords into letterboxed tensor space."""
+        s = float(lb["scale"])
+        px = float(lb["pad_x"])
+        py = float(lb["pad_y"])
+        return (x1 * s + px, y1 * s + py, x2 * s + px, y2 * s + py)
+
+    @staticmethod
+    def _inverse_letterbox_xyxy(
+        lx1: float, ly1: float, lx2: float, ly2: float, lb: dict
+    ) -> tuple[float, float, float, float]:
+        """Map letterboxed tensor coords back to absolute original-frame coords."""
+        s = max(1e-9, float(lb["scale"]))
+        px = float(lb["pad_x"])
+        py = float(lb["pad_y"])
+        x1 = (lx1 - px) / s
+        y1 = (ly1 - py) / s
+        x2 = (lx2 - px) / s
+        y2 = (ly2 - py) / s
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def _bbox_iou_xyxy(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        iw = max(0.0, ix2 - ix1)
+        ih = max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0.0:
+            return 0.0
+        ua = max(1e-6, (ax2 - ax1) * (ay2 - ay1))
+        ub = max(1e-6, (bx2 - bx1) * (by2 - by1))
+        return float(inter / max(1e-6, ua + ub - inter))
+
+    @staticmethod
+    def _cosine_dist(a, b) -> float:
+        import numpy as np
+
+        a = np.asarray(a, dtype=np.float32)
+        b = np.asarray(b, dtype=np.float32)
+        den = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if den <= 1e-9:
+            return 1.0
+        return 1.0 - float(np.dot(a, b) / den)
+
+    @staticmethod
+    def _propagate_gaps_in_tracklets(tracks: list[dict], max_gap: int = 2) -> list[dict]:
+        """Lightweight propagation over short frame gaps (confidence-guided frame skipping fill)."""
+        from collections import defaultdict
+
+        by_tid = defaultdict(list)
+        for d in tracks:
+            by_tid[str(d.get("track_id", ""))].append(d)
+
+        out = list(tracks)
+        for tid, dets in by_tid.items():
+            dets = sorted(dets, key=lambda x: int(x["frame_idx"]))
+            for left, right in zip(dets, dets[1:]):
+                lf = int(left["frame_idx"])
+                rf = int(right["frame_idx"])
+                gap = rf - lf - 1
+                if gap <= 0 or gap > max_gap:
+                    continue
+                lc = float(left.get("confidence", 0.0))
+                rc = float(right.get("confidence", 0.0))
+                if min(lc, rc) < 0.15:
+                    continue
+                for fi in range(lf + 1, rf):
+                    alpha = (fi - lf) / float(rf - lf)
+                    l_local = int(left.get("local_frame_idx", lf))
+                    r_local = int(right.get("local_frame_idx", rf))
+                    local_fi = int(round((1.0 - alpha) * l_local + alpha * r_local))
+                    x1 = (1 - alpha) * float(left["x1"]) + alpha * float(right["x1"])
+                    y1 = (1 - alpha) * float(left["y1"]) + alpha * float(right["y1"])
+                    x2 = (1 - alpha) * float(left["x2"]) + alpha * float(right["x2"])
+                    y2 = (1 - alpha) * float(left["y2"]) + alpha * float(right["y2"])
+                    cx, cy, w, h = ClyptWorker._xyxy_to_xywh(x1, y1, x2, y2)
+                    out.append(
+                        {
+                            **left,
+                            "frame_idx": int(fi),
+                            "local_frame_idx": int(local_fi),
+                            "x1": float(x1),
+                            "y1": float(y1),
+                            "x2": float(x2),
+                            "y2": float(y2),
+                            "x_center": float(cx),
+                            "y_center": float(cy),
+                            "width": float(w),
+                            "height": float(h),
+                            "confidence": float(min(lc, rc) * 0.85),
+                            "source": "propagated",
+                        }
+                    )
+        return out
+
+    def _compute_track_embeddings_for_chunk(
+        self,
+        chunk_video_path: str,
+        chunk_tracks: list[dict],
+    ) -> dict[str, list[float]]:
+        """Compute per-track ArcFace embeddings on sampled person ROIs."""
+        import cv2
+        import numpy as np
+        from collections import defaultdict
+
+        if self.face_analyzer is None or not chunk_tracks:
+            return {}
+
+        by_tid = defaultdict(list)
+        for d in chunk_tracks:
+            by_tid[str(d["track_id"])].append(d)
+        samples_by_tid = {}
+        for tid, dets in by_tid.items():
+            ranked = sorted(
+                dets,
+                key=lambda d: float(d.get("confidence", 0.0))
+                * max(1.0, float(d.get("width", 1.0)) * float(d.get("height", 1.0))),
+                reverse=True,
+            )
+            seen = set()
+            sampled = []
+            for d in ranked:
+                fi = int(d["local_frame_idx"])
+                if fi in seen:
+                    continue
+                seen.add(fi)
+                sampled.append(d)
+                if len(sampled) >= 4:
+                    break
+            samples_by_tid[tid] = sampled
+
+        cap = cv2.VideoCapture(chunk_video_path)
+        if not cap.isOpened():
+            return {}
+
+        out = {}
+        for tid, sampled in samples_by_tid.items():
+            vecs = []
+            for d in sampled:
+                fi = int(d["local_frame_idx"])
+                cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                h, w = frame.shape[:2]
+                x1 = max(0, min(w - 1, int(round(float(d["x1"])))))
+                y1 = max(0, min(h - 1, int(round(float(d["y1"])))))
+                x2 = max(0, min(w, int(round(float(d["x2"])))))
+                y2 = max(0, min(h, int(round(float(d["y2"])))))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                crop = frame[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
+                try:
+                    faces = self.face_analyzer.get(crop)
+                except Exception:
+                    continue
+                if not faces:
+                    continue
+                best_face = max(
+                    faces,
+                    key=lambda f: float(
+                        max(0.0, f.bbox[2] - f.bbox[0])
+                        * max(0.0, f.bbox[3] - f.bbox[1])
+                        * getattr(f, "det_score", 1.0)
+                    ),
+                )
+                emb = np.asarray(getattr(best_face, "normed_embedding", None), dtype=np.float32)
+                if emb.size > 0:
+                    vecs.append(emb)
+            if vecs:
+                out[tid] = np.mean(np.stack(vecs, axis=0), axis=0).astype(np.float32).tolist()
+        cap.release()
+        return out
+
+    def _roi_refine_interpolated_tracks(
+        self,
+        chunk_video_path: str,
+        tracks: list[dict],
+        model,
+        width: int,
+        height: int,
+        infer_imgsz: int,
+    ) -> tuple[list[dict], int]:
+        """Refine propagated detections using detector-on-ROI rather than full-frame inference."""
+        import cv2
+        import numpy as np
+        from collections import defaultdict
+
+        if not tracks:
+            return tracks, 0
+
+        # Group propagated detections by local frame for single frame decode.
+        by_local_fi: dict[int, list[int]] = defaultdict(list)
+        for i, d in enumerate(tracks):
+            if str(d.get("source", "")) != "propagated":
+                continue
+            fi = int(d.get("local_frame_idx", -1))
+            if fi < 0:
+                continue
+            by_local_fi[fi].append(i)
+
+        if not by_local_fi:
+            return tracks, 0
+
+        cap = cv2.VideoCapture(chunk_video_path)
+        if not cap.isOpened():
+            return tracks, 0
+
+        refined = 0
+        for local_fi in sorted(by_local_fi.keys()):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(local_fi))
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+
+            fh, fw = frame.shape[:2]
+            for idx in by_local_fi[local_fi]:
+                d = tracks[idx]
+                x1 = float(d.get("x1", 0.0))
+                y1 = float(d.get("y1", 0.0))
+                x2 = float(d.get("x2", x1 + 1.0))
+                y2 = float(d.get("y2", y1 + 1.0))
+                bw = max(1.0, x2 - x1)
+                bh = max(1.0, y2 - y1)
+
+                # ROI predicted around propagated box (expanded context).
+                rx1 = max(0, int(np.floor(x1 - 0.35 * bw)))
+                ry1 = max(0, int(np.floor(y1 - 0.35 * bh)))
+                rx2 = min(fw, int(np.ceil(x2 + 0.35 * bw)))
+                ry2 = min(fh, int(np.ceil(y2 + 0.35 * bh)))
+                if rx2 <= rx1 or ry2 <= ry1:
+                    continue
+                roi = frame[ry1:ry2, rx1:rx2]
+                if roi.size == 0:
+                    continue
+
+                try:
+                    pred = model.predict(
+                        source=roi,
+                        classes=[0],
+                        conf=0.15,
+                        verbose=False,
+                        imgsz=infer_imgsz,
+                    )
+                except Exception:
+                    continue
+                if not pred:
+                    continue
+                r = pred[0]
+                if r.boxes is None or len(r.boxes) == 0:
+                    continue
+
+                roi_boxes = r.boxes.xyxy.cpu().numpy()
+                roi_confs = r.boxes.conf.cpu().numpy()
+                best = None
+                for bxyxy, conf in zip(roi_boxes, roi_confs):
+                    bx1, by1, bx2, by2 = [float(v) for v in bxyxy]
+                    gx1 = min(max(0.0, bx1 + rx1), float(max(0, width - 1)))
+                    gy1 = min(max(0.0, by1 + ry1), float(max(0, height - 1)))
+                    gx2 = min(max(gx1 + 1.0, bx2 + rx1), float(max(1, width)))
+                    gy2 = min(max(gy1 + 1.0, by2 + ry1), float(max(1, height)))
+                    iou = self._bbox_iou_xyxy((x1, y1, x2, y2), (gx1, gy1, gx2, gy2))
+                    score = (0.7 * iou) + (0.3 * float(conf))
+                    if best is None or score > best[0]:
+                        best = (score, gx1, gy1, gx2, gy2, float(conf), iou)
+
+                if best is None:
+                    continue
+                _, gx1, gy1, gx2, gy2, conf_best, iou_best = best
+                if iou_best < 0.2 and conf_best < 0.45:
+                    continue
+
+                cx, cy, nw, nh = self._xyxy_to_xywh(gx1, gy1, gx2, gy2)
+                d["x1"] = float(gx1)
+                d["y1"] = float(gy1)
+                d["x2"] = float(gx2)
+                d["y2"] = float(gy2)
+                d["x_center"] = float(cx)
+                d["y_center"] = float(cy)
+                d["width"] = float(nw)
+                d["height"] = float(nh)
+                d["confidence"] = float(max(float(d.get("confidence", 0.0)), conf_best))
+                d["source"] = "roi_refine"
+                refined += 1
+
+        cap.release()
+        return tracks, refined
+
+    def _track_single_chunk(
+        self,
+        video_path: str,
+        meta: dict,
+        chunk: dict,
+        tracker_cfg: str,
+        chunk_dir: str,
+    ) -> dict:
+        """Track one chunk independently and emit per-chunk NDJSON."""
+        import json
+        import os
+        import subprocess
+        import time
+        from ultralytics import YOLO
+
+        fps = float(meta["fps"])
+        width = int(meta["width"])
+        height = int(meta["height"])
+        infer_imgsz = max(320, int(os.getenv("CLYPT_YOLO_IMGSZ", "640")))
+        start_f = int(chunk["start_frame"])
+        end_f = int(chunk["end_frame"])
+        start_s = start_f / max(1e-6, fps)
+        dur_s = max(1.0 / max(1e-6, fps), (end_f - start_f) / max(1e-6, fps))
+        chunk_idx = int(chunk["chunk_idx"])
+
+        chunk_video_path = os.path.join(chunk_dir, f"chunk_{chunk_idx:04d}.mp4")
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-ss", f"{start_s:.3f}",
+                "-i", video_path,
+                "-t", f"{dur_s:.3f}",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-an",
+                chunk_video_path,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        model_path = YOLO_ENGINE_PATH if os.path.exists(YOLO_ENGINE_PATH) else YOLO_WEIGHTS_PATH
+        model = YOLO(model_path)
+        stride = 2 if dur_s >= 50.0 else 1
+        started = time.time()
+        processed_frames = 0
+        lb_meta = self._compute_letterbox_meta(width, height, infer_imgsz, infer_imgsz)
+
+        results = model.track(
+            source=chunk_video_path,
+            tracker=tracker_cfg,
             persist=True,
             classes=[0],
             stream=True,
             verbose=False,
+            vid_stride=stride,
+            imgsz=infer_imgsz,
         )
 
         tracks = []
-        n_boxes = 0
-        for frame_idx, r in enumerate(results, start=1):
-            if r.boxes is not None and r.boxes.id is not None:
-                boxes = r.boxes.xywh.cpu().numpy()
-                track_ids = r.boxes.id.cpu().numpy().astype(int)
-                confs = r.boxes.conf.cpu().numpy()
+        for local_fi, r in enumerate(results):
+            processed_frames += 1
+            global_fi = start_f + local_fi * stride
+            if r.boxes is None or r.boxes.id is None:
+                continue
+            boxes_xyxy = r.boxes.xyxy.cpu().numpy()
+            ids = r.boxes.id.cpu().numpy().astype(int)
+            confs = r.boxes.conf.cpu().numpy()
+            obb_polys = None
+            if getattr(r, "obb", None) is not None and getattr(r.obb, "xyxyxyxy", None) is not None:
+                try:
+                    obb_polys = r.obb.xyxyxyxy.cpu().numpy()
+                except Exception:
+                    obb_polys = None
 
-                for box, track_id, conf in zip(boxes, track_ids, confs):
-                    cx, cy, w, h = box
-                    tracks.append({
-                        "frame_idx": frame_idx - 1,
-                        "track_id": f"track_{track_id}",
-                        "x_center": float(cx),
-                        "y_center": float(cy),
-                        "width": float(w),
-                        "height": float(h),
-                        "confidence": float(conf),
-                    })
-                    n_boxes += 1
+            for i, (xyxy, tid_raw, conf) in enumerate(zip(boxes_xyxy, ids, confs)):
+                x1, y1, x2, y2 = [float(v) for v in xyxy]
+                # Deterministic conversion path:
+                # 1) absolute xyxy -> normalized xywh
+                # 2) normalized xywh -> absolute xyxy
+                # 3) explicit letterbox forward+inverse affine
+                xcn, ycn, wn, hn = self._xyxy_abs_to_xywhn(x1, y1, x2, y2, width, height)
+                x1, y1, x2, y2 = self._xywhn_to_xyxy_abs(xcn, ycn, wn, hn, width, height)
+                lx1, ly1, lx2, ly2 = self._forward_letterbox_xyxy(x1, y1, x2, y2, lb_meta)
+                x1, y1, x2, y2 = self._inverse_letterbox_xyxy(lx1, ly1, lx2, ly2, lb_meta)
+                x1 = min(max(0.0, x1), float(max(0, width - 1)))
+                y1 = min(max(0.0, y1), float(max(0, height - 1)))
+                x2 = min(max(x1 + 1.0, x2), float(max(1, width)))
+                y2 = min(max(y1 + 1.0, y2), float(max(1, height)))
+                cx, cy, bw, bh = self._xyxy_to_xywh(x1, y1, x2, y2)
+                out = {
+                    "frame_idx": int(global_fi),
+                    "local_frame_idx": int(local_fi),
+                    "chunk_idx": int(chunk_idx),
+                    "track_id": f"chunk_{chunk_idx}_track_{int(tid_raw)}",
+                    "local_track_id": int(tid_raw),
+                    "class_id": 0,
+                    "label": "person",
+                    "confidence": float(conf),
+                    "x1": float(x1),
+                    "y1": float(y1),
+                    "x2": float(x2),
+                    "y2": float(y2),
+                    "x_center": float(cx),
+                    "y_center": float(cy),
+                    "width": float(bw),
+                    "height": float(bh),
+                    "source": "detector",
+                    "geometry_type": "aabb",
+                    "bbox_norm_xywh": {
+                        "x_center": float(xcn),
+                        "y_center": float(ycn),
+                        "width": float(wn),
+                        "height": float(hn),
+                    },
+                }
+                if obb_polys is not None and i < len(obb_polys):
+                    pts = obb_polys[i].reshape(-1, 2).tolist()
+                    out["geometry_type"] = "obb"
+                    out["polygon"] = [[float(px), float(py)] for px, py in pts]
+                tracks.append(out)
 
-            if frame_idx % log_every_n_frames == 0:
-                elapsed = max(1e-6, time.time() - started_at)
-                fps_eff = frame_idx / elapsed
-                if total_frames > 0:
-                    pct = (100.0 * frame_idx) / max(1, total_frames)
-                    print(
-                        "  YOLO progress: "
-                        f"{frame_idx}/{total_frames} frames ({pct:.1f}%), "
-                        f"{n_boxes} boxes, {fps_eff:.1f} fps"
+        if stride > 1:
+            # Confidence-guided fallback: if sparse pass has many weak detections,
+            # rerun dense tracking to re-anchor.
+            weak_ratio = 0.0
+            if tracks:
+                weak_ratio = sum(1 for d in tracks if float(d.get("confidence", 0.0)) < 0.3) / len(tracks)
+            if weak_ratio > 0.25:
+                dense_results = model.track(
+                    source=chunk_video_path,
+                    tracker=tracker_cfg,
+                    persist=True,
+                    classes=[0],
+                    stream=True,
+                    verbose=False,
+                    vid_stride=1,
+                    imgsz=infer_imgsz,
+                )
+                tracks = []
+                for local_fi, r in enumerate(dense_results):
+                    processed_frames += 1
+                    global_fi = start_f + local_fi
+                    if r.boxes is None or r.boxes.id is None:
+                        continue
+                    boxes_xyxy = r.boxes.xyxy.cpu().numpy()
+                    ids = r.boxes.id.cpu().numpy().astype(int)
+                    confs = r.boxes.conf.cpu().numpy()
+                    for xyxy, tid_raw, conf in zip(boxes_xyxy, ids, confs):
+                        x1, y1, x2, y2 = [float(v) for v in xyxy]
+                        xcn, ycn, wn, hn = self._xyxy_abs_to_xywhn(x1, y1, x2, y2, width, height)
+                        x1, y1, x2, y2 = self._xywhn_to_xyxy_abs(xcn, ycn, wn, hn, width, height)
+                        lx1, ly1, lx2, ly2 = self._forward_letterbox_xyxy(x1, y1, x2, y2, lb_meta)
+                        x1, y1, x2, y2 = self._inverse_letterbox_xyxy(lx1, ly1, lx2, ly2, lb_meta)
+                        x1 = min(max(0.0, x1), float(max(0, width - 1)))
+                        y1 = min(max(0.0, y1), float(max(0, height - 1)))
+                        x2 = min(max(x1 + 1.0, x2), float(max(1, width)))
+                        y2 = min(max(y1 + 1.0, y2), float(max(1, height)))
+                        cx, cy, bw, bh = self._xyxy_to_xywh(x1, y1, x2, y2)
+                        tracks.append(
+                            {
+                                "frame_idx": int(global_fi),
+                                "local_frame_idx": int(local_fi),
+                                "chunk_idx": int(chunk_idx),
+                                "track_id": f"chunk_{chunk_idx}_track_{int(tid_raw)}",
+                                "local_track_id": int(tid_raw),
+                                "class_id": 0,
+                                "label": "person",
+                                "confidence": float(conf),
+                                "x1": float(x1),
+                                "y1": float(y1),
+                                "x2": float(x2),
+                                "y2": float(y2),
+                                "x_center": float(cx),
+                                "y_center": float(cy),
+                                "width": float(bw),
+                                "height": float(bh),
+                                "source": "detector",
+                                "geometry_type": "aabb",
+                                "bbox_norm_xywh": {
+                                    "x_center": float(xcn),
+                                    "y_center": float(ycn),
+                                    "width": float(wn),
+                                    "height": float(hn),
+                                },
+                            }
+                        )
+            else:
+                tracks = self._propagate_gaps_in_tracklets(tracks, max_gap=max(1, stride))
+                if os.getenv("CLYPT_ENABLE_ROI_DETECT", "1") == "1":
+                    tracks, roi_refined = self._roi_refine_interpolated_tracks(
+                        chunk_video_path=chunk_video_path,
+                        tracks=tracks,
+                        model=model,
+                        width=width,
+                        height=height,
+                        infer_imgsz=infer_imgsz,
                     )
-                else:
-                    print(
-                        "  YOLO progress: "
-                        f"{frame_idx} frames, {n_boxes} boxes, {fps_eff:.1f} fps"
-                    )
+                    if roi_refined:
+                        print(f"    Chunk {chunk_idx}: ROI refined {roi_refined} propagated boxes")
 
-        print(f"Tracking complete: {len(tracks)} bounding boxes across frames.")
-        return tracks
+        emb_map = self._compute_track_embeddings_for_chunk(chunk_video_path, tracks)
+        chunk_geom = (
+            "mixed"
+            if any(str(d.get("geometry_type", "")) == "obb" for d in tracks)
+            else PHASE1_GEOMETRY_TYPE
+        )
+
+        ndjson_path = os.path.join(chunk_dir, f"chunk_{chunk_idx:04d}.ndjson")
+        header = {
+            "record_type": "header",
+            "schema_version": PHASE1_SCHEMA_VERSION,
+            "task_type": PHASE1_TASK_TYPE,
+            "coordinate_space": PHASE1_COORDINATE_SPACE,
+            "geometry_type": chunk_geom,
+            "class_taxonomy": PHASE1_CLASS_TAXONOMY,
+            "chunk_idx": int(chunk_idx),
+            "start_frame": int(start_f),
+            "end_frame": int(end_f),
+            "fps": float(fps),
+            "model": "yolo26s",
+            "tracker": "botsort_reid",
+            "letterbox": lb_meta,
+        }
+        with open(ndjson_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(header) + "\n")
+            for d in sorted(tracks, key=lambda x: (int(x["frame_idx"]), str(x["track_id"]))):
+                f.write(json.dumps(d) + "\n")
+
+        elapsed = time.time() - started
+        print(
+            f"  Chunk {chunk_idx}: frames {start_f}-{end_f}, "
+            f"{len(tracks)} boxes, {elapsed:.1f}s"
+        )
+        return {
+            "chunk_idx": int(chunk_idx),
+            "start_frame": int(start_f),
+            "end_frame": int(end_f),
+            "overlap_frames": int(chunk["overlap_frames"]),
+            "elapsed_s": float(elapsed),
+            "processed_frames": int(processed_frames),
+            "chunk_frames": int(max(0, end_f - start_f)),
+            "tracks": tracks,
+            "embeddings": emb_map,
+            "ndjson_path": ndjson_path,
+        }
+
+    def _stitch_chunk_tracks(self, chunk_results: list[dict], fps: float) -> tuple[list[dict], dict]:
+        """Stitch chunk-local IDs into global IDs using overlap IoU + embeddings."""
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+        from collections import defaultdict
+
+        if not chunk_results:
+            return [], {"idf1_proxy": 0.0, "mota_proxy": 0.0, "track_fragmentation_rate": 0.0}
+
+        chunk_results = sorted(chunk_results, key=lambda c: int(c["chunk_idx"]))
+        local_to_global: dict[tuple[int, str], str] = {}
+        next_gid = 0
+        matches = 0
+        unmatched_right_total = 0
+        unmatched_left_total = 0
+
+        # Seed first chunk IDs.
+        first_ids = sorted(set(d["track_id"] for d in chunk_results[0]["tracks"]))
+        for tid in first_ids:
+            local_to_global[(chunk_results[0]["chunk_idx"], tid)] = f"track_{next_gid}"
+            next_gid += 1
+
+        def summarize_tracks_in_interval(chunk_data: dict, lo_f: int, hi_f: int) -> dict[str, dict]:
+            by_tid = defaultdict(list)
+            for d in chunk_data["tracks"]:
+                fi = int(d["frame_idx"])
+                if lo_f <= fi <= hi_f:
+                    by_tid[str(d["track_id"])].append(d)
+            out = {}
+            for tid, dets in by_tid.items():
+                dets = sorted(dets, key=lambda x: int(x["frame_idx"]))
+                box = (
+                    float(np.mean([float(x["x1"]) for x in dets])),
+                    float(np.mean([float(x["y1"]) for x in dets])),
+                    float(np.mean([float(x["x2"]) for x in dets])),
+                    float(np.mean([float(x["y2"]) for x in dets])),
+                )
+                out[tid] = {
+                    "box": box,
+                    "support": len(dets),
+                    "embedding": chunk_data.get("embeddings", {}).get(tid),
+                }
+            return out
+
+        for left, right in zip(chunk_results, chunk_results[1:]):
+            overlap_lo = int(right["start_frame"])
+            overlap_hi = min(int(left["end_frame"]), int(right["end_frame"])) - 1
+            if overlap_hi < overlap_lo:
+                # No overlap; initialize all right chunk tracks as new global IDs.
+                for tid in sorted(set(d["track_id"] for d in right["tracks"])):
+                    if (right["chunk_idx"], tid) not in local_to_global:
+                        local_to_global[(right["chunk_idx"], tid)] = f"track_{next_gid}"
+                        next_gid += 1
+                continue
+
+            left_sig = summarize_tracks_in_interval(left, overlap_lo, overlap_hi)
+            right_sig = summarize_tracks_in_interval(right, overlap_lo, overlap_hi)
+            left_ids = sorted(left_sig.keys())
+            right_ids = sorted(right_sig.keys())
+            if not left_ids or not right_ids:
+                for tid in right_ids:
+                    if (right["chunk_idx"], tid) not in local_to_global:
+                        local_to_global[(right["chunk_idx"], tid)] = f"track_{next_gid}"
+                        next_gid += 1
+                continue
+
+            # TrackTrack-style local candidate pruning: each left track keeps best right candidate.
+            reduced_pairs = set()
+            for lid in left_ids:
+                best = None
+                for rid in right_ids:
+                    iou = self._bbox_iou_xyxy(left_sig[lid]["box"], right_sig[rid]["box"])
+                    if iou <= 0.01:
+                        continue
+                    emb_l = left_sig[lid]["embedding"]
+                    emb_r = right_sig[rid]["embedding"]
+                    emb_dist = self._cosine_dist(emb_l, emb_r) if emb_l is not None and emb_r is not None else 0.5
+                    cost = (0.55 * (1.0 - iou)) + (0.45 * emb_dist)
+                    if best is None or cost < best[0]:
+                        best = (cost, rid)
+                if best is not None:
+                    reduced_pairs.add((lid, best[1]))
+
+            if not reduced_pairs:
+                unmatched_left_total += len(left_ids)
+                unmatched_right_total += len(right_ids)
+                for tid in right_ids:
+                    if (right["chunk_idx"], tid) not in local_to_global:
+                        local_to_global[(right["chunk_idx"], tid)] = f"track_{next_gid}"
+                        next_gid += 1
+                continue
+
+            li = {tid: i for i, tid in enumerate(left_ids)}
+            ri = {tid: j for j, tid in enumerate(right_ids)}
+            mat = np.full((len(left_ids), len(right_ids)), fill_value=1e6, dtype=np.float32)
+            for lid, rid in reduced_pairs:
+                iou = self._bbox_iou_xyxy(left_sig[lid]["box"], right_sig[rid]["box"])
+                emb_l = left_sig[lid]["embedding"]
+                emb_r = right_sig[rid]["embedding"]
+                emb_dist = self._cosine_dist(emb_l, emb_r) if emb_l is not None and emb_r is not None else 0.5
+                mat[li[lid], ri[rid]] = (0.55 * (1.0 - iou)) + (0.45 * emb_dist)
+
+            r_idx, c_idx = linear_sum_assignment(mat)
+            matched_right = set()
+            matched_left = set()
+            for r_i, c_i in zip(r_idx, c_idx):
+                cost = float(mat[r_i, c_i])
+                if cost >= 0.72:
+                    continue
+                lid = left_ids[r_i]
+                rid = right_ids[c_i]
+                gid = local_to_global.get((left["chunk_idx"], lid))
+                if gid is None:
+                    gid = f"track_{next_gid}"
+                    next_gid += 1
+                    local_to_global[(left["chunk_idx"], lid)] = gid
+                local_to_global[(right["chunk_idx"], rid)] = gid
+                matched_right.add(rid)
+                matched_left.add(lid)
+                matches += 1
+
+            unmatched_left = [tid for tid in left_ids if tid not in matched_left]
+            unmatched_right = [tid for tid in right_ids if tid not in matched_right]
+            unmatched_left_total += len(unmatched_left)
+            unmatched_right_total += len(unmatched_right)
+
+            # Track-aware initialization: short/weak right tracklets attempt nearest
+            # global assignment before being declared a new identity.
+            for rid in unmatched_right:
+                assigned = False
+                rs = right_sig[rid]
+                if int(rs.get("support", 0)) < 3:
+                    best = None
+                    for lid in left_ids:
+                        iou = self._bbox_iou_xyxy(left_sig[lid]["box"], rs["box"])
+                        emb_l = left_sig[lid]["embedding"]
+                        emb_r = rs["embedding"]
+                        emb_dist = self._cosine_dist(emb_l, emb_r) if emb_l is not None and emb_r is not None else 0.5
+                        cost = (0.55 * (1.0 - iou)) + (0.45 * emb_dist)
+                        if best is None or cost < best[0]:
+                            best = (cost, lid)
+                    if best is not None and best[0] < 0.66:
+                        gid = local_to_global.get((left["chunk_idx"], best[1]))
+                        if gid:
+                            local_to_global[(right["chunk_idx"], rid)] = gid
+                            assigned = True
+                if not assigned:
+                    local_to_global[(right["chunk_idx"], rid)] = f"track_{next_gid}"
+                    next_gid += 1
+
+        # Rewrite + dedupe overlaps.
+        dedupe = {}
+        for chunk_data in chunk_results:
+            cidx = int(chunk_data["chunk_idx"])
+            for d in chunk_data["tracks"]:
+                old_tid = str(d["track_id"])
+                gid = local_to_global.get((cidx, old_tid))
+                if gid is None:
+                    gid = f"track_{next_gid}"
+                    next_gid += 1
+                    local_to_global[(cidx, old_tid)] = gid
+                row = dict(d)
+                row["track_id"] = gid
+                key = (int(row["frame_idx"]), str(row["track_id"]))
+                prev = dedupe.get(key)
+                if prev is None or float(row.get("confidence", 0.0)) > float(prev.get("confidence", 0.0)):
+                    dedupe[key] = row
+
+        unified = sorted(dedupe.values(), key=lambda x: (int(x["frame_idx"]), str(x["track_id"])))
+        total_track_ids = len(set(d["track_id"] for d in unified))
+        fragments = sum(1 for _, tid in dedupe.keys() if tid is not None)
+        idf1_proxy = (2.0 * matches) / max(1.0, (2.0 * matches) + unmatched_left_total + unmatched_right_total)
+        mota_proxy = 1.0 - (
+            (unmatched_left_total + unmatched_right_total) / max(1.0, matches + unmatched_left_total + unmatched_right_total)
+        )
+        total_processed_frames = int(
+            sum(int(c.get("processed_frames", 0)) for c in chunk_results)
+        )
+        total_chunk_elapsed = float(
+            sum(float(c.get("elapsed_s", 0.0)) for c in chunk_results)
+        )
+        chunk_throughput_fps = (
+            float(total_processed_frames / max(1e-6, total_chunk_elapsed))
+            if total_chunk_elapsed > 0.0
+            else 0.0
+        )
+        metrics = {
+            "idf1_proxy": float(max(0.0, min(1.0, idf1_proxy))),
+            "mota_proxy": float(max(0.0, min(1.0, mota_proxy))),
+            "track_fragmentation_rate": float(total_track_ids / max(1.0, len(unified) ** 0.5)),
+            "stitched_matches": int(matches),
+            "unmatched_left": int(unmatched_left_total),
+            "unmatched_right": int(unmatched_right_total),
+            "chunk_processed_frames": int(total_processed_frames),
+            "chunk_elapsed_s": float(total_chunk_elapsed),
+            "chunk_throughput_fps": float(chunk_throughput_fps),
+        }
+        _ = fragments
+        return unified, metrics
+
+    def _run_tracking(self, video_path: str) -> tuple[list[dict], dict]:
+        """Run chunked YOLO26+BoT-SORT tracking with overlap stitching."""
+        import os
+        import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        print("Running YOLO26s + BoT-SORT (ReID/GMC) chunked tracking inference...")
+        video_path = self._ensure_h264(video_path)
+        meta = self._probe_video_meta(video_path)
+        fps = float(meta["fps"])
+        total_frames = int(meta["total_frames"])
+        if total_frames <= 0:
+            print("  Warning: no frames found in video")
+            return [], {}
+
+        chunks = self._build_chunk_plan(total_frames, fps)
+        tracker_cfg = self._ensure_botsort_reid_yaml()
+        chunk_dir = "/vol/clypt-chunks"
+        os.makedirs(chunk_dir, exist_ok=True)
+        for f in os.listdir(chunk_dir):
+            if f.endswith(".mp4") or f.endswith(".ndjson"):
+                try:
+                    os.remove(os.path.join(chunk_dir, f))
+                except Exception:
+                    pass
+
+        started = time.time()
+        workers = max(1, min(3, int(os.getenv("CLYPT_TRACK_CHUNK_WORKERS", "2"))))
+        results = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [
+                pool.submit(
+                    self._track_single_chunk,
+                    video_path,
+                    meta,
+                    chunk,
+                    tracker_cfg,
+                    chunk_dir,
+                )
+                for chunk in chunks
+            ]
+            for i, fut in enumerate(as_completed(futs), start=1):
+                res = fut.result()
+                results.append(res)
+                pct = (100.0 * i) / max(1, len(chunks))
+                print(f"  Chunk progress: {i}/{len(chunks)} ({pct:.1f}%)")
+
+        # Producer -> consumer state sync for distributed volume semantics.
+        try:
+            TRACKING_VOLUME.commit()
+            TRACKING_VOLUME.reload()
+        except Exception:
+            pass
+
+        stitched, metrics = self._stitch_chunk_tracks(results, fps=fps)
+        elapsed = max(1e-6, time.time() - started)
+        eff_fps = float(total_frames / elapsed)
+        if isinstance(metrics, dict):
+            metrics["tracking_wallclock_s"] = float(elapsed)
+            metrics["throughput_fps"] = float(eff_fps)
+            metrics["schema_pass_rate"] = 1.0
+        print(
+            "Tracking complete: "
+            f"{len(stitched)} boxes across {total_frames} frames, "
+            f"{eff_fps:.1f} effective fps"
+        )
+        if metrics:
+            print(
+                "  Stitch quality: "
+                f"idf1_proxy={metrics.get('idf1_proxy', 0.0):.3f}, "
+                f"mota_proxy={metrics.get('mota_proxy', 0.0):.3f}, "
+                f"fragmentation={metrics.get('track_fragmentation_rate', 0.0):.3f}"
+            )
+        return stitched, metrics
 
     # ──────────────────────────────────────────
     # Global tracklet clustering (InsightFace + DBSCAN)
@@ -2124,6 +3139,249 @@ class ClyptWorker:
             track_to_dets=track_to_dets,
         )
 
+    def _enforce_rollout_gates(self, tracking_metrics: dict | None):
+        """Apply rollout gates for continuity quality before downstream steps."""
+        import os
+
+        min_idf1 = float(os.getenv("CLYPT_GATE_MIN_IDF1_PROXY", "0.45"))
+        min_mota = float(os.getenv("CLYPT_GATE_MIN_MOTA_PROXY", "0.35"))
+        max_frag = float(os.getenv("CLYPT_GATE_MAX_FRAGMENTATION", "6.0"))
+        min_thr_fps = float(os.getenv("CLYPT_GATE_MIN_THROUGHPUT_FPS", "0.0"))
+        max_wallclock_s = float(os.getenv("CLYPT_GATE_MAX_WALLCLOCK_S", "0.0"))
+        min_schema_pass = float(os.getenv("CLYPT_GATE_MIN_SCHEMA_PASS_RATE", "1.0"))
+        gate_enforce = os.getenv("CLYPT_ENFORCE_ROLLOUT_GATES", "0") == "1"
+        metrics = tracking_metrics if isinstance(tracking_metrics, dict) else {}
+        idf1_v = float(metrics.get("idf1_proxy", 0.0))
+        mota_v = float(metrics.get("mota_proxy", 0.0))
+        frag_v = float(metrics.get("track_fragmentation_rate", 999.0))
+        thr_v = float(metrics.get("throughput_fps", 0.0))
+        wc_v = float(metrics.get("tracking_wallclock_s", 0.0))
+        schema_v = float(metrics.get("schema_pass_rate", 1.0))
+        gate_ok = idf1_v >= min_idf1 and mota_v >= min_mota and frag_v <= max_frag
+        if min_thr_fps > 0.0:
+            gate_ok = gate_ok and (thr_v >= min_thr_fps)
+        if max_wallclock_s > 0.0:
+            gate_ok = gate_ok and (wc_v <= max_wallclock_s)
+        gate_ok = gate_ok and (schema_v >= min_schema_pass)
+        print(
+            "  Rollout gates: "
+            f"idf1_proxy={idf1_v:.3f}>={min_idf1:.3f}, "
+            f"mota_proxy={mota_v:.3f}>={min_mota:.3f}, "
+            f"frag={frag_v:.3f}<={max_frag:.3f}, "
+            f"throughput={thr_v:.2f}>={min_thr_fps:.2f}, "
+            f"wallclock={wc_v:.1f}<={max_wallclock_s:.1f}, "
+            f"schema_pass={schema_v:.3f}>={min_schema_pass:.3f} -> "
+            f"{'PASS' if gate_ok else 'FAIL'}"
+        )
+        if gate_enforce and not gate_ok:
+            raise RuntimeError("Rollout gates failed for tracking quality/continuity")
+
+    def _finalize_from_words_tracks(
+        self,
+        video_path: str,
+        audio_path: str,
+        youtube_url: str,
+        words: list[dict],
+        tracks: list[dict],
+        tracking_metrics: dict | None = None,
+    ) -> dict:
+        """Finalize extraction from precomputed ASR words + tracking tracks."""
+        metrics = dict(tracking_metrics) if isinstance(tracking_metrics, dict) else {}
+        metrics["schema_pass_rate"] = self._tracking_contract_pass_rate(tracks)
+        self._validate_tracking_contract(tracks)
+        self._enforce_rollout_gates(metrics)
+
+        _, track_to_dets = self._build_track_indexes(tracks)
+
+        # Step 3: Global tracklet clustering
+        print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
+        tracks = self._cluster_tracklets(
+            video_path,
+            tracks,
+            track_to_dets=track_to_dets,
+        )
+        frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
+
+        # Step 4: Speaker binding
+        print("[Phase 1] Step 4/4: Running speaker binding...")
+        speaker_bindings = self._run_speaker_binding(
+            video_path,
+            audio_path,
+            tracks,
+            words,
+            frame_to_dets=frame_to_dets,
+            track_to_dets=track_to_dets,
+        )
+        geometry_type = (
+            "mixed"
+            if any(str(t.get("geometry_type", "")) == "obb" for t in tracks)
+            else PHASE1_GEOMETRY_TYPE
+        )
+
+        phase_1_visual = {
+            "source_video": youtube_url,
+            "schema_version": PHASE1_SCHEMA_VERSION,
+            "task_type": PHASE1_TASK_TYPE,
+            "coordinate_space": PHASE1_COORDINATE_SPACE,
+            "geometry_type": geometry_type,
+            "class_taxonomy": PHASE1_CLASS_TAXONOMY,
+            "tracking_metrics": metrics,
+            "tracks": tracks,
+        }
+
+        phase_1_audio = {
+            "source_audio": youtube_url,
+            "words": words,
+            "speaker_bindings": speaker_bindings,
+        }
+
+        print(f"[Phase 1] Complete — {len(words)} words, {len(tracks)} tracks")
+        return {
+            "status": "success",
+            "phase_1_visual": phase_1_visual,
+            "phase_1_audio": phase_1_audio,
+            # Backward compatibility for older clients still expecting 1A keys.
+            "phase_1a_visual": phase_1_visual,
+            "phase_1a_audio": phase_1_audio,
+        }
+
+    @modal.method()
+    def stage_video_for_tracking(self, video_bytes: bytes) -> dict:
+        """Persist video bytes to volume, normalize codec, and return chunk plan."""
+        import os
+        import json
+        import uuid
+
+        job_id = uuid.uuid4().hex
+        job_dir = f"/vol/clypt-chunks/jobs/{job_id}"
+        os.makedirs(job_dir, exist_ok=True)
+        raw_video_path = f"{job_dir}/video.mp4"
+        with open(raw_video_path, "wb") as f:
+            f.write(video_bytes)
+
+        video_path = self._ensure_h264(raw_video_path)
+        meta = self._probe_video_meta(video_path)
+        if int(meta.get("total_frames", 0)) <= 0:
+            raise RuntimeError("Could not stage video for tracking: no decodable frames")
+
+        chunks = self._build_chunk_plan(int(meta["total_frames"]), float(meta["fps"]))
+        manifest = {
+            "job_id": job_id,
+            "video_path": video_path,
+            "meta": meta,
+            "chunks": chunks,
+        }
+        with open(f"{job_dir}/manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        try:
+            TRACKING_VOLUME.commit()
+            TRACKING_VOLUME.reload()
+        except Exception:
+            pass
+
+        print(
+            f"[Phase 1] Staged tracking job {job_id[:8]}... "
+            f"{meta['total_frames']} frames, {len(chunks)} chunks"
+        )
+        return manifest
+
+    @modal.method()
+    def run_asr_only(self, audio_wav_bytes: bytes) -> list[dict]:
+        """Run ASR-only path for distributed fan-out workflow."""
+        import os
+        import uuid
+
+        dl_dir = "/tmp/clypt"
+        os.makedirs(dl_dir, exist_ok=True)
+        audio_path = f"{dl_dir}/audio_only_{uuid.uuid4().hex}.wav"
+        with open(audio_path, "wb") as f:
+            f.write(audio_wav_bytes)
+        try:
+            return self._run_asr(audio_path)
+        finally:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+
+    @modal.method()
+    def track_chunk_from_staged(
+        self,
+        job_id: str,
+        video_path: str,
+        meta: dict,
+        chunk: dict,
+    ) -> dict:
+        """Track one chunk from a staged volume video in a separate GPU container."""
+        import os
+
+        _ = job_id
+        tracker_cfg = self._ensure_botsort_reid_yaml()
+        chunk_dir = f"/vol/clypt-chunks/jobs/{job_id}/chunks"
+        os.makedirs(chunk_dir, exist_ok=True)
+        return self._track_single_chunk(video_path, meta, chunk, tracker_cfg, chunk_dir)
+
+    @modal.method()
+    def stitch_tracking_chunks(self, chunk_results: list[dict], fps: float) -> dict:
+        """Stitch distributed chunk outputs into global track IDs."""
+        tracks, metrics = self._stitch_chunk_tracks(chunk_results, fps=fps)
+        return {"tracks": tracks, "tracking_metrics": metrics}
+
+    @modal.method()
+    def finalize_extraction(
+        self,
+        video_bytes: bytes,
+        audio_wav_bytes: bytes,
+        youtube_url: str,
+        words: list[dict],
+        tracks: list[dict],
+        tracking_metrics: dict | None = None,
+    ) -> dict:
+        """Finalize from externally-fanned-out ASR/tracking outputs."""
+        import os
+        import uuid
+
+        dl_dir = "/tmp/clypt"
+        os.makedirs(dl_dir, exist_ok=True)
+        suffix = uuid.uuid4().hex
+        video_path = f"{dl_dir}/video_finalize_{suffix}.mp4"
+        audio_path = f"{dl_dir}/audio_finalize_{suffix}.wav"
+        with open(video_path, "wb") as f:
+            f.write(video_bytes)
+        with open(audio_path, "wb") as f:
+            f.write(audio_wav_bytes)
+
+        try:
+            # Avoid mutating caller-owned objects in-place.
+            words_local = [dict(w) for w in words]
+            tracks_local = [dict(t) for t in tracks]
+            return self._finalize_from_words_tracks(
+                video_path=video_path,
+                audio_path=audio_path,
+                youtube_url=youtube_url,
+                words=words_local,
+                tracks=tracks_local,
+                tracking_metrics=tracking_metrics if isinstance(tracking_metrics, dict) else {},
+            )
+        finally:
+            h264_video_path = video_path.replace(".mp4", "_h264.mp4")
+            for p in (video_path, audio_path, h264_video_path):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    @modal.method()
+    def cleanup_tracking_job(self, job_id: str) -> None:
+        """Remove staged chunk artifacts for a distributed tracking job."""
+        import os
+        import shutil
+
+        job_dir = f"/vol/clypt-chunks/jobs/{job_id}"
+        if os.path.exists(job_dir):
+            shutil.rmtree(job_dir, ignore_errors=True)
+        try:
+            TRACKING_VOLUME.commit()
+        except Exception:
+            pass
+
     # ──────────────────────────────────────────
     # Main extraction method (called remotely)
     # ──────────────────────────────────────────
@@ -2164,32 +3422,19 @@ class ClyptWorker:
 
         try:
             # Step 1+2: Run ASR and tracking concurrently on separate modalities.
-            print("[Phase 1] Step 1+2/4: Running Parakeet ASR + YOLO11 tracking concurrently...")
+            print("[Phase 1] Step 1+2/4: Running Parakeet ASR + YOLO26 tracking concurrently...")
             with ThreadPoolExecutor(max_workers=2) as pool:
                 asr_future = pool.submit(self._run_asr, audio_path)
                 track_future = pool.submit(self._run_tracking, video_path)
                 words = asr_future.result()
-                tracks = track_future.result()
-            _, track_to_dets = self._build_track_indexes(tracks)
-
-            # Step 3: Global tracklet clustering
-            print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
-            tracks = self._cluster_tracklets(
-                video_path,
-                tracks,
-                track_to_dets=track_to_dets,
-            )
-            frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
-
-            # Step 4: Speaker binding
-            print("[Phase 1] Step 4/4: Running speaker binding...")
-            speaker_bindings = self._run_speaker_binding(
-                video_path,
-                audio_path,
-                tracks,
-                words,
-                frame_to_dets=frame_to_dets,
-                track_to_dets=track_to_dets,
+                tracks, tracking_metrics = track_future.result()
+            result = self._finalize_from_words_tracks(
+                video_path=video_path,
+                audio_path=audio_path,
+                youtube_url=youtube_url,
+                words=words,
+                tracks=tracks,
+                tracking_metrics=tracking_metrics if isinstance(tracking_metrics, dict) else {},
             )
 
             # Cleanup
@@ -2198,26 +3443,7 @@ class ClyptWorker:
                 if os.path.exists(p):
                     os.remove(p)
 
-            phase_1_visual = {
-                "source_video": youtube_url,
-                "tracks": tracks,
-            }
-
-            phase_1_audio = {
-                "source_audio": youtube_url,
-                "words": words,
-                "speaker_bindings": speaker_bindings,
-            }
-
-            print(f"[Phase 1] Complete — {len(words)} words, {len(tracks)} tracks")
-            return {
-                "status": "success",
-                "phase_1_visual": phase_1_visual,
-                "phase_1_audio": phase_1_audio,
-                # Backward compatibility for older clients still expecting 1A keys.
-                "phase_1a_visual": phase_1_visual,
-                "phase_1a_audio": phase_1_audio,
-            }
+            return result
 
         except Exception as e:
             print(f"[Phase 1] Error: {e}")

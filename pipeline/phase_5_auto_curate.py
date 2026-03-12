@@ -176,6 +176,9 @@ def fetch_all_edges(database) -> list[dict]:
     with database.snapshot() as snapshot:
         results = list(snapshot.execute_sql(sql))
 
+    if not results:
+        raise RuntimeError("NarrativeEdge table is empty; full-graph auto-curation requires edges.")
+
     edges = []
     for row in results:
         edges.append({

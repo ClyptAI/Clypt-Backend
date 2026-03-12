@@ -2,12 +2,12 @@
 """
 Phase 5: Retrieval & Production Serving
 ========================================
-Takes a text query, embeds it via multimodalembedding@001, performs a hybrid
+Takes a text query, embeds it via Gemini Embedding 2, performs a hybrid
 Spanner query (vector KNN anchor + 1-hop graph traversal), sends the sub-graph
 to Gemini 3.1 Pro for clip scoring, and outputs a Remotion render payload.
 
 Pipeline:
-  1. Embed the user query → 1408-d vector
+  1. Embed the user query → 3072-d vector (`RETRIEVAL_QUERY`)
   2. APPROX_COSINE_DISTANCE on SemanticClipNode → anchor node
   3. Spanner Graph 1-hop traversal → context nodes
   4. ClipScoringAgent (Gemini) → optimal clip boundaries
@@ -20,9 +20,6 @@ import json
 import logging
 import os
 from pathlib import Path
-
-import vertexai
-from vertexai.vision_models import MultiModalEmbeddingModel
 
 from google import genai
 from google.genai.types import HttpOptions
@@ -38,8 +35,11 @@ SPANNER_INSTANCE = "clypt-spanner-v2"
 SPANNER_DATABASE = "clypt-graph-db-v2"
 GEMINI_LOCATION = "global"
 GEMINI_MODEL = "gemini-3.1-pro-preview"
+EMBEDDING_MODEL = "gemini-embedding-2-preview"
+EMBEDDING_TASK_TYPE = "RETRIEVAL_QUERY"
+EMBEDDING_API_VERSION = "v1beta"
 
-EMBEDDING_DIM = 1408
+EMBEDDING_DIM = 3072
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_PATH = ROOT / "outputs" / "remotion_payload.json"
@@ -83,14 +83,33 @@ class ClipScore(BaseModel):
 # Step 1: Embed the query
 # ──────────────────────────────────────────────
 def embed_query(query: str) -> list[float]:
-    """Generate a 1408-d text embedding from the user query."""
-    vertexai.init(project=PROJECT_ID, location=LOCATION)
-    model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")
-    embeddings = model.get_embeddings(
-        contextual_text=query,
-        dimension=EMBEDDING_DIM,
+    """Generate a 3072-d query embedding for retrieval."""
+    os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
+    os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+
+    client = genai.Client(http_options=HttpOptions(api_version=EMBEDDING_API_VERSION))
+    response = client.models.embed_content(
+        model=EMBEDDING_MODEL,
+        contents=[query],
+        config=genai.types.EmbedContentConfig(
+            output_dimensionality=EMBEDDING_DIM,
+            task_type=EMBEDDING_TASK_TYPE,
+        ),
     )
-    return embeddings.text_embedding
+
+    embeddings = getattr(response, "embeddings", None) or []
+    if not embeddings:
+        raise RuntimeError("No query embedding returned")
+
+    values = getattr(embeddings[0], "values", None)
+    if not values:
+        raise RuntimeError("Empty query embedding returned")
+    if len(values) != EMBEDDING_DIM:
+        raise RuntimeError(
+            f"Query embedding size mismatch: got {len(values)}, expected {EMBEDDING_DIM}"
+        )
+    return list(values)
 
 
 # ──────────────────────────────────────────────
@@ -208,6 +227,11 @@ def find_context_nodes(database, anchor_node_id: str) -> list[dict]:
             "speakers": [str(s) for s in speakers if s is not None and str(s) != ""],
             "edge_label": row[6],
         })
+    if not nodes:
+        raise RuntimeError(
+            f"No NarrativeEdge context found for anchor {anchor_node_id}; "
+            "graph retrieval requires populated edges."
+        )
     return nodes
 
 
@@ -256,12 +280,12 @@ def score_subgraph(subgraph: dict) -> ClipScore:
 # ──────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info("PHASE 4 — Retrieval & Production Serving")
+    log.info("PHASE 5 — Retrieval & Production Serving")
     log.info("=" * 60)
 
     # ── Step 1: Embed the query ──
     log.info(f"Query: \"{USER_QUERY}\"")
-    log.info("Embedding query via multimodalembedding@001…")
+    log.info(f"Embedding query via {EMBEDDING_MODEL} ({EMBEDDING_TASK_TYPE})…")
     query_vector = embed_query(USER_QUERY)
     log.info(f"  Query vector: {len(query_vector)}d")
 
@@ -379,7 +403,7 @@ def main():
 
     # ── Summary ──
     log.info("=" * 60)
-    log.info("PHASE 4 COMPLETE")
+    log.info("PHASE 5 COMPLETE")
     log.info(f"  Query: \"{USER_QUERY}\"")
     log.info(f"  Anchor distance: {anchor['distance']:.6f}")
     log.info(f"  Sub-graph nodes: {len(all_nodes)}")

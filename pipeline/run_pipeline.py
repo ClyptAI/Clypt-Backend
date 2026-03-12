@@ -8,7 +8,7 @@ Prompts for a YouTube URL, then runs the full pipeline sequentially:
   FFmpeg    →  Re-encode video for Remotion compatibility
   Phase 2A  →  Content Mechanism Decomposition (Gemini chunked multimodal)
   Phase 2B  →  Narrative Edge Mapping (Gemini text-only)
-  Phase 3   →  Multimodal Embedding (multimodalembedding@001)
+  Phase 3   →  Multimodal Embedding (Gemini Embedding 2)
   Phase 4   →  Storage & Graph Binding (Spanner + GCS)
   Phase 5   →  Auto-Curate (full-graph sweep + Gemini scoring)
   Render    →  Remotion render (fetch tracking + render all compositions)
