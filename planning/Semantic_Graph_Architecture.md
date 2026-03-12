@@ -14,7 +14,7 @@ The pipeline runs sequentially through seven stages:
 YouTube URL
     │
     ▼
-Phase 1A: Deterministic Extraction ──→ phase_1a_visual.json, phase_1a_audio.json
+Phase 1A: Deterministic Extraction ──→ phase_1_visual.json, phase_1_audio.json
     │
     ▼
 Phase 1A-R: Speaker Reconciliation ──→ phase_1a_speaker_map.json
@@ -23,13 +23,13 @@ Phase 1A-R: Speaker Reconciliation ──→ phase_1a_speaker_map.json
 FFmpeg Re-encode ──→ clean H.264 video for Remotion
     │
     ▼
-Phase 1B: Content Mechanism Decomposition ──→ phase_1b_nodes.json
+Phase 1B: Content Mechanism Decomposition ──→ phase_2a_nodes.json
     │
     ▼
-Phase 1C: Narrative Edge Mapping ──→ phase_1c_narrative_edges.json
+Phase 1C: Narrative Edge Mapping ──→ phase_2b_narrative_edges.json
     │
     ▼
-Phase 2: Multimodal Embedding ──→ phase_2_embeddings.json
+Phase 2: Multimodal Embedding ──→ phase_3_embeddings.json
     │
     ▼
 Phase 3: Storage & Graph Binding ──→ Spanner (nodes + edges) + GCS (speaker-tagged tracking)
@@ -62,14 +62,14 @@ Clypt-PreYC/
 ├── pipeline/                          # All Python pipeline scripts
 │   ├── __init__.py
 │   ├── run_pipeline.py                # Orchestrator (entry point)
-│   ├── phase_1a_extract.py            # Deterministic extraction
+│   ├── phase_1_modal_pipeline.py            # Deterministic extraction
 │   ├── phase_1a_reconcile.py          # Speaker-to-face reconciliation
-│   ├── phase_1b_decompose.py          # Content mechanism decomposition
-│   ├── phase_1c_edges.py              # Narrative edge mapping
-│   ├── phase_2_embed.py               # Multimodal embedding
-│   ├── phase_3_store.py               # Spanner + GCS storage
-│   ├── phase_4_auto_curate.py         # Auto-curator (full-graph sweep)
-│   └── phase_4_retrieve.py            # Query-based retrieval (standalone)
+│   ├── phase_2a_make_nodes.py          # Content mechanism decomposition
+│   ├── phase_2b_draw_edges.py              # Narrative edge mapping
+│   ├── phase_3_multimodal_embeddings.py               # Multimodal embedding
+│   ├── phase_4_store_graph.py               # Spanner + GCS storage
+│   ├── phase_5_auto_curate.py         # Auto-curator (full-graph sweep)
+│   └── phase_5_retrieve.py            # Query-based retrieval (standalone)
 ├── clypt-render-engine/               # Remotion rendering project
 │   ├── src/
 │   │   ├── Root.tsx                   # Composition registration
@@ -136,11 +136,11 @@ The single entry point for the entire pipeline. It:
 6. Runs the Node.js tracking fetcher script.
 7. Renders each Remotion composition individually to `clypt-render-engine/out/`.
 
-The orchestrator excludes `phase_4_retrieve.py` since that script is query-based and designed for standalone use.
+The orchestrator excludes `phase_5_retrieve.py` since that script is query-based and designed for standalone use.
 
 ---
 
-### Phase 1A: Deterministic Extraction — `pipeline/phase_1a_extract.py`
+### Phase 1A: Deterministic Extraction — `pipeline/phase_1_modal_pipeline.py`
 
 **Purpose:** Establish the mathematical ground truth of the video before any AI reasoning happens.
 
@@ -171,8 +171,8 @@ The orchestrator excludes `phase_4_retrieve.py` since that script is query-based
    - The `us` regional endpoint for Chirp 3 availability.
 
 4. **Output** — Two JSON ledgers saved to `outputs/`:
-   - `phase_1a_visual.json` — shot changes, person detections, face detections, object tracking, and label detections, all with millisecond timestamps and normalized bounding boxes.
-   - `phase_1a_audio.json` — a flat array of words (each with `start_time_ms`, `end_time_ms`, `speaker_tag`, `confidence`) and full transcript segments.
+   - `phase_1_visual.json` — shot changes, person detections, face detections, object tracking, and label detections, all with millisecond timestamps and normalized bounding boxes.
+   - `phase_1_audio.json` — a flat array of words (each with `start_time_ms`, `end_time_ms`, `speaker_tag`, `confidence`) and full transcript segments.
 
 **Known Behavior:** `PERSON_DETECTION` and `OBJECT_TRACKING` may return "Calculator failure" errors from the Video Intelligence API for certain videos. The script logs these errors but continues — the pipeline handles missing data gracefully.
 
@@ -182,7 +182,7 @@ The orchestrator excludes `phase_4_retrieve.py` since that script is query-based
 
 **Purpose:** Correlate STT speaker tags (acoustic identity, no spatial info) with Video Intelligence face tracks (spatial bounding boxes, no speaker identity) to produce a unified speaker→face mapping.
 
-**Inputs:** `phase_1a_visual.json`, `phase_1a_audio.json`
+**Inputs:** `phase_1_visual.json`, `phase_1_audio.json`
 
 **Algorithm:**
 
@@ -201,7 +201,7 @@ The orchestrator excludes `phase_4_retrieve.py` since that script is query-based
 
 ---
 
-### Phase 1B: Content Mechanism Decomposition — `pipeline/phase_1b_decompose.py`
+### Phase 1B: Content Mechanism Decomposition — `pipeline/phase_2a_make_nodes.py`
 
 **Purpose:** Use Gemini 3.1 Pro as a multimodal reasoning engine to decompose the video into semantically meaningful nodes with rich metadata about *why* each moment works.
 
@@ -211,7 +211,7 @@ The orchestrator excludes `phase_4_retrieve.py` since that script is query-based
 
 **Process:**
 
-1. **Load Phase 1A Ledgers** — Reads `phase_1a_visual.json` and `phase_1a_audio.json` from disk.
+1. **Load Phase 1A Ledgers** — Reads `phase_1_visual.json` and `phase_1_audio.json` from disk.
 
 2. **Chunk Planning** — Groups consecutive shots into chunks that fit within a 200,000-token budget. Token costs are estimated per-shot based on the density of face frames, person frames, object frames, word count, and label segments in that shot's time range. Each chunk's boundaries are aligned to shot changes to avoid splitting a shot across chunks.
 
@@ -242,11 +242,11 @@ The orchestrator excludes `phase_4_retrieve.py` since that script is query-based
 
 **Gemini Configuration:** Uses `thinking_config=ThinkingConfig(thinking_level="HIGH")` for maximum reasoning depth, and `temperature=0.2` with Pydantic-enforced structured output.
 
-**Output:** `outputs/phase_1b_nodes.json` — a deduplicated array of Semantic Nodes ordered chronologically.
+**Output:** `outputs/phase_2a_nodes.json` — a deduplicated array of Semantic Nodes ordered chronologically.
 
 ---
 
-### Phase 1C: Narrative Edge Mapping — `pipeline/phase_1c_edges.py`
+### Phase 1C: Narrative Edge Mapping — `pipeline/phase_2b_draw_edges.py`
 
 **Purpose:** Map the structural narrative relationships between Semantic Nodes by drawing directional edges — the "graph topology" pass.
 
@@ -254,7 +254,7 @@ The orchestrator excludes `phase_4_retrieve.py` since that script is query-based
 
 **Process:**
 
-1. **Load Nodes** — Reads `phase_1b_nodes.json`.
+1. **Load Nodes** — Reads `phase_2a_nodes.json`.
 2. **Text-Only Gemini Call** — Sends the entire node array as text to Gemini (no video attachment). The prompt places the node JSON data first with instructions after it (data-first ordering anchors Gemini's reasoning on the data before generation). Uses `thinking_config=ThinkingConfig(thinking_level="HIGH")` for deeper reasoning — this is the cheapest phase to enable thinking on since it's text-only.
 3. **Pydantic Validation** — Parses the response and validates edge references match actual node `start_time` values.
 
@@ -280,11 +280,11 @@ The orchestrator excludes `phase_4_retrieve.py` since that script is query-based
 | `narrative_classification` | string | 1-sentence explanation of why these nodes connect |
 | `confidence_score` | float | 0.0–1.0 |
 
-**Output:** `outputs/phase_1c_narrative_edges.json`
+**Output:** `outputs/phase_2b_narrative_edges.json`
 
 ---
 
-### Phase 2: Multimodal Embedding — `pipeline/phase_2_embed.py`
+### Phase 2: Multimodal Embedding — `pipeline/phase_3_multimodal_embeddings.py`
 
 **Purpose:** Project each Semantic Node into a shared 1408-dimensional multimodal vector space, fusing text semantics with actual video frame embeddings.
 
@@ -292,7 +292,7 @@ The orchestrator excludes `phase_4_retrieve.py` since that script is query-based
 
 **Process:**
 
-For each node in `phase_1b_nodes.json`:
+For each node in `phase_2a_nodes.json`:
 
 1. **Text Payload Construction** — Concatenates the node's `transcript_segment`, `vocal_delivery`, and a stringified summary of active `content_mechanisms` (e.g., `"Humor: subversion (0.8), Social: status reversal (0.9)"`) into a single rich text string.
 
@@ -304,11 +304,11 @@ For each node in `phase_1b_nodes.json`:
 
 4. **Minimum Segment Enforcement** — The embedding API requires segments of at least 4 seconds. Segments shorter than this are padded.
 
-**Output:** `outputs/phase_2_embeddings.json` — mirrors the input nodes with an appended `multimodal_embedding` key containing the fused 1408-float array.
+**Output:** `outputs/phase_3_embeddings.json` — mirrors the input nodes with an appended `multimodal_embedding` key containing the fused 1408-float array.
 
 ---
 
-### Phase 3: Storage & Graph Binding — `pipeline/phase_3_store.py`
+### Phase 3: Storage & Graph Binding — `pipeline/phase_4_store_graph.py`
 
 **Purpose:** Ingest all computed data into Google Cloud Spanner and upload spatial tracking data to GCS, establishing the persistent semantic graph.
 
@@ -316,7 +316,7 @@ For each node in `phase_1b_nodes.json`:
 
 **Process:**
 
-1. **Data Loading** — Reads `phase_2_embeddings.json`, `phase_1c_narrative_edges.json`, `phase_1a_visual.json`, `phase_1a_audio.json`, and (optionally) `phase_1a_speaker_map.json` from Phase 1A-R.
+1. **Data Loading** — Reads `phase_3_embeddings.json`, `phase_2b_narrative_edges.json`, `phase_1_visual.json`, `phase_1_audio.json`, and (optionally) `phase_1a_speaker_map.json` from Phase 1A-R.
 
 2. **UUID Assignment** — Generates a UUID for every node and builds a `start_time → node_id` mapping dictionary used to resolve edge references.
 
@@ -350,7 +350,7 @@ The database uses four DDL statements (see `spannerSchema.sql`):
 
 ---
 
-### Phase 4 (Auto-Curator): Full-Graph Sweep — `pipeline/phase_4_auto_curate.py`
+### Phase 4 (Auto-Curator): Full-Graph Sweep — `pipeline/phase_5_auto_curate.py`
 
 **Purpose:** Sweep the entire semantic graph to identify the best viral clip candidates without relying on a user query. This mimics OpusClip-style automatic clip detection.
 
@@ -384,7 +384,7 @@ The database uses four DDL statements (see `spannerSchema.sql`):
 
 ---
 
-### Phase 4 (Retrieve): Query-Based Retrieval — `pipeline/phase_4_retrieve.py`
+### Phase 4 (Retrieve): Query-Based Retrieval — `pipeline/phase_5_retrieve.py`
 
 **Purpose:** Find a specific clip matching a natural language query using hybrid vector search + graph traversal. This is a standalone script, not included in the orchestrator.
 
@@ -404,7 +404,7 @@ The database uses four DDL statements (see `spannerSchema.sql`):
 
 6. **Remotion Payload** — Outputs a single `remotion_payload.json` with the same structure as the auto-curate payloads, including `active_speaker_timeline`.
 
-**Usage:** `python3 pipeline/phase_4_retrieve.py` (edit `USER_QUERY` in the script).
+**Usage:** `python3 pipeline/phase_5_retrieve.py` (edit `USER_QUERY` in the script).
 
 ---
 
@@ -504,12 +504,12 @@ All intermediate files are written to `outputs/` (gitignored) and `downloads/` (
 |---|---|---|
 | `downloads/video.mp4` | Phase 1A | GCS upload, FFmpeg re-encode, Remotion |
 | `downloads/audio.m4a` | Phase 1A | GCS upload |
-| `outputs/phase_1a_visual.json` | Phase 1A | Phase 1A-R, Phase 1B, Phase 3 |
-| `outputs/phase_1a_audio.json` | Phase 1A | Phase 1A-R, Phase 1B, Phase 3 |
+| `outputs/phase_1_visual.json` | Phase 1A | Phase 1A-R, Phase 1B, Phase 3 |
+| `outputs/phase_1_audio.json` | Phase 1A | Phase 1A-R, Phase 1B, Phase 3 |
 | `outputs/phase_1a_speaker_map.json` | Phase 1A-R | Phase 3 |
-| `outputs/phase_1b_nodes.json` | Phase 1B | Phase 1C, Phase 2 |
-| `outputs/phase_1c_narrative_edges.json` | Phase 1C | Phase 3 |
-| `outputs/phase_2_embeddings.json` | Phase 2 | Phase 3 |
+| `outputs/phase_2a_nodes.json` | Phase 1B | Phase 1C, Phase 2 |
+| `outputs/phase_2b_narrative_edges.json` | Phase 1C | Phase 3 |
+| `outputs/phase_3_embeddings.json` | Phase 2 | Phase 3 |
 | `outputs/remotion_payloads_array.json` | Phase 4 Auto-Curate | Remotion |
 | `outputs/remotion_payload.json` | Phase 4 Retrieve | Remotion (standalone) |
 

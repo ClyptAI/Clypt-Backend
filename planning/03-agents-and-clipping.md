@@ -6,21 +6,21 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 ## Agent Roles (Implemented)
 
 The current system uses a hybrid runtime:
-- **Modal GPU microservice** for deterministic multimodal extraction in Phase 1A.
-- **Gemini** for semantic reasoning and clip scoring in Phases 1B, 1C, and 4.
+- **Modal GPU microservice** for deterministic multimodal extraction in Phase 1.
+- **Gemini** for semantic reasoning and clip scoring in Phases 2A, 2B, and 5.
 
 | Role | Stage | Runtime | Output |
 |---|---|---|---|
-| **Deterministic Extraction Worker** | Phase 1A | Modal (NVIDIA Canary-1B-v2 + YOLOv12/BoT-SORT + TalkNCE/LASER) | `phase_1a_visual.json`, `phase_1a_audio.json` |
-| **Content Mechanism Decomposition** | Phase 1B | Gemini 3.1 Pro | `phase_1b_nodes.json` |
-| **Narrative Edge Mapping** | Phase 1C | Gemini 3.1 Pro (text-only) | `phase_1c_narrative_edges.json` |
-| **Auto-Curator ClipScoringAgent** | Phase 4 Auto-Curate | Gemini 3.1 Pro | ranked clip payloads |
-| **Retrieve ClipScoringAgent** | Phase 4 Retrieve | Gemini 3.1 Pro | query-specific clip payload |
+| **Deterministic Extraction Worker** | Phase 1 | Modal (Parakeet + YOLO11/BoT-SORT + TalkNet) | `phase_1_visual.json`, `phase_1_audio.json` |
+| **Content Mechanism Decomposition** | Phase 2A | Gemini 3.1 Pro | `phase_2a_nodes.json` |
+| **Narrative Edge Mapping** | Phase 2B | Gemini 3.1 Pro (text-only) | `phase_2b_narrative_edges.json` |
+| **Auto-Curator ClipScoringAgent** | Phase 5 Auto-Curate | Gemini 3.1 Pro | ranked clip payloads |
+| **Retrieve ClipScoringAgent** | Phase 5 Retrieve | Gemini 3.1 Pro | query-specific clip payload |
 
 ---
-## Phase 1A Extraction Mechanics
+## Phase 1 Extraction Mechanics
 
-`pipeline/phase_1a_extract.py` now performs three tasks only:
+`pipeline/phase_1_modal_pipeline.py` now performs three tasks only:
 1. Build webhook request payload from input YouTube URL.
 2. Call Modal endpoint and wait for extraction completion.
 3. Persist returned visual/audio ledgers for downstream phases.
@@ -28,8 +28,8 @@ The current system uses a hybrid runtime:
 Inside Modal, the extraction stack runs in order:
 1. `yt-dlp`
 2. NVIDIA Canary-1B-v2 (word-level timestamps + punctuation)
-3. YOLOv12 + BoT-SORT (dense 60fps persistent tracks)
-4. TalkNCE + LASER + lip landmarks (active speaker to `track_id` binding)
+3. YOLO11 + BoT-SORT (dense persistent tracks)
+4. TalkNet (active speaker to `track_id` binding)
 
 No separate reconciliation phase exists after extraction.
 
@@ -63,12 +63,12 @@ Clip scoring prompt evaluates:
 ## Remotion Clip Construction
 
 The clip renderer uses:
-- `clip_start_ms` / `clip_end_ms` from Phase 4 output
+- `clip_start_ms` / `clip_end_ms` from Phase 5 output
 - `tracking_uris` merged into `merged_tracking.json`
 - `active_speaker_timeline` for speaker-aware camera following
 - direct per-frame `x/y` transforms from BoT-SORT trajectories in `ClyptViralShort.tsx`
 
-The renderer no longer depends on additional smoothing logic because Phase 1A tracking data is already dense and smoothed.
+The renderer no longer depends on additional smoothing logic because Phase 1 tracking data is already dense and smoothed.
 
 ---
 ## What Is Not Yet Reflected Here

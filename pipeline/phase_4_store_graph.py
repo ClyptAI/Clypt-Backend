@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 3: Storage & Graph Binding (Spanner + GCS)
+Phase 4: Storage & Graph Binding (Spanner + GCS)
 =================================================
 Ingests Phase 1/2 JSON ledgers into Google Cloud Spanner (nodes + edges)
 and uploads decoupled spatial tracking data to GCS.
@@ -9,16 +9,16 @@ Uses Spanner's native multi-model architecture: ScaNN vector search on
 the embedding column, Spanner Graph for edge traversal.
 
 Inputs:
-  - phase_2_embeddings.json          (nodes with 1408-d vectors)
-  - phase_1c_narrative_edges.json    (directional edges)
-  - phase_1a_visual.json             (face/person/object/label data)
-  - phase_1a_audio.json              (word-level timestamps + speakers)
+  - phase_3_embeddings.json          (nodes with 1408-d vectors)
+  - phase_2b_narrative_edges.json    (directional edges)
+  - phase_1_visual.json             (face/person/object/label data)
+  - phase_1_audio.json              (word-level timestamps + speakers)
 
 Targets:
-  - Spanner: instance=clypt-preyc-db, database=clypt-db
+  - Spanner: instance=clypt-spanner-v2, database=clypt-graph-db-v2
     - Table: SemanticClipNode
     - Table: NarrativeEdge
-  - GCS: gs://clypt-test-bucket/tracking/[node_id].json
+  - GCS: gs://clypt-storage-v2/tracking/[node_id].json
 """
 
 from __future__ import annotations
@@ -33,19 +33,19 @@ from google.cloud import spanner, storage
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-preyc"
-SPANNER_INSTANCE = "clypt-preyc-db"
-SPANNER_DATABASE = "clypt-db"
+PROJECT_ID = "clypt-v2"
+SPANNER_INSTANCE = "clypt-spanner-v2"
+SPANNER_DATABASE = "clypt-graph-db-v2"
 
-GCS_BUCKET = "clypt-test-bucket"
-VIDEO_GCS_URI = "gs://clypt-test-bucket/phase_1a/video.mp4"
+GCS_BUCKET = "clypt-storage-v2"
+VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
 TRACKING_PREFIX = "tracking"
 
 ROOT = Path(__file__).resolve().parent.parent
-EMBEDDINGS_PATH = ROOT / "outputs" / "phase_2_embeddings.json"
-EDGES_PATH = ROOT / "outputs" / "phase_1c_narrative_edges.json"
-VISUAL_PATH = ROOT / "outputs" / "phase_1a_visual.json"
-AUDIO_PATH = ROOT / "outputs" / "phase_1a_audio.json"
+EMBEDDINGS_PATH = ROOT / "outputs" / "phase_3_embeddings.json"
+EDGES_PATH = ROOT / "outputs" / "phase_2b_narrative_edges.json"
+VISUAL_PATH = ROOT / "outputs" / "phase_1_visual.json"
+AUDIO_PATH = ROOT / "outputs" / "phase_1_audio.json"
 
 BATCH_SIZE = 100
 
@@ -57,7 +57,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("phase_3")
+log = logging.getLogger("phase_4")
 # Suppress Spanner SDK internal metrics export errors (missing instance_id in Cloud Monitoring)
 logging.getLogger("opentelemetry.sdk.metrics._internal.export").setLevel(logging.CRITICAL)
 
@@ -215,7 +215,7 @@ def _write_mutations_batched(database, mutations: list, label: str):
 # ──────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info("PHASE 3 — Storage & Graph Binding")
+    log.info("PHASE 4 — Storage & Graph Binding")
     log.info("=" * 60)
 
     # ── Load all data ──
@@ -444,7 +444,7 @@ def main():
 
     # ── Summary ──
     log.info("=" * 60)
-    log.info("PHASE 3 COMPLETE")
+    log.info("PHASE 4 COMPLETE")
     log.info(f"  Spanner nodes written:  {len(node_mutations)}")
     log.info(f"  Spanner edges written:  {len(edge_mutations)}")
     log.info(f"  Edges skipped:          {skipped}")

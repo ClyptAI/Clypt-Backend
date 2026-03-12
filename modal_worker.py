@@ -1,6 +1,6 @@
 """
-Clypt Phase 1A — Modal GPU Worker
-===================================
+Clypt Phase 1 — Modal GPU Worker
+=================================
 Serverless GPU microservice that performs deterministic multimodal extraction:
 
   1. NVIDIA Parakeet-TDT → word-level ASR with timestamps + punctuation
@@ -2134,7 +2134,7 @@ class ClyptWorker:
         audio_wav_bytes: bytes,
         youtube_url: str,
     ) -> dict:
-        """Run the full Phase 1A extraction stack on pre-downloaded media.
+        """Run the full Phase 1 extraction stack on pre-downloaded media.
 
         Args:
             video_bytes: Muxed MP4 video (for visual tracking).
@@ -2142,7 +2142,7 @@ class ClyptWorker:
             youtube_url: Original URL (for metadata only).
 
         Returns:
-            dict with phase_1a_visual and phase_1a_audio payloads.
+            dict with phase_1_visual and phase_1_audio payloads.
         """
         import os
         from concurrent.futures import ThreadPoolExecutor
@@ -2160,11 +2160,11 @@ class ClyptWorker:
 
         video_mb = len(video_bytes) / 1e6
         audio_mb = len(audio_wav_bytes) / 1e6
-        print(f"[Phase 1A] Received video ({video_mb:.1f} MB) + audio ({audio_mb:.1f} MB)")
+        print(f"[Phase 1] Received video ({video_mb:.1f} MB) + audio ({audio_mb:.1f} MB)")
 
         try:
             # Step 1+2: Run ASR and tracking concurrently on separate modalities.
-            print("[Phase 1A] Step 1+2/4: Running Parakeet ASR + YOLO11 tracking concurrently...")
+            print("[Phase 1] Step 1+2/4: Running Parakeet ASR + YOLO11 tracking concurrently...")
             with ThreadPoolExecutor(max_workers=2) as pool:
                 asr_future = pool.submit(self._run_asr, audio_path)
                 track_future = pool.submit(self._run_tracking, video_path)
@@ -2173,7 +2173,7 @@ class ClyptWorker:
             _, track_to_dets = self._build_track_indexes(tracks)
 
             # Step 3: Global tracklet clustering
-            print("[Phase 1A] Step 3/4: Clustering tracklets into global IDs...")
+            print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
             tracks = self._cluster_tracklets(
                 video_path,
                 tracks,
@@ -2182,7 +2182,7 @@ class ClyptWorker:
             frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
 
             # Step 4: Speaker binding
-            print("[Phase 1A] Step 4/4: Running speaker binding...")
+            print("[Phase 1] Step 4/4: Running speaker binding...")
             speaker_bindings = self._run_speaker_binding(
                 video_path,
                 audio_path,
@@ -2198,24 +2198,27 @@ class ClyptWorker:
                 if os.path.exists(p):
                     os.remove(p)
 
-            phase_1a_visual = {
+            phase_1_visual = {
                 "source_video": youtube_url,
                 "tracks": tracks,
             }
 
-            phase_1a_audio = {
+            phase_1_audio = {
                 "source_audio": youtube_url,
                 "words": words,
                 "speaker_bindings": speaker_bindings,
             }
 
-            print(f"[Phase 1A] Complete — {len(words)} words, {len(tracks)} tracks")
+            print(f"[Phase 1] Complete — {len(words)} words, {len(tracks)} tracks")
             return {
                 "status": "success",
-                "phase_1a_visual": phase_1a_visual,
-                "phase_1a_audio": phase_1a_audio,
+                "phase_1_visual": phase_1_visual,
+                "phase_1_audio": phase_1_audio,
+                # Backward compatibility for older clients still expecting 1A keys.
+                "phase_1a_visual": phase_1_visual,
+                "phase_1a_audio": phase_1_audio,
             }
 
         except Exception as e:
-            print(f"[Phase 1A] Error: {e}")
+            print(f"[Phase 1] Error: {e}")
             return {"status": "error", "message": str(e)}

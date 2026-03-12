@@ -7,11 +7,11 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 
 | Integration | Usage |
 |---|---|
-| YouTube + `yt-dlp` | Source media acquisition in Phase 1A worker |
-| Modal (FastAPI + serverless GPU) | Hosts deterministic extraction microservice on A10G/A100 |
+| YouTube + `yt-dlp` | Source media acquisition in Phase 1 worker |
+| Modal (FastAPI + serverless GPU) | Hosts deterministic extraction microservice |
 | NVIDIA Canary-1B-v2 | High-speed transcription with word-level timestamps and punctuation |
-| YOLOv12 + BoT-SORT | Dense 60fps face/person tracking with persistent IDs |
-| TalkNCE + LASER + MediaPipe landmarks | Active speaker binding from audio-visual synchrony |
+| YOLO11 + BoT-SORT | Dense face/person tracking with persistent IDs |
+| TalkNet + InsightFace | Active speaker binding from audio-visual synchrony |
 | Gemini 3.1 Pro | Decomposition, edge mapping, clip scoring |
 | Multimodal Embeddings (`multimodalembedding@001`) | Node and query vectorization |
 | Cloud Spanner | Node/edge relational graph + vector index + property graph |
@@ -23,18 +23,18 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 
 | File | Produced By | Consumed By |
 |---|---|---|
-| `phase_1a_visual.json` | Phase 1A Modal worker | 1B, 3, Remotion tracking fetch |
-| `phase_1a_audio.json` | Phase 1A Modal worker | 1B, 3, 4 |
-| `phase_1b_nodes.json` | Phase 1B | 1C, 2 |
-| `phase_1c_narrative_edges.json` | Phase 1C | 3 |
-| `phase_2_embeddings.json` | Phase 2 | 3 |
-| `remotion_payloads_array.json` | Phase 4 Auto-Curate | Remotion |
-| `remotion_payload.json` | Phase 4 Retrieve | Remotion standalone |
+| `phase_1_visual.json` | Phase 1 Modal worker | 2A, 4, Remotion tracking fetch |
+| `phase_1_audio.json` | Phase 1 Modal worker | 2A, 4, 5 |
+| `phase_2a_nodes.json` | Phase 2A | 2B, 3 |
+| `phase_2b_narrative_edges.json` | Phase 2B | 4 |
+| `phase_3_embeddings.json` | Phase 3 | 4 |
+| `remotion_payloads_array.json` | Phase 5 Auto-Curate | Remotion |
+| `remotion_payload.json` | Phase 5 Retrieve | Remotion standalone |
 
 Artifact notes:
-- `phase_1a_visual.json` contains dense 60fps BoT-SORT arrays with persistent `track_id` assignments.
-- `phase_1a_audio.json` contains NVIDIA Canary-1B-v2 transcript words with direct `speaker_track_id` mapping.
-- `phase_1a_speaker_map.json` is removed because speaker-to-track binding is native to Phase 1A.
+- `phase_1_visual.json` contains dense 60fps BoT-SORT arrays with persistent `track_id` assignments.
+- `phase_1_audio.json` contains NVIDIA Canary-1B-v2 transcript words with direct `speaker_track_id` mapping.
+- `phase_1a_speaker_map.json` is removed because speaker-to-track binding is native to Phase 1.
 
 ---
 ## Spanner Model
@@ -60,11 +60,11 @@ Artifact notes:
 
 | Resource | Service | Purpose |
 |---|---|---|
-| Modal app endpoint | Modal | Phase 1A extraction webhook target |
-| `clypt-preyc` | GCP project | Core cloud project for non-extraction services |
-| `clypt-test-bucket` | Cloud Storage | Uploads + tracking JSON |
-| `clypt-preyc-db` | Spanner instance | Database host |
-| `clypt-db` | Spanner database | Graph + vectors |
+| Modal app endpoint | Modal | Phase 1 extraction webhook target |
+| `clypt-v2` | GCP project | Core cloud project for non-extraction services |
+| `clypt-storage-v2` | Cloud Storage | Uploads + tracking JSON |
+| `clypt-spanner-v2` | Spanner instance | Database host |
+| `clypt-graph-db-v2` | Spanner database | Graph + vectors |
 | `gemini-3.1-pro-preview` | Vertex AI | LLM reasoning stages |
 | `multimodalembedding@001` | Vertex AI | 1408-d embeddings |
 

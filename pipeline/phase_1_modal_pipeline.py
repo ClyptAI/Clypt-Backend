@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 1A: Deterministic Extraction
+Phase 1: Modal Deterministic Extraction
 ===================================
 Downloads video + audio locally via yt-dlp, converts audio to 16kHz mono WAV,
 then sends both to the Modal GPU worker for extraction (ASR, tracking, speaker
@@ -8,8 +8,8 @@ binding). Writes the returned ledgers to outputs/.
 
 Outputs:
   - downloads/video.mp4           (muxed video for downstream use + Remotion)
-  - outputs/phase_1a_visual.json  (tracking data from Modal worker)
-  - outputs/phase_1a_audio.json   (word-level transcript from Modal worker)
+  - outputs/phase_1_visual.json  (tracking data from Modal worker)
+  - outputs/phase_1_audio.json   (word-level transcript from Modal worker)
 """
 
 import json
@@ -48,7 +48,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("phase_1a")
+log = logging.getLogger("phase_1")
 
 
 # ──────────────────────────────────────────────
@@ -146,10 +146,17 @@ def download_media(url: str) -> tuple[str, str]:
         if p.exists():
             p.unlink()
             log.info(f"Removed stale downloads/{stale}")
-    for stale in ("phase_1a_visual.json", "phase_1a_audio.json",
-                   "phase_1b_nodes.json", "phase_1c_narrative_edges.json",
-                   "phase_2_embeddings.json", "remotion_payloads_array.json",
-                   "remotion_payload.json"):
+    for stale in (
+        # Current phase naming
+        "phase_1_visual.json", "phase_1_audio.json",
+        "phase_2a_nodes.json", "phase_2b_narrative_edges.json",
+        "phase_3_embeddings.json", "remotion_payloads_array.json",
+        "remotion_payload.json",
+        # Legacy phase naming (cleanup compatibility)
+        "phase_1a_visual.json", "phase_1a_audio.json",
+        "phase_1b_nodes.json", "phase_1c_narrative_edges.json",
+        "phase_2_embeddings.json",
+    ):
         p = OUTPUT_DIR / stale
         if p.exists():
             p.unlink()
@@ -238,7 +245,7 @@ async def call_modal_worker(
 async def main(youtube_url: str | None = None):
     url = youtube_url or "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     log.info("=" * 60)
-    log.info("PHASE 1A — Deterministic Extraction")
+    log.info("PHASE 1 — Modal Deterministic Extraction")
     log.info("=" * 60)
 
     # Step 1: Download locally
@@ -251,25 +258,30 @@ async def main(youtube_url: str | None = None):
 
     if result.get("status") != "success":
         log.error(f"Modal worker failed: {result.get('message', 'unknown error')}")
-        raise RuntimeError(f"Phase 1A extraction failed: {result.get('message')}")
+        raise RuntimeError(f"Phase 1 extraction failed: {result.get('message')}")
 
     # Step 3: Write output ledgers
-    visual_out = OUTPUT_DIR / "phase_1a_visual.json"
-    audio_out = OUTPUT_DIR / "phase_1a_audio.json"
+    visual_out = OUTPUT_DIR / "phase_1_visual.json"
+    audio_out = OUTPUT_DIR / "phase_1_audio.json"
+
+    phase_1_visual = result.get("phase_1_visual") or result.get("phase_1a_visual")
+    phase_1_audio = result.get("phase_1_audio") or result.get("phase_1a_audio")
+    if phase_1_visual is None or phase_1_audio is None:
+        raise RuntimeError("Modal worker response missing Phase 1 visual/audio payloads")
 
     with open(visual_out, "w") as f:
-        json.dump(result["phase_1a_visual"], f, indent=2)
+        json.dump(phase_1_visual, f, indent=2)
     log.info(f"Visual ledger saved → {visual_out}")
 
     with open(audio_out, "w") as f:
-        json.dump(result["phase_1a_audio"], f, indent=2)
+        json.dump(phase_1_audio, f, indent=2)
     log.info(f"Audio ledger saved → {audio_out}")
 
     # Summary
-    words = result["phase_1a_audio"].get("words", [])
-    tracks = result["phase_1a_visual"].get("tracks", [])
+    words = phase_1_audio.get("words", [])
+    tracks = phase_1_visual.get("tracks", [])
     log.info("=" * 60)
-    log.info("PHASE 1A COMPLETE")
+    log.info("PHASE 1 COMPLETE")
     log.info(f"  Words transcribed: {len(words)}")
     log.info(f"  Visual tracks:     {len(tracks)}")
     if words:

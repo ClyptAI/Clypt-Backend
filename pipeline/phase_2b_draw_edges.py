@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Phase 1C: Narrative Edge Mapping
+Phase 2B: Narrative Edge Mapping
 =================================
-Passes the Phase 1B Semantic Nodes into Gemini 3.1 Pro as a text-only
+Passes the Phase 2A Semantic Nodes into Gemini 3.1 Pro as a text-only
 reasoning pass. The model acts as a graph topology engine to draw
 directional narrative edges between nodes.
 
 Inputs:
-  - phase_1b_nodes.json  (local, array of Semantic Nodes)
+  - phase_2a_nodes.json  (local, array of Semantic Nodes)
 
 Output:
-  - phase_1c_narrative_edges.json  (array of directional edges)
+  - phase_2b_narrative_edges.json  (array of directional edges)
 """
 
 import json
@@ -26,13 +26,13 @@ from pydantic import BaseModel, Field
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-preyc"
+PROJECT_ID = "clypt-v2"
 LOCATION = "global"
 MODEL_ID = "gemini-3.1-pro-preview"
 
 ROOT = Path(__file__).resolve().parent.parent
-NODES_PATH = ROOT / "outputs" / "phase_1b_nodes.json"
-OUTPUT_PATH = ROOT / "outputs" / "phase_1c_narrative_edges.json"
+NODES_PATH = ROOT / "outputs" / "phase_2a_nodes.json"
+OUTPUT_PATH = ROOT / "outputs" / "phase_2b_narrative_edges.json"
 
 # ──────────────────────────────────────────────
 # Logging
@@ -42,7 +42,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("phase_1c")
+log = logging.getLogger("phase_2b")
 
 # ──────────────────────────────────────────────
 # System instruction (exact prompt from spec)
@@ -87,10 +87,10 @@ class NarrativeEdge(BaseModel):
 
 def main():
     log.info("=" * 60)
-    log.info("PHASE 1C — Narrative Edge Mapping")
+    log.info("PHASE 2B — Narrative Edge Mapping")
     log.info("=" * 60)
 
-    # ── Load Phase 1B nodes ──
+    # ── Load Phase 2A nodes ──
     log.info(f"Loading nodes: {NODES_PATH}")
     nodes_json = NODES_PATH.read_text()
     nodes_data = json.loads(nodes_json)
@@ -99,7 +99,7 @@ def main():
 
     # ── Build the prompt ──
     user_prompt = (
-        "=== SEMANTIC NODES (phase_1b_nodes.json) ===\n"
+        "=== SEMANTIC NODES (phase_2a_nodes.json) ===\n"
         f"{nodes_json}\n\n"
         "---\n\n"
         "Analyze the nodes above and map the structural narrative "
@@ -148,7 +148,7 @@ def main():
 
     # ── Summary ──
     log.info("=" * 60)
-    log.info("PHASE 1C COMPLETE")
+    log.info("PHASE 2B COMPLETE")
     log.info(f"  Edges: {len(edges)}")
 
     if edges:

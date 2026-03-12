@@ -4,13 +4,13 @@ Clypt Pipeline Orchestrator
 ============================
 Prompts for a YouTube URL, then runs the full pipeline sequentially:
 
-  Phase 1A  →  Deterministic Extraction
+  Phase 1   →  Modal deterministic extraction
   FFmpeg    →  Re-encode video for Remotion compatibility
-  Phase 1B  →  Content Mechanism Decomposition (Gemini chunked multimodal)
-  Phase 1C  →  Narrative Edge Mapping (Gemini text-only)
-  Phase 2   →  Multimodal Embedding (multimodalembedding@001)
-  Phase 3   →  Storage & Graph Binding (Spanner + GCS)
-  Phase 4   →  Auto-Curate (full-graph sweep + Gemini scoring)
+  Phase 2A  →  Content Mechanism Decomposition (Gemini chunked multimodal)
+  Phase 2B  →  Narrative Edge Mapping (Gemini text-only)
+  Phase 3   →  Multimodal Embedding (multimodalembedding@001)
+  Phase 4   →  Storage & Graph Binding (Spanner + GCS)
+  Phase 5   →  Auto-Curate (full-graph sweep + Gemini scoring)
   Render    →  Remotion render (fetch tracking + render all compositions)
 """
 
@@ -105,12 +105,12 @@ def setup_render_engine():
 
     if not video_src.exists():
         raise FileNotFoundError(
-            f"Missing source video: {video_src}. Run Phase 1A first."
+            f"Missing source video: {video_src}. Run Phase 1 first."
         )
     if not payload_src.exists():
         raise FileNotFoundError(
             f"Missing remotion payload: {payload_src}. "
-            "Run Phase 4 (auto-curate) before rendering."
+            "Run Phase 5 (auto-curate) before rendering."
         )
 
     # ── Video: hard link (instant, no extra disk) with copy fallback ──
@@ -202,33 +202,33 @@ def main():
 
     log.info(f"Target: {url}\n")
 
-    # ── Phase 1A: Deterministic Extraction ──
-    from pipeline.phase_1a_extract import main as phase_1a_main
-    asyncio.run(phase_1a_main(youtube_url=url))
+    # ── Phase 1: Modal deterministic extraction ──
+    from pipeline.phase_1_modal_pipeline import main as phase_1_main
+    asyncio.run(phase_1_main(youtube_url=url))
 
     # ── FFmpeg Re-encode ──
     banner("RE-ENCODING VIDEO (FFmpeg)")
     reencode_video()
 
-    # ── Phase 1B: Content Mechanism Decomposition ──
-    from pipeline.phase_1b_decompose import main as phase_1b_main
-    phase_1b_main()
+    # ── Phase 2A: Content Mechanism Decomposition ──
+    from pipeline.phase_2a_make_nodes import main as phase_2a_main
+    phase_2a_main()
 
-    # ── Phase 1C: Narrative Edge Mapping ──
-    from pipeline.phase_1c_edges import main as phase_1c_main
-    phase_1c_main()
+    # ── Phase 2B: Narrative Edge Mapping ──
+    from pipeline.phase_2b_draw_edges import main as phase_2b_main
+    phase_2b_main()
 
-    # ── Phase 2: Multimodal Embedding ──
-    from pipeline.phase_2_embed import main as phase_2_main
-    phase_2_main()
-
-    # ── Phase 3: Storage & Graph Binding ──
-    from pipeline.phase_3_store import main as phase_3_main
+    # ── Phase 3: Multimodal Embedding ──
+    from pipeline.phase_3_multimodal_embeddings import main as phase_3_main
     phase_3_main()
 
-    # ── Phase 4: Auto-Curate ──
-    from pipeline.phase_4_auto_curate import main as phase_4_main
+    # ── Phase 4: Storage & Graph Binding ──
+    from pipeline.phase_4_store_graph import main as phase_4_main
     phase_4_main()
+
+    # ── Phase 5: Auto-Curate ──
+    from pipeline.phase_5_auto_curate import main as phase_5_main
+    phase_5_main()
 
     # ── Remotion Render ──
     banner("REMOTION RENDER")

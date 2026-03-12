@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 2: Multimodal Embedding (Late Fusion)
+Phase 3: Multimodal Embedding (Late Fusion)
 ============================================
 Projects Semantic Nodes into a shared 1408-dimensional multimodal vector space
 using the multimodalembedding@001 model. For each node, requests BOTH a text
@@ -8,11 +8,11 @@ embedding (from transcript + vocal delivery + mechanism summary) and a video
 embedding (from the node's exact time segment), then fuses them via mean pooling.
 
 Inputs:
-  - phase_1b_nodes.json                         (local)
-  - gs://clypt-test-bucket/phase_1a/video.mp4   (GCS)
+  - phase_2a_nodes.json                         (local)
+  - gs://clypt-storage-v2/phase_1/video.mp4   (GCS)
 
 Output:
-  - phase_2_embeddings.json  (nodes + multimodal_embedding vectors)
+  - phase_3_embeddings.json  (nodes + multimodal_embedding vectors)
 """
 
 from __future__ import annotations
@@ -32,12 +32,12 @@ from vertexai.vision_models import (
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-preyc"
+PROJECT_ID = "clypt-v2"
 LOCATION = "us-central1"
 ROOT = Path(__file__).resolve().parent.parent
-VIDEO_GCS_URI = "gs://clypt-test-bucket/phase_1a/video.mp4"
-NODES_PATH = ROOT / "outputs" / "phase_1b_nodes.json"
-OUTPUT_PATH = ROOT / "outputs" / "phase_2_embeddings.json"
+VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
+NODES_PATH = ROOT / "outputs" / "phase_2a_nodes.json"
+OUTPUT_PATH = ROOT / "outputs" / "phase_3_embeddings.json"
 
 EMBEDDING_DIM = 1408
 MIN_SEGMENT_SEC = 4  # API minimum interval
@@ -50,7 +50,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("phase_2")
+log = logging.getLogger("phase_3")
 
 
 # ──────────────────────────────────────────────
@@ -104,7 +104,7 @@ def _average_vectors(vectors: list[list[float]]) -> list[float]:
 # ──────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info("PHASE 2 — Multimodal Embedding (Late Fusion)")
+    log.info("PHASE 3 — Multimodal Embedding (Late Fusion)")
     log.info("=" * 60)
 
     # ── Load nodes ──
@@ -190,7 +190,7 @@ def main():
 
     # ── Summary ──
     log.info("=" * 60)
-    log.info("PHASE 2 COMPLETE")
+    log.info("PHASE 3 COMPLETE")
     log.info(f"  Nodes processed: {len(results)}")
     log.info(f"  Successful: {len(results) - failed}")
     log.info(f"  Failed: {failed}")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 4 (Auto-Curator): Full-Graph Sweep & Viral Clip Detection
+Phase 5 (Auto-Curator): Full-Graph Sweep & Viral Clip Detection
 ================================================================
 Mimics OpusClip by sweeping the entire semantic graph instead of relying
 on vector search. Groups nodes into narrative chapters using edge topology,
@@ -30,9 +30,9 @@ from pydantic import BaseModel, Field
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-preyc"
-SPANNER_INSTANCE = "clypt-preyc-db"
-SPANNER_DATABASE = "clypt-db"
+PROJECT_ID = "clypt-v2"
+SPANNER_INSTANCE = "clypt-spanner-v2"
+SPANNER_DATABASE = "clypt-graph-db-v2"
 GEMINI_LOCATION = "global"
 GEMINI_MODEL = "gemini-3.1-pro-preview"
 
@@ -51,7 +51,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("phase_4_auto")
+log = logging.getLogger("phase_5_auto")
 # Suppress Spanner SDK internal metrics export errors (missing instance_id / rate limit)
 for _name in ("opentelemetry.sdk.metrics._internal.export", "opentelemetry.sdk.metrics"):
     logging.getLogger(_name).setLevel(logging.CRITICAL)

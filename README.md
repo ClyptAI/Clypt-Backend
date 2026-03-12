@@ -1,43 +1,106 @@
-# Clypt — AI-Powered Video Clipping Pipeline
+# Clypt: Creator Intelligence and Clipping
 
-Clypt takes a YouTube URL and produces rendered 9:16 short-form clips by building a semantic graph, storing it in Cloud Spanner, and using Gemini for mechanism decomposition, narrative edge mapping, and clip scoring.
+Clypt takes a YouTube URL and produces rendered 9:16 short-form clips. It combines a Modal GPU extraction stack (ASR + tracking + speaker binding) with Gemini-powered semantic graph reasoning and Remotion rendering.
 
-For planning docs, see:
-- `planning/01-product-and-demo.md`
-- `planning/02-system-architecture.md`
-- `planning/03-agents-and-clipping.md`
-- `planning/04-data-integrations-and-reference.md`
+## Architecture at a Glance
 
-## Current Migration State
+```text
+YouTube URL
+  -> Phase 1 (Modal GPU): ASR + tracking + speaker binding
+  -> Phase 2A: Gemini mechanism decomposition
+  -> Phase 2B: Gemini narrative edges
+  -> Phase 3: multimodal embeddings
+  -> Phase 4: Spanner + GCS storage
+  -> Phase 5: Gemini clip scoring/selection
+  -> Remotion render (9:16 clips)
+```
 
-Phase 1A is being migrated to a Modal-hosted GPU extraction service.
+### Phase 1 (Modal worker)
 
-This repo has already removed deprecated post-extraction stages:
-- `phase_1a_reconcile.py`
-- `phase_1a_asd_infer.py`
-- `phase_1a_asd.py`
-- `phase_1a_fuse.py`
+- ASR: NVIDIA Parakeet-TDT-1.1B
+- Visual tracking: YOLO11 + BoT-SORT
+- Face stack: InsightFace
+- Active speaker binding: TalkNet
+
+The local client is `pipeline/phase_1_modal_pipeline.py` and the GPU service is `modal_worker.py`.
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.11+
 - Node.js 18+ and npm
 - FFmpeg
-- Google Cloud SDK (for Spanner, GCS, Vertex)
+- Modal account/CLI auth
+- Google Cloud auth for downstream phases (Spanner, GCS, Vertex)
 
 ```bash
 gcloud auth login
 gcloud auth application-default login
 ```
 
-## GCP Setup
+## Install
 
-The defaults in pipeline scripts assume:
-- Project: `clypt-preyc`
-- Spanner instance/database: `clypt-preyc-db` / `clypt-db`
-- Bucket: `clypt-test-bucket`
+```bash
+pip install -r requirements.txt
+cd clypt-render-engine && npm install && cd ..
+```
 
-Enable required APIs for current non-extraction phases:
+Optional UI app:
+
+```bash
+cd cortex-ui && npm install && cd ..
+```
+
+## Deploy Modal Worker
+
+```bash
+modal deploy modal_worker.py
+```
+
+## Run
+
+### Run full pipeline
+
+```bash
+python3 pipeline/run_pipeline.py
+```
+
+### Run only Phase 1 extraction
+
+```bash
+python3 pipeline/phase_1_modal_pipeline.py
+```
+
+## Outputs
+
+- `downloads/video.mp4` and `downloads/audio_16k.wav`
+- `outputs/phase_1_visual.json`
+- `outputs/phase_1_audio.json`
+- `outputs/phase_2a_nodes.json`
+- `outputs/phase_2b_narrative_edges.json`
+- `outputs/phase_3_embeddings.json`
+- `outputs/remotion_payloads_array.json`
+- Rendered clips: `clypt-render-engine/out/`
+
+## Pipeline Scripts
+
+| Phase | Script |
+|---|---|
+| 1 | `pipeline/phase_1_modal_pipeline.py` |
+| 2A | `pipeline/phase_2a_make_nodes.py` |
+| 2B | `pipeline/phase_2b_draw_edges.py` |
+| 3 | `pipeline/phase_3_multimodal_embeddings.py` |
+| 4 | `pipeline/phase_4_store_graph.py` |
+| 5 (auto-curate) | `pipeline/phase_5_auto_curate.py` |
+| 5 (retrieve) | `pipeline/phase_5_retrieve.py` |
+| orchestrator | `pipeline/run_pipeline.py` |
+
+## GCP Defaults Used by Scripts
+
+- Project: `clypt-v2`
+- Spanner instance/database: `clypt-spanner-v2` / `clypt-graph-db-v2`
+- Bucket: `clypt-storage-v2`
+
+Enable APIs:
 
 ```bash
 gcloud services enable \
@@ -46,95 +109,24 @@ gcloud services enable \
   storage.googleapis.com
 ```
 
-Legacy extraction-only APIs (to be removed after Modal cutover):
-
-```bash
-gcloud services enable \
-  videointelligence.googleapis.com \
-  speech.googleapis.com
-```
-
 Create resources:
 
 ```bash
-gcloud storage buckets create gs://clypt-test-bucket --location=us-central1
+gcloud storage buckets create gs://clypt-storage-v2 --location=us-central1
 
-gcloud spanner instances create clypt-preyc-db \
+gcloud spanner instances create clypt-spanner-v2 \
   --config=regional-us-central1 \
   --description="Clypt dev instance" \
   --nodes=1
 
-gcloud spanner databases create clypt-db \
-  --instance=clypt-preyc-db \
+gcloud spanner databases create clypt-graph-db-v2 \
+  --instance=clypt-spanner-v2 \
   --ddl-file=spannerSchema.sql
 ```
 
-## Installation
+## Planning Docs
 
-```bash
-pip install -r requirements.txt
-cd clypt-render-engine && npm install && cd ..
-```
-
-## Running the Pipeline
-
-```bash
-python3 pipeline/run_pipeline.py
-```
-
-The orchestrator runs:
-1. Phase 1A extraction
-2. FFmpeg re-encode
-3. Phase 1B
-4. Phase 1C
-5. Phase 2
-6. Phase 3
-7. Phase 4
-8. Remotion render
-
-Output clips are written to `clypt-render-engine/out/`.
-
-## Pipeline Phases
-
-| Phase | Script | Description |
-|---|---|---|
-| 1A | `phase_1a_extract.py` | Deterministic extraction ledger generation |
-| FFmpeg | `run_pipeline.py` | Re-encode video for Remotion compatibility |
-| 1B | `phase_1b_decompose.py` | Content mechanism decomposition (Gemini multimodal) |
-| 1C | `phase_1c_edges.py` | Narrative edge mapping (Gemini text-only) |
-| 2 | `phase_2_embed.py` | Multimodal embedding (1408-d vectors) |
-| 3 | `phase_3_store.py` | Storage in Spanner + GCS tracking upload |
-| 4 | `phase_4_auto_curate.py` | Auto-curator (full-graph sweep + Gemini scoring) |
-| Retrieve | `phase_4_retrieve.py` | Query-based retrieval (standalone) |
-
-## Project Structure
-
-```text
-Clypt-V2/
-├── pipeline/
-│   ├── run_pipeline.py
-│   ├── phase_1a_extract.py
-│   ├── phase_1b_decompose.py
-│   ├── phase_1c_edges.py
-│   ├── phase_2_embed.py
-│   ├── phase_3_store.py
-│   ├── phase_4_auto_curate.py
-│   └── phase_4_retrieve.py
-├── clypt-render-engine/
-├── planning/
-├── spannerSchema.sql
-└── requirements.txt
-```
-
-## Cost Notes
-
-Main costs come from:
-- Vertex AI (Gemini + embeddings)
-- Cloud Spanner (continuous while instance is running)
-- Cloud Storage
-
-Delete Spanner instance when not in use:
-
-```bash
-gcloud spanner instances delete clypt-preyc-db
-```
+- `planning/01-product-and-demo.md`
+- `planning/02-system-architecture.md`
+- `planning/03-agents-and-clipping.md`
+- `planning/04-data-integrations-and-reference.md`

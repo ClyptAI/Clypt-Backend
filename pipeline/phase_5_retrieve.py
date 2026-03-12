@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 4: Retrieval & Production Serving
+Phase 5: Retrieval & Production Serving
 ========================================
 Takes a text query, embeds it via multimodalembedding@001, performs a hybrid
 Spanner query (vector KNN anchor + 1-hop graph traversal), sends the sub-graph
@@ -32,10 +32,10 @@ from pydantic import BaseModel, Field
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-preyc"
+PROJECT_ID = "clypt-v2"
 LOCATION = "us-central1"
-SPANNER_INSTANCE = "clypt-preyc-db"
-SPANNER_DATABASE = "clypt-db"
+SPANNER_INSTANCE = "clypt-spanner-v2"
+SPANNER_DATABASE = "clypt-graph-db-v2"
 GEMINI_LOCATION = "global"
 GEMINI_MODEL = "gemini-3.1-pro-preview"
 
@@ -55,7 +55,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("phase_4")
+log = logging.getLogger("phase_5")
 # Suppress Spanner SDK internal metrics export errors (missing instance_id in Cloud Monitoring)
 logging.getLogger("opentelemetry.sdk.metrics._internal.export").setLevel(logging.CRITICAL)
 

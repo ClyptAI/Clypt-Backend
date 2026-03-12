@@ -18,14 +18,14 @@ export async function GET() {
 
   try {
     nodes = JSON.parse(
-      readFileSync(join(outputsDir, "phase_1b_nodes.json"), "utf-8")
+      readFileSync(join(outputsDir, "phase_2a_nodes.json"), "utf-8")
     );
   } catch {
     // nodes file may not exist yet
   }
   try {
     edges = JSON.parse(
-      readFileSync(join(outputsDir, "phase_1c_narrative_edges.json"), "utf-8")
+      readFileSync(join(outputsDir, "phase_2b_narrative_edges.json"), "utf-8")
     );
   } catch {
     // edges file may not exist yet
@@ -50,11 +50,11 @@ export async function POST(req: Request) {
   mkdirSync(outputsDir, { recursive: true });
 
   writeFileSync(
-    join(outputsDir, "phase_1b_nodes.json"),
+    join(outputsDir, "phase_2a_nodes.json"),
     JSON.stringify(nodes, null, 2)
   );
   writeFileSync(
-    join(outputsDir, "phase_1c_narrative_edges.json"),
+    join(outputsDir, "phase_2b_narrative_edges.json"),
     JSON.stringify(edges, null, 2)
   );
 

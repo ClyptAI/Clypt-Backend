@@ -210,7 +210,7 @@ async function main() {
     console.log("Loaded single payload (legacy mode)");
   } else {
     throw new Error(
-      "No Remotion payload file found. Run phase_4_auto_curate.py first " +
+      "No Remotion payload file found. Run phase_5_auto_curate.py first " +
       "to generate outputs/remotion_payloads_array.json.",
     );
   }

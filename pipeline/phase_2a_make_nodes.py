@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Phase 1B: Content Mechanism Decomposition (Chunked Processing)
+Phase 2A: Content Mechanism Decomposition (Chunked Processing)
 ===============================================================
-Splits the Phase 1A ledgers into adaptive, token-budgeted chunks aligned
+Splits the Phase 1 ledgers into adaptive, token-budgeted chunks aligned
 on shot boundaries. Each chunk sends full uncompacted visual + audio data
 for its time range, plus the GCS video, to Gemini 3.1 Pro. A merge pass
 deduplicates boundary nodes into the final output.
 
 Inputs:
-  - gs://clypt-test-bucket/phase_1a/video.mp4  (muxed video+audio on GCS)
-  - phase_1a_visual.json   (local, sliced per chunk)
-  - phase_1a_audio.json    (local, sliced per chunk)
+  - gs://clypt-storage-v2/phase_1/video.mp4  (muxed video+audio on GCS)
+  - phase_1_visual.json   (local, sliced per chunk)
+  - phase_1_audio.json    (local, sliced per chunk)
 
 Output:
-  - phase_1b_nodes.json    (array of Semantic Nodes)
+  - phase_2a_nodes.json    (array of Semantic Nodes)
 """
 
 from __future__ import annotations
@@ -31,15 +31,15 @@ from pydantic import BaseModel, Field
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-preyc"
+PROJECT_ID = "clypt-v2"
 LOCATION = "global"
 MODEL_ID = "gemini-3.1-pro-preview"
 
 ROOT = Path(__file__).resolve().parent.parent
-VIDEO_GCS_URI = "gs://clypt-test-bucket/phase_1a/video.mp4"
-VISUAL_LEDGER_PATH = ROOT / "outputs" / "phase_1a_visual.json"
-AUDIO_LEDGER_PATH = ROOT / "outputs" / "phase_1a_audio.json"
-OUTPUT_PATH = ROOT / "outputs" / "phase_1b_nodes.json"
+VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
+VISUAL_LEDGER_PATH = ROOT / "outputs" / "phase_1_visual.json"
+AUDIO_LEDGER_PATH = ROOT / "outputs" / "phase_1_audio.json"
+OUTPUT_PATH = ROOT / "outputs" / "phase_2a_nodes.json"
 
 # Maximum text tokens to send per chunk. Kept deliberately low to avoid
 # exceeding Gemini's 1M-token context window once the video and prompt
@@ -54,7 +54,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("phase_1b")
+log = logging.getLogger("phase_2a")
 
 # ──────────────────────────────────────────────
 # System instruction (exact prompt from spec)
@@ -311,10 +311,10 @@ def _merge_nodes(all_chunk_nodes: list[list[SemanticNode]]) -> list[SemanticNode
 # ──────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info("PHASE 1B — Content Mechanism Decomposition (Chunked)")
+    log.info("PHASE 2A — Content Mechanism Decomposition (Chunked)")
     log.info("=" * 60)
 
-    # ── Load Phase 1A ledgers ──
+    # ── Load Phase 1 ledgers ──
     log.info(f"Loading visual ledger: {VISUAL_LEDGER_PATH}")
     with open(VISUAL_LEDGER_PATH) as f:
         visual_raw = json.load(f)
@@ -417,7 +417,7 @@ def main():
 
     # ── Summary ──
     log.info("=" * 60)
-    log.info("PHASE 1B COMPLETE")
+    log.info("PHASE 2A COMPLETE")
     log.info(f"  Chunks processed: {len(chunks)}")
     log.info(f"  Final nodes: {len(nodes)}")
     if nodes:
