@@ -9,7 +9,7 @@ Uses Spanner's native multi-model architecture: ScaNN vector search on
 the embedding column, Spanner Graph for edge traversal.
 
 Inputs:
-  - phase_3_embeddings.json          (nodes with 1408-d vectors)
+  - phase_3_embeddings.json          (nodes with 3072-d vectors)
   - phase_2b_narrative_edges.json    (directional edges)
   - phase_1_visual.json             (face/person/object/label data)
   - phase_1_audio.json              (word-level timestamps + speakers)

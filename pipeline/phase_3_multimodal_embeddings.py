@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Phase 3: Multimodal Embedding (Late Fusion)
-============================================
-Projects Semantic Nodes into a shared 1408-dimensional multimodal vector space
-using the multimodalembedding@001 model. For each node, requests BOTH a text
-embedding (from transcript + vocal delivery + mechanism summary) and a video
-embedding (from the node's exact time segment), then fuses them via mean pooling.
+Phase 3: Multimodal Embedding (Gemini Embedding 2)
+===================================================
+Projects semantic nodes into a shared 3072-dimensional space using Gemini
+Embedding 2. Each node is embedded as interleaved text + video with
+`task_type=RETRIEVAL_DOCUMENT` for catalog indexing.
 
 Inputs:
-  - phase_2a_nodes.json                         (local)
-  - gs://clypt-storage-v2/phase_1/video.mp4   (GCS)
+  - phase_2a_nodes.json                        (local)
+  - gs://clypt-storage-v2/phase_1/video.mp4    (GCS)
 
 Output:
   - phase_3_embeddings.json  (nodes + multimodal_embedding vectors)
@@ -19,15 +18,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
-import vertexai
-from vertexai.vision_models import (
-    MultiModalEmbeddingModel,
-    Video,
-    VideoSegmentConfig,
-)
+from google import genai
+from google.genai import types
+from google.genai.types import HttpOptions
 
 # ──────────────────────────────────────────────
 # Configuration
@@ -39,8 +36,12 @@ VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
 NODES_PATH = ROOT / "outputs" / "phase_2a_nodes.json"
 OUTPUT_PATH = ROOT / "outputs" / "phase_3_embeddings.json"
 
-EMBEDDING_DIM = 1408
-MIN_SEGMENT_SEC = 4  # API minimum interval
+MODEL_ID = "gemini-embedding-2-preview"
+EMBEDDING_DIM = 3072
+TASK_TYPE = "RETRIEVAL_DOCUMENT"
+EMBEDDING_API_VERSION = "v1beta"
+MAX_SEGMENT_SEC = 120.0
+MIN_SEGMENT_SEC = 0.2
 
 # ──────────────────────────────────────────────
 # Logging
@@ -54,17 +55,21 @@ log = logging.getLogger("phase_3")
 
 
 # ──────────────────────────────────────────────
-# Text payload construction
+# Payload helpers
 # ──────────────────────────────────────────────
 def _build_text_payload(node: dict) -> str:
-    """Concatenate transcript, vocal delivery, and mechanism summary into a rich text string."""
+    """Concatenate transcript, vocal delivery, and mechanism summary into one text payload."""
     parts: list[str] = []
 
-    transcript = node.get("transcript_segment", "").strip()
+    transcript = (
+        str(node.get("transcript_segment", "")).strip()
+        or str(node.get("transcript", "")).strip()
+        or str(node.get("transcript_text", "")).strip()
+    )
     if transcript:
         parts.append(transcript)
 
-    vocal = node.get("vocal_delivery", "").strip()
+    vocal = str(node.get("vocal_delivery", "")).strip()
     if vocal:
         parts.append(f"Vocal delivery: {vocal}")
 
@@ -79,24 +84,69 @@ def _build_text_payload(node: dict) -> str:
     if mech_parts:
         parts.append("Content mechanisms: " + ", ".join(mech_parts))
 
-    return " | ".join(parts)
+    return " | ".join(parts).strip()
 
 
-def _mean_pool(vec_a: list[float], vec_b: list[float]) -> list[float]:
-    """Element-wise mean of two equal-length vectors."""
-    return [(a + b) / 2.0 for a, b in zip(vec_a, vec_b)]
+def _format_offset(seconds: float) -> str:
+    value = max(0.0, float(seconds))
+    token = f"{value:.3f}".rstrip("0").rstrip(".")
+    if not token:
+        token = "0"
+    return f"{token}s"
 
 
-def _average_vectors(vectors: list[list[float]]) -> list[float]:
-    """Average multiple vectors into one."""
-    if len(vectors) == 1:
-        return vectors[0]
-    n = len(vectors)
-    result = [0.0] * len(vectors[0])
-    for vec in vectors:
-        for i, v in enumerate(vec):
-            result[i] += v
-    return [x / n for x in result]
+def _normalize_segment(start_s: float, end_s: float) -> tuple[float, float]:
+    start = max(0.0, float(start_s))
+    end = max(start, float(end_s))
+
+    if end - start < MIN_SEGMENT_SEC:
+        end = start + MIN_SEGMENT_SEC
+
+    if end - start > MAX_SEGMENT_SEC:
+        end = start + MAX_SEGMENT_SEC
+
+    return start, end
+
+
+def _make_client():
+    os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
+    os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+    return genai.Client(http_options=HttpOptions(api_version=EMBEDDING_API_VERSION))
+
+
+def _embed_node(
+    client,
+    text_payload: str,
+    video_uri: str,
+    start_s: float,
+    end_s: float,
+) -> list[float]:
+    video_part = types.Part(
+        file_data=types.FileData(file_uri=video_uri, mime_type="video/mp4"),
+        video_metadata=types.VideoMetadata(
+            start_offset=_format_offset(start_s),
+            end_offset=_format_offset(end_s),
+        ),
+    )
+
+    response = client.models.embed_content(
+        model=MODEL_ID,
+        contents=[text_payload, video_part],
+        config=types.EmbedContentConfig(
+            output_dimensionality=EMBEDDING_DIM,
+            task_type=TASK_TYPE,
+        ),
+    )
+
+    embeddings = getattr(response, "embeddings", None) or []
+    if not embeddings:
+        raise RuntimeError("No embeddings returned")
+
+    values = getattr(embeddings[0], "values", None)
+    if not values:
+        raise RuntimeError("Empty embedding vector returned")
+    return list(values)
 
 
 # ──────────────────────────────────────────────
@@ -104,8 +154,12 @@ def _average_vectors(vectors: list[list[float]]) -> list[float]:
 # ──────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info("PHASE 3 — Multimodal Embedding (Late Fusion)")
+    log.info("PHASE 3 — Multimodal Embedding (Gemini Embedding 2)")
     log.info("=" * 60)
+
+    if not NODES_PATH.exists():
+        log.error(f"Input file not found: {NODES_PATH}")
+        return
 
     # ── Load nodes ──
     log.info(f"Loading nodes: {NODES_PATH}")
@@ -113,27 +167,25 @@ def main():
         nodes = json.load(f)
     log.info(f"  Nodes loaded: {len(nodes)}")
 
-    # ── Initialize Vertex AI ──
-    vertexai.init(project=PROJECT_ID, location=LOCATION)
-    model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")
-    log.info(f"Model: multimodalembedding@001")
+    # ── Initialize Gemini Embedding 2 client ──
+    client = _make_client()
+    log.info(f"Model: {MODEL_ID}")
+    log.info(f"Task type: {TASK_TYPE}")
     log.info(f"Video: {VIDEO_GCS_URI}")
     log.info(f"Embedding dimension: {EMBEDDING_DIM}")
-
-    video = Video.load_from_file(VIDEO_GCS_URI)
 
     # ── Process each node ──
     results: list[dict] = []
     failed = 0
 
     for i, node in enumerate(nodes):
-        start_s = float(node["start_time"])
-        end_s = float(node["end_time"])
-
-        if end_s - start_s < MIN_SEGMENT_SEC:
-            end_s = start_s + MIN_SEGMENT_SEC
+        start_s = float(node.get("start_time", 0.0))
+        end_s = float(node.get("end_time", start_s))
+        start_s, end_s = _normalize_segment(start_s, end_s)
 
         text_payload = _build_text_payload(node)
+        if not text_payload:
+            text_payload = "No transcript available for this video segment."
 
         log.info(
             f"[{i + 1}/{len(nodes)}] Node {start_s:.1f}s–{end_s:.1f}s "
@@ -141,39 +193,16 @@ def main():
         )
 
         try:
-            embeddings = model.get_embeddings(
-                video=video,
-                video_segment_config=VideoSegmentConfig(
-                    start_offset_sec=int(start_s),
-                    end_offset_sec=int(end_s),
-                ),
-                contextual_text=text_payload,
-                dimension=EMBEDDING_DIM,
+            fused = _embed_node(
+                client=client,
+                text_payload=text_payload,
+                video_uri=VIDEO_GCS_URI,
+                start_s=start_s,
+                end_s=end_s,
             )
-
-            text_vec = embeddings.text_embedding
-            video_vecs = [ve.embedding for ve in embeddings.video_embeddings]
-
-            if not text_vec:
-                log.warning(f"  No text embedding returned for node {i + 1}")
-                results.append({**node, "multimodal_embedding": None})
-                failed += 1
-                continue
-
-            if not video_vecs:
-                log.warning(f"  No video embeddings returned for node {i + 1}, using text only")
-                fused = text_vec
-            else:
-                visual_vec = _average_vectors(video_vecs)
-                fused = _mean_pool(text_vec, visual_vec)
-
             fused_rounded = [round(x, 8) for x in fused]
-            results.append({**node, "multimodal_embedding": fused_rounded})
-            log.info(
-                f"  Text vec: {len(text_vec)}d | "
-                f"Video segments: {len(video_vecs)} | "
-                f"Fused: {len(fused_rounded)}d"
-            )
+            results.append({**node, "multimodal_embedding": fused_rounded, "embedding_dim": len(fused_rounded)})
+            log.info(f"  Embedding generated: {len(fused_rounded)}d")
 
         except Exception as e:
             log.error(f"  FAILED: {e}")
@@ -181,7 +210,7 @@ def main():
             failed += 1
 
         if i < len(nodes) - 1:
-            time.sleep(0.5)
+            time.sleep(0.2)
 
     # ── Save ──
     with open(OUTPUT_PATH, "w") as f:
