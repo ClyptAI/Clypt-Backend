@@ -24,18 +24,18 @@ This worker is designed to run either:
 - ASR: `nvidia/parakeet-tdt-1.1b`
 - Detector/tracker: `YOLO26s + BoT-SORT (ReID + GMC)`
 - Face ID for clustering: InsightFace (`buffalo_l`, ArcFace embeddings)
-- Active speaker detection: TalkNet
+- Active speaker detection: LR-ASD
 
 ### Runtime
 
 `@app.cls(...)` config:
 
 - `gpu="H100"`
-- `timeout=1800`
+- `timeout=3600`
 - `max_containers=8`
-- `min_containers=1`
+- `min_containers=0`
 - `scaledown_window=900`
-- `enable_memory_snapshot=True`
+- `enable_memory_snapshot=False`
 - shared volume mount: `/vol/clypt-chunks`
 
 ---
@@ -47,7 +47,7 @@ During image build, the worker caches:
 - Parakeet weights
 - YOLO26s weights
 - best-effort YOLO ONNX export and TensorRT/OpenVINO artifacts
-- TalkNet checkpoint + source files
+- LR-ASD checkpoint + source files
 - InsightFace model pack
 
 This reduces cold-start time and avoids runtime model downloads.
@@ -64,7 +64,7 @@ Runs full Phase 1:
 
 1. ASR + tracking concurrently
 2. global tracklet clustering
-3. speaker binding (TalkNet, heuristic fallback)
+3. speaker binding (LR-ASD, heuristic fallback)
 4. contract validation + rollout gates
 
 Response includes both modern and compatibility keys:
@@ -195,7 +195,7 @@ This stage is designed to reduce ID fragmentation without hardcoding a fixed spe
 
 ## Speaker Binding (Phase 1 Step 4)
 
-Primary path: `TalkNet` (`_run_talknet_binding`)
+Primary path: `LR-ASD` (`_run_lrasd_binding`)
 
 - builds contiguous frame subchunks
 - fault-tolerant face crop path with anchor projection fallback
@@ -210,7 +210,7 @@ Fallback path: `_run_speaker_binding_heuristic`
 - motion/confidence/area based scoring
 - optional lip-landmark tie-break when available
 
-If TalkNet confidence/coverage is too low, worker falls back automatically.
+If LR-ASD confidence/coverage is too low, worker falls back automatically.
 
 ---
 

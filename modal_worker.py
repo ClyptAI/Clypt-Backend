@@ -5,7 +5,7 @@ Serverless GPU microservice that performs deterministic multimodal extraction:
 
   1. NVIDIA Parakeet-TDT → word-level ASR with timestamps + punctuation
   2. YOLOv26 + BoT-SORT  → dense person tracking with persistent IDs
-  3. TalkNet ASD         → active speaker binding (audio-visual sync)
+  3. LR-ASD              → active speaker binding (audio-visual sync)
 
 Media is downloaded locally by the calling pipeline and sent to this worker
 as raw bytes. This avoids YouTube bot detection on datacenter IPs.
@@ -29,8 +29,8 @@ MODEL_DEBUG_SECRET = modal.Secret.from_dict(
 )
 
 ASR_MODEL_NAME = "nvidia/parakeet-tdt-1.1b"
-TALKNET_MODEL_PATH = "/root/.cache/clypt/pretrain_TalkSet.model"
-TALKNET_REPO_ROOT = "/root/talknet_asd"
+LRASD_MODEL_PATH = "/root/.cache/clypt/finetuning_TalkSet.model"
+LRASD_REPO_ROOT = "/root/lrasd"
 YOLO_WEIGHTS_PATH = "yolo26s.pt"
 YOLO_ONNX_PATH = "/root/.cache/clypt/yolo26s.onnx"
 YOLO_ENGINE_PATH = "/root/.cache/clypt/yolo26s.engine"
@@ -40,6 +40,235 @@ PHASE1_TASK_TYPE = "person_tracking"
 PHASE1_COORDINATE_SPACE = "absolute_original_frame_xyxy"
 PHASE1_GEOMETRY_TYPE = "aabb"
 PHASE1_CLASS_TAXONOMY = {"0": "person"}
+
+
+def _cluster_extraction_config() -> dict:
+    """Shared extraction knobs for tracklet face embedding sampling."""
+    return {
+        "max_frames_per_tracklet": 6,
+        "max_ranked_candidates": 18,
+        "target_face_encodings_per_tracklet": 2,
+        "cluster_face_min_det_score": 0.35,
+        "cluster_face_min_side_px": 36.0,
+        "cluster_face_min_rel_area": 0.035,
+    }
+
+
+def _build_cluster_sample_plan(tracklets: dict[str, list[dict]], config: dict) -> tuple[dict[str, list[dict]], set[int]]:
+    """Pick representative detections per tracklet for face embedding extraction."""
+    sampled_by_tid: dict[str, list[dict]] = {}
+    needed_frames: set[int] = set()
+    max_frames_per_tracklet = int(config["max_frames_per_tracklet"])
+    max_ranked_candidates = int(config["max_ranked_candidates"])
+
+    for tid in sorted(tracklets.keys()):
+        detections = tracklets.get(tid, [])
+        if not detections:
+            continue
+
+        ranked_dets = sorted(
+            detections,
+            key=lambda d: (
+                float(d.get("confidence", 0.0)),
+                float(d.get("width", 0.0)) * float(d.get("height", 0.0)),
+            ),
+            reverse=True,
+        )
+
+        sampled_dets = []
+        seen_frames = set()
+        for det in ranked_dets[:max_ranked_candidates]:
+            frame_idx = int(det.get("frame_idx", -1))
+            if frame_idx < 0 or frame_idx in seen_frames:
+                continue
+            seen_frames.add(frame_idx)
+            sampled_dets.append(det)
+            if len(sampled_dets) >= max_frames_per_tracklet:
+                break
+
+        if not sampled_dets:
+            ordered = sorted(detections, key=lambda d: int(d.get("frame_idx", -1)))
+            sampled_dets = [ordered[len(ordered) // 2]]
+
+        sampled_by_tid[tid] = sampled_dets
+        needed_frames.update(int(d.get("frame_idx", -1)) for d in sampled_dets if int(d.get("frame_idx", -1)) >= 0)
+
+    return sampled_by_tid, needed_frames
+
+
+def _extract_cluster_embeddings_subset(
+    face_analyzer,
+    read_path: str,
+    sampled_by_tid_subset: dict[str, list[dict]],
+    config: dict,
+    log_prefix: str = "",
+) -> dict:
+    """Extract one embedding per tracklet for a subset of track IDs."""
+    import cv2
+    import numpy as np
+    from decord import VideoReader, cpu
+
+    if not sampled_by_tid_subset:
+        return {
+            "embeddings": {},
+            "fallback_ids": [],
+            "face_accept_count": 0,
+            "face_reject_lowq_count": 0,
+            "sampled_frames": 0,
+            "tracklets_processed": 0,
+        }
+
+    target_face_encodings_per_tracklet = int(config["target_face_encodings_per_tracklet"])
+    cluster_face_min_det_score = float(config["cluster_face_min_det_score"])
+    cluster_face_min_side_px = float(config["cluster_face_min_side_px"])
+    cluster_face_min_rel_area = float(config["cluster_face_min_rel_area"])
+
+    needed_frames = sorted(
+        {
+            int(det.get("frame_idx", -1))
+            for sampled_dets in sampled_by_tid_subset.values()
+            for det in sampled_dets
+            if int(det.get("frame_idx", -1)) >= 0
+        }
+    )
+    if not needed_frames:
+        return {
+            "embeddings": {},
+            "fallback_ids": [],
+            "face_accept_count": 0,
+            "face_reject_lowq_count": 0,
+            "sampled_frames": 0,
+            "tracklets_processed": 0,
+        }
+
+    vr = VideoReader(read_path, ctx=cpu(0))
+    valid_needed = [fi for fi in needed_frames if 0 <= fi < len(vr)]
+    if not valid_needed:
+        return {
+            "embeddings": {},
+            "fallback_ids": [],
+            "face_accept_count": 0,
+            "face_reject_lowq_count": 0,
+            "sampled_frames": 0,
+            "tracklets_processed": 0,
+        }
+
+    batch = vr.get_batch(valid_needed).asnumpy()
+    frame_map: dict[int, np.ndarray] = {fi: batch[i] for i, fi in enumerate(valid_needed)}
+
+    embeddings: dict[str, np.ndarray] = {}
+    fallback_ids: list[str] = []
+    face_accept_count = 0
+    face_reject_lowq_count = 0
+    total_tids = len(sampled_by_tid_subset)
+
+    for tid_idx, tid in enumerate(sorted(sampled_by_tid_subset.keys()), start=1):
+        sampled_dets = sampled_by_tid_subset.get(tid, [])
+        if not sampled_dets:
+            continue
+
+        face_vectors = []
+        hist_vectors = []
+        for det in sampled_dets:
+            frame_idx = int(det.get("frame_idx", -1))
+            frame = frame_map.get(frame_idx)
+            if frame is None:
+                continue
+
+            cx = float(det.get("x_center", 0.0))
+            cy = float(det.get("y_center", 0.0))
+            w = float(det.get("width", 0.0))
+            h = float(det.get("height", 0.0))
+            fh, fw = frame.shape[:2]
+            x1 = max(0, int(cx - 0.55 * w))
+            y1 = max(0, int(cy - 0.78 * h))
+            x2 = min(fw, int(cx + 0.55 * w))
+            y2 = min(fh, int(cy + 0.18 * h))
+
+            crop = frame[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            ch, cw = crop.shape[:2]
+            if min(ch, cw) < 128:
+                scale = max(1.0, 128.0 / max(1.0, min(ch, cw)))
+                crop = cv2.resize(
+                    crop,
+                    (max(2, int(round(cw * scale))), max(2, int(round(ch * scale)))),
+                    interpolation=cv2.INTER_CUBIC,
+                )
+
+            used_face_encoding = False
+            if face_analyzer is not None:
+                try:
+                    faces = face_analyzer.get(cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+                    if faces:
+                        best_face = max(
+                            faces,
+                            key=lambda f: float(
+                                max(0.0, f.bbox[2] - f.bbox[0])
+                                * max(0.0, f.bbox[3] - f.bbox[1])
+                                * getattr(f, "det_score", 1.0)
+                            ),
+                        )
+                        fb = np.asarray(best_face.bbox, dtype=np.float32)
+                        face_w = float(max(0.0, fb[2] - fb[0]))
+                        face_h = float(max(0.0, fb[3] - fb[1]))
+                        det_score = float(getattr(best_face, "det_score", 0.0))
+                        rel_area = (face_w * face_h) / max(1.0, float(crop.shape[0] * crop.shape[1]))
+                        is_high_quality = (
+                            det_score >= cluster_face_min_det_score
+                            and face_w >= cluster_face_min_side_px
+                            and face_h >= cluster_face_min_side_px
+                            and rel_area >= cluster_face_min_rel_area
+                        )
+                        if is_high_quality:
+                            emb = np.asarray(best_face.normed_embedding, dtype=np.float32)
+                            face_vectors.append(emb)
+                            used_face_encoding = True
+                            face_accept_count += 1
+                        else:
+                            face_reject_lowq_count += 1
+                except Exception:
+                    used_face_encoding = False
+
+            if not used_face_encoding:
+                hist = cv2.calcHist(
+                    [crop], [0, 1, 2], None, [8, 8, 8],
+                    [0, 256, 0, 256, 0, 256],
+                )
+                hist = cv2.normalize(hist, hist).flatten()
+                if len(hist) < 512:
+                    hist = np.pad(hist, (0, 512 - len(hist)))
+                else:
+                    hist = hist[:512]
+                hist_vectors.append(hist.astype(np.float32))
+
+            if len(face_vectors) >= target_face_encodings_per_tracklet:
+                break
+
+        if face_vectors:
+            embeddings[tid] = np.mean(np.asarray(face_vectors, dtype=np.float32), axis=0).astype(np.float32)
+        elif hist_vectors:
+            embeddings[tid] = np.mean(np.asarray(hist_vectors, dtype=np.float32), axis=0).astype(np.float32)
+            fallback_ids.append(tid)
+        else:
+            embeddings[tid] = np.zeros(512, dtype=np.float32)
+            fallback_ids.append(tid)
+
+        if tid_idx % 10 == 0 or tid_idx == total_tids:
+            print(
+                f"{log_prefix}Embedding progress: {tid_idx}/{total_tids} tracklets "
+                f"(accepted={face_accept_count}, fallback={len(fallback_ids)})"
+            )
+
+    return {
+        "embeddings": embeddings,
+        "fallback_ids": fallback_ids,
+        "face_accept_count": face_accept_count,
+        "face_reject_lowq_count": face_reject_lowq_count,
+        "sampled_frames": len(valid_needed),
+        "tracklets_processed": total_tids,
+    }
 
 
 def download_asr_model():
@@ -109,43 +338,39 @@ def prepare_yolo_onnx_tensorrt():
             print(f"Warning: OpenVINO export failed ({type(e).__name__}: {e})")
 
 
-def download_talknet_model():
-    """Cache TalkNet checkpoint + architecture files at image build time."""
+def download_lrasd_model():
+    """Cache LR-ASD checkpoint + architecture files at image build time."""
     import os
-    import subprocess
     import urllib.request
 
-    os.makedirs(os.path.dirname(TALKNET_MODEL_PATH), exist_ok=True)
-    os.makedirs(os.path.join(TALKNET_REPO_ROOT, "model"), exist_ok=True)
+    os.makedirs(os.path.dirname(LRASD_MODEL_PATH), exist_ok=True)
+    os.makedirs(os.path.join(LRASD_REPO_ROOT, "model"), exist_ok=True)
 
-    if not os.path.exists(TALKNET_MODEL_PATH):
-        print("Downloading TalkNet weights...")
-        file_id = "1AbN9fCf9IexMxEKXLQY2KYBlb-IhSEea"
-        subprocess.run(
-            ["gdown", "--id", file_id, "-O", TALKNET_MODEL_PATH],
-            check=True,
+    if not os.path.exists(LRASD_MODEL_PATH):
+        print("Downloading LR-ASD TalkSet fine-tuned weights...")
+        urllib.request.urlretrieve(
+            "https://raw.githubusercontent.com/Junhua-Liao/LR-ASD/main/weight/finetuning_TalkSet.model",
+            LRASD_MODEL_PATH,
         )
     else:
-        print("TalkNet checkpoint already cached.")
+        print("LR-ASD checkpoint already cached.")
 
     files = {
-        os.path.join(TALKNET_REPO_ROOT, "model", "talkNetModel.py"):
-        "https://raw.githubusercontent.com/TaoRuijie/TalkNet-ASD/main/model/talkNetModel.py",
-        os.path.join(TALKNET_REPO_ROOT, "model", "audioEncoder.py"):
-        "https://raw.githubusercontent.com/TaoRuijie/TalkNet-ASD/main/model/audioEncoder.py",
-        os.path.join(TALKNET_REPO_ROOT, "model", "visualEncoder.py"):
-        "https://raw.githubusercontent.com/TaoRuijie/TalkNet-ASD/main/model/visualEncoder.py",
-        os.path.join(TALKNET_REPO_ROOT, "model", "attentionLayer.py"):
-        "https://raw.githubusercontent.com/TaoRuijie/TalkNet-ASD/main/model/attentionLayer.py",
-        os.path.join(TALKNET_REPO_ROOT, "loss.py"):
-        "https://raw.githubusercontent.com/TaoRuijie/TalkNet-ASD/main/loss.py",
+        os.path.join(LRASD_REPO_ROOT, "model", "Model.py"):
+        "https://raw.githubusercontent.com/Junhua-Liao/LR-ASD/main/model/Model.py",
+        os.path.join(LRASD_REPO_ROOT, "model", "Classifier.py"):
+        "https://raw.githubusercontent.com/Junhua-Liao/LR-ASD/main/model/Classifier.py",
+        os.path.join(LRASD_REPO_ROOT, "model", "Encoder.py"):
+        "https://raw.githubusercontent.com/Junhua-Liao/LR-ASD/main/model/Encoder.py",
+        os.path.join(LRASD_REPO_ROOT, "loss.py"):
+        "https://raw.githubusercontent.com/Junhua-Liao/LR-ASD/main/loss.py",
     }
     for out_path, url in files.items():
         if not os.path.exists(out_path):
-            print(f"Downloading TalkNet source file: {os.path.basename(out_path)}")
+            print(f"Downloading LR-ASD source file: {os.path.basename(out_path)}")
             urllib.request.urlretrieve(url, out_path)
 
-    init_file = os.path.join(TALKNET_REPO_ROOT, "model", "__init__.py")
+    init_file = os.path.join(LRASD_REPO_ROOT, "model", "__init__.py")
     if not os.path.exists(init_file):
         open(init_file, "w", encoding="utf-8").close()
 
@@ -199,7 +424,6 @@ clypt_image = (
         "Pillow",
         "resampy",
         "soundfile",
-        "gdown",
     )
     # Step 2: NeMo ASR
     .pip_install("nemo_toolkit[asr]")
@@ -207,7 +431,7 @@ clypt_image = (
     .run_function(download_asr_model)
     .run_function(download_yolo_model)
     .run_function(prepare_yolo_onnx_tensorrt)
-    .run_function(download_talknet_model)
+    .run_function(download_lrasd_model)
     .run_function(download_insightface_model)
 )
 
@@ -219,9 +443,93 @@ clypt_image = (
     image=clypt_image,
     gpu="H100",
     timeout=3600,
-    max_containers=8,
+    max_containers=4,
     min_containers=0,
-    scaledown_window=900,
+    scaledown_window=120,
+    enable_memory_snapshot=False,
+    secrets=[MODEL_DEBUG_SECRET],
+    volumes={"/vol/clypt-chunks": TRACKING_VOLUME},
+)
+class ClusterEmbeddingWorker:
+
+    @modal.enter()
+    def load_face_model(self):
+        from insightface.app import FaceAnalysis
+
+        self.face_analyzer = None
+        try:
+            print("Loading InsightFace for cluster embedding shard worker...")
+            self.face_analyzer = FaceAnalysis(
+                name="buffalo_l",
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+            self.face_analyzer.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.15)
+            print("Cluster shard InsightFace ready.")
+        except Exception as e:
+            print(
+                "Warning: cluster shard InsightFace initialization failed "
+                f"({type(e).__name__}: {e})"
+            )
+
+    @modal.method()
+    def extract_cluster_embeddings_shard(
+        self,
+        video_path: str,
+        sampled_by_tid_subset: dict[str, list[dict]],
+        shard_idx: int,
+        total_shards: int,
+    ) -> dict:
+        import time
+
+        if video_path.startswith("/vol/"):
+            try:
+                TRACKING_VOLUME.reload()
+            except Exception:
+                pass
+
+        config = _cluster_extraction_config()
+        print(
+            f"[cluster-shard {shard_idx}/{total_shards}] Starting "
+            f"{len(sampled_by_tid_subset)} tracklets"
+        )
+        started = time.time()
+        result = _extract_cluster_embeddings_subset(
+            face_analyzer=self.face_analyzer,
+            read_path=video_path,
+            sampled_by_tid_subset=sampled_by_tid_subset,
+            config=config,
+            log_prefix=f"  [cluster-shard {shard_idx}/{total_shards}] ",
+        )
+        embeddings = {
+            tid: vec.tolist()
+            for tid, vec in result.get("embeddings", {}).items()
+        }
+        elapsed_s = float(time.time() - started)
+        print(
+            f"[cluster-shard {shard_idx}/{total_shards}] Complete "
+            f"tracklets={result.get('tracklets_processed', 0)} "
+            f"accepted={result.get('face_accept_count', 0)} "
+            f"fallback={len(result.get('fallback_ids', []))} "
+            f"elapsed={elapsed_s:.1f}s"
+        )
+        return {
+            "embeddings": embeddings,
+            "fallback_ids": list(result.get("fallback_ids", [])),
+            "face_accept_count": int(result.get("face_accept_count", 0)),
+            "face_reject_lowq_count": int(result.get("face_reject_lowq_count", 0)),
+            "sampled_frames": int(result.get("sampled_frames", 0)),
+            "tracklets_processed": int(result.get("tracklets_processed", 0)),
+            "elapsed_s": elapsed_s,
+        }
+
+
+@app.cls(
+    image=clypt_image,
+    gpu="H100",
+    timeout=3600,
+    max_containers=4,
+    min_containers=0,
+    scaledown_window=120,
     enable_memory_snapshot=False,
     secrets=[MODEL_DEBUG_SECRET],
     volumes={"/vol/clypt-chunks": TRACKING_VOLUME},
@@ -229,8 +537,8 @@ clypt_image = (
 class ClyptWorker:
 
     @staticmethod
-    def _load_talknet_checkpoint(model, loss_av, ckpt_path: str):
-        """Load TalkNet checkpoint into model + AV classifier head."""
+    def _load_lrasd_checkpoint(model, loss_av, ckpt_path: str):
+        """Load LR-ASD checkpoint into model + AV classifier head."""
         import torch
 
         state = torch.load(ckpt_path, map_location="cpu")
@@ -267,7 +575,7 @@ class ClyptWorker:
         missing, unexpected = model.load_state_dict(model_state, strict=False)
         if missing or unexpected:
             raise RuntimeError(
-                "TalkNet checkpoint mismatch: "
+                "LR-ASD checkpoint mismatch: "
                 f"missing={len(missing)} unexpected={len(unexpected)}"
             )
         if loss_state:
@@ -469,6 +777,175 @@ class ClyptWorker:
                 }
         return out
 
+    def _build_sparse_face_box_map(
+        self,
+        video_path: str,
+        frame_to_dets: dict[int, list[dict]],
+        track_to_dets: dict[str, list[dict]],
+        fps: float,
+        target_fps: float,
+        relevant_frames: set[int] | None = None,
+    ) -> dict[tuple[str, int], tuple[int, int, int, int, float, float]]:
+        """Precompute per-track face boxes at sparse FPS and interpolate short gaps.
+
+        Returns:
+            {(track_id, frame_idx): (x1, y1, x2, y2, det_conf, quality)}
+            quality=1.0 direct detector hit, <1.0 interpolated/propagated.
+        """
+        import os
+        import cv2
+        import numpy as np
+        from bisect import bisect_left
+        from collections import defaultdict
+        from decord import VideoReader, cpu
+
+        h264_path = video_path.replace(".mp4", "_h264.mp4")
+        read_path = h264_path if os.path.exists(h264_path) else video_path
+
+        try:
+            vr = VideoReader(read_path, ctx=cpu(0))
+        except Exception as e:
+            print(
+                "  Warning: sparse face precompute could not open video "
+                f"({type(e).__name__}: {e})"
+            )
+            return {}
+
+        total_frames = len(vr)
+        if total_frames <= 0:
+            return {}
+
+        # Sparse sampling controls.
+        sample_stride = max(1, int(round(max(1e-6, fps) / max(0.1, target_fps))))
+        min_det_conf = float(os.getenv("CLYPT_ASD_FACE_MIN_DET_CONF", "0.25"))
+        min_area_ratio = float(os.getenv("CLYPT_ASD_FACE_MIN_AREA_RATIO", "0.0004"))
+        max_interp_gap = int(
+            os.getenv(
+                "CLYPT_ASD_FACE_MAX_INTERP_GAP",
+                str(max(4, int(round(max(1.0, fps) * 1.0)))),
+            )
+        )
+
+        sample_frames = set(range(0, total_frames, sample_stride))
+        # Anchor endpoints for each track to improve interpolation continuity.
+        for dets in track_to_dets.values():
+            if not dets:
+                continue
+            sample_frames.add(int(dets[0]["frame_idx"]))
+            sample_frames.add(int(dets[-1]["frame_idx"]))
+        sample_frames = sorted(fi for fi in sample_frames if 0 <= fi < total_frames)
+        # When caller provides relevant_frames (e.g. frames overlapping word
+        # timestamps), skip sampling frames that can't contribute to binding.
+        if relevant_frames is not None:
+            sample_frames = [fi for fi in sample_frames if fi in relevant_frames]
+            print(f"  Sparse precompute restricted to {len(sample_frames)} word-relevant frames")
+
+        sampled: dict[str, dict[int, tuple[int, int, int, int, float, float]]] = defaultdict(dict)
+        for fi in sample_frames:
+            dets = frame_to_dets.get(fi, [])
+            if not dets:
+                continue
+            try:
+                frame = vr[fi].asnumpy()  # RGB
+            except Exception:
+                continue
+            if frame is None or frame.size == 0:
+                continue
+
+            fh, fw = frame.shape[:2]
+            frame_area = float(max(1, fh * fw))
+            # Keep strongest detection per track at frame fi.
+            best_by_track: dict[str, dict] = {}
+            for d in dets:
+                tid = str(d.get("track_id", ""))
+                if not tid:
+                    continue
+                cur = best_by_track.get(tid)
+                if cur is None or float(d.get("confidence", 0.0)) > float(cur.get("confidence", 0.0)):
+                    best_by_track[tid] = d
+
+            for tid, d in best_by_track.items():
+                conf = float(d.get("confidence", 0.0))
+                if conf < min_det_conf:
+                    continue
+                area = float(d.get("width", 0.0)) * float(d.get("height", 0.0))
+                if area < (min_area_ratio * frame_area):
+                    continue
+                crop, anchor = self._detect_face_in_person_det(frame, d)
+                if crop is None or anchor is None:
+                    continue
+                cx = float(d.get("x_center", 0.0))
+                cy = float(d.get("y_center", 0.0))
+                bw = float(d.get("width", 0.0))
+                bh = float(d.get("height", 0.0))
+                if bw <= 1e-6 or bh <= 1e-6:
+                    continue
+                x1 = int(round(cx + float(anchor["x_offset"]) * bw))
+                y1 = int(round(cy + float(anchor["y_offset"]) * bh))
+                ww = int(round(max(2.0, float(anchor["w_ratio"]) * bw)))
+                hh = int(round(max(2.0, float(anchor["h_ratio"]) * bh)))
+                x1 = max(0, min(fw - 1, x1))
+                y1 = max(0, min(fh - 1, y1))
+                x2 = max(x1 + 1, min(fw, x1 + ww))
+                y2 = max(y1 + 1, min(fh, y1 + hh))
+                sampled[tid][fi] = (x1, y1, x2, y2, conf, 1.0)
+
+        # Interpolate sparse boxes onto dense track frames.
+        out: dict[tuple[str, int], tuple[int, int, int, int, float, float]] = {}
+        for tid, dets in track_to_dets.items():
+            frames = sorted({int(d.get("frame_idx", -1)) for d in dets if int(d.get("frame_idx", -1)) >= 0})
+            if not frames:
+                continue
+            s = sampled.get(tid, {})
+            if not s:
+                continue
+            s_keys = sorted(s.keys())
+            for fi in frames:
+                key = (tid, fi)
+                if fi in s:
+                    out[key] = s[fi]
+                    continue
+                pos = bisect_left(s_keys, fi)
+                left = s_keys[pos - 1] if pos > 0 else None
+                right = s_keys[pos] if pos < len(s_keys) else None
+                chosen = None
+                if left is not None and right is not None:
+                    gap = right - left
+                    if gap > 0 and gap <= max_interp_gap:
+                        a = (fi - left) / float(gap)
+                        l = np.array(s[left][:4], dtype=np.float32)
+                        r = np.array(s[right][:4], dtype=np.float32)
+                        b = (1.0 - a) * l + a * r
+                        x1, y1, x2, y2 = [int(round(v)) for v in b.tolist()]
+                        # Clamp and sanitize via known frame dimensions from track box.
+                        dref = next((d for d in dets if int(d.get("frame_idx", -1)) == fi), None)
+                        if dref is not None:
+                            cx = float(dref.get("x_center", 0.0))
+                            cy = float(dref.get("y_center", 0.0))
+                            bw = float(dref.get("width", 1.0))
+                            bh = float(dref.get("height", 1.0))
+                            x1 = int(round(max(0.0, min(x1, cx + 1.2 * bw))))
+                            y1 = int(round(max(0.0, min(y1, cy + 1.2 * bh))))
+                            x2 = int(round(max(x1 + 1.0, x2)))
+                            y2 = int(round(max(y1 + 1.0, y2)))
+                        conf = float((s[left][4] + s[right][4]) * 0.5)
+                        chosen = (x1, y1, x2, y2, conf, 0.7)
+                if chosen is None:
+                    nearest = None
+                    if left is not None:
+                        nearest = left
+                    if right is not None and (
+                        nearest is None or abs(right - fi) < abs(nearest - fi)
+                    ):
+                        nearest = right
+                    if nearest is not None and abs(nearest - fi) <= max(1, max_interp_gap // 2):
+                        x1, y1, x2, y2, conf, _ = s[nearest]
+                        chosen = (x1, y1, x2, y2, conf, 0.5)
+                if chosen is not None:
+                    out[key] = chosen
+
+        return out
+
     @staticmethod
     def _tensor_debug_stats(name, tensor):
         """Compact tensor diagnostics for model-debug logging."""
@@ -490,64 +967,56 @@ class ClyptWorker:
             f"mean={float(tf.mean()):.5f} std={float(tf.std(unbiased=False)):.5f}"
         )
 
-    def _talknet_forward_scores(
+    def _lrasd_forward_scores(
         self,
         audio_t,
         visual_t,
     ):
-        """Batched TalkNet forward.
+        """Batched LR-ASD forward.
 
         Returns per-frame speaking probabilities in [0, 1].
         """
         import torch
 
         b, t = visual_t.shape[:2]
-        self._talknet_debug_calls = getattr(self, "_talknet_debug_calls", 0) + 1
+        self._lrasd_debug_calls = getattr(self, "_lrasd_debug_calls", 0) + 1
         debug_now = (
             getattr(self, "model_debug", False)
             and (
-                self._talknet_debug_calls
+                self._lrasd_debug_calls
                 % max(1, getattr(self, "model_debug_every", 20))
                 == 1
             )
         )
         if debug_now:
-            print("  [TALKNET DEBUG] Input tensors:")
+            print("  [LR-ASD DEBUG] Input tensors:")
             print("   " + self._tensor_debug_stats("audio_t", audio_t))
             print("   " + self._tensor_debug_stats("visual_t", visual_t))
 
-        audio_embed = self.talknet_model.forward_audio_frontend(audio_t)
-        visual_embed = self.talknet_model.forward_visual_frontend(visual_t)
+        audio_embed = self.lrasd_model.forward_audio_frontend(audio_t)
+        visual_embed = self.lrasd_model.forward_visual_frontend(visual_t)
         if debug_now:
-            print("   " + self._tensor_debug_stats("audio_embed_pre_xattn", audio_embed))
-            print("   " + self._tensor_debug_stats("visual_embed_pre_xattn", visual_embed))
+            print("   " + self._tensor_debug_stats("audio_embed", audio_embed))
+            print("   " + self._tensor_debug_stats("visual_embed", visual_embed))
 
-        audio_embed, visual_embed = self.talknet_model.forward_cross_attention(
-            audio_embed, visual_embed
-        )
-        if debug_now:
-            print("   " + self._tensor_debug_stats("audio_embed_post_xattn", audio_embed))
-            print("   " + self._tensor_debug_stats("visual_embed_post_xattn", visual_embed))
-
-        outs_av = self.talknet_model.forward_audio_visual_backend(audio_embed, visual_embed)
-        if outs_av.shape[0] != b * t:
-            raise RuntimeError(
-                f"TalkNet output shape mismatch: outs_av={tuple(outs_av.shape)}, expected first dim {b*t}"
-            )
+        outs_av = self.lrasd_model.forward_audio_visual_backend(audio_embed, visual_embed)
         if debug_now:
             print("   " + self._tensor_debug_stats("outs_av", outs_av))
-
-        av_logits = self.talknet_loss_av.FC(outs_av)
+        if outs_av.shape[0] != b * t:
+            raise RuntimeError(
+                f"LR-ASD output shape mismatch: outs_av={tuple(outs_av.shape)}, expected first dim {b*t}"
+            )
+        av_logits = self.lrasd_loss_av.FC(outs_av)
         av_prob = torch.softmax(av_logits, dim=-1)[:, 1].reshape(b, t)
         if debug_now:
             print("   " + self._tensor_debug_stats("av_logits", av_logits))
             print("   " + self._tensor_debug_stats("av_prob", av_prob))
-            print(f"  [TALKNET DEBUG] forward_call={self._talknet_debug_calls} b={b} t={t}")
+            print(f"  [LR-ASD DEBUG] forward_call={self._lrasd_debug_calls} b={b} t={t}")
         return av_prob
 
     @modal.enter()
     def load_model(self):
-        """Load Parakeet, YOLO, and TalkNet into GPU VRAM."""
+        """Load Parakeet, YOLO, and LR-ASD into GPU VRAM."""
         import os
         import sys
         import nemo.collections.asr as nemo_asr
@@ -558,11 +1027,11 @@ class ClyptWorker:
 
         self.model_debug = os.getenv("CLYPT_MODEL_DEBUG", "0") == "1"
         self.model_debug_every = int(os.getenv("CLYPT_MODEL_DEBUG_EVERY", "20"))
-        self._talknet_debug_calls = 0
+        self._lrasd_debug_calls = 0
         if self.model_debug:
             print(
                 "Model debug logging enabled: "
-                f"CLYPT_MODEL_DEBUG=1, every={self.model_debug_every} TalkNet forwards"
+                f"CLYPT_MODEL_DEBUG=1, every={self.model_debug_every} LR-ASD forwards"
             )
 
         # --- Load Parakeet ---
@@ -615,34 +1084,34 @@ class ClyptWorker:
                 f"({type(e).__name__}: {e})"
             )
 
-        # --- Load TalkNet ---
-        self.talknet_model = None
-        self.talknet_loss_av = None
+        # --- Load LR-ASD ---
+        self.lrasd_model = None
+        self.lrasd_loss_av = None
         try:
-            print("Loading TalkNet model into GPU VRAM...")
-            if TALKNET_REPO_ROOT not in sys.path:
-                sys.path.append(TALKNET_REPO_ROOT)
-            from model.talkNetModel import talkNetModel
+            print("Loading LR-ASD model into GPU VRAM...")
+            if LRASD_REPO_ROOT not in sys.path:
+                sys.path.insert(0, LRASD_REPO_ROOT)
+            from model.Model import ASD_Model
             from loss import lossAV
 
-            self.talknet_model = talkNetModel()
-            self.talknet_loss_av = lossAV()
-            self._load_talknet_checkpoint(
-                self.talknet_model,
-                self.talknet_loss_av,
-                TALKNET_MODEL_PATH,
+            self.lrasd_model = ASD_Model()
+            self.lrasd_loss_av = lossAV()
+            self._load_lrasd_checkpoint(
+                self.lrasd_model,
+                self.lrasd_loss_av,
+                LRASD_MODEL_PATH,
             )
-            self.talknet_model = self.talknet_model.to(self.gpu_device)
-            self.talknet_model.eval()
-            self.talknet_loss_av = self.talknet_loss_av.to(self.gpu_device)
-            self.talknet_loss_av.eval()
-            print("TalkNet ready.")
+            self.lrasd_model = self.lrasd_model.to(self.gpu_device)
+            self.lrasd_model.eval()
+            self.lrasd_loss_av = self.lrasd_loss_av.to(self.gpu_device)
+            self.lrasd_loss_av.eval()
+            print("LR-ASD ready.")
         except Exception as e:
             # Keep worker alive; binding step falls back if this fails at runtime.
-            self.talknet_model = None
-            self.talknet_loss_av = None
+            self.lrasd_model = None
+            self.lrasd_loss_av = None
             print(
-                "Warning: failed to load TalkNet checkpoint "
+                "Warning: failed to load LR-ASD checkpoint "
                 f"({type(e).__name__}: {e})"
             )
 
@@ -683,7 +1152,7 @@ class ClyptWorker:
                     "word": word,
                     "start_time_ms": int(start_s * 1000),
                     "end_time_ms": int(end_s * 1000),
-                    "speaker_track_id": None,  # populated by TalkNet later
+                    "speaker_track_id": None,  # populated by speaker binding later
                 })
         else:
             print("Warning: no timestamp dict with 'word' key found")
@@ -692,7 +1161,7 @@ class ClyptWorker:
         return words
 
     # ──────────────────────────────────────────
-    # Visual tracking (YOLOv11 + BoT-SORT)
+    # Visual tracking (YOLOv26 + BoT-SORT)
     # ──────────────────────────────────────────
     def _ensure_h264(self, video_path: str) -> str:
         """Re-encode to H.264 if the video uses AV1 or another codec OpenCV can't decode."""
@@ -1234,7 +1703,9 @@ class ClyptWorker:
 
         model_path = YOLO_ENGINE_PATH if os.path.exists(YOLO_ENGINE_PATH) else YOLO_WEIGHTS_PATH
         model = YOLO(model_path)
-        stride = 2 if dur_s >= 50.0 else 1
+        # QA fidelity mode: keep chunk tracking dense so downstream camera-follow
+        # uses detector-driven boxes instead of propagated/ROI-refined boxes.
+        stride = 1
         started = time.time()
         processed_frames = 0
         lb_meta = self._compute_letterbox_meta(width, height, infer_imgsz, infer_imgsz)
@@ -1253,7 +1724,7 @@ class ClyptWorker:
         tracks = []
         for local_fi, r in enumerate(results):
             processed_frames += 1
-            global_fi = start_f + local_fi * stride
+            global_fi = start_f + local_fi
             if r.boxes is None or r.boxes.id is None:
                 continue
             boxes_xyxy = r.boxes.xyxy.cpu().numpy()
@@ -1312,85 +1783,6 @@ class ClyptWorker:
                     out["geometry_type"] = "obb"
                     out["polygon"] = [[float(px), float(py)] for px, py in pts]
                 tracks.append(out)
-
-        if stride > 1:
-            # Confidence-guided fallback: if sparse pass has many weak detections,
-            # rerun dense tracking to re-anchor.
-            weak_ratio = 0.0
-            if tracks:
-                weak_ratio = sum(1 for d in tracks if float(d.get("confidence", 0.0)) < 0.3) / len(tracks)
-            if weak_ratio > 0.25:
-                dense_results = model.track(
-                    source=chunk_video_path,
-                    tracker=tracker_cfg,
-                    persist=True,
-                    classes=[0],
-                    stream=True,
-                    verbose=False,
-                    vid_stride=1,
-                    imgsz=infer_imgsz,
-                )
-                tracks = []
-                for local_fi, r in enumerate(dense_results):
-                    processed_frames += 1
-                    global_fi = start_f + local_fi
-                    if r.boxes is None or r.boxes.id is None:
-                        continue
-                    boxes_xyxy = r.boxes.xyxy.cpu().numpy()
-                    ids = r.boxes.id.cpu().numpy().astype(int)
-                    confs = r.boxes.conf.cpu().numpy()
-                    for xyxy, tid_raw, conf in zip(boxes_xyxy, ids, confs):
-                        x1, y1, x2, y2 = [float(v) for v in xyxy]
-                        xcn, ycn, wn, hn = self._xyxy_abs_to_xywhn(x1, y1, x2, y2, width, height)
-                        x1, y1, x2, y2 = self._xywhn_to_xyxy_abs(xcn, ycn, wn, hn, width, height)
-                        lx1, ly1, lx2, ly2 = self._forward_letterbox_xyxy(x1, y1, x2, y2, lb_meta)
-                        x1, y1, x2, y2 = self._inverse_letterbox_xyxy(lx1, ly1, lx2, ly2, lb_meta)
-                        x1 = min(max(0.0, x1), float(max(0, width - 1)))
-                        y1 = min(max(0.0, y1), float(max(0, height - 1)))
-                        x2 = min(max(x1 + 1.0, x2), float(max(1, width)))
-                        y2 = min(max(y1 + 1.0, y2), float(max(1, height)))
-                        cx, cy, bw, bh = self._xyxy_to_xywh(x1, y1, x2, y2)
-                        tracks.append(
-                            {
-                                "frame_idx": int(global_fi),
-                                "local_frame_idx": int(local_fi),
-                                "chunk_idx": int(chunk_idx),
-                                "track_id": f"chunk_{chunk_idx}_track_{int(tid_raw)}",
-                                "local_track_id": int(tid_raw),
-                                "class_id": 0,
-                                "label": "person",
-                                "confidence": float(conf),
-                                "x1": float(x1),
-                                "y1": float(y1),
-                                "x2": float(x2),
-                                "y2": float(y2),
-                                "x_center": float(cx),
-                                "y_center": float(cy),
-                                "width": float(bw),
-                                "height": float(bh),
-                                "source": "detector",
-                                "geometry_type": "aabb",
-                                "bbox_norm_xywh": {
-                                    "x_center": float(xcn),
-                                    "y_center": float(ycn),
-                                    "width": float(wn),
-                                    "height": float(hn),
-                                },
-                            }
-                        )
-            else:
-                tracks = self._propagate_gaps_in_tracklets(tracks, max_gap=max(1, stride))
-                if os.getenv("CLYPT_ENABLE_ROI_DETECT", "1") == "1":
-                    tracks, roi_refined = self._roi_refine_interpolated_tracks(
-                        chunk_video_path=chunk_video_path,
-                        tracks=tracks,
-                        model=model,
-                        width=width,
-                        height=height,
-                        infer_imgsz=infer_imgsz,
-                    )
-                    if roi_refined:
-                        print(f"    Chunk {chunk_idx}: ROI refined {roi_refined} propagated boxes")
 
         emb_map = self._compute_track_embeddings_for_chunk(chunk_video_path, tracks)
         chunk_geom = (
@@ -1724,27 +2116,17 @@ class ClyptWorker:
     ) -> list[dict]:
         """Cluster fragmented BoT-SORT track IDs into global person IDs via GPU face embeddings."""
         import os
-        import cv2
         import numpy as np
-        from decord import VideoReader, cpu
         from sklearn.cluster import DBSCAN
 
         if not tracks:
             return tracks
 
-        # Keep clustering cost bounded while giving each tracklet multiple chances.
-        max_frames_per_tracklet = 6
-        max_ranked_candidates = 18
-        target_face_encodings_per_tracklet = 2
+        extraction_cfg = _cluster_extraction_config()
         # ArcFace embeddings are unit-normalized; cosine distance is preferred.
         dbscan_eps = 0.44
         dbscan_min_samples = 1
         reassign_noise_max_dist = 0.45
-        # Keep low InsightFace detector threshold for TalkNet, but gate low-quality
-        # detections in clustering to reduce noisy/partial-face embeddings.
-        cluster_face_min_det_score = 0.35
-        cluster_face_min_side_px = 36.0
-        cluster_face_min_rel_area = 0.035
         # Conservative tiny-cluster merge: avoid collapsing real speakers.
         tiny_cluster_min_tracklets = 3
         tiny_cluster_min_boxes = max(60, int(len(tracks) * 0.003))
@@ -1792,155 +2174,106 @@ class ClyptWorker:
         face_accept_count = 0
         face_reject_lowq_count = 0
 
-        sampled_by_tid: dict[str, list[dict]] = {}
-        needed_frames: set[int] = set()
-        for tid in unique_ids:
-            detections = tracklets[tid]
-            if not detections:
-                continue
-
-            # Prefer better crops first: high confidence + larger bbox area.
-            ranked_dets = sorted(
-                detections,
-                key=lambda d: (
-                    float(d.get("confidence", 0.0)),
-                    float(d.get("width", 0.0)) * float(d.get("height", 0.0)),
-                ),
-                reverse=True,
-            )
-
-            # Sample multiple frames per tracklet, deduping by frame index.
-            sampled_dets = []
-            seen_frames = set()
-            for det in ranked_dets[:max_ranked_candidates]:
-                frame_idx = int(det.get("frame_idx", -1))
-                if frame_idx < 0 or frame_idx in seen_frames:
-                    continue
-                seen_frames.add(frame_idx)
-                sampled_dets.append(det)
-                if len(sampled_dets) >= max_frames_per_tracklet:
-                    break
-
-            if not sampled_dets:
-                sampled_dets = [sorted(detections, key=lambda d: d["frame_idx"])[len(detections) // 2]]
-            sampled_by_tid[tid] = sampled_dets
-            needed_frames.update(int(d["frame_idx"]) for d in sampled_dets)
-
+        sampled_by_tid, needed_frames = _build_cluster_sample_plan(tracklets, extraction_cfg)
         if not needed_frames:
             print("  No usable sampled frames for clustering")
             return tracks
 
-        # Decode sampled frames in one fast random-access batch with decord.
-        frame_map: dict[int, np.ndarray] = {}
-        try:
-            vr = VideoReader(read_path, ctx=cpu(0))
-        except Exception as e:
-            print(f"  Warning: decord could not open video for clustering ({type(e).__name__}: {e})")
-            return tracks
-        sorted_needed = sorted(needed_frames)
-        valid_needed = [fi for fi in sorted_needed if 0 <= fi < len(vr)]
-        if not valid_needed:
-            print("  No valid frame indices for clustering")
-            return tracks
-        batch = vr.get_batch(valid_needed).asnumpy()  # RGB uint8
-        for i, fi in enumerate(valid_needed):
-            frame_map[fi] = batch[i]
+        shard_workers = max(1, min(4, int(os.getenv("CLYPT_CLUSTER_SHARD_WORKERS", "4"))))
+        min_shard_tracklets = max(8, int(os.getenv("CLYPT_CLUSTER_MIN_SHARD_TRACKLETS", "24")))
+        can_shard_remotely = (
+            shard_workers > 1
+            and len(unique_ids) >= min_shard_tracklets
+            and read_path.startswith("/vol/")
+        )
 
-        for tid in unique_ids:
-            sampled_dets = sampled_by_tid.get(tid, [])
-            if not sampled_dets:
-                continue
-            face_vectors = []
-            hist_vectors = []
-
-            for det in sampled_dets:
-                frame_idx = int(det["frame_idx"])
-                frame = frame_map.get(frame_idx)
-                if frame is None:
+        extraction_result = None
+        if can_shard_remotely:
+            shard_count = min(shard_workers, len(unique_ids))
+            shard_size = max(1, (len(unique_ids) + shard_count - 1) // shard_count)
+            shards = []
+            for shard_idx in range(shard_count):
+                start = shard_idx * shard_size
+                end = min(len(unique_ids), start + shard_size)
+                shard_tids = unique_ids[start:end]
+                if not shard_tids:
                     continue
+                shards.append(
+                    {
+                        "shard_idx": shard_idx + 1,
+                        "sampled_by_tid": {tid: sampled_by_tid[tid] for tid in shard_tids if tid in sampled_by_tid},
+                    }
+                )
 
-                # Convert person box to a larger head-focused crop.
-                cx, cy = float(det["x_center"]), float(det["y_center"])
-                w, h = float(det["width"]), float(det["height"])
-                fh, fw = frame.shape[:2]
-                x1 = max(0, int(cx - 0.55 * w))
-                y1 = max(0, int(cy - 0.78 * h))
-                x2 = min(fw, int(cx + 0.55 * w))
-                y2 = min(fh, int(cy + 0.18 * h))
+            if len(shards) > 1:
+                print(
+                    "  Cluster embedding fan-out: "
+                    f"{len(shards)} shards across up to {shard_workers} workers"
+                )
+                try:
+                    cluster_worker = modal.Cls.from_name(app.name, "ClusterEmbeddingWorker")()
+                    shard_handles = [
+                        cluster_worker.extract_cluster_embeddings_shard.spawn(
+                            video_path=read_path,
+                            sampled_by_tid_subset=shard["sampled_by_tid"],
+                            shard_idx=int(shard["shard_idx"]),
+                            total_shards=len(shards),
+                        )
+                        for shard in shards
+                    ]
 
-                crop = frame[y1:y2, x1:x2]
-                if crop.size == 0:
-                    continue
-                ch, cw = crop.shape[:2]
-                if min(ch, cw) < 128:
-                    scale = max(1.0, 128.0 / max(1.0, min(ch, cw)))
-                    crop = cv2.resize(
-                        crop,
-                        (max(2, int(round(cw * scale))), max(2, int(round(ch * scale)))),
-                        interpolation=cv2.INTER_CUBIC,
+                    merged_embeddings: dict[str, np.ndarray] = {}
+                    merged_fallbacks: list[str] = []
+                    sampled_frames_total = 0
+                    for idx, handle in enumerate(shard_handles, start=1):
+                        shard_result = handle.get(timeout=None)
+                        sampled_frames_total += int(shard_result.get("sampled_frames", 0))
+                        face_accept_count += int(shard_result.get("face_accept_count", 0))
+                        face_reject_lowq_count += int(shard_result.get("face_reject_lowq_count", 0))
+                        merged_fallbacks.extend(str(tid) for tid in shard_result.get("fallback_ids", []))
+                        for tid, vec in shard_result.get("embeddings", {}).items():
+                            merged_embeddings[str(tid)] = np.asarray(vec, dtype=np.float32)
+                        print(
+                            "  Cluster embedding shard "
+                            f"{idx}/{len(shard_handles)} collected: "
+                            f"tracklets={int(shard_result.get('tracklets_processed', 0))}, "
+                            f"accepted={int(shard_result.get('face_accept_count', 0))}, "
+                            f"fallback={len(shard_result.get('fallback_ids', []))}, "
+                            f"elapsed={float(shard_result.get('elapsed_s', 0.0)):.1f}s"
+                        )
+
+                    extraction_result = {
+                        "embeddings": merged_embeddings,
+                        "fallback_ids": merged_fallbacks,
+                        "face_accept_count": face_accept_count,
+                        "face_reject_lowq_count": face_reject_lowq_count,
+                        "sampled_frames": sampled_frames_total,
+                    }
+                except Exception as e:
+                    print(
+                        "  Warning: cluster embedding fan-out failed; "
+                        f"falling back to local extraction ({type(e).__name__}: {e})"
                     )
 
-                used_face_encoding = False
-                if self.face_analyzer is not None:
-                    try:
-                        # InsightFace expects BGR inputs.
-                        faces = self.face_analyzer.get(cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
-                        if faces:
-                            best_face = max(
-                                faces,
-                                key=lambda f: float(
-                                    max(0.0, f.bbox[2] - f.bbox[0])
-                                    * max(0.0, f.bbox[3] - f.bbox[1])
-                                    * getattr(f, "det_score", 1.0)
-                                ),
-                            )
-                            fb = np.asarray(best_face.bbox, dtype=np.float32)
-                            face_w = float(max(0.0, fb[2] - fb[0]))
-                            face_h = float(max(0.0, fb[3] - fb[1]))
-                            det_score = float(getattr(best_face, "det_score", 0.0))
-                            rel_area = (face_w * face_h) / max(
-                                1.0, float(crop.shape[0] * crop.shape[1])
-                            )
-                            is_high_quality = (
-                                det_score >= cluster_face_min_det_score
-                                and face_w >= cluster_face_min_side_px
-                                and face_h >= cluster_face_min_side_px
-                                and rel_area >= cluster_face_min_rel_area
-                            )
-                            if is_high_quality:
-                                emb = np.asarray(best_face.normed_embedding, dtype=np.float32)
-                                face_vectors.append(emb)
-                                used_face_encoding = True
-                                face_accept_count += 1
-                            else:
-                                face_reject_lowq_count += 1
-                    except Exception:
-                        used_face_encoding = False
+        if extraction_result is None:
+            print(
+                "  Cluster embedding mode: local "
+                f"({len(sampled_by_tid)} tracklets, {len(needed_frames)} sampled frames)"
+            )
+            extraction_result = _extract_cluster_embeddings_subset(
+                face_analyzer=self.face_analyzer,
+                read_path=read_path,
+                sampled_by_tid_subset=sampled_by_tid,
+                config=extraction_cfg,
+                log_prefix="  [cluster-local] ",
+            )
 
-                if not used_face_encoding:
-                    hist = cv2.calcHist(
-                        [crop], [0, 1, 2], None, [8, 8, 8],
-                        [0, 256, 0, 256, 0, 256],
-                    )
-                    hist = cv2.normalize(hist, hist).flatten()
-                    if len(hist) < 512:
-                        hist = np.pad(hist, (0, 512 - len(hist)))
-                    else:
-                        hist = hist[:512]
-                    hist_vectors.append(hist)
-
-                if len(face_vectors) >= target_face_encodings_per_tracklet:
-                    break
-
-            if face_vectors:
-                embeddings[tid] = np.mean(np.asarray(face_vectors), axis=0)
-            elif hist_vectors:
-                embeddings[tid] = np.mean(np.asarray(hist_vectors), axis=0)
-                fallback_ids.append(tid)
-            else:
-                # Last-resort deterministic vector to avoid dropping IDs outright.
-                fallback_ids.append(tid)
-                embeddings[tid] = np.zeros(512, dtype=np.float32)
+        embeddings = dict(extraction_result.get("embeddings", {}))
+        fallback_ids = [str(tid) for tid in extraction_result.get("fallback_ids", [])]
+        face_accept_count = int(extraction_result.get("face_accept_count", face_accept_count))
+        face_reject_lowq_count = int(
+            extraction_result.get("face_reject_lowq_count", face_reject_lowq_count)
+        )
 
         if not embeddings:
             print("  No embeddings extracted, skipping clustering")
@@ -1954,7 +2287,7 @@ class ClyptWorker:
         print(
             "  Face quality gate: "
             f"accepted={face_accept_count}, rejected_lowq={face_reject_lowq_count}, "
-            f"min_det_score={cluster_face_min_det_score:.2f}"
+            f"min_det_score={float(extraction_cfg['cluster_face_min_det_score']):.2f}"
         )
         print(f"  Face encodings: {len(face_tids)}, histogram fallbacks: {len(hist_tids)}")
 
@@ -2299,7 +2632,7 @@ class ClyptWorker:
 
         return tracks
 
-    def _run_talknet_binding(
+    def _run_lrasd_binding(
         self,
         video_path: str,
         audio_wav_path: str,
@@ -2307,8 +2640,10 @@ class ClyptWorker:
         words: list[dict],
         frame_to_dets: dict[int, list[dict]] | None = None,
         track_to_dets: dict[str, list[dict]] | None = None,
+        force_dense: bool = False,
     ) -> list[dict] | None:
-        """Run TalkNet ASD inference and map words to visual track IDs."""
+        """Run LR-ASD inference and map words to visual track IDs."""
+        import concurrent.futures as cf
         import cv2
         import os
         import numpy as np
@@ -2319,8 +2654,8 @@ class ClyptWorker:
         from bisect import bisect_left
         from collections import Counter
 
-        if self.talknet_model is None or self.talknet_loss_av is None:
-            print("  TalkNet unavailable; falling back to heuristic binder.")
+        if self.lrasd_model is None or self.lrasd_loss_av is None:
+            print("  LR-ASD unavailable; falling back to heuristic binder.")
             return None
         if not words or not tracks:
             return []
@@ -2332,7 +2667,7 @@ class ClyptWorker:
             vr = VideoReader(read_path, ctx=cpu(0))
         except Exception as e:
             print(
-                "  Warning: could not open video for TalkNet binding "
+                "  Warning: could not open video for LR-ASD binding "
                 f"({type(e).__name__}: {e})"
             )
             return None
@@ -2346,11 +2681,69 @@ class ClyptWorker:
             wav = np.mean(wav, axis=1)
         wav = wav.astype(np.int16, copy=False)
         if sr <= 0:
-            print("  Warning: invalid audio sample rate for TalkNet binding")
+            print("  Warning: invalid audio sample rate for LR-ASD binding")
             return None
 
         if frame_to_dets is None or track_to_dets is None:
             frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
+
+        sparse_enabled = (
+            (os.getenv("CLYPT_ASD_PRECOMPUTED_FACE", "1") == "1")
+            and not force_dense
+        )
+        sparse_face_fps = float(os.getenv("CLYPT_ASD_FACE_FPS", "1.0"))
+        sparse_min_coverage = float(
+            os.getenv("CLYPT_ASD_PRECOMPUTED_MIN_COVERAGE", "0.80")
+        )
+        precomputed_face_boxes: dict[tuple[str, int], tuple[int, int, int, int, float, float]] = {}
+        if sparse_enabled:
+            # Build set of frames that overlap with any word timestamp so we
+            # only run InsightFace where it matters for speaker binding.
+            _word_margin_frames = int(round(fps * 0.5))  # 0.5s padding
+            _relevant_frames: set[int] = set()
+            for w in words:
+                ws_ms = int(w.get("start_time_ms", 0))
+                we_ms = int(w.get("end_time_ms", ws_ms))
+                sfi = max(0, int(round((ws_ms / 1000.0) * fps)) - _word_margin_frames)
+                efi = int(round((we_ms / 1000.0) * fps)) + _word_margin_frames
+                for fi in range(sfi, efi + 1):
+                    _relevant_frames.add(fi)
+            print(
+                f"  LR-ASD sparse face mode enabled @ {sparse_face_fps:.2f} FPS "
+                f"({len(_relevant_frames)} word-relevant frames)"
+            )
+            precomputed_face_boxes = self._build_sparse_face_box_map(
+                video_path=read_path,
+                frame_to_dets=frame_to_dets,
+                track_to_dets=track_to_dets,
+                fps=fps,
+                target_fps=sparse_face_fps,
+                relevant_frames=_relevant_frames if _relevant_frames else None,
+            )
+            needed = 0
+            covered = 0
+            for tid, dets in track_to_dets.items():
+                tid_s = str(tid)
+                for d in dets:
+                    fi = int(d.get("frame_idx", -1))
+                    if fi < 0:
+                        continue
+                    needed += 1
+                    if (tid_s, fi) in precomputed_face_boxes:
+                        covered += 1
+            coverage = float(covered / max(1, needed))
+            print(
+                "  LR-ASD sparse coverage: "
+                f"{covered}/{needed}={coverage:.1%} "
+                f"(threshold={sparse_min_coverage:.1%})"
+            )
+            if coverage < sparse_min_coverage:
+                print(
+                    "  LR-ASD sparse coverage too low; "
+                    "switching to dense face mode for this run."
+                )
+                sparse_enabled = False
+                precomputed_face_boxes = {}
 
         frame_cache: dict[int, object] = {}
         total_frames = len(vr)
@@ -2359,19 +2752,43 @@ class ClyptWorker:
             if frame_idx in frame_cache:
                 return frame_cache[frame_idx]
             if frame_idx < 0 or frame_idx >= total_frames:
-                frame_cache[frame_idx] = None
                 return None
-            try:
-                frame = vr[frame_idx].asnumpy()  # RGB
-            except Exception:
-                frame = None
-            frame_cache[frame_idx] = frame
+
+            # Pre-fetch a short forward window in one batched decord read.
+            fetch_end = min(frame_idx + 16, total_frames)
+            fetch_indices = list(range(frame_idx, fetch_end))
+            missing_indices = [fi for fi in fetch_indices if fi not in frame_cache]
+            if missing_indices:
+                try:
+                    batch = vr.get_batch(missing_indices).asnumpy()  # RGB
+                    for idx, frame_data in zip(missing_indices, batch):
+                        frame_cache[idx] = frame_data
+                except Exception:
+                    frame_cache[frame_idx] = None
+
+            # Evict old frames to keep memory bounded.
             if len(frame_cache) > 192:
-                for k in list(frame_cache.keys())[:48]:
+                stale_keys = [k for k in frame_cache.keys() if k < frame_idx - 32]
+                for k in stale_keys:
                     frame_cache.pop(k, None)
-            return frame_cache[frame_idx]
+                # Fallback trim if stale-eviction was insufficient.
+                if len(frame_cache) > 192:
+                    for k in sorted(frame_cache.keys())[: max(0, len(frame_cache) - 192)]:
+                        frame_cache.pop(k, None)
+
+            return frame_cache.get(frame_idx)
 
         face_cache: dict[tuple[str, int], tuple[object, object]] = {}
+        geom_fallback_enabled = os.getenv("CLYPT_ASD_GEOM_FALLBACK", "1") == "1"
+        # Periodically run InsightFace as a recovery/calibration path instead of every frame.
+        insightface_recovery_every = max(
+            1, int(os.getenv("CLYPT_ASD_INSIGHTFACE_RECOVERY_EVERY", "24"))
+        )
+        # When sparse precompute already covers most frames, periodic
+        # InsightFace recovery is redundant — only run it on genuine misses.
+        if sparse_enabled:
+            insightface_recovery_every = 999_999_999
+            print("  Sparse coverage sufficient; disabling periodic InsightFace recovery")
 
         def _face_crop(tid: str, fi: int, det: dict):
             key = (tid, fi)
@@ -2381,24 +2798,85 @@ class ClyptWorker:
             if frame is None:
                 face_cache[key] = (None, None)
                 return face_cache[key]
-            crop, anchor = self._detect_face_in_person_det(frame, det)
-            face_cache[key] = (crop, anchor)
-            if len(face_cache) > 768:
-                for k in list(face_cache.keys())[:192]:
-                    face_cache.pop(k, None)
-            return face_cache[key]
+
+            def _cache_and_return(crop_val, anchor_val):
+                face_cache[key] = (crop_val, anchor_val)
+                if len(face_cache) > 768:
+                    for k in list(face_cache.keys())[:192]:
+                        face_cache.pop(k, None)
+                return face_cache[key]
+
+            # 1) Fast path: precomputed sparse face box.
+            if sparse_enabled:
+                pb = precomputed_face_boxes.get((tid, fi))
+                if pb is not None:
+                    x1, y1, x2, y2, _, _ = pb
+                    fh, fw = frame.shape[:2]
+                    x1 = max(0, min(fw - 1, int(x1)))
+                    y1 = max(0, min(fh - 1, int(y1)))
+                    x2 = max(x1 + 1, min(fw, int(x2)))
+                    y2 = max(y1 + 1, min(fh, int(y2)))
+                    crop = frame[y1:y2, x1:x2]
+                    if crop is not None and crop.size > 0:
+                        crop = cv2.resize(crop, (112, 112), interpolation=cv2.INTER_LINEAR)
+                        return _cache_and_return(crop, None)
+
+            # 2) Very fast geometric fallback (top-center head proxy in person box).
+            crop = None
+            anchor = None
+            fh, fw = frame.shape[:2]
+            cx = float(det.get("x_center", 0.0))
+            cy = float(det.get("y_center", 0.0))
+            bw = float(det.get("width", 0.0))
+            bh = float(det.get("height", 0.0))
+            if geom_fallback_enabled and bw > 1e-6 and bh > 1e-6:
+                gx1 = max(0, int(cx - 0.25 * bw))
+                gy1 = max(0, int(cy - 0.45 * bh))
+                gx2 = min(fw, int(cx + 0.25 * bw))
+                gy2 = min(fh, int(cy + 0.15 * bh))
+                if gx2 > gx1 and gy2 > gy1:
+                    g = frame[gy1:gy2, gx1:gx2]
+                    if g is not None and g.size > 0:
+                        crop = cv2.resize(g, (112, 112), interpolation=cv2.INTER_LINEAR)
+                        anchor = {
+                            "x_offset": (float(gx1) - cx) / bw,
+                            "y_offset": (float(gy1) - cy) / bh,
+                            "w_ratio": float(gx2 - gx1) / bw,
+                            "h_ratio": float(gy2 - gy1) / bh,
+                        }
+
+            # 3) Recovery path: periodically run InsightFace to re-calibrate.
+            # Use it when geometry failed OR at a low periodic cadence.
+            should_recover = (crop is None) or ((fi % insightface_recovery_every) == 0)
+            if should_recover:
+                det_crop, det_anchor = self._detect_face_in_person_det(frame, det)
+                if det_crop is not None:
+                    crop = det_crop
+                    anchor = det_anchor
+
+            return _cache_and_return(crop, anchor)
 
         asd_scores: dict[tuple[str, int], float] = {}
         scored_track_ids = set()
         chunk_size = 120
         min_chunk_frames = 20
-        talknet_batch_size = 8
+        # Moderate batching + optional CPU/GPU overlap on a single GPU.
+        lrasd_batch_size = max(4, min(64, int(os.getenv("CLYPT_LRASD_BATCH_SIZE", "32"))))
+        enable_lrasd_overlap = os.getenv("CLYPT_LRASD_PIPELINE_OVERLAP", "1") == "1"
+        max_inflight = max(1, min(4, int(os.getenv("CLYPT_LRASD_MAX_INFLIGHT", "4"))))
+        if not enable_lrasd_overlap:
+            max_inflight = 1
         contiguous_frame_gap = 4
         interpolation_gap = 5
         word_match_max_gap = 4
         score_lookup_max_delta = 8
-        min_talknet_prob = 0.15
-        min_talknet_assign_ratio = 0.15
+        min_lrasd_prob = 0.15
+        min_lrasd_assign_ratio = 0.15
+        print(
+            "  LR-ASD pipeline: "
+            f"batch_size={lrasd_batch_size}, overlap={'on' if enable_lrasd_overlap else 'off'}, "
+            f"max_inflight={max_inflight}"
+        )
 
         # Use speech timing to skip obviously irrelevant chunks.
         word_frame_ranges: list[tuple[int, int]] = []
@@ -2453,34 +2931,35 @@ class ClyptWorker:
         flush_counter = 0
         face_hits = 0
         face_misses = 0
+        inflight_futures: list[cf.Future] = []
+        infer_executor = cf.ThreadPoolExecutor(max_workers=1) if enable_lrasd_overlap else None
 
-        def _flush_pending(t_len: int):
-            nonlocal scored_chunks
-            nonlocal flush_counter
-            pending = pending_by_t.get(t_len, [])
-            if not pending:
-                return
-            flush_counter += 1
-
+        def _score_pending_batch(
+            pending: list[tuple[str, list[int], np.ndarray, np.ndarray]],
+            t_len: int,
+            flush_id: int,
+        ) -> list[tuple[str, list[int], np.ndarray]]:
+            """Run one LR-ASD batch and return aligned per-frame scores."""
             visual_batch = np.stack([p[2] for p in pending], axis=0)
             audio_batch = np.stack([p[3] for p in pending], axis=0)
             visual_t = torch.from_numpy(visual_batch).float().to(self.gpu_device)
             audio_t = torch.from_numpy(audio_batch).float().to(self.gpu_device)
             if self.model_debug and (
-                flush_counter % max(1, self.model_debug_every // 2) == 1
+                flush_id % max(1, self.model_debug_every // 2) == 1
             ):
-                print("  [TALKNET DEBUG] _flush_pending tensors:")
+                print("  [LR-ASD DEBUG] _flush_pending tensors:")
                 print("   " + self._tensor_debug_stats("audio_t", audio_t))
                 print("   " + self._tensor_debug_stats("visual_t", visual_t))
                 print(f"   batch={len(pending)} t_len={t_len}")
 
             with torch.no_grad():
-                score_bt = self._talknet_forward_scores(
+                score_bt = self._lrasd_forward_scores(
                     audio_t,
                     visual_t,
                 )
             score_np = score_bt.detach().float().cpu().numpy()
 
+            rows: list[tuple[str, list[int], np.ndarray]] = []
             for i, (tid, valid_frames, _, _) in enumerate(pending):
                 row = score_np[i]
                 if len(row) != len(valid_frames):
@@ -2492,13 +2971,41 @@ class ClyptWorker:
                         x_old = np.linspace(0.0, 1.0, num=len(row), dtype=np.float32)
                         x_new = np.linspace(0.0, 1.0, num=len(valid_frames), dtype=np.float32)
                         row = np.interp(x_new, x_old, row).astype(np.float32)
+                rows.append((tid, valid_frames, row))
+            return rows
 
+        def _commit_scored_rows(rows: list[tuple[str, list[int], np.ndarray]]):
+            nonlocal scored_chunks
+            for tid, valid_frames, row in rows:
                 for fi, sc in zip(valid_frames, row):
                     asd_scores[(tid, fi)] = float(sc)
                 scored_track_ids.add(tid)
                 scored_chunks += 1
 
+        def _drain_one(block: bool = False):
+            if not inflight_futures:
+                return
+            if block or len(inflight_futures) >= max_inflight:
+                fut = inflight_futures.pop(0)
+                rows = fut.result()
+                _commit_scored_rows(rows)
+
+        def _flush_pending(t_len: int):
+            nonlocal flush_counter
+            pending = pending_by_t.get(t_len, [])
+            if not pending:
+                return
+            flush_counter += 1
             pending_by_t[t_len] = []
+            if infer_executor is None:
+                rows = _score_pending_batch(pending, t_len, flush_counter)
+                _commit_scored_rows(rows)
+                return
+            _drain_one(block=False)
+            inflight_futures.append(
+                infer_executor.submit(_score_pending_batch, pending, t_len, flush_counter)
+            )
+            _drain_one(block=False)
 
         def _queue_subchunk(tid, frames, crops):
             t = len(frames)
@@ -2518,7 +3025,7 @@ class ClyptWorker:
                 return
 
             visual_np = np.stack([cv2.cvtColor(c, cv2.COLOR_RGB2GRAY) for c in crops], axis=0)
-            # Match official TalkNet extraction for variable-fps video.
+            # Keep audio/video time-scale aligned across variable-fps inputs.
             target_audio_frames = int(round(t * 4))
             mfcc_winlen = 0.025 * 25.0 / max(fps, 1e-6)
             mfcc_winstep = 0.010 * 25.0 / max(fps, 1e-6)
@@ -2539,133 +3046,139 @@ class ClyptWorker:
             audio_np = np.asarray(mfcc[:target_audio_frames, :], dtype=np.float32)
 
             pending_by_t.setdefault(t, []).append((tid, frames, visual_np, audio_np))
-            if len(pending_by_t[t]) >= talknet_batch_size:
+            if len(pending_by_t[t]) >= lrasd_batch_size:
                 _flush_pending(t)
 
-        for tid, dets in track_to_dets.items():
-            best_by_frame = self._interpolate_track_detections(
-                dets, max_gap=interpolation_gap
-            )
+        try:
+            for tid, dets in track_to_dets.items():
+                best_by_frame = self._interpolate_track_detections(
+                    dets, max_gap=interpolation_gap
+                )
 
-            frame_list = sorted(best_by_frame.keys())
-            if len(frame_list) < min_chunk_frames:
-                continue
-
-            runs = _split_contiguous_runs(frame_list, contiguous_frame_gap)
-            for run in runs:
-                if len(run) < min_chunk_frames:
+                frame_list = sorted(best_by_frame.keys())
+                if len(frame_list) < min_chunk_frames:
                     continue
-                for start in range(0, len(run), chunk_size):
-                    chunk_frames = run[start:start + chunk_size]
-                    chunk_counter += 1
-                    if len(chunk_frames) < min_chunk_frames:
+
+                runs = _split_contiguous_runs(frame_list, contiguous_frame_gap)
+                for run in runs:
+                    if len(run) < min_chunk_frames:
                         continue
-                    if not _chunk_overlaps_words(chunk_frames[0], chunk_frames[-1]):
-                        continue
+                    for start in range(0, len(run), chunk_size):
+                        chunk_frames = run[start:start + chunk_size]
+                        chunk_counter += 1
+                        if len(chunk_frames) < min_chunk_frames:
+                            continue
+                        if not _chunk_overlaps_words(chunk_frames[0], chunk_frames[-1]):
+                            continue
 
-                    # --- FIX: FAULT-TOLERANT CROP-AND-DROP ---
-                    current_face_subchunk = []
-                    current_crops = []
-                    missing_count = 0
-                    last_good_crop = None
-                    last_known_anchor = None
+                        # --- FIX: FAULT-TOLERANT CROP-AND-DROP ---
+                        current_face_subchunk = []
+                        current_crops = []
+                        missing_count = 0
+                        last_good_crop = None
+                        last_known_anchor = None
 
-                    for fi in chunk_frames:
-                        det = best_by_frame.get(fi)
-                        crop = None
-                        anchor = None
-                        frame = None
-                        if det is not None:
-                            frame = _get_frame(fi)
-                            crop, anchor = _face_crop(tid, fi, det)
+                        for fi in chunk_frames:
+                            det = best_by_frame.get(fi)
+                            crop = None
+                            anchor = None
+                            frame = None
+                            if det is not None:
+                                frame = _get_frame(fi)
+                                crop, anchor = _face_crop(tid, fi, det)
 
-                            # If detector misses, project last known face anchor onto current person box.
-                            if (
-                                crop is None
-                                and last_known_anchor is not None
-                                and frame is not None
-                            ):
-                                cx = float(det.get("x_center", 0.0))
-                                cy = float(det.get("y_center", 0.0))
-                                bw = float(det.get("width", 0.0))
-                                bh = float(det.get("height", 0.0))
-                                if bw > 1e-6 and bh > 1e-6:
-                                    fx1 = int(round(cx + float(last_known_anchor["x_offset"]) * bw))
-                                    fy1 = int(round(cy + float(last_known_anchor["y_offset"]) * bh))
-                                    fw_face = int(round(max(2.0, float(last_known_anchor["w_ratio"]) * bw)))
-                                    fh_face = int(round(max(2.0, float(last_known_anchor["h_ratio"]) * bh)))
-                                    fh_img, fw_img = frame.shape[:2]
-                                    gx1 = max(0, min(fw_img - 1, fx1))
-                                    gy1 = max(0, min(fh_img - 1, fy1))
-                                    gx2 = max(0, min(fw_img, gx1 + fw_face))
-                                    gy2 = max(0, min(fh_img, gy1 + fh_face))
-                                    if gx2 > gx1 and gy2 > gy1:
-                                        fallback_crop = frame[gy1:gy2, gx1:gx2]
-                                        if fallback_crop.size > 0:
-                                            crop = cv2.resize(
-                                                fallback_crop,
-                                                (112, 112),
-                                                interpolation=cv2.INTER_LINEAR,
-                                            )
+                                # If detector misses, project last known face anchor onto current person box.
+                                if (
+                                    crop is None
+                                    and last_known_anchor is not None
+                                    and frame is not None
+                                ):
+                                    cx = float(det.get("x_center", 0.0))
+                                    cy = float(det.get("y_center", 0.0))
+                                    bw = float(det.get("width", 0.0))
+                                    bh = float(det.get("height", 0.0))
+                                    if bw > 1e-6 and bh > 1e-6:
+                                        fx1 = int(round(cx + float(last_known_anchor["x_offset"]) * bw))
+                                        fy1 = int(round(cy + float(last_known_anchor["y_offset"]) * bh))
+                                        fw_face = int(round(max(2.0, float(last_known_anchor["w_ratio"]) * bw)))
+                                        fh_face = int(round(max(2.0, float(last_known_anchor["h_ratio"]) * bh)))
+                                        fh_img, fw_img = frame.shape[:2]
+                                        gx1 = max(0, min(fw_img - 1, fx1))
+                                        gy1 = max(0, min(fh_img - 1, fy1))
+                                        gx2 = max(0, min(fw_img, gx1 + fw_face))
+                                        gy2 = max(0, min(fh_img, gy1 + fh_face))
+                                        if gx2 > gx1 and gy2 > gy1:
+                                            fallback_crop = frame[gy1:gy2, gx1:gx2]
+                                            if fallback_crop.size > 0:
+                                                crop = cv2.resize(
+                                                    fallback_crop,
+                                                    (112, 112),
+                                                    interpolation=cv2.INTER_LINEAR,
+                                                )
 
-                        if crop is not None:
-                            face_hits += 1
-                            # If we had a micro-gap, mathematically pad it using the last known face
-                            if missing_count > 0 and last_good_crop is not None:
-                                for pad_idx in range(missing_count):
-                                    pad_fi = fi - missing_count + pad_idx
-                                    current_face_subchunk.append(pad_fi)
-                                    current_crops.append(last_good_crop)
+                            if crop is not None:
+                                face_hits += 1
+                                # If we had a micro-gap, mathematically pad it using the last known face
+                                if missing_count > 0 and last_good_crop is not None:
+                                    for pad_idx in range(missing_count):
+                                        pad_fi = fi - missing_count + pad_idx
+                                        current_face_subchunk.append(pad_fi)
+                                        current_crops.append(last_good_crop)
 
-                            current_face_subchunk.append(fi)
-                            current_crops.append(crop)
+                                current_face_subchunk.append(fi)
+                                current_crops.append(crop)
 
-                            last_good_crop = crop
-                            if anchor is not None:
-                                last_known_anchor = anchor
-                            missing_count = 0
-                        else:
-                            face_misses += 1
-                            missing_count += 1
-                            # If the face is lost for more than 5 frames, it's a real break. Terminate the chunk.
-                            if missing_count > 5:
-                                if len(current_face_subchunk) >= min_chunk_frames:
-                                    _queue_subchunk(tid, current_face_subchunk, current_crops)
-                                current_face_subchunk = []
-                                current_crops = []
+                                last_good_crop = crop
+                                if anchor is not None:
+                                    last_known_anchor = anchor
                                 missing_count = 0
-                                last_good_crop = None
-                                last_known_anchor = None
+                            else:
+                                face_misses += 1
+                                missing_count += 1
+                                # If the face is lost for more than 5 frames, it's a real break. Terminate the chunk.
+                                if missing_count > 5:
+                                    if len(current_face_subchunk) >= min_chunk_frames:
+                                        _queue_subchunk(tid, current_face_subchunk, current_crops)
+                                    current_face_subchunk = []
+                                    current_crops = []
+                                    missing_count = 0
+                                    last_good_crop = None
+                                    last_known_anchor = None
 
-                    # Flush remainder
-                    if len(current_face_subchunk) >= min_chunk_frames:
-                        _queue_subchunk(tid, current_face_subchunk, current_crops)
+                        # Flush remainder
+                        if len(current_face_subchunk) >= min_chunk_frames:
+                            _queue_subchunk(tid, current_face_subchunk, current_crops)
 
-                    if chunk_counter % 40 == 0:
-                        print(
-                            "  TalkNet progress: "
-                            f"{chunk_counter}/{max(total_chunks, 1)} chunks, "
-                            f"scored_chunks={scored_chunks}, scored_tracks={len(scored_track_ids)}"
-                        )
+                        if chunk_counter % 40 == 0:
+                            print(
+                                "  LR-ASD progress: "
+                                f"{chunk_counter}/{max(total_chunks, 1)} chunks, "
+                                f"scored_chunks={scored_chunks}, scored_tracks={len(scored_track_ids)}"
+                            )
 
-        for t_len in list(pending_by_t.keys()):
-            _flush_pending(t_len)
+            for t_len in list(pending_by_t.keys()):
+                _flush_pending(t_len)
+            while inflight_futures:
+                _drain_one(block=True)
+        finally:
+            if infer_executor is not None:
+                infer_executor.shutdown(wait=True, cancel_futures=False)
 
         if not asd_scores:
-            print("  TalkNet produced no valid frame scores")
+            print("  LR-ASD produced no valid frame scores")
             return None
         if self.model_debug:
             total_face_events = face_hits + face_misses
             hit_rate = (face_hits / total_face_events) if total_face_events > 0 else 0.0
             print(
-                "  [TALKNET DEBUG] face crop stats: "
+                "  [LR-ASD DEBUG] face crop stats: "
                 f"hits={face_hits}, misses={face_misses}, hit_rate={hit_rate:.1%}, "
                 f"flushes={flush_counter}, scored_chunks={scored_chunks}"
             )
 
         score_vals = np.asarray(list(asd_scores.values()), dtype=np.float32)
         print(
-            "  TalkNet score stats: "
+            "  LR-ASD score stats: "
             f"min={float(np.min(score_vals)):.3f}, "
             f"p10={float(np.percentile(score_vals, 10)):.3f}, "
             f"p50={float(np.percentile(score_vals, 50)):.3f}, "
@@ -2675,8 +3188,8 @@ class ClyptWorker:
         score_spread = float(np.percentile(score_vals, 90) - np.percentile(score_vals, 50))
         min_assignment_margin = max(0.004, 0.18 * score_spread)
         print(
-            "  TalkNet assignment gates: "
-            f"min_prob={min_talknet_prob:.3f}, margin={min_assignment_margin:.4f}"
+            "  LR-ASD assignment gates: "
+            f"min_prob={min_lrasd_prob:.3f}, margin={min_assignment_margin:.4f}"
         )
 
         frame_keys = sorted(frame_to_dets.keys())
@@ -2754,7 +3267,7 @@ class ClyptWorker:
                 best_total, best_prob, best_tid = scored_candidates[0]
                 second_total = scored_candidates[1][0] if len(scored_candidates) > 1 else -1e9
                 confident_pick = (
-                    best_prob >= min_talknet_prob
+                    best_prob >= min_lrasd_prob
                     and (
                         len(scored_candidates) == 1
                         or (best_total - second_total) >= min_assignment_margin
@@ -2813,23 +3326,23 @@ class ClyptWorker:
             bindings.append(cur)
 
         print(
-            "  TalkNet word matching: "
+            "  LR-ASD word matching: "
             f"with_frame={words_with_frame}/{len(words)}, "
             f"with_dets={words_with_dets}/{len(words)}, "
             f"with_scored_candidate={words_with_scored_candidate}/{len(words)}"
         )
         assigned_ratio = assigned / max(1, len(words))
-        print(f"  TalkNet assignment ratio: {assigned}/{len(words)}={assigned_ratio:.1%}")
-        if assigned_ratio < min_talknet_assign_ratio or len(scored_track_ids) < 2:
+        print(f"  LR-ASD assignment ratio: {assigned}/{len(words)}={assigned_ratio:.1%}")
+        if assigned_ratio < min_lrasd_assign_ratio or len(scored_track_ids) < 2:
             print(
-                "  TalkNet confidence too low for final binding "
+                "  LR-ASD confidence too low for final binding "
                 f"(assigned_ratio={assigned_ratio:.1%}, scored_tracks={len(scored_track_ids)}); "
                 "falling back to heuristic binder."
             )
             return None
 
         print(
-            "TalkNet binding complete: "
+            "LR-ASD binding complete: "
             f"{assigned}/{len(words)} words assigned, "
             f"{len(scored_track_ids)} scored tracks, {len(bindings)} segments"
         )
@@ -2849,7 +3362,7 @@ class ClyptWorker:
         """Bind each word to a visual track ID using AV synchrony and lip activity cues.
 
         This is a lightweight in-worker implementation that follows the same
-        high-level objective as TalkNet: align speech timing with the most
+        high-level objective as neural AV-ASD: align speech timing with the most
         likely active on-screen speaker track.
         """
         import cv2
@@ -3119,8 +3632,8 @@ class ClyptWorker:
         frame_to_dets: dict[int, list[dict]] | None = None,
         track_to_dets: dict[str, list[dict]] | None = None,
     ) -> list[dict]:
-        """Bind words to track IDs using TalkNet, with heuristic fallback."""
-        bindings = self._run_talknet_binding(
+        """Bind words to track IDs using LR-ASD, with heuristic fallback."""
+        bindings = self._run_lrasd_binding(
             video_path=video_path,
             audio_wav_path=audio_wav_path,
             tracks=tracks,
@@ -3331,24 +3844,56 @@ class ClyptWorker:
     @modal.method()
     def finalize_extraction(
         self,
-        video_bytes: bytes,
         audio_wav_bytes: bytes,
         youtube_url: str,
         words: list[dict],
         tracks: list[dict],
         tracking_metrics: dict | None = None,
+        job_id: str | None = None,
+        video_bytes: bytes | None = None,
     ) -> dict:
-        """Finalize from externally-fanned-out ASR/tracking outputs."""
+        """Finalize from externally-fanned-out ASR/tracking outputs.
+
+        When *job_id* is provided the video is read directly from the shared
+        volume (``/vol/clypt-chunks/jobs/{job_id}/``) avoiding a full
+        video-bytes RPC transfer.  Falls back to *video_bytes* when the
+        volume path is unavailable.
+        """
         import os
+        import json
         import uuid
 
         dl_dir = "/tmp/clypt"
         os.makedirs(dl_dir, exist_ok=True)
         suffix = uuid.uuid4().hex
-        video_path = f"{dl_dir}/video_finalize_{suffix}.mp4"
+
+        # --- Video: prefer staged volume path over RPC bytes ---
+        video_path = None
+        _video_from_volume = False
+        if job_id:
+            TRACKING_VOLUME.reload()
+            manifest_path = f"/vol/clypt-chunks/jobs/{job_id}/manifest.json"
+            if os.path.exists(manifest_path):
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                vol_video = manifest.get("video_path", "")
+                if vol_video and os.path.exists(vol_video):
+                    video_path = vol_video
+                    _video_from_volume = True
+                    print(f"[finalize] Reusing staged video from volume ({job_id[:8]}...)")
+
+        if video_path is None:
+            if video_bytes is None:
+                raise RuntimeError(
+                    "finalize_extraction requires either job_id (volume) or video_bytes"
+                )
+            video_path = f"{dl_dir}/video_finalize_{suffix}.mp4"
+            with open(video_path, "wb") as f:
+                f.write(video_bytes)
+            print("[finalize] Wrote video from RPC bytes (no volume path available)")
+
+        # --- Audio: always from bytes (small payload) ---
         audio_path = f"{dl_dir}/audio_finalize_{suffix}.wav"
-        with open(video_path, "wb") as f:
-            f.write(video_bytes)
         with open(audio_path, "wb") as f:
             f.write(audio_wav_bytes)
 
@@ -3365,8 +3910,12 @@ class ClyptWorker:
                 tracking_metrics=tracking_metrics if isinstance(tracking_metrics, dict) else {},
             )
         finally:
+            # Only clean up files we created locally, not volume-staged ones.
             h264_video_path = video_path.replace(".mp4", "_h264.mp4")
-            for p in (video_path, audio_path, h264_video_path):
+            cleanup = [audio_path]
+            if not _video_from_volume:
+                cleanup.extend([video_path, h264_video_path])
+            for p in cleanup:
                 if os.path.exists(p):
                     os.remove(p)
 

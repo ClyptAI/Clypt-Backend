@@ -489,7 +489,7 @@ async def call_modal_worker_distributed(
 
     ClyptWorker = modal.Cls.from_name("clypt-sota-worker", "ClyptWorker")
     worker = ClyptWorker()
-    max_gpu_workers = max(1, min(8, int(os.getenv("CLYPT_MAX_GPU_WORKERS", "8"))))
+    max_gpu_workers = max(1, min(4, int(os.getenv("CLYPT_MAX_GPU_WORKERS", "4"))))
     log.info(f"Distributed fan-out enabled (max GPU workers={max_gpu_workers})")
 
     # Best-effort autoscaler cap for chunk tracking method.
@@ -532,45 +532,35 @@ async def call_modal_worker_distributed(
 
         if use_detached:
             asr_handle = await worker.run_asr_only.spawn.aio(audio_wav_bytes=audio_bytes)
-            chunk_obj = await worker.track_chunk_from_staged.spawn_map.aio(
-                [job_id] * len(chunks),
-                [staged_video_path] * len(chunks),
-                [meta] * len(chunks),
-                chunks,
+            # NOTE: spawn_map.aio may return None on some Modal SDK/runtime
+            # combinations; submit explicit per-chunk spawns to get stable
+            # FunctionCall handles for detached resume.
+            chunk_handles = await asyncio.gather(
+                *[
+                    worker.track_chunk_from_staged.spawn.aio(
+                        job_id=job_id,
+                        video_path=staged_video_path,
+                        meta=meta,
+                        chunk=c,
+                    )
+                    for c in chunks
+                ]
             )
             tracking_submitted_ts = time.time()
-            if hasattr(chunk_obj, "get") and hasattr(chunk_obj, "object_id"):
-                chunk_mode = "indexed"
-                chunk_handle = chunk_obj
-                chunk_handles = None
-                state_payload = {
-                    "status": "submitted",
-                    "job_id": job_id,
-                    "video_path": staged_video_path,
-                    "meta": meta,
-                    "chunks": chunks,
-                    "asr_call_id": str(asr_handle.object_id),
-                    "chunk_mode": "indexed",
-                    "chunk_call_id": str(chunk_obj.object_id),
-                    "tracking_submitted_ts": tracking_submitted_ts,
-                }
-            elif isinstance(chunk_obj, (list, tuple)):
-                chunk_mode = "list"
-                chunk_handle = None
-                chunk_handles = list(chunk_obj)
-                state_payload = {
-                    "status": "submitted",
-                    "job_id": job_id,
-                    "video_path": staged_video_path,
-                    "meta": meta,
-                    "chunks": chunks,
-                    "asr_call_id": str(asr_handle.object_id),
-                    "chunk_mode": "list",
-                    "chunk_call_ids": [str(c.object_id) for c in chunk_handles],
-                    "tracking_submitted_ts": tracking_submitted_ts,
-                }
-            else:
-                raise RuntimeError("spawn_map returned unknown handle type")
+            chunk_mode = "list"
+            chunk_handle = None
+            chunk_handles = list(chunk_handles)
+            state_payload = {
+                "status": "submitted",
+                "job_id": job_id,
+                "video_path": staged_video_path,
+                "meta": meta,
+                "chunks": chunks,
+                "asr_call_id": str(asr_handle.object_id),
+                "chunk_mode": "list",
+                "chunk_call_ids": [str(c.object_id) for c in chunk_handles],
+                "tracking_submitted_ts": tracking_submitted_ts,
+            }
             save_detached_state(state_payload)
         else:
             # Non-detached fallback path.
@@ -610,12 +600,12 @@ async def call_modal_worker_distributed(
             tracking_metrics["throughput_fps"] = float(total_frames / max(1e-6, tracking_wallclock_s))
 
             result = await worker.finalize_extraction.remote.aio(
-                video_bytes=video_bytes,
                 audio_wav_bytes=audio_bytes,
                 youtube_url=youtube_url,
                 words=words,
                 tracks=tracks,
                 tracking_metrics=tracking_metrics,
+                job_id=job_id,
             )
             try:
                 await worker.cleanup_tracking_job.remote.aio(job_id=job_id)
@@ -657,12 +647,12 @@ async def call_modal_worker_distributed(
     tracking_metrics["throughput_fps"] = float(total_frames / max(1e-6, tracking_wallclock_s))
 
     result = await worker.finalize_extraction.remote.aio(
-        video_bytes=video_bytes,
         audio_wav_bytes=audio_bytes,
         youtube_url=youtube_url,
         words=words,
         tracks=tracks,
         tracking_metrics=tracking_metrics,
+        job_id=job_id,
     )
 
     # Best-effort staged artifact cleanup.
