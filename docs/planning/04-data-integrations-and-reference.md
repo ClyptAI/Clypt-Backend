@@ -89,5 +89,5 @@ Python (`requirements.txt`):
 - `google-cloud-spanner`
 - `yt-dlp`
 
-Node (`clypt-render-engine/`):
+Node (`remotion-render/`):
 - Remotion render stack (`npm install` in render engine directory)

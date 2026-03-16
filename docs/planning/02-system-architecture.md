@@ -22,7 +22,7 @@ YouTube URL
 ```
 
 Phase 1 is split across two execution environments:
-- `pipeline/phase_1_modal_pipeline.py` in the main pipeline acts as a lightweight HTTP client.
+- `backend/pipeline/phase_1_modal_pipeline.py` in the main pipeline acts as a lightweight HTTP client.
 - A Modal serverless GPU worker performs the actual extraction workloads.
 
 ---
@@ -51,16 +51,16 @@ This removes any need for post-hoc speaker reconciliation.
 
 | Component | Role |
 |---|---|
-| `pipeline/run_pipeline.py` | Orchestrates all phases and rendering handoff |
-| `pipeline/phase_1_modal_pipeline.py` | Sends webhook request to Modal and writes returned ledgers |
+| `backend/pipeline/run_pipeline.py` | Orchestrates all phases and rendering handoff |
+| `backend/pipeline/phase_1_modal_pipeline.py` | Sends webhook request to Modal and writes returned ledgers |
 | `modal` GPU service (FastAPI) | Runs Parakeet + YOLO11/BoT-SORT + TalkNet extraction stack |
-| `pipeline/phase_2a_make_nodes.py` | Gemini 3.1 Pro semantic node decomposition |
-| `pipeline/phase_2b_draw_edges.py` | Gemini 3.1 Pro narrative edge mapping |
-| `pipeline/phase_3_multimodal_embeddings.py` | Vertex multimodal embedding fusion |
-| `pipeline/phase_4_store_graph.py` | Spanner graph writes + GCS tracking payloads |
-| `pipeline/phase_5_auto_curate.py` | Full-graph chapter scoring and clip selection |
-| `pipeline/phase_5_retrieve.py` | Query-based hybrid retrieval (standalone) |
-| `clypt-render-engine/` | Remotion 9:16 clip rendering with speaker-aware tracking |
+| `backend/pipeline/phase_2a_make_nodes.py` | Gemini 3.1 Pro semantic node decomposition |
+| `backend/pipeline/phase_2b_draw_edges.py` | Gemini 3.1 Pro narrative edge mapping |
+| `backend/pipeline/phase_3_multimodal_embeddings.py` | Vertex multimodal embedding fusion |
+| `backend/pipeline/phase_4_store_graph.py` | Spanner graph writes + GCS tracking payloads |
+| `backend/pipeline/phase_5_auto_curate.py` | Full-graph chapter scoring and clip selection |
+| `backend/pipeline/phase_5_retrieve.py` | Query-based hybrid retrieval (standalone) |
+| `remotion-render/` | Remotion 9:16 clip rendering with speaker-aware tracking |
 
 ---
 ## Render Path

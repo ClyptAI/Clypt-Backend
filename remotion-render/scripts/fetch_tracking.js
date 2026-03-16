@@ -210,8 +210,8 @@ async function main() {
     console.log("Loaded single payload (legacy mode)");
   } else {
     throw new Error(
-      "No Remotion payload file found. Run phase_5_auto_curate.py first " +
-      "to generate outputs/remotion_payloads_array.json.",
+      "No Remotion payload file found. Run backend/pipeline/phase_5_auto_curate.py first " +
+      "to generate backend/outputs/remotion_payloads_array.json.",
     );
   }
 

@@ -20,8 +20,9 @@ dist/
 build/
 
 # Local pipeline outputs/artifacts
-downloads/
-outputs/
+backend/downloads/
+backend/outputs/
+backend/.parallel_runs/
 .parallel_runs/
 
 # Logs

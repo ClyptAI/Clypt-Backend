@@ -20,7 +20,7 @@ The current system uses a hybrid runtime:
 ---
 ## Phase 1 Extraction Mechanics
 
-`pipeline/phase_1_modal_pipeline.py` now performs three tasks only:
+`backend/pipeline/phase_1_modal_pipeline.py` now performs three tasks only:
 1. Build webhook request payload from input YouTube URL.
 2. Call Modal endpoint and wait for extraction completion.
 3. Persist returned visual/audio ledgers for downstream phases.

@@ -21,14 +21,14 @@ YouTube URL
 
 ## Tech Stack (Current)
 
-### Phase 1 Modal worker (`modal_worker.py`)
+### Phase 1 Modal worker (`backend/modal_worker.py`)
 - ASR: NVIDIA Parakeet-TDT-1.1B
 - Tracking: YOLO26s + BoT-SORT (+ chunk fan-out + stitch)
 - Face: InsightFace/ArcFace for ID stabilization
 - Active speaker binding: TalkNet
 - Runtime: Modal `H100`, `max_containers=8`, memory snapshot enabled
 
-### Local pipeline client (`pipeline/phase_1_modal_pipeline.py`)
+### Local pipeline client (`backend/pipeline/phase_1_modal_pipeline.py`)
 - Downloads source media with `yt-dlp`
 - Converts audio to 16kHz mono WAV
 - Calls Modal worker (single-worker or distributed fan-out mode)
@@ -62,7 +62,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cd clypt-render-engine && npm install && cd ..
+cd remotion-render && npm install && cd ..
 ```
 
 2. Authenticate CLIs
@@ -95,7 +95,7 @@ gcloud spanner databases describe clypt-graph-db-v2 --instance=clypt-spanner-v2
 
 Run this section only if resources are missing or intentionally being rebuilt.
 
-`spannerSchema.sql` includes `CREATE PROPERTY GRAPH`, so the Spanner instance must be `ENTERPRISE` edition.
+`backend/spanner_schema.sql` includes `CREATE PROPERTY GRAPH`, so the Spanner instance must be `ENTERPRISE` edition.
 
 ```bash
 gcloud spanner instances create clypt-spanner-v2 \
@@ -106,7 +106,7 @@ gcloud spanner instances create clypt-spanner-v2 \
 
 gcloud spanner databases create clypt-graph-db-v2 \
   --instance=clypt-spanner-v2 \
-  --ddl-file=spannerSchema.sql
+  --ddl-file=backend/spanner_schema.sql
 ```
 
 If database exists and schema changed:
@@ -114,14 +114,14 @@ If database exists and schema changed:
 ```bash
 gcloud spanner databases ddl update clypt-graph-db-v2 \
   --instance=clypt-spanner-v2 \
-  --ddl-file=spannerSchema.sql
+  --ddl-file=backend/spanner_schema.sql
 ```
 
 ## Deploy Modal Worker
 
 ```bash
 source .venv/bin/activate
-.venv/bin/modal deploy modal_worker.py
+.venv/bin/modal deploy backend/modal_worker.py
 ```
 
 ## Run with a Video URL
@@ -134,14 +134,14 @@ CLYPT_DISTRIBUTED_MODAL_FANOUT=1 \
 CLYPT_DISTRIBUTED_DETACH=1 \
 CLYPT_DISTRIBUTED_RESUME=1 \
 CLYPT_MAX_GPU_WORKERS=8 \
-.venv/bin/python -c "import asyncio; from pipeline.phase_1_modal_pipeline import main; asyncio.run(main('https://www.youtube.com/watch?v=dXUFsDcC0_4'))"
+.venv/bin/python -c "import asyncio; from backend.pipeline.phase_1_modal_pipeline import main; asyncio.run(main('https://www.youtube.com/watch?v=dXUFsDcC0_4'))"
 ```
 
 This will:
 - download source media locally
 - upload canonical source video to `gs://clypt-storage-v2/phase_1/video.mp4`
 - run Modal extraction
-- write `outputs/phase_1_visual.json`, `outputs/phase_1_audio.json`, and `outputs/phase_1_visual.ndjson`
+- write `backend/outputs/phase_1_visual.json`, `backend/outputs/phase_1_audio.json`, and `backend/outputs/phase_1_visual.ndjson`
 
 ### Option B: Run full pipeline (all phases + render)
 
@@ -149,7 +149,7 @@ Interactive:
 
 ```bash
 source .venv/bin/activate
-.venv/bin/python pipeline/run_pipeline.py
+.venv/bin/python backend/pipeline/run_pipeline.py
 ```
 
 Then paste a YouTube URL when prompted.
@@ -157,20 +157,20 @@ Then paste a YouTube URL when prompted.
 Non-interactive:
 
 ```bash
-printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python pipeline/run_pipeline.py
+printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python backend/pipeline/run_pipeline.py
 ```
 
 ## Important Runtime Flags
 
-### Phase 1 client flags (`pipeline/phase_1_modal_pipeline.py`)
+### Phase 1 client flags (`backend/pipeline/phase_1_modal_pipeline.py`)
 - `CLYPT_DISTRIBUTED_MODAL_FANOUT` (`1`/`0`): distributed chunk fan-out mode
 - `CLYPT_DISTRIBUTED_DETACH` (`1`/`0`): submit jobs detached and collect later
-- `CLYPT_DISTRIBUTED_RESUME` (`1`/`0`): resume from `outputs/phase_1_detached_state.json`
+- `CLYPT_DISTRIBUTED_RESUME` (`1`/`0`): resume from `backend/outputs/phase_1_detached_state.json`
 - `CLYPT_MAX_GPU_WORKERS` (default `8`, capped to `8`)
 - `GCS_BUCKET` (default `clypt-storage-v2`)
 - `GCS_VIDEO_OBJECT` (default `phase_1/video.mp4`)
 
-### Worker flags (`modal_worker.py`)
+### Worker flags (`backend/modal_worker.py`)
 - `CLYPT_YOLO_IMGSZ` (default `640`)
 - `CLYPT_ENABLE_ROI_DETECT` (`1`/`0`)
 - `CLYPT_TRACK_CHUNK_WORKERS` (local thread workers inside one container)
@@ -186,31 +186,31 @@ printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python p
 ## Expected Outputs
 
 ### Core artifacts
-- `downloads/video.mp4`
-- `downloads/audio_16k.wav`
-- `outputs/phase_1_visual.json`
-- `outputs/phase_1_audio.json`
-- `outputs/phase_1_visual.ndjson`
-- `outputs/phase_2a_nodes.json`
-- `outputs/phase_2b_narrative_edges.json`
-- `outputs/phase_3_embeddings.json`
-- `outputs/remotion_payloads_array.json`
+- `backend/downloads/video.mp4`
+- `backend/downloads/audio_16k.wav`
+- `backend/outputs/phase_1_visual.json`
+- `backend/outputs/phase_1_audio.json`
+- `backend/outputs/phase_1_visual.ndjson`
+- `backend/outputs/phase_2a_nodes.json`
+- `backend/outputs/phase_2b_narrative_edges.json`
+- `backend/outputs/phase_3_embeddings.json`
+- `backend/outputs/remotion_payloads_array.json`
 
 ### Rendered clips
-- `clypt-render-engine/out/`
+- `remotion-render/out/`
 
 ## Script Map
 
 | Phase | Script |
 |---|---|
-| 1 | `pipeline/phase_1_modal_pipeline.py` |
-| 2A | `pipeline/phase_2a_make_nodes.py` |
-| 2B | `pipeline/phase_2b_draw_edges.py` |
-| 3 | `pipeline/phase_3_multimodal_embeddings.py` |
-| 4 | `pipeline/phase_4_store_graph.py` |
-| 5 (auto-curate) | `pipeline/phase_5_auto_curate.py` |
-| 5 (retrieve) | `pipeline/phase_5_retrieve.py` |
-| full orchestrator | `pipeline/run_pipeline.py` |
+| 1 | `backend/pipeline/phase_1_modal_pipeline.py` |
+| 2A | `backend/pipeline/phase_2a_make_nodes.py` |
+| 2B | `backend/pipeline/phase_2b_draw_edges.py` |
+| 3 | `backend/pipeline/phase_3_multimodal_embeddings.py` |
+| 4 | `backend/pipeline/phase_4_store_graph.py` |
+| 5 (auto-curate) | `backend/pipeline/phase_5_auto_curate.py` |
+| 5 (retrieve) | `backend/pipeline/phase_5_retrieve.py` |
+| full orchestrator | `backend/pipeline/run_pipeline.py` |
 
 ## Metadata Defaults in Code
 
@@ -221,7 +221,7 @@ printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python p
 
 ## Planning References
 
-- `planning/01-product-and-demo.md`
-- `planning/02-system-architecture.md`
-- `planning/03-agents-and-clipping.md`
-- `planning/04-data-integrations-and-reference.md`
+- `docs/planning/01-product-and-demo.md`
+- `docs/planning/02-system-architecture.md`
+- `docs/planning/03-agents-and-clipping.md`
+- `docs/planning/04-data-integrations-and-reference.md`

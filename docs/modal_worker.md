@@ -280,13 +280,13 @@ Rollout gates:
 
 ```bash
 source .venv/bin/activate
-.venv/bin/modal deploy modal_worker.py
+.venv/bin/modal deploy backend/modal_worker.py
 ```
 
 ---
 
 ## Notes for Teammates
 
-- This worker expects media bytes from local pipeline code (`pipeline/phase_1_modal_pipeline.py`), not direct YouTube access from Modal.
+- This worker expects media bytes from local pipeline code (`backend/pipeline/phase_1_modal_pipeline.py`), not direct YouTube access from Modal.
 - The recommended production path is distributed fan-out from the client with up to 8 GPU workers.
 - Staged chunk artifacts live under `/vol/clypt-chunks/jobs/<job_id>` and should be cleaned with `cleanup_tracking_job`.

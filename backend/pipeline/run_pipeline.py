@@ -24,7 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PIPELINE_DIR = ROOT / "pipeline"
-RENDER_DIR = ROOT / "clypt-render-engine"
+RENDER_DIR = ROOT.parent / "remotion-render"
 DOWNLOADS_DIR = ROOT / "downloads"
 OUTPUTS_DIR = ROOT / "outputs"
 FFMPEG_REENCODE_CRF = os.getenv("FFMPEG_REENCODE_CRF", "15")

@@ -35,10 +35,10 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 
 ### How It Runs
 1. User provides a YouTube URL.
-2. `pipeline/phase_1_modal_pipeline.py` sends the URL to the Modal webhook and receives extraction JSON.
+2. `backend/pipeline/phase_1_modal_pipeline.py` sends the URL to the Modal webhook and receives extraction JSON.
 3. Pipeline continues through Phase 2A -> 2B -> 3 -> 4 -> 5.
 4. Auto-curation outputs clip payloads.
-5. Remotion renders 9:16 clips into `clypt-render-engine/out/`.
+5. Remotion renders 9:16 clips into `remotion-render/out/`.
 
 ### What to Show in Demo
 1. **Modal extraction output** proving deterministic grounding from SOTA models.
