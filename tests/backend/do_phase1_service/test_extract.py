@@ -80,3 +80,26 @@ def test_host_lock_rejects_second_extraction_attempt(tmp_path: Path):
         with pytest.raises(HostExtractionBusyError, match="already running"):
             with host_extraction_lock(lock_path):
                 pass
+
+
+def test_busy_host_guard_triggers_before_download_work(tmp_path: Path, monkeypatch):
+    lock_path = tmp_path / "extract.lock"
+    download_calls = []
+
+    def fake_download_media(_url):
+        download_calls.append("download")
+        raise AssertionError("download_media should not run while host is busy")
+
+    monkeypatch.setattr("backend.do_phase1_service.extract.download_media", fake_download_media)
+
+    with host_extraction_lock(lock_path):
+        with pytest.raises(HostExtractionBusyError):
+            run_extraction_job(
+                source_url="https://youtube.com/watch?v=x",
+                job_id="job_123",
+                output_dir=tmp_path,
+                storage=FakeStorage(),
+                host_lock_path=lock_path,
+            )
+
+    assert download_calls == []

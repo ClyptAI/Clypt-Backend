@@ -6,9 +6,6 @@ from backend.do_phase1_service.models import JobCreatePayload, JobRecord
 from backend.do_phase1_service.state_store import SQLiteJobStore
 
 
-DEFAULT_MAX_ATTEMPTS = 3
-
-
 def create_job(store: SQLiteJobStore, payload: JobCreatePayload) -> JobRecord:
     now = datetime.now(UTC)
     record = JobRecord(source_url=payload.source_url, status="queued", created_at=now, updated_at=now)

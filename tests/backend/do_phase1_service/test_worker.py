@@ -48,7 +48,7 @@ class DummyResult:
                 "runtime": {"provider": "digitalocean", "worker_id": "worker-1", "region": None},
                 "timings": {"ingest_ms": 1, "processing_ms": 1, "upload_ms": 1},
                 "quality_metrics": {"schema_pass_rate": 1.0, "transcript_coverage": 1.0, "tracking_confidence": 1.0},
-                "retry": {"attempts": 1, "max_attempts": 3, "last_error": None},
+                "retry": None,
                 "failure": None,
             },
             "manifest_uri": self.manifest_uri,

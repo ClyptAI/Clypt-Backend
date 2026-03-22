@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 
 from backend.do_phase1_service.state_store import SQLiteJobStore
 
@@ -41,6 +42,47 @@ def test_claim_next_job_does_not_reclaim_running_job(tmp_path: Path):
     store = SQLiteJobStore(tmp_path / "jobs.db")
     store.save_job(job_id="job_123", source_url="https://youtube.com/watch?v=x", status="running", retries=1)
 
-    claim = store.claim_next_job(stale_after_seconds=0)
+    claim = store.claim_next_job(stale_after_seconds=60)
 
     assert claim is None
+
+
+def test_active_heartbeat_prevents_running_job_reclaim(tmp_path: Path):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    started_at = datetime.now(UTC) - timedelta(minutes=10)
+    old_updated_at = datetime.now(UTC) - timedelta(minutes=5)
+    store.save_job(
+        job_id="job_123",
+        source_url="https://youtube.com/watch?v=x",
+        status="running",
+        retries=1,
+        started_at=started_at,
+        updated_at=old_updated_at,
+    )
+
+    heartbeat = store.heartbeat_job("job_123")
+    claim = store.claim_next_job(stale_after_seconds=60)
+
+    assert heartbeat is not None
+    assert claim is None
+
+
+def test_stale_running_job_is_reclaimable(tmp_path: Path):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    old_updated_at = datetime.now(UTC) - timedelta(hours=2)
+    started_at = datetime.now(UTC) - timedelta(hours=2)
+    store.save_job(
+        job_id="job_123",
+        source_url="https://youtube.com/watch?v=x",
+        status="running",
+        retries=1,
+        started_at=started_at,
+        updated_at=old_updated_at,
+    )
+
+    claim = store.claim_next_job(stale_after_seconds=60)
+
+    assert claim is not None
+    assert claim.job_id == "job_123"
+    assert claim.status == "running"
+    assert claim.retries == 2

@@ -48,15 +48,14 @@ def run_extraction_job(
     output_dir: str | Path,
     storage: StorageBackend | None = None,
     host_lock_path: str | Path | None = None,
-    attempt_count: int | None = None,
 ) -> PersistedPhase1Manifest:
     storage = storage or GCSStorage()
     output_dir = Path(output_dir)
     job_output_dir = output_dir / job_id
     job_output_dir.mkdir(parents=True, exist_ok=True)
 
-    video_path, audio_path = download_media(source_url)
     with host_extraction_lock(host_lock_path or DEFAULT_HOST_LOCK_PATH):
+        video_path, audio_path = download_media(source_url)
         modal_result = execute_local_extraction(
             video_path=video_path,
             audio_path=audio_path,
@@ -84,7 +83,6 @@ def run_extraction_job(
         canonical_video_uri=canonical_video_uri,
         phase_1_audio=phase_1_audio,
         phase_1_visual=phase_1_visual,
-        attempt_count=attempt_count,
     )
 
 

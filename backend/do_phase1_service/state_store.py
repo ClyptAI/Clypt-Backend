@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from backend.do_phase1_service.models import JobRecord
@@ -46,16 +46,18 @@ class SQLiteJobStore:
 
     def claim_next_job(self, *, stale_after_seconds: int = 1800) -> JobRecord | None:
         now = datetime.now(UTC)
-        _ = stale_after_seconds
+        stale_before = now - timedelta(seconds=stale_after_seconds)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
                 SELECT * FROM jobs
                 WHERE status = 'queued'
-                ORDER BY created_at ASC
+                   OR (status = 'running' AND updated_at <= ?)
+                ORDER BY CASE WHEN status = 'queued' THEN 0 ELSE 1 END, created_at ASC
                 LIMIT 1
                 """,
+                (stale_before.isoformat(),),
             ).fetchone()
             if row is None:
                 connection.commit()
@@ -127,6 +129,22 @@ class SQLiteJobStore:
                 ),
             )
         return self.get_job(job_id)
+
+    def heartbeat_job(self, job_id: str) -> JobRecord | None:
+        now = datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET updated_at = ?
+                WHERE job_id = ? AND status = 'running'
+                """,
+                (now.isoformat(), job_id),
+            )
+            if connection.total_changes == 0:
+                return None
+            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        return self._row_to_job(row) if row else None
 
     def get_job(self, job_id: str) -> JobRecord | None:
         with self._connect() as connection:

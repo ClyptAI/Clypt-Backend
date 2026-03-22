@@ -13,7 +13,6 @@ def test_manifest_uses_durable_storage_uris(tmp_path: Path):
         job_id="job_123",
         source_url="https://youtube.com/watch?v=x",
         canonical_video_uri=canonical_video_uri,
-        attempt_count=2,
         phase_1_audio={
             "source_audio": "https://youtube.com/watch?v=x",
             "words": [],
@@ -41,5 +40,4 @@ def test_manifest_uses_durable_storage_uris(tmp_path: Path):
     assert manifest.artifacts.visual_tracking.uri.startswith("gs://")
     assert manifest.canonical_video_gcs_uri == canonical_video_uri
     assert manifest.canonical_video_gcs_uri.endswith("/phase_1/jobs/job_123/source_video.mp4")
-    assert manifest.metadata.retry.attempts == 2
-    assert manifest.metadata.retry.max_attempts is None
+    assert manifest.metadata.retry is None

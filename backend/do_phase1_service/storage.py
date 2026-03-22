@@ -59,7 +59,6 @@ def persist_phase1_outputs(
     canonical_video_uri: str,
     phase_1_audio: dict,
     phase_1_visual: dict,
-    attempt_count: int | None = None,
 ) -> PersistedPhase1Manifest:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -117,13 +116,7 @@ def persist_phase1_outputs(
                 "transcript_coverage": 1.0 if phase_1_audio.get("words") is not None else 0.0,
                 "tracking_confidence": float(phase_1_visual.get("tracking_metrics", {}).get("schema_pass_rate", 1.0)),
             },
-            "retry": {
-                "attempts": attempt_count,
-                "max_attempts": None,
-                "last_error": None,
-            }
-            if attempt_count is not None
-            else None,
+            "retry": None,
             "failure": None,
         },
     }
