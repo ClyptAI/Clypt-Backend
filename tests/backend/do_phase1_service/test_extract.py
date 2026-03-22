@@ -191,6 +191,116 @@ def test_scale_detection_geometry_scales_spatial_fields_only():
     assert scaled["confidence"] == 0.9
 
 
+def test_speaker_binding_mode_forces_heuristic(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    calls = []
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "heuristic")
+    monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd"))
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding_heuristic",
+        lambda *args, **kwargs: calls.append("heuristic") or [{"track_id": "t1"}],
+    )
+
+    result = worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "t1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    )
+
+    assert result == [{"track_id": "t1"}]
+    assert calls == ["heuristic"]
+
+
+def test_speaker_binding_mode_auto_prefers_heuristic_for_large_long_video(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    calls = []
+
+    monkeypatch.delenv("CLYPT_SPEAKER_BINDING_MODE", raising=False)
+    monkeypatch.setattr(
+        worker,
+        "_probe_video_meta",
+        lambda path: {"width": 3840, "height": 2160, "duration_s": 392.0},
+    )
+    monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd"))
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding_heuristic",
+        lambda *args, **kwargs: calls.append("heuristic") or [{"track_id": "t1"}],
+    )
+
+    result = worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "t1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    )
+
+    assert result == [{"track_id": "t1"}]
+    assert calls == ["heuristic"]
+
+
+def test_speaker_binding_mode_auto_prefers_lrasd_for_small_short_video(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    calls = []
+
+    monkeypatch.delenv("CLYPT_SPEAKER_BINDING_MODE", raising=False)
+    monkeypatch.setattr(
+        worker,
+        "_probe_video_meta",
+        lambda path: {"width": 1280, "height": 720, "duration_s": 45.0},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_run_lrasd_binding",
+        lambda **kwargs: calls.append("lrasd") or [{"track_id": "t1"}],
+    )
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding_heuristic",
+        lambda *args, **kwargs: calls.append("heuristic") or [{"track_id": "t2"}],
+    )
+
+    result = worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "t1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    )
+
+    assert result == [{"track_id": "t1"}]
+    assert calls == ["lrasd"]
+
+
+def test_speaker_binding_mode_lrasd_still_falls_back_when_primary_returns_none(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    calls = []
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "lrasd")
+    monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd") or None)
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding_heuristic",
+        lambda *args, **kwargs: calls.append("heuristic") or [{"track_id": "fallback"}],
+    )
+
+    result = worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "t1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    )
+
+    assert result == [{"track_id": "fallback"}]
+    assert calls == ["lrasd", "heuristic"]
+
+
 def test_host_lock_serializes_second_extraction_attempt(tmp_path: Path):
     lock_path = tmp_path / "extract.lock"
     events = []

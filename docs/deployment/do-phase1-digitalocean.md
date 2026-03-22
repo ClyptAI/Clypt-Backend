@@ -72,6 +72,11 @@ sudo chmod 600 /etc/clypt-phase1/gcp-sa.json
 
 Recommended Phase 1 tuning for large creator videos:
 
+- `CLYPT_SPEAKER_BINDING_MODE=auto`
+- `CLYPT_SPEAKER_BINDING_AUTO_MAX_DURATION_S=180`
+- `CLYPT_SPEAKER_BINDING_AUTO_MAX_LONG_EDGE=1920`
+- `CLYPT_SPEAKER_BINDING_AUTO_MAX_WORDS=450`
+- `CLYPT_SPEAKER_BINDING_AUTO_MAX_TRACKS=12`
 - `CLYPT_SPEAKER_BINDING_PROXY_ENABLE=1`
 - `CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE=1280`
 - `CLYPT_ASD_PRECOMPUTED_FACE=1`
@@ -81,7 +86,9 @@ Recommended Phase 1 tuning for large creator videos:
 - `CLYPT_LRASD_PIPELINE_OVERLAP=1`
 - `CLYPT_LRASD_MAX_INFLIGHT=4`
 
-The speaker-binding proxy keeps LR-ASD off full-resolution 4K frames while
+`CLYPT_SPEAKER_BINDING_MODE=auto` keeps a fast heuristic path for large or
+long clips, while still using LR-ASD by default on smaller videos. The
+speaker-binding proxy keeps LR-ASD off full-resolution 4K frames while
 preserving the original video for tracking and downstream artifacts.
 
 ## Deploy the Service

@@ -1389,6 +1389,57 @@ class ClyptWorker:
         )
         return proxy_path, scale_x, scale_y
 
+    def _select_speaker_binding_mode(
+        self,
+        video_path: str,
+        tracks: list[dict],
+        words: list[dict],
+    ) -> str:
+        """Choose the speaker-binding path for this clip."""
+        requested_mode = os.getenv("CLYPT_SPEAKER_BINDING_MODE", "auto").strip().lower()
+        if requested_mode in {"heuristic", "lrasd"}:
+            return requested_mode
+        if requested_mode not in {"", "auto"}:
+            print(
+                f"  Warning: unknown CLYPT_SPEAKER_BINDING_MODE={requested_mode!r}; "
+                "falling back to auto"
+            )
+
+        meta = self._probe_video_meta(video_path)
+        width = int(meta.get("width", 0) or 0)
+        height = int(meta.get("height", 0) or 0)
+        duration_s = float(meta.get("duration_s", 0.0) or 0.0)
+        long_edge = max(width, height)
+
+        auto_max_duration_s = float(
+            os.getenv("CLYPT_SPEAKER_BINDING_AUTO_MAX_DURATION_S", "180")
+        )
+        auto_max_long_edge = int(
+            os.getenv("CLYPT_SPEAKER_BINDING_AUTO_MAX_LONG_EDGE", "1920")
+        )
+        auto_max_words = int(os.getenv("CLYPT_SPEAKER_BINDING_AUTO_MAX_WORDS", "450"))
+        auto_max_tracks = int(os.getenv("CLYPT_SPEAKER_BINDING_AUTO_MAX_TRACKS", "12"))
+
+        if (
+            (duration_s > auto_max_duration_s and long_edge > auto_max_long_edge)
+            or duration_s > (auto_max_duration_s * 1.5)
+            or len(words) > auto_max_words
+            or len(tracks) > auto_max_tracks
+        ):
+            print(
+                "  Speaker binding mode=heuristic (auto): "
+                f"duration_s={duration_s:.1f}, long_edge={long_edge}, "
+                f"tracks={len(tracks)}, words={len(words)}"
+            )
+            return "heuristic"
+
+        print(
+            "  Speaker binding mode=lrasd (auto): "
+            f"duration_s={duration_s:.1f}, long_edge={long_edge}, "
+            f"tracks={len(tracks)}, words={len(words)}"
+        )
+        return "lrasd"
+
     @staticmethod
     def _probe_video_meta(video_path: str) -> dict:
         """Return fps/size/frame_count metadata for a local video."""
@@ -3809,16 +3860,18 @@ class ClyptWorker:
         track_to_dets: dict[str, list[dict]] | None = None,
     ) -> list[dict]:
         """Bind words to track IDs using LR-ASD, with heuristic fallback."""
-        bindings = self._run_lrasd_binding(
-            video_path=video_path,
-            audio_wav_path=audio_wav_path,
-            tracks=tracks,
-            words=words,
-            frame_to_dets=frame_to_dets,
-            track_to_dets=track_to_dets,
-        )
-        if bindings is not None:
-            return bindings
+        mode = self._select_speaker_binding_mode(video_path, tracks, words)
+        if mode == "lrasd":
+            bindings = self._run_lrasd_binding(
+                video_path=video_path,
+                audio_wav_path=audio_wav_path,
+                tracks=tracks,
+                words=words,
+                frame_to_dets=frame_to_dets,
+                track_to_dets=track_to_dets,
+            )
+            if bindings is not None:
+                return bindings
 
         print("Running fallback speaker binding heuristic...")
         return self._run_speaker_binding_heuristic(
