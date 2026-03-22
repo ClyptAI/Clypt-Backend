@@ -58,8 +58,18 @@ class DummyResult:
 def test_worker_promotes_job_through_lifecycle(tmp_path: Path, monkeypatch):
     store = SQLiteJobStore(tmp_path / "jobs.db")
     enqueue_job(store, job_id="job_123", payload={"source_url": "https://youtube.com/watch?v=x"})
-    monkeypatch.setattr("backend.do_phase1_service.worker.run_extraction_job", lambda **kwargs: DummyResult())
+    observed_statuses = []
+
+    def fake_run_extraction_job(**kwargs):
+        observed_statuses.append(store.get_job(kwargs["job_id"]).status)
+        return DummyResult()
+
+    monkeypatch.setattr("backend.do_phase1_service.worker.run_extraction_job", fake_run_extraction_job)
 
     run_worker_once(store, output_root=tmp_path)
 
-    assert store.get_job("job_123").status in {"running", "succeeded"}
+    assert observed_statuses == ["running"]
+    job = store.get_job("job_123")
+    assert job is not None
+    assert job.status == "succeeded"
+    assert job.manifest_uri == "gs://bucket/manifests/job_123.json"

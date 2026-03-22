@@ -27,7 +27,7 @@ def test_extract_job_produces_manifest_and_artifacts(tmp_path: Path, monkeypatch
         lambda url: (str(video_path), str(audio_path)),
     )
     monkeypatch.setattr(
-        "backend.do_phase1_service.extract.call_modal_worker",
+        "backend.do_phase1_service.extract.execute_local_extraction",
         lambda video_path, audio_path, youtube_url: {
             "status": "success",
             "phase_1_visual": {

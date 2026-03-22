@@ -10,8 +10,9 @@ from backend.do_phase1_service.state_store import SQLiteJobStore
 from backend.do_phase1_service.storage import GCSStorage, StorageBackend
 
 
-DEFAULT_DB_PATH = Path(os.getenv("DO_PHASE1_DB_PATH", "backend/do_phase1_service/jobs.db"))
-DEFAULT_OUTPUT_ROOT = Path(os.getenv("DO_PHASE1_OUTPUT_ROOT", "backend/do_phase1_service/workdir"))
+DEFAULT_STATE_ROOT = Path(os.getenv("DO_PHASE1_STATE_ROOT", "/var/lib/clypt/do_phase1_service"))
+DEFAULT_DB_PATH = Path(os.getenv("DO_PHASE1_DB_PATH", str(DEFAULT_STATE_ROOT / "jobs.db")))
+DEFAULT_OUTPUT_ROOT = Path(os.getenv("DO_PHASE1_OUTPUT_ROOT", str(DEFAULT_STATE_ROOT / "workdir")))
 
 
 def run_worker_once(
