@@ -38,7 +38,9 @@ doctl compute droplet create clypt-phase1-gpu-1 \
 
 ## Bootstrap the Droplet
 
-SSH in, clone the repo to `/opt/clypt-phase1/repo`, then run:
+SSH in and get the repo contents onto the droplet at `/opt/clypt-phase1/repo`.
+If the GitHub repo is private, `rsync`/`scp` from a local checkout is fine.
+Then run:
 
 ```bash
 sudo bash scripts/do_phase1/bootstrap_gpu_droplet.sh
@@ -76,8 +78,23 @@ Run on the droplet from the repo checkout:
 sudo REPO_DIR=/opt/clypt-phase1/repo \
   BRANCH=codex/balanced-hybrid-phase1-contract \
   ENV_FILE=/etc/clypt-phase1/do-phase1.env \
+  REQUIREMENTS_FILE=requirements-do-phase1.txt \
   bash scripts/do_phase1/deploy_phase1_service.sh
 ```
+
+If you synced a plain working tree instead of a full `.git` checkout, add:
+
+```bash
+sudo SKIP_GIT_SYNC=1 \
+  REPO_DIR=/opt/clypt-phase1/repo \
+  ENV_FILE=/etc/clypt-phase1/do-phase1.env \
+  REQUIREMENTS_FILE=requirements-do-phase1.txt \
+  bash scripts/do_phase1/deploy_phase1_service.sh
+```
+
+The deploy script now installs the dedicated Phase 1 droplet dependency set
+from `requirements-do-phase1.txt` and pre-caches the ASR / YOLO / LR-ASD /
+InsightFace assets expected by `backend/modal_worker.py`.
 
 ## Point the Local Pipeline at DO
 

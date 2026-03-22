@@ -41,9 +41,6 @@ def run_worker_once(
     heartbeat_stop = threading.Event()
     heartbeat_thread: threading.Thread | None = None
     try:
-        failed_step = "storage_init"
-        storage = storage or GCSStorage()
-
         heartbeat_thread = _start_heartbeat_thread(
             store,
             job.job_id,
@@ -51,6 +48,9 @@ def run_worker_once(
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             stop_event=heartbeat_stop,
         )
+
+        failed_step = "storage_init"
+        storage = storage or GCSStorage()
 
         failed_step = "extraction"
         manifest = run_extraction_job(

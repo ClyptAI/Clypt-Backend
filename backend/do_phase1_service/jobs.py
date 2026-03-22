@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from backend.do_phase1_service.models import JobCreatePayload, JobRecord
@@ -98,3 +98,4 @@ def _require_job(store: SQLiteJobStore, job_id: str) -> JobRecord:
     if job is None:
         raise KeyError(f"unknown job_id: {job_id}")
     return job
+UTC = timezone.utc

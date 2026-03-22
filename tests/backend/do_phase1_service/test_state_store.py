@@ -1,5 +1,7 @@
 from pathlib import Path
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+UTC = timezone.utc
 
 from backend.do_phase1_service.state_store import SQLiteJobStore
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -263,3 +263,4 @@ class SQLiteJobStore:
             started_at=datetime.fromisoformat(row["started_at"]) if row["started_at"] else None,
             completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
         )
+UTC = timezone.utc
