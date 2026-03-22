@@ -1296,6 +1296,36 @@ class ClyptWorker:
         return video_path
 
     @staticmethod
+    def _tracking_chunk_workers() -> int:
+        try:
+            requested = int(os.getenv("CLYPT_TRACK_CHUNK_WORKERS", "1"))
+        except Exception:
+            requested = 1
+        return max(1, min(3, requested))
+
+    def _get_tracking_model(self):
+        model = getattr(self, "_shared_tracking_model", None)
+        if model is not None:
+            return model
+
+        model = getattr(self, "yolo_model", None)
+        if model is not None:
+            self._shared_tracking_model = model
+            return model
+
+        model = self._build_tracking_model()
+        self._shared_tracking_model = model
+        self.yolo_model = model
+        return model
+
+    @staticmethod
+    def _build_tracking_model():
+        from ultralytics import YOLO
+
+        model_path = YOLO_ENGINE_PATH if os.path.exists(YOLO_ENGINE_PATH) else YOLO_WEIGHTS_PATH
+        return YOLO(model_path)
+
+    @staticmethod
     def _scale_detection_geometry(det: dict, scale_x: float, scale_y: float) -> dict:
         if abs(scale_x - 1.0) < 1e-6 and abs(scale_y - 1.0) < 1e-6:
             return det
@@ -1884,13 +1914,13 @@ class ClyptWorker:
         chunk: dict,
         tracker_cfg: str,
         chunk_dir: str,
+        model=None,
     ) -> dict:
         """Track one chunk independently and emit per-chunk NDJSON."""
         import json
         import os
         import subprocess
         import time
-        from ultralytics import YOLO
 
         fps = float(meta["fps"])
         width = int(meta["width"])
@@ -1920,8 +1950,8 @@ class ClyptWorker:
             stderr_msg = ffmpeg_result.stderr.decode(errors='replace')
             raise RuntimeError(f"ffmpeg chunk failed (exit {ffmpeg_result.returncode}): {stderr_msg}")
 
-        model_path = YOLO_ENGINE_PATH if os.path.exists(YOLO_ENGINE_PATH) else YOLO_WEIGHTS_PATH
-        model = YOLO(model_path)
+        if model is None:
+            model = self._build_tracking_model()
         # QA fidelity mode: keep chunk tracking dense so downstream camera-follow
         # uses detector-driven boxes instead of propagated/ROI-refined boxes.
         stride = 1
@@ -2276,7 +2306,8 @@ class ClyptWorker:
                     pass
 
         started = time.time()
-        workers = max(1, min(3, int(os.getenv("CLYPT_TRACK_CHUNK_WORKERS", "2"))))
+        workers = self._tracking_chunk_workers()
+        shared_model = self._get_tracking_model() if workers == 1 else None
         results = []
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = [
@@ -2287,6 +2318,7 @@ class ClyptWorker:
                     chunk,
                     tracker_cfg,
                     chunk_dir,
+                    shared_model,
                 )
                 for chunk in chunks
             ]

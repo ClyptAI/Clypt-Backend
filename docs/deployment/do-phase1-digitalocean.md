@@ -77,6 +77,7 @@ Recommended Phase 1 tuning for large creator videos:
 - `CLYPT_SPEAKER_BINDING_AUTO_MAX_LONG_EDGE=1920`
 - `CLYPT_SPEAKER_BINDING_AUTO_MAX_WORDS=450`
 - `CLYPT_SPEAKER_BINDING_AUTO_MAX_TRACKS=12`
+- `CLYPT_TRACK_CHUNK_WORKERS=1`
 - `CLYPT_SPEAKER_BINDING_PROXY_ENABLE=1`
 - `CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE=1280`
 - `CLYPT_ASD_PRECOMPUTED_FACE=1`
@@ -90,6 +91,9 @@ Recommended Phase 1 tuning for large creator videos:
 long clips, while still using LR-ASD by default on smaller videos. The
 speaker-binding proxy keeps LR-ASD off full-resolution 4K frames while
 preserving the original video for tracking and downstream artifacts.
+`CLYPT_TRACK_CHUNK_WORKERS=1` is the safest default on a single GPU droplet:
+it reuses the loaded YOLO model and avoids concurrent GPU tracker calls that
+can destabilize long runs.
 
 ## Deploy the Service
 

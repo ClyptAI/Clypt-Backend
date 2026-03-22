@@ -301,6 +301,35 @@ def test_speaker_binding_mode_lrasd_still_falls_back_when_primary_returns_none(m
     assert calls == ["lrasd", "heuristic"]
 
 
+def test_tracking_chunk_workers_default_to_one(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_TRACK_CHUNK_WORKERS", raising=False)
+
+    assert worker._tracking_chunk_workers() == 1
+
+
+def test_tracking_chunk_workers_honor_env_and_clamp(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_TRACK_CHUNK_WORKERS", "3")
+    assert worker._tracking_chunk_workers() == 3
+
+    monkeypatch.setenv("CLYPT_TRACK_CHUNK_WORKERS", "0")
+    assert worker._tracking_chunk_workers() == 1
+
+
+def test_get_tracking_model_reuses_loaded_yolo_model():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    sentinel = object()
+    worker.yolo_model = sentinel
+
+    assert worker._get_tracking_model() is sentinel
+
+
 def test_host_lock_serializes_second_extraction_attempt(tmp_path: Path):
     lock_path = tmp_path / "extract.lock"
     events = []
