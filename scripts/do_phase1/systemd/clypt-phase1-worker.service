@@ -6,8 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/clypt-phase1/repo
-EnvironmentFile=/etc/clypt-phase1/do-phase1.env
-ExecStart=/opt/clypt-phase1/repo/.venv/bin/python -m backend.do_phase1_service.worker
+ExecStart=/opt/clypt-phase1/repo/scripts/do_phase1/run_worker_service.sh
 Restart=always
 RestartSec=5
 
