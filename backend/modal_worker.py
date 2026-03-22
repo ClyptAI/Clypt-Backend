@@ -1,20 +1,90 @@
 """
-Clypt Phase 1 — Modal GPU Worker
-=================================
-Serverless GPU microservice that performs deterministic multimodal extraction:
+Clypt Phase 1 extraction worker definitions.
 
-  1. NVIDIA Parakeet-TDT → word-level ASR with timestamps + punctuation
-  2. YOLOv26 + BoT-SORT  → dense person tracking with persistent IDs
-  3. LR-ASD              → active speaker binding (audio-visual sync)
-
-Media is downloaded locally by the calling pipeline and sent to this worker
-as raw bytes. This avoids YouTube bot detection on datacenter IPs.
-
-Deployed via: modal deploy modal_worker.py
-Test via:     modal serve modal_worker.py  (hot-reload dev mode)
+When the Modal SDK is available, this module also exposes the original Modal
+deployment wrappers. When it is not available, the pure Python extraction code
+can still be imported and reused by the DigitalOcean worker path.
 """
 
-import modal
+import os
+
+try:
+    if os.getenv("CLYPT_ENABLE_MODAL_SDK", "0") != "1":
+        raise ImportError("Modal SDK disabled for non-Modal runtimes")
+    import modal  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - exercised implicitly by DO runtime import
+    class _ShimMethod:
+        def __init__(self, fn):
+            self._fn = fn
+
+        def __get__(self, instance, owner):
+            if instance is None:
+                return self
+            return self._fn.__get__(instance, owner)
+
+        def _get_raw_f(self):
+            return self._fn
+
+    def _shim_method(*_args, **_kwargs):
+        def _decorator(fn):
+            return _ShimMethod(fn)
+        return _decorator
+
+    class _ShimVolume:
+        @staticmethod
+        def from_name(*_args, **_kwargs):
+            return _ShimVolume()
+
+        def commit(self):
+            return None
+
+        def reload(self):
+            return None
+
+    class _ShimSecret:
+        @staticmethod
+        def from_dict(*_args, **_kwargs):
+            return _ShimSecret()
+
+    class _ShimImage:
+        @staticmethod
+        def debian_slim(*_args, **_kwargs):
+            return _ShimImage()
+
+        def apt_install(self, *_args, **_kwargs):
+            return self
+
+        def pip_install(self, *_args, **_kwargs):
+            return self
+
+        def run_function(self, *_args, **_kwargs):
+            return self
+
+    class _ShimApp:
+        def __init__(self, name: str):
+            self.name = name
+
+        def cls(self, **_kwargs):
+            def _decorator(cls):
+                cls._get_user_cls = classmethod(lambda klass: klass)
+                return cls
+            return _decorator
+
+    class _ShimCls:
+        @staticmethod
+        def from_name(*_args, **_kwargs):
+            raise RuntimeError("Modal remote class lookup is unavailable without the Modal SDK")
+
+    class _ShimModal:
+        App = _ShimApp
+        Volume = _ShimVolume
+        Secret = _ShimSecret
+        Image = _ShimImage
+        Cls = _ShimCls
+        method = staticmethod(_shim_method)
+        enter = staticmethod(_shim_method)
+
+    modal = _ShimModal()
 
 # ──────────────────────────────────────────────
 # App + Image

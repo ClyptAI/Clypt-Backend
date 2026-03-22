@@ -63,7 +63,7 @@ def run_extraction_job(
         phase_1_visual = modal_result.get("phase_1_visual") or modal_result.get("phase_1a_visual")
         phase_1_audio = modal_result.get("phase_1_audio") or modal_result.get("phase_1a_audio")
         if phase_1_visual is None or phase_1_audio is None:
-            raise RuntimeError("modal worker did not return phase_1_visual and phase_1_audio")
+            raise RuntimeError("phase 1 extraction did not return phase_1_visual and phase_1_audio")
 
         canonical_video_uri = storage.upload_file(video_path, f"phase_1/jobs/{job_id}/source_video.mp4")
         phase_1_visual = enrich_visual_ledger_for_downstream(phase_1_visual, phase_1_audio, video_path)
