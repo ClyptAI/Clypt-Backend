@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from backend.do_phase1_service.jobs import create_job, enqueue_job, mark_failed, mark_running, mark_succeeded
 from backend.do_phase1_service.models import JobCreatePayload
 from backend.do_phase1_service.state_store import SQLiteJobStore
@@ -37,16 +39,20 @@ def test_job_lifecycle_updates_status_and_manifest(tmp_path: Path):
     assert succeeded.manifest == manifest
     assert succeeded.manifest_uri == "gs://bucket/job.json"
 
-    rerun = mark_running(store, created.job_id)
+    created2 = create_job(store, payload)
+    rerun = mark_running(store, created2.job_id)
     failed = mark_failed(
         store,
-        created.job_id,
+        created2.job_id,
         claim_token=rerun.claim_token,
         error_type="RuntimeError",
         error_message="boom",
     )
     assert failed.status == "failed"
     assert failed.failure["error_type"] == "RuntimeError"
+
+    with pytest.raises(ValueError, match="cannot mark job .* running from status succeeded"):
+        mark_running(store, created.job_id)
 
 
 def test_enqueue_job_persists_specific_job_id(tmp_path: Path):

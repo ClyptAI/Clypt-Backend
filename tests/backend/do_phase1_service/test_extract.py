@@ -97,6 +97,8 @@ def test_host_lock_covers_download_and_waits_before_second_download(tmp_path: Pa
     lock_path = tmp_path / "extract.lock"
     order = []
     download_allowed = threading.Event()
+    uploaded_bytes = {}
+    enriched_bytes = {}
 
     def fake_download_media(url):
         order.append(f"download:{url}")
@@ -104,7 +106,7 @@ def test_host_lock_covers_download_and_waits_before_second_download(tmp_path: Pa
             download_allowed.wait(timeout=2.0)
         video_path = tmp_path / f"{url.rsplit('=', 1)[-1]}.mp4"
         audio_path = tmp_path / f"{url.rsplit('=', 1)[-1]}.wav"
-        video_path.write_bytes(b"video")
+        video_path.write_bytes(url.encode("utf-8"))
         audio_path.write_bytes(b"audio")
         return str(video_path), str(audio_path)
 
@@ -137,7 +139,16 @@ def test_host_lock_covers_download_and_waits_before_second_download(tmp_path: Pa
 
     monkeypatch.setattr("backend.do_phase1_service.extract.download_media", fake_download_media)
     monkeypatch.setattr("backend.do_phase1_service.extract.execute_local_extraction", fake_execute_local_extraction)
-    monkeypatch.setattr("backend.do_phase1_service.extract.enrich_visual_ledger_for_downstream", lambda phase_1_visual, phase_1_audio, video_path: phase_1_visual)
+    class InspectingStorage(FakeStorage):
+        def upload_file(self, source_path, object_name: str) -> str:
+            uploaded_bytes[object_name] = Path(source_path).read_bytes()
+            return super().upload_file(source_path, object_name)
+
+    def fake_enrich_visual_ledger_for_downstream(phase_1_visual, phase_1_audio, video_path):
+        enriched_bytes[str(video_path)] = Path(video_path).read_bytes()
+        return phase_1_visual
+
+    monkeypatch.setattr("backend.do_phase1_service.extract.enrich_visual_ledger_for_downstream", fake_enrich_visual_ledger_for_downstream)
     monkeypatch.setattr("backend.do_phase1_service.extract.validate_phase_handoff", lambda visual_ledger, audio_ledger: None)
 
     first_done = []
@@ -147,7 +158,7 @@ def test_host_lock_covers_download_and_waits_before_second_download(tmp_path: Pa
             source_url="https://youtube.com/watch?v=first",
             job_id="job_first",
             output_dir=tmp_path,
-            storage=FakeStorage(),
+            storage=InspectingStorage(),
             host_lock_path=lock_path,
         )
         first_done.append(result.job_id)
@@ -161,7 +172,7 @@ def test_host_lock_covers_download_and_waits_before_second_download(tmp_path: Pa
             source_url="https://youtube.com/watch?v=second",
             job_id="job_second",
             output_dir=tmp_path,
-            storage=FakeStorage(),
+            storage=InspectingStorage(),
             host_lock_path=lock_path,
         )
     )
@@ -180,3 +191,7 @@ def test_host_lock_covers_download_and_waits_before_second_download(tmp_path: Pa
         "download:https://youtube.com/watch?v=second",
         "extract:https://youtube.com/watch?v=second",
     ]
+    assert uploaded_bytes["phase_1/jobs/job_first/source_video.mp4"] == b"https://youtube.com/watch?v=first"
+    assert uploaded_bytes["phase_1/jobs/job_second/source_video.mp4"] == b"https://youtube.com/watch?v=second"
+    assert enriched_bytes[str(tmp_path / "first.mp4")] == b"https://youtube.com/watch?v=first"
+    assert enriched_bytes[str(tmp_path / "second.mp4")] == b"https://youtube.com/watch?v=second"

@@ -40,6 +40,8 @@ def get_job(store: SQLiteJobStore, job_id: str) -> JobRecord | None:
 
 def mark_running(store: SQLiteJobStore, job_id: str) -> JobRecord:
     job = _require_job(store, job_id)
+    if job.status != "queued":
+        raise ValueError(f"cannot mark job {job_id} running from status {job.status}")
     now = datetime.now(UTC)
     return store.save_job(
         job_id=job.job_id,

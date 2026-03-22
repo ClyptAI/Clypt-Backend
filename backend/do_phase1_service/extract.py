@@ -57,29 +57,31 @@ def run_extraction_job(
             audio_path=audio_path,
             youtube_url=source_url,
         )
-    if modal_result.get("status") != "success":
-        raise RuntimeError(modal_result.get("message", "phase 1 extraction failed"))
+        if modal_result.get("status") != "success":
+            raise RuntimeError(modal_result.get("message", "phase 1 extraction failed"))
 
-    phase_1_visual = modal_result.get("phase_1_visual") or modal_result.get("phase_1a_visual")
-    phase_1_audio = modal_result.get("phase_1_audio") or modal_result.get("phase_1a_audio")
-    if phase_1_visual is None or phase_1_audio is None:
-        raise RuntimeError("modal worker did not return phase_1_visual and phase_1_audio")
+        phase_1_visual = modal_result.get("phase_1_visual") or modal_result.get("phase_1a_visual")
+        phase_1_audio = modal_result.get("phase_1_audio") or modal_result.get("phase_1a_audio")
+        if phase_1_visual is None or phase_1_audio is None:
+            raise RuntimeError("modal worker did not return phase_1_visual and phase_1_audio")
 
-    canonical_video_uri = storage.upload_file(video_path, f"phase_1/jobs/{job_id}/source_video.mp4")
-    phase_1_visual = enrich_visual_ledger_for_downstream(phase_1_visual, phase_1_audio, video_path)
-    phase_1_visual["video_gcs_uri"] = canonical_video_uri
-    phase_1_audio["video_gcs_uri"] = canonical_video_uri
-    validate_phase_handoff(phase_1_visual, phase_1_audio)
+        canonical_video_uri = storage.upload_file(video_path, f"phase_1/jobs/{job_id}/source_video.mp4")
+        phase_1_visual = enrich_visual_ledger_for_downstream(phase_1_visual, phase_1_audio, video_path)
+        phase_1_visual["video_gcs_uri"] = canonical_video_uri
+        phase_1_audio["video_gcs_uri"] = canonical_video_uri
+        validate_phase_handoff(phase_1_visual, phase_1_audio)
 
-    return persist_phase1_outputs(
-        storage=storage,
-        output_dir=job_output_dir,
-        job_id=job_id,
-        source_url=source_url,
-        canonical_video_uri=canonical_video_uri,
-        phase_1_audio=phase_1_audio,
-        phase_1_visual=phase_1_visual,
-    )
+        manifest = persist_phase1_outputs(
+            storage=storage,
+            output_dir=job_output_dir,
+            job_id=job_id,
+            source_url=source_url,
+            canonical_video_uri=canonical_video_uri,
+            phase_1_audio=phase_1_audio,
+            phase_1_visual=phase_1_visual,
+        )
+
+    return manifest
 
 
 def execute_local_extraction(*, video_path: str, audio_path: str, youtube_url: str) -> dict:
