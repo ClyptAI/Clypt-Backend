@@ -67,7 +67,7 @@ def persist_phase1_outputs(
     visual_uri = _upload_json(storage, phase_1_visual, f"phase_1/jobs/{job_id}/phase_1_visual.json")
 
     manifest_payload = {
-        "contract_version": "v1",
+        "contract_version": "v2",
         "job_id": job_id,
         "status": "succeeded",
         "source_video": {"source_url": source_url},

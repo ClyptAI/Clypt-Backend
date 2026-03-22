@@ -11,7 +11,7 @@ class DummyResult:
 
     def model_dump(self, mode: str = "python"):
         return {
-            "contract_version": "v1",
+            "contract_version": "v2",
             "job_id": "job_123",
             "status": "succeeded",
             "source_video": {"source_url": "https://youtube.com/watch?v=x"},

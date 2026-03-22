@@ -84,7 +84,7 @@ from backend.pipeline.phase1_contract import Phase1Manifest, JobState
 def test_manifest_requires_contract_version_and_job_state():
     manifest = Phase1Manifest.model_validate(
         {
-            "contract_version": "v1",
+            "contract_version": "v2",
             "job_id": "job_123",
             "status": JobState.SUCCEEDED,
             "source_video": {"source_url": "https://youtube.com/watch?v=x"},
@@ -95,7 +95,7 @@ def test_manifest_requires_contract_version_and_job_state():
             "metadata": {"runtime": {"provider": "digitalocean"}, "timings": {}},
         }
     )
-    assert manifest.contract_version == "v1"
+    assert manifest.contract_version == "v2"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**

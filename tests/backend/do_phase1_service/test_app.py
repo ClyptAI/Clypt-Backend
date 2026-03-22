@@ -54,7 +54,7 @@ def test_get_job_result_returns_409_until_success(tmp_path: Path):
 def test_get_job_result_returns_manifest_on_success(tmp_path: Path):
     store = SQLiteJobStore(tmp_path / "jobs.db")
     manifest = {
-        "contract_version": "v1",
+        "contract_version": "v2",
         "job_id": "job_123",
         "status": "succeeded",
         "source_video": {"source_url": "https://youtube.com/watch?v=x"},
@@ -91,7 +91,7 @@ def test_get_job_result_returns_manifest_on_success(tmp_path: Path):
             "runtime": {"provider": "digitalocean", "worker_id": "worker-1", "region": None},
             "timings": {"ingest_ms": 1, "processing_ms": 1, "upload_ms": 1},
             "quality_metrics": {"schema_pass_rate": 1.0, "transcript_coverage": 1.0, "tracking_confidence": 1.0},
-            "retry": {"attempts": 1, "max_attempts": 3, "last_error": None},
+            "retry": None,
             "failure": None,
         },
     }

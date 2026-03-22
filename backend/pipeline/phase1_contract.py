@@ -273,7 +273,7 @@ class Phase1Metadata(BaseModel):
 class Phase1Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["v1"]
+    contract_version: Literal["v2"]
     job_id: str
     status: JobState
     source_video: Phase1SourceVideo

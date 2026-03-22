@@ -8,7 +8,7 @@ from backend.pipeline.phase1_contract import JobState, Phase1Manifest
 
 def _legacy_manifest_payload() -> dict:
     return {
-        "contract_version": "v1",
+        "contract_version": "v2",
         "job_id": "job_123",
         "status": JobState.SUCCEEDED,
         "source_video": {"source_url": "https://youtube.com/watch?v=RgOz31Gaibw"},
@@ -157,7 +157,7 @@ def _legacy_manifest_payload() -> dict:
 def test_manifest_accepts_realistic_legacy_payload_shape():
     manifest = Phase1Manifest.model_validate(_legacy_manifest_payload())
 
-    assert manifest.contract_version == "v1"
+    assert manifest.contract_version == "v2"
     assert manifest.canonical_video_gcs_uri == "gs://clypt-storage-v2/phase_1/video.mp4"
     assert manifest.artifacts.transcript.speaker_bindings[0].track_id == "Global_Person_0"
     assert manifest.artifacts.transcript.words[0].word == "foundational"
@@ -170,7 +170,7 @@ def test_manifest_accepts_realistic_legacy_payload_shape():
     [
         (lambda payload: payload["artifacts"]["transcript"].pop("speaker_bindings"), "speaker_bindings"),
         (lambda payload: payload["artifacts"]["visual_tracking"].pop("tracks"), "tracks"),
-        (lambda payload: payload.__setitem__("contract_version", "v2"), "v1"),
+        (lambda payload: payload.__setitem__("contract_version", "v1"), "v2"),
         (
             lambda payload: payload.__setitem__("canonical_video_gcs_uri", "https://example.com/video.mp4"),
             "gs://",
