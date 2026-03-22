@@ -1325,6 +1325,17 @@ class ClyptWorker:
         model_path = YOLO_ENGINE_PATH if os.path.exists(YOLO_ENGINE_PATH) else YOLO_WEIGHTS_PATH
         return YOLO(model_path)
 
+    def _select_tracking_mode(self) -> str:
+        requested_mode = os.getenv("CLYPT_TRACKING_MODE", "auto").strip().lower()
+        if requested_mode in {"direct", "chunked"}:
+            return requested_mode
+        if requested_mode not in {"", "auto"}:
+            print(
+                f"  Warning: unknown CLYPT_TRACKING_MODE={requested_mode!r}; "
+                "falling back to auto"
+            )
+        return "direct" if self._tracking_chunk_workers() == 1 else "chunked"
+
     @staticmethod
     def _scale_detection_geometry(det: dict, scale_x: float, scale_y: float) -> dict:
         if abs(scale_x - 1.0) < 1e-6 and abs(scale_y - 1.0) < 1e-6:
@@ -2079,6 +2090,202 @@ class ClyptWorker:
             "ndjson_path": ndjson_path,
         }
 
+    def _run_tracking_direct(self, video_path: str) -> tuple[list[dict], dict]:
+        """Run YOLO + BoT-SORT as a single full-video stream."""
+        import time
+
+        print("Running YOLO26s + BoT-SORT direct tracking inference...")
+        video_path = self._ensure_h264(video_path)
+        meta = self._probe_video_meta(video_path)
+        fps = float(meta["fps"])
+        total_frames = int(meta["total_frames"])
+        width = int(meta["width"])
+        height = int(meta["height"])
+        if total_frames <= 0:
+            print("  Warning: no frames found in video")
+            return [], {}
+
+        infer_imgsz = max(320, int(os.getenv("CLYPT_YOLO_IMGSZ", "640")))
+        tracker_cfg = self._ensure_botsort_reid_yaml()
+        model = self._get_tracking_model()
+        lb_meta = self._compute_letterbox_meta(width, height, infer_imgsz, infer_imgsz)
+        started = time.time()
+        log_every_n_frames = 600
+
+        results = model.track(
+            source=video_path,
+            tracker=tracker_cfg,
+            persist=True,
+            classes=[0],
+            stream=True,
+            verbose=False,
+            vid_stride=1,
+            imgsz=infer_imgsz,
+        )
+
+        tracks = []
+        n_boxes = 0
+        for frame_idx, r in enumerate(results, start=1):
+            if r.boxes is None or r.boxes.id is None:
+                continue
+
+            boxes_xyxy = r.boxes.xyxy.cpu().numpy()
+            ids = r.boxes.id.cpu().numpy().astype(int)
+            confs = r.boxes.conf.cpu().numpy()
+            obb_polys = None
+            if getattr(r, "obb", None) is not None and getattr(r.obb, "xyxyxyxy", None) is not None:
+                try:
+                    obb_polys = r.obb.xyxyxyxy.cpu().numpy()
+                except Exception:
+                    obb_polys = None
+
+            for i, (xyxy, tid_raw, conf) in enumerate(zip(boxes_xyxy, ids, confs)):
+                x1, y1, x2, y2 = [float(v) for v in xyxy]
+                xcn, ycn, wn, hn = self._xyxy_abs_to_xywhn(x1, y1, x2, y2, width, height)
+                x1, y1, x2, y2 = self._xywhn_to_xyxy_abs(xcn, ycn, wn, hn, width, height)
+                lx1, ly1, lx2, ly2 = self._forward_letterbox_xyxy(x1, y1, x2, y2, lb_meta)
+                x1, y1, x2, y2 = self._inverse_letterbox_xyxy(lx1, ly1, lx2, ly2, lb_meta)
+                x1 = min(max(0.0, x1), float(max(0, width - 1)))
+                y1 = min(max(0.0, y1), float(max(0, height - 1)))
+                x2 = min(max(x1 + 1.0, x2), float(max(1, width)))
+                y2 = min(max(y1 + 1.0, y2), float(max(1, height)))
+                cx, cy, bw, bh = self._xyxy_to_xywh(x1, y1, x2, y2)
+                out = {
+                    "frame_idx": int(frame_idx - 1),
+                    "track_id": f"track_{int(tid_raw)}",
+                    "local_track_id": int(tid_raw),
+                    "class_id": 0,
+                    "label": "person",
+                    "confidence": float(conf),
+                    "x1": float(x1),
+                    "y1": float(y1),
+                    "x2": float(x2),
+                    "y2": float(y2),
+                    "x_center": float(cx),
+                    "y_center": float(cy),
+                    "width": float(bw),
+                    "height": float(bh),
+                    "source": "detector",
+                    "geometry_type": "aabb",
+                    "bbox_norm_xywh": {
+                        "x_center": float(xcn),
+                        "y_center": float(ycn),
+                        "width": float(wn),
+                        "height": float(hn),
+                    },
+                }
+                if obb_polys is not None and i < len(obb_polys):
+                    pts = obb_polys[i].reshape(-1, 2).tolist()
+                    out["geometry_type"] = "obb"
+                    out["polygon"] = [[float(px), float(py)] for px, py in pts]
+                tracks.append(out)
+                n_boxes += 1
+
+            if frame_idx % log_every_n_frames == 0:
+                elapsed = max(1e-6, time.time() - started)
+                fps_eff = frame_idx / elapsed
+                pct = (100.0 * frame_idx) / max(1, total_frames)
+                print(
+                    "  YOLO progress: "
+                    f"{frame_idx}/{total_frames} frames ({pct:.1f}%), "
+                    f"{n_boxes} boxes, {fps_eff:.1f} fps"
+                )
+
+        elapsed = max(1e-6, time.time() - started)
+        eff_fps = float(total_frames / elapsed)
+        metrics = {
+            "tracking_mode": "direct",
+            "tracking_wallclock_s": float(elapsed),
+            "throughput_fps": float(eff_fps),
+            "schema_pass_rate": 1.0,
+            "track_fragmentation_rate": float(
+                len({str(t.get("track_id")) for t in tracks}) / max(1.0, len(tracks) ** 0.5)
+            ),
+        }
+        print(
+            "Tracking complete: "
+            f"{len(tracks)} boxes across {total_frames} frames, "
+            f"{eff_fps:.1f} effective fps"
+        )
+        return tracks, metrics
+
+    def _run_tracking_chunked(self, video_path: str) -> tuple[list[dict], dict]:
+        """Run chunked YOLO + BoT-SORT tracking with stitching."""
+        import os
+        import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        print("Running YOLO26s + BoT-SORT (ReID/GMC) chunked tracking inference...")
+        video_path = self._ensure_h264(video_path)
+        meta = self._probe_video_meta(video_path)
+        fps = float(meta["fps"])
+        total_frames = int(meta["total_frames"])
+        if total_frames <= 0:
+            print("  Warning: no frames found in video")
+            return [], {}
+
+        chunks = self._build_chunk_plan(total_frames, fps)
+        tracker_cfg = self._ensure_botsort_reid_yaml()
+        chunk_dir = "/vol/clypt-chunks"
+        os.makedirs(chunk_dir, exist_ok=True)
+        for f in os.listdir(chunk_dir):
+            if f.endswith(".mp4") or f.endswith(".ndjson"):
+                try:
+                    os.remove(os.path.join(chunk_dir, f))
+                except Exception:
+                    pass
+
+        started = time.time()
+        workers = self._tracking_chunk_workers()
+        shared_model = self._get_tracking_model() if workers == 1 else None
+        results = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [
+                pool.submit(
+                    self._track_single_chunk,
+                    video_path,
+                    meta,
+                    chunk,
+                    tracker_cfg,
+                    chunk_dir,
+                    shared_model,
+                )
+                for chunk in chunks
+            ]
+            for i, fut in enumerate(as_completed(futs), start=1):
+                res = fut.result()
+                results.append(res)
+                pct = (100.0 * i) / max(1, len(chunks))
+                print(f"  Chunk progress: {i}/{len(chunks)} ({pct:.1f}%)")
+
+        try:
+            TRACKING_VOLUME.commit()
+            TRACKING_VOLUME.reload()
+        except Exception:
+            pass
+
+        stitched, metrics = self._stitch_chunk_tracks(results, fps=fps)
+        elapsed = max(1e-6, time.time() - started)
+        eff_fps = float(total_frames / elapsed)
+        if isinstance(metrics, dict):
+            metrics["tracking_mode"] = "chunked"
+            metrics["tracking_wallclock_s"] = float(elapsed)
+            metrics["throughput_fps"] = float(eff_fps)
+            metrics["schema_pass_rate"] = 1.0
+        print(
+            "Tracking complete: "
+            f"{len(stitched)} boxes across {total_frames} frames, "
+            f"{eff_fps:.1f} effective fps"
+        )
+        if metrics:
+            print(
+                "  Stitch quality: "
+                f"idf1_proxy={metrics.get('idf1_proxy', 0.0):.3f}, "
+                f"mota_proxy={metrics.get('mota_proxy', 0.0):.3f}, "
+                f"fragmentation={metrics.get('track_fragmentation_rate', 0.0):.3f}"
+            )
+        return stitched, metrics
+
     def _stitch_chunk_tracks(self, chunk_results: list[dict], fps: float) -> tuple[list[dict], dict]:
         """Stitch chunk-local IDs into global IDs using overlap IoU + embeddings."""
         import numpy as np
@@ -2280,81 +2487,12 @@ class ClyptWorker:
         return unified, metrics
 
     def _run_tracking(self, video_path: str) -> tuple[list[dict], dict]:
-        """Run chunked YOLO26+BoT-SORT tracking with overlap stitching."""
-        import os
-        import time
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        print("Running YOLO26s + BoT-SORT (ReID/GMC) chunked tracking inference...")
-        video_path = self._ensure_h264(video_path)
-        meta = self._probe_video_meta(video_path)
-        fps = float(meta["fps"])
-        total_frames = int(meta["total_frames"])
-        if total_frames <= 0:
-            print("  Warning: no frames found in video")
-            return [], {}
-
-        chunks = self._build_chunk_plan(total_frames, fps)
-        tracker_cfg = self._ensure_botsort_reid_yaml()
-        chunk_dir = "/vol/clypt-chunks"
-        os.makedirs(chunk_dir, exist_ok=True)
-        for f in os.listdir(chunk_dir):
-            if f.endswith(".mp4") or f.endswith(".ndjson"):
-                try:
-                    os.remove(os.path.join(chunk_dir, f))
-                except Exception:
-                    pass
-
-        started = time.time()
-        workers = self._tracking_chunk_workers()
-        shared_model = self._get_tracking_model() if workers == 1 else None
-        results = []
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [
-                pool.submit(
-                    self._track_single_chunk,
-                    video_path,
-                    meta,
-                    chunk,
-                    tracker_cfg,
-                    chunk_dir,
-                    shared_model,
-                )
-                for chunk in chunks
-            ]
-            for i, fut in enumerate(as_completed(futs), start=1):
-                res = fut.result()
-                results.append(res)
-                pct = (100.0 * i) / max(1, len(chunks))
-                print(f"  Chunk progress: {i}/{len(chunks)} ({pct:.1f}%)")
-
-        # Producer -> consumer state sync for distributed volume semantics.
-        try:
-            TRACKING_VOLUME.commit()
-            TRACKING_VOLUME.reload()
-        except Exception:
-            pass
-
-        stitched, metrics = self._stitch_chunk_tracks(results, fps=fps)
-        elapsed = max(1e-6, time.time() - started)
-        eff_fps = float(total_frames / elapsed)
-        if isinstance(metrics, dict):
-            metrics["tracking_wallclock_s"] = float(elapsed)
-            metrics["throughput_fps"] = float(eff_fps)
-            metrics["schema_pass_rate"] = 1.0
-        print(
-            "Tracking complete: "
-            f"{len(stitched)} boxes across {total_frames} frames, "
-            f"{eff_fps:.1f} effective fps"
-        )
-        if metrics:
-            print(
-                "  Stitch quality: "
-                f"idf1_proxy={metrics.get('idf1_proxy', 0.0):.3f}, "
-                f"mota_proxy={metrics.get('mota_proxy', 0.0):.3f}, "
-                f"fragmentation={metrics.get('track_fragmentation_rate', 0.0):.3f}"
-            )
-        return stitched, metrics
+        """Run tracking using either direct or chunked execution."""
+        mode = self._select_tracking_mode()
+        print(f"Tracking mode={mode}")
+        if mode == "direct":
+            return self._run_tracking_direct(video_path)
+        return self._run_tracking_chunked(video_path)
 
     # ──────────────────────────────────────────
     # Global tracklet clustering (InsightFace + DBSCAN)

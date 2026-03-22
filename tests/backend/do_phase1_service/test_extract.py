@@ -330,6 +330,50 @@ def test_get_tracking_model_reuses_loaded_yolo_model():
     assert worker._get_tracking_model() is sentinel
 
 
+def test_tracking_mode_auto_prefers_direct_with_single_worker(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_TRACKING_MODE", raising=False)
+    monkeypatch.setattr(worker, "_tracking_chunk_workers", lambda: 1)
+
+    assert worker._select_tracking_mode() == "direct"
+
+
+def test_tracking_mode_auto_prefers_chunked_with_multiple_workers(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_TRACKING_MODE", raising=False)
+    monkeypatch.setattr(worker, "_tracking_chunk_workers", lambda: 2)
+
+    assert worker._select_tracking_mode() == "chunked"
+
+
+def test_run_tracking_uses_direct_mode(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    calls = []
+
+    monkeypatch.setattr(worker, "_select_tracking_mode", lambda: "direct")
+    monkeypatch.setattr(
+        worker,
+        "_run_tracking_direct",
+        lambda video_path: calls.append(("direct", video_path)) or ([{"track_id": "t1"}], {"tracking_mode": "direct"}),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_run_tracking_chunked",
+        lambda video_path: calls.append(("chunked", video_path)) or ([{"track_id": "t2"}], {"tracking_mode": "chunked"}),
+    )
+
+    tracks, metrics = worker._run_tracking("video.mp4")
+
+    assert tracks == [{"track_id": "t1"}]
+    assert metrics == {"tracking_mode": "direct"}
+    assert calls == [("direct", "video.mp4")]
+
+
 def test_host_lock_serializes_second_extraction_attempt(tmp_path: Path):
     lock_path = tmp_path / "extract.lock"
     events = []
