@@ -1,0 +1,15 @@
+[Unit]
+Description=Clypt Phase 1 DigitalOcean Worker
+After=network-online.target clypt-phase1-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase1/repo
+EnvironmentFile=/etc/clypt-phase1/do-phase1.env
+ExecStart=/opt/clypt-phase1/repo/.venv/bin/python -m backend.do_phase1_service.worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
