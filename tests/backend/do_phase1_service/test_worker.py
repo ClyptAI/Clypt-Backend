@@ -1,0 +1,65 @@
+from pathlib import Path
+
+from backend.do_phase1_service.jobs import enqueue_job
+from backend.do_phase1_service.state_store import SQLiteJobStore
+from backend.do_phase1_service.worker import run_worker_once
+
+
+class DummyResult:
+    status = "succeeded"
+    manifest_uri = "gs://bucket/manifests/job_123.json"
+
+    def model_dump(self, mode: str = "python"):
+        return {
+            "contract_version": "v1",
+            "job_id": "job_123",
+            "status": "succeeded",
+            "source_video": {"source_url": "https://youtube.com/watch?v=x"},
+            "canonical_video_gcs_uri": "gs://bucket/phase_1/video.mp4",
+            "artifacts": {
+                "transcript": {
+                    "uri": "gs://bucket/transcript.json",
+                    "source_audio": "https://youtube.com/watch?v=x",
+                    "video_gcs_uri": "gs://bucket/phase_1/video.mp4",
+                    "words": [],
+                    "speaker_bindings": [],
+                },
+                "visual_tracking": {
+                    "uri": "gs://bucket/visual.json",
+                    "source_video": "https://youtube.com/watch?v=x",
+                    "video_gcs_uri": "gs://bucket/phase_1/video.mp4",
+                    "schema_version": "2.0.0",
+                    "task_type": "person_tracking",
+                    "coordinate_space": "absolute_original_frame_xyxy",
+                    "geometry_type": "aabb",
+                    "class_taxonomy": {"0": "person"},
+                    "tracking_metrics": {"schema_pass_rate": 1.0},
+                    "tracks": [],
+                    "face_detections": [],
+                    "person_detections": [],
+                    "label_detections": [],
+                    "object_tracking": [],
+                    "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+                    "video_metadata": {"width": 1920, "height": 1080, "fps": 30.0, "duration_ms": 1000},
+                },
+                "events": None,
+            },
+            "metadata": {
+                "runtime": {"provider": "digitalocean", "worker_id": "worker-1", "region": None},
+                "timings": {"ingest_ms": 1, "processing_ms": 1, "upload_ms": 1},
+                "quality_metrics": {"schema_pass_rate": 1.0, "transcript_coverage": 1.0, "tracking_confidence": 1.0},
+                "retry": {"attempts": 1, "max_attempts": 3, "last_error": None},
+                "failure": None,
+            },
+            "manifest_uri": self.manifest_uri,
+        }
+
+
+def test_worker_promotes_job_through_lifecycle(tmp_path: Path, monkeypatch):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    enqueue_job(store, job_id="job_123", payload={"source_url": "https://youtube.com/watch?v=x"})
+    monkeypatch.setattr("backend.do_phase1_service.worker.run_extraction_job", lambda **kwargs: DummyResult())
+
+    run_worker_once(store, output_root=tmp_path)
+
+    assert store.get_job("job_123").status in {"running", "succeeded"}
