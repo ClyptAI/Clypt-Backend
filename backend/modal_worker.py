@@ -7,6 +7,8 @@ can still be imported and reused by the DigitalOcean worker path.
 """
 
 import os
+import subprocess
+import time
 
 try:
     if os.getenv("CLYPT_ENABLE_MODAL_SDK", "0") != "1":
@@ -855,6 +857,8 @@ class ClyptWorker:
         fps: float,
         target_fps: float,
         relevant_frames: set[int] | None = None,
+        scale_x: float = 1.0,
+        scale_y: float = 1.0,
     ) -> dict[tuple[str, int], tuple[int, int, int, int, float, float]]:
         """Precompute per-track face boxes at sparse FPS and interpolate short gaps.
 
@@ -935,19 +939,20 @@ class ClyptWorker:
                     best_by_track[tid] = d
 
             for tid, d in best_by_track.items():
-                conf = float(d.get("confidence", 0.0))
+                d_scaled = self._scale_detection_geometry(d, scale_x=scale_x, scale_y=scale_y)
+                conf = float(d_scaled.get("confidence", 0.0))
                 if conf < min_det_conf:
                     continue
-                area = float(d.get("width", 0.0)) * float(d.get("height", 0.0))
+                area = float(d_scaled.get("width", 0.0)) * float(d_scaled.get("height", 0.0))
                 if area < (min_area_ratio * frame_area):
                     continue
-                crop, anchor = self._detect_face_in_person_det(frame, d)
+                crop, anchor = self._detect_face_in_person_det(frame, d_scaled)
                 if crop is None or anchor is None:
                     continue
-                cx = float(d.get("x_center", 0.0))
-                cy = float(d.get("y_center", 0.0))
-                bw = float(d.get("width", 0.0))
-                bh = float(d.get("height", 0.0))
+                cx = float(d_scaled.get("x_center", 0.0))
+                cy = float(d_scaled.get("y_center", 0.0))
+                bw = float(d_scaled.get("width", 0.0))
+                bh = float(d_scaled.get("height", 0.0))
                 if bw <= 1e-6 or bh <= 1e-6:
                     continue
                 x1 = int(round(cx + float(anchor["x_offset"]) * bw))
@@ -1235,7 +1240,6 @@ class ClyptWorker:
     # ──────────────────────────────────────────
     def _ensure_h264(self, video_path: str) -> str:
         """Re-encode to H.264 if the video uses AV1 or another codec OpenCV can't decode."""
-        import subprocess, os
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name", "-of", "csv=p=0", video_path],
@@ -1290,6 +1294,100 @@ class ClyptWorker:
             print(f"  Re-encoded: {os.path.getsize(h264_path) / 1e6:.1f} MB")
             return h264_path
         return video_path
+
+    @staticmethod
+    def _scale_detection_geometry(det: dict, scale_x: float, scale_y: float) -> dict:
+        if abs(scale_x - 1.0) < 1e-6 and abs(scale_y - 1.0) < 1e-6:
+            return det
+        scaled = dict(det)
+        for key, scale in (
+            ("x_center", scale_x),
+            ("y_center", scale_y),
+            ("width", scale_x),
+            ("height", scale_y),
+        ):
+            if key in scaled:
+                scaled[key] = float(scaled[key]) * scale
+        return scaled
+
+    def _prepare_speaker_binding_video(self, video_path: str) -> tuple[str, float, float]:
+        """Create a lower-res proxy for speaker binding when the source is very large."""
+        if os.getenv("CLYPT_SPEAKER_BINDING_PROXY_ENABLE", "1") != "1":
+            return video_path, 1.0, 1.0
+
+        max_long_edge = max(0, int(os.getenv("CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE", "1280")))
+        if max_long_edge <= 0:
+            return video_path, 1.0, 1.0
+
+        meta = self._probe_video_meta(video_path)
+        width = int(meta.get("width", 0) or 0)
+        height = int(meta.get("height", 0) or 0)
+        long_edge = max(width, height)
+        if width <= 0 or height <= 0 or long_edge <= max_long_edge:
+            return video_path, 1.0, 1.0
+
+        proxy_path = video_path.replace(".mp4", "_speaker_proxy.mp4")
+        if not os.path.exists(proxy_path):
+            scale_expr = f"scale={max_long_edge}:-2" if width >= height else f"scale=-2:{max_long_edge}"
+            print(f"  Speaker-binding proxy: {width}x{height} -> long_edge {max_long_edge}px")
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        video_path,
+                        "-vf",
+                        scale_expr,
+                        "-c:v",
+                        "h264_nvenc",
+                        "-preset",
+                        "p4",
+                        "-cq",
+                        "23",
+                        "-an",
+                        proxy_path,
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        video_path,
+                        "-vf",
+                        scale_expr,
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "ultrafast",
+                        "-crf",
+                        "23",
+                        "-an",
+                        proxy_path,
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+        proxy_meta = self._probe_video_meta(proxy_path)
+        proxy_width = int(proxy_meta.get("width", 0) or 0)
+        proxy_height = int(proxy_meta.get("height", 0) or 0)
+        if proxy_width <= 0 or proxy_height <= 0:
+            return video_path, 1.0, 1.0
+
+        scale_x = proxy_width / max(1.0, float(width))
+        scale_y = proxy_height / max(1.0, float(height))
+        print(
+            "  Speaker-binding proxy ready: "
+            f"{proxy_width}x{proxy_height} (scale_x={scale_x:.3f}, scale_y={scale_y:.3f})"
+        )
+        return proxy_path, scale_x, scale_y
 
     @staticmethod
     def _probe_video_meta(video_path: str) -> dict:
@@ -2732,9 +2830,10 @@ class ClyptWorker:
 
         h264_path = video_path.replace(".mp4", "_h264.mp4")
         read_path = h264_path if os.path.exists(h264_path) else video_path
+        binding_video_path, binding_scale_x, binding_scale_y = self._prepare_speaker_binding_video(read_path)
 
         try:
-            vr = VideoReader(read_path, ctx=cpu(0))
+            vr = VideoReader(binding_video_path, ctx=cpu(0))
         except Exception as e:
             print(
                 "  Warning: could not open video for LR-ASD binding "
@@ -2783,12 +2882,14 @@ class ClyptWorker:
                 f"({len(_relevant_frames)} word-relevant frames)"
             )
             precomputed_face_boxes = self._build_sparse_face_box_map(
-                video_path=read_path,
+                video_path=binding_video_path,
                 frame_to_dets=frame_to_dets,
                 track_to_dets=track_to_dets,
                 fps=fps,
                 target_fps=sparse_face_fps,
                 relevant_frames=_relevant_frames if _relevant_frames else None,
+                scale_x=binding_scale_x,
+                scale_y=binding_scale_y,
             )
             needed = 0
             covered = 0
@@ -3154,6 +3255,11 @@ class ClyptWorker:
                             anchor = None
                             frame = None
                             if det is not None:
+                                det = self._scale_detection_geometry(
+                                    det,
+                                    scale_x=binding_scale_x,
+                                    scale_y=binding_scale_y,
+                                )
                                 frame = _get_frame(fi)
                                 crop, anchor = _face_crop(tid, fi, det)
 
@@ -3779,15 +3885,20 @@ class ClyptWorker:
 
         # Step 3: Global tracklet clustering
         print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
+        cluster_started_at = time.perf_counter()
         tracks = self._cluster_tracklets(
             video_path,
             tracks,
             track_to_dets=track_to_dets,
         )
+        cluster_elapsed_s = time.perf_counter() - cluster_started_at
+        metrics["cluster_tracklets_wallclock_s"] = round(cluster_elapsed_s, 3)
+        print(f"[Phase 1] Step 3/4 complete in {cluster_elapsed_s:.2f}s")
         frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
 
         # Step 4: Speaker binding
         print("[Phase 1] Step 4/4: Running speaker binding...")
+        speaker_binding_started_at = time.perf_counter()
         speaker_bindings = self._run_speaker_binding(
             video_path,
             audio_path,
@@ -3796,6 +3907,9 @@ class ClyptWorker:
             frame_to_dets=frame_to_dets,
             track_to_dets=track_to_dets,
         )
+        speaker_binding_elapsed_s = time.perf_counter() - speaker_binding_started_at
+        metrics["speaker_binding_wallclock_s"] = round(speaker_binding_elapsed_s, 3)
+        print(f"[Phase 1] Step 4/4 complete in {speaker_binding_elapsed_s:.2f}s")
         geometry_type = (
             "mixed"
             if any(str(t.get("geometry_type", "")) == "obb" for t in tracks)

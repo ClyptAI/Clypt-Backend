@@ -70,6 +70,20 @@ sudo chmod 600 /etc/clypt-phase1/gcp-sa.json
 - `GCS_BUCKET`
 - `GOOGLE_CLOUD_PROJECT`
 
+Recommended Phase 1 tuning for large creator videos:
+
+- `CLYPT_SPEAKER_BINDING_PROXY_ENABLE=1`
+- `CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE=1280`
+- `CLYPT_ASD_PRECOMPUTED_FACE=1`
+- `CLYPT_ASD_FACE_FPS=1.0`
+- `CLYPT_ASD_PRECOMPUTED_MIN_COVERAGE=0.80`
+- `CLYPT_LRASD_BATCH_SIZE=32`
+- `CLYPT_LRASD_PIPELINE_OVERLAP=1`
+- `CLYPT_LRASD_MAX_INFLIGHT=4`
+
+The speaker-binding proxy keeps LR-ASD off full-resolution 4K frames while
+preserving the original video for tracking and downstream artifacts.
+
 ## Deploy the Service
 
 Run on the droplet from the repo checkout:

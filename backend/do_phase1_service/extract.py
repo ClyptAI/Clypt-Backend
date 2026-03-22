@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import time
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -49,9 +50,11 @@ def run_extraction_job(
     output_dir = Path(output_dir)
     job_output_dir = output_dir / job_id
     job_output_dir.mkdir(parents=True, exist_ok=True)
+    ingest_started_at = time.perf_counter()
 
     with host_extraction_lock(host_lock_path or DEFAULT_HOST_LOCK_PATH):
         video_path, audio_path = download_media(source_url)
+        processing_started_at = time.perf_counter()
         modal_result = execute_local_extraction(
             video_path=video_path,
             audio_path=audio_path,
@@ -70,6 +73,7 @@ def run_extraction_job(
         phase_1_visual["video_gcs_uri"] = canonical_video_uri
         phase_1_audio["video_gcs_uri"] = canonical_video_uri
         validate_phase_handoff(phase_1_visual, phase_1_audio)
+        upload_started_at = time.perf_counter()
 
         manifest = persist_phase1_outputs(
             storage=storage,
@@ -79,6 +83,11 @@ def run_extraction_job(
             canonical_video_uri=canonical_video_uri,
             phase_1_audio=phase_1_audio,
             phase_1_visual=phase_1_visual,
+            timings={
+                "ingest_ms": int(round((processing_started_at - ingest_started_at) * 1000)),
+                "processing_ms": int(round((upload_started_at - processing_started_at) * 1000)),
+                "upload_ms": int(round((time.perf_counter() - upload_started_at) * 1000)),
+            },
         )
 
     return manifest

@@ -59,6 +59,7 @@ def persist_phase1_outputs(
     canonical_video_uri: str,
     phase_1_audio: dict,
     phase_1_visual: dict,
+    timings: dict[str, int] | None = None,
 ) -> PersistedPhase1Manifest:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -107,9 +108,9 @@ def persist_phase1_outputs(
                 "region": os.getenv("DO_REGION"),
             },
             "timings": {
-                "ingest_ms": 0,
-                "processing_ms": 0,
-                "upload_ms": 0,
+                "ingest_ms": int((timings or {}).get("ingest_ms", 0)),
+                "processing_ms": int((timings or {}).get("processing_ms", 0)),
+                "upload_ms": int((timings or {}).get("upload_ms", 0)),
             },
             "quality_metrics": {
                 "schema_pass_rate": float(phase_1_visual.get("tracking_metrics", {}).get("schema_pass_rate", 1.0)),
