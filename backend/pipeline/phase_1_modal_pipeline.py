@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Phase 1: Modal Deterministic Extraction
-===================================
-Downloads video + audio locally via yt-dlp, converts audio to 16kHz mono WAV,
-then sends both to the Modal GPU worker for extraction (ASR, tracking, speaker
-binding). Writes the returned ledgers to outputs/.
+Phase 1: DigitalOcean async job orchestration
+=============================================
+Submits the source URL to the DO Phase 1 service, polls until the job completes,
+then materializes the returned manifest artifacts into the legacy local files
+that downstream phases still consume.
 
 Outputs:
-  - downloads/video.mp4           (muxed video for downstream use + Remotion)
-  - outputs/phase_1_visual.json  (tracking data from Modal worker)
-  - outputs/phase_1_audio.json   (word-level transcript from Modal worker)
+  - downloads/video.mp4           (compatibility bridge for downstream + Remotion)
+  - outputs/phase_1_visual.json   (tracking data derived from the manifest)
+  - outputs/phase_1_audio.json    (transcript data derived from the manifest)
 """
 
 import asyncio
@@ -20,10 +20,10 @@ import subprocess
 import time
 from pathlib import Path
 
-import modal
-from modal.functions import FunctionCall
 import yt_dlp
-from google.cloud import storage
+
+from backend.pipeline.do_phase1_client import DOPhase1Client
+from backend.pipeline.phase1_contract import JobState, Phase1Manifest
 
 # ──────────────────────────────────────────────
 # Configuration
@@ -42,10 +42,10 @@ ALLOW_LOW_RES_VIDEO = os.getenv("ALLOW_LOW_RES_VIDEO", "0") == "1"
 ROOT = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = ROOT / "downloads"
 OUTPUT_DIR = ROOT / "outputs"
-GCS_BUCKET = os.getenv("GCS_BUCKET", "clypt-storage-v2")
-GCS_VIDEO_OBJECT = os.getenv("GCS_VIDEO_OBJECT", "phase_1/video.mp4")
 PHASE1_NDJSON_PATH = OUTPUT_DIR / "phase_1_visual.ndjson"
 DETACHED_STATE_PATH = OUTPUT_DIR / "phase_1_detached_state.json"
+DEFAULT_DO_PHASE1_POLL_INTERVAL_SECONDS = 10.0
+DEFAULT_DO_PHASE1_TIMEOUT_SECONDS = 60.0 * 30.0
 
 # ──────────────────────────────────────────────
 # Logging
@@ -137,7 +137,7 @@ def probe_video_codec(video_path: str) -> str:
 
 
 def ensure_h264_local(video_path: str) -> str:
-    """Prefer local H.264 so Modal can skip AV1/VP9 re-encode latency."""
+    """Prefer local H.264 so downstream Remotion/video tooling stays fast."""
     codec = probe_video_codec(video_path)
     log.info(f"Video codec detected: {codec}")
 
@@ -147,7 +147,7 @@ def ensure_h264_local(video_path: str) -> str:
         return video_path
 
     h264_path = str(DOWNLOAD_DIR / "video_h264.mp4")
-    log.info(f"Re-encoding local video {codec} -> h264 for faster Modal processing…")
+    log.info(f"Re-encoding local video {codec} -> h264 for downstream compatibility…")
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", video_path,
@@ -166,17 +166,6 @@ def ensure_h264_local(video_path: str) -> str:
         f"({Path(h264_path).stat().st_size / 1e6:.1f} MB)"
     )
     return h264_path
-
-
-def upload_video_to_gcs(video_path: str) -> str:
-    """Upload local video to the canonical GCS URI required by downstream phases."""
-    client = storage.Client()
-    bucket = client.bucket(GCS_BUCKET)
-    blob = bucket.blob(GCS_VIDEO_OBJECT)
-    blob.upload_from_filename(video_path)
-    uri = f"gs://{GCS_BUCKET}/{GCS_VIDEO_OBJECT}"
-    log.info(f"Uploaded source video → {uri}")
-    return uri
 
 
 def _build_shot_changes(duration_ms: int, window_ms: int = 10000) -> list[dict]:
@@ -356,14 +345,92 @@ def save_detached_state(payload: dict):
     OUTPUT_DIR.mkdir(exist_ok=True)
     with open(DETACHED_STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-    log.info(f"Detached fan-out state saved → {DETACHED_STATE_PATH}")
+    log.info(f"Detached Phase 1 state saved → {DETACHED_STATE_PATH}")
 
 
 def load_detached_state() -> dict | None:
     if not DETACHED_STATE_PATH.exists():
         return None
-    with open(DETACHED_STATE_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(DETACHED_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        log.warning(f"Detached state at {DETACHED_STATE_PATH} is invalid JSON; ignoring it.")
+        return None
+
+
+def clear_detached_state():
+    if DETACHED_STATE_PATH.exists():
+        DETACHED_STATE_PATH.unlink()
+        log.info(f"Cleared detached state → {DETACHED_STATE_PATH}")
+
+
+def get_phase1_service_base_url() -> str:
+    base_url = (
+        os.getenv("DO_PHASE1_BASE_URL")
+        or os.getenv("PHASE1_SERVICE_URL")
+        or os.getenv("DIGITALOCEAN_PHASE1_BASE_URL")
+    )
+    if not base_url:
+        raise RuntimeError(
+            "DigitalOcean Phase 1 orchestration requires DO_PHASE1_BASE_URL "
+            "(or PHASE1_SERVICE_URL / DIGITALOCEAN_PHASE1_BASE_URL)."
+        )
+    return base_url
+
+
+def get_phase1_poll_interval_seconds() -> float:
+    return max(
+        0.0,
+        float(os.getenv("DO_PHASE1_POLL_INTERVAL_SECONDS", str(DEFAULT_DO_PHASE1_POLL_INTERVAL_SECONDS))),
+    )
+
+
+def get_phase1_timeout_seconds() -> float:
+    return max(
+        0.0,
+        float(os.getenv("DO_PHASE1_TIMEOUT_SECONDS", str(DEFAULT_DO_PHASE1_TIMEOUT_SECONDS))),
+    )
+
+
+def build_phase1_client() -> DOPhase1Client:
+    return DOPhase1Client(base_url=get_phase1_service_base_url())
+
+
+def _state_payload(*, job_id: str, source_url: str, status: str, **extra: object) -> dict:
+    payload = {
+        "provider": "digitalocean",
+        "job_id": job_id,
+        "source_url": source_url,
+        "status": status,
+        "updated_at_epoch_s": time.time(),
+    }
+    payload.update(extra)
+    return payload
+
+
+def _load_resumable_job_id(source_url: str) -> str | None:
+    state = load_detached_state()
+    if not state:
+        return None
+    if state.get("provider") != "digitalocean":
+        log.info("Ignoring non-DigitalOcean detached state left by an older Phase 1 flow.")
+        return None
+    if state.get("source_url") != source_url:
+        log.info(
+            "Ignoring detached state for a different source URL (%s); starting a fresh Phase 1 job.",
+            state.get("source_url"),
+        )
+        return None
+    job_id = str(state.get("job_id", "")).strip()
+    if not job_id:
+        return None
+    log.info(
+        "Resuming DigitalOcean Phase 1 job %s from detached state (last status=%s).",
+        job_id,
+        state.get("status", "unknown"),
+    )
+    return job_id
 
 
 # ──────────────────────────────────────────────
@@ -445,235 +512,132 @@ def download_media(url: str) -> tuple[str, str]:
 
 
 # ──────────────────────────────────────────────
-# Step 2: Send to Modal GPU worker
+# Step 2: Submit + poll DigitalOcean job service
 # ──────────────────────────────────────────────
-async def call_modal_worker(
-    video_path: str, audio_path: str, youtube_url: str
-) -> dict:
-    """Send video + audio bytes to the Modal GPU worker and return results."""
-    log.info("Reading files for upload to Modal…")
-    video_bytes = Path(video_path).read_bytes()
-    audio_bytes = Path(audio_path).read_bytes()
+async def submit_or_resume_phase1_job(client: DOPhase1Client, source_url: str) -> str:
+    resumable_job_id = _load_resumable_job_id(source_url)
+    if resumable_job_id:
+        return resumable_job_id
+
+    submission = await client.submit_job(source_url)
+    job_id = str(submission.job_id)
+    log.info("Submitted DigitalOcean Phase 1 job %s (status=%s).", job_id, submission.status)
+    save_detached_state(
+        _state_payload(
+            job_id=job_id,
+            source_url=source_url,
+            status=str(submission.status),
+            submitted_at_epoch_s=time.time(),
+        )
+    )
+    return job_id
+
+
+async def wait_for_phase1_manifest(
+    client: DOPhase1Client,
+    *,
+    job_id: str,
+    source_url: str,
+) -> Phase1Manifest:
+    timeout_seconds = get_phase1_timeout_seconds()
+    poll_interval_seconds = get_phase1_poll_interval_seconds()
+    started_at = time.monotonic()
+
     log.info(
-        f"  Video: {len(video_bytes) / 1e6:.1f} MB, "
-        f"Audio: {len(audio_bytes) / 1e6:.1f} MB"
+        "Polling DigitalOcean Phase 1 job %s every %.1fs (timeout %.1fs).",
+        job_id,
+        poll_interval_seconds,
+        timeout_seconds,
     )
 
-    log.info("Calling Modal GPU worker…")
-    ClyptWorker = modal.Cls.from_name("clypt-sota-worker", "ClyptWorker")
-    worker = ClyptWorker()
+    while True:
+        job = await client.get_job(job_id)
+        status = str(job.status)
+        log.info("DigitalOcean Phase 1 job %s status=%s", job_id, status)
 
-    t0 = time.time()
-    result = await worker.extract.remote.aio(
-        video_bytes=video_bytes,
-        audio_wav_bytes=audio_bytes,
-        youtube_url=youtube_url,
-    )
-    elapsed = time.time() - t0
-    log.info(f"Modal worker returned in {elapsed:.1f}s")
-
-    return result
-
-
-async def call_modal_worker_distributed(
-    video_path: str, audio_path: str, youtube_url: str
-) -> dict:
-    """Client-orchestrated distributed tracking fan-out across Modal workers."""
-    log.info("Reading files for upload to Modal…")
-    video_bytes = Path(video_path).read_bytes()
-    audio_bytes = Path(audio_path).read_bytes()
-    log.info(
-        f"  Video: {len(video_bytes) / 1e6:.1f} MB, "
-        f"Audio: {len(audio_bytes) / 1e6:.1f} MB"
-    )
-
-    ClyptWorker = modal.Cls.from_name("clypt-sota-worker", "ClyptWorker")
-    worker = ClyptWorker()
-    max_gpu_workers = max(1, min(4, int(os.getenv("CLYPT_MAX_GPU_WORKERS", "4"))))
-    log.info(f"Distributed fan-out enabled (max GPU workers={max_gpu_workers})")
-
-    # Best-effort autoscaler cap for chunk tracking method.
-    try:
-        await worker.track_chunk_from_staged.update_autoscaler.aio(max_containers=max_gpu_workers)
-    except Exception:
-        pass
-
-    t0 = time.time()
-    allow_resume = os.getenv("CLYPT_DISTRIBUTED_RESUME", "1") == "1"
-    use_detached = os.getenv("CLYPT_DISTRIBUTED_DETACH", "1") == "1"
-    state = load_detached_state() if allow_resume else None
-    if state and state.get("status") == "submitted":
-        log.info(f"Resuming detached fan-out job {state.get('job_id', '')[:8]}…")
-        chunks = list(state["chunks"])
-        meta = dict(state["meta"])
-        job_id = str(state["job_id"])
-        staged_video_path = str(state["video_path"])
-        asr_handle = FunctionCall.from_id(str(state["asr_call_id"]))
-        chunk_mode = str(state.get("chunk_mode", "indexed"))
-        if chunk_mode == "indexed":
-            chunk_handle = FunctionCall.from_id(str(state["chunk_call_id"]))
-            chunk_handles = None
-        else:
-            chunk_handle = None
-            chunk_handles = [FunctionCall.from_id(str(cid)) for cid in state.get("chunk_call_ids", [])]
-        tracking_submitted_ts = float(state.get("tracking_submitted_ts", time.time()))
-    else:
-        stage = await worker.stage_video_for_tracking.remote.aio(video_bytes=video_bytes)
-        chunks = list(stage.get("chunks", []))
-        meta = dict(stage.get("meta", {}))
-        job_id = str(stage.get("job_id", ""))
-        staged_video_path = str(stage.get("video_path", ""))
-        if not chunks or not job_id or not staged_video_path:
-            raise RuntimeError("Distributed staging failed: missing chunks/job metadata")
-        log.info(
-            f"Staged job {job_id[:8]}… with {len(chunks)} chunks "
-            f"({meta.get('total_frames', 0)} frames @ {meta.get('fps', 0):.2f} fps)"
+        save_detached_state(
+            _state_payload(
+                job_id=job_id,
+                source_url=source_url,
+                status=status,
+                manifest_uri=getattr(job, "manifest_uri", None),
+                failure=getattr(job, "failure", None),
+            )
         )
 
-        if use_detached:
-            asr_handle = await worker.run_asr_only.spawn.aio(audio_wav_bytes=audio_bytes)
-            # NOTE: spawn_map.aio may return None on some Modal SDK/runtime
-            # combinations; submit explicit per-chunk spawns to get stable
-            # FunctionCall handles for detached resume.
-            chunk_handles = await asyncio.gather(
-                *[
-                    worker.track_chunk_from_staged.spawn.aio(
-                        job_id=job_id,
-                        video_path=staged_video_path,
-                        meta=meta,
-                        chunk=c,
-                    )
-                    for c in chunks
-                ]
+        if job.status == JobState.SUCCEEDED or status == JobState.SUCCEEDED.value:
+            manifest = await client.get_result(job_id)
+            clear_detached_state()
+            return manifest
+
+        if job.status == JobState.FAILED or status == JobState.FAILED.value:
+            message = getattr(job, "failure", None) or {"error_message": "unknown DigitalOcean Phase 1 failure"}
+            save_detached_state(
+                _state_payload(
+                    job_id=job_id,
+                    source_url=source_url,
+                    status=status,
+                    failure=message,
+                    terminal=True,
+                )
             )
-            tracking_submitted_ts = time.time()
-            chunk_mode = "list"
-            chunk_handle = None
-            chunk_handles = list(chunk_handles)
-            state_payload = {
-                "status": "submitted",
-                "job_id": job_id,
-                "video_path": staged_video_path,
-                "meta": meta,
-                "chunks": chunks,
-                "asr_call_id": str(asr_handle.object_id),
-                "chunk_mode": "list",
-                "chunk_call_ids": [str(c.object_id) for c in chunk_handles],
-                "tracking_submitted_ts": tracking_submitted_ts,
-            }
-            save_detached_state(state_payload)
-        else:
-            # Non-detached fallback path.
-            asr_task = asyncio.create_task(
-                worker.run_asr_only.remote.aio(audio_wav_bytes=audio_bytes)
+            raise RuntimeError(f"Phase 1 extraction failed for job {job_id}: {message}")
+
+        elapsed = time.monotonic() - started_at
+        if elapsed >= timeout_seconds:
+            save_detached_state(
+                _state_payload(
+                    job_id=job_id,
+                    source_url=source_url,
+                    status=status,
+                    timeout_seconds=timeout_seconds,
+                    resume_hint="Re-run the pipeline to resume polling this job.",
+                )
+            )
+            log.warning(
+                "Timeout while waiting for DigitalOcean Phase 1 job %s after %.1fs. "
+                "Resume by re-running the pipeline; state saved at %s.",
+                job_id,
+                elapsed,
+                DETACHED_STATE_PATH,
+            )
+            raise TimeoutError(
+                f"DigitalOcean Phase 1 job {job_id} did not complete within {timeout_seconds:.1f}s. "
+                f"Resume by re-running the pipeline; state saved at {DETACHED_STATE_PATH}."
             )
 
-            sem = asyncio.Semaphore(max_gpu_workers)
+        await asyncio.sleep(poll_interval_seconds)
 
-            async def _run_one(c: dict):
-                async with sem:
-                    return await worker.track_chunk_from_staged.remote.aio(
-                        job_id=job_id,
-                        video_path=staged_video_path,
-                        meta=meta,
-                        chunk=c,
-                    )
 
-            tasks = [_run_one(c) for c in chunks]
-            chunk_results: list[dict] = []
-            done = 0
-            for fut in asyncio.as_completed(tasks):
-                chunk_results.append(await fut)
-                done += 1
-                pct = (100.0 * done) / max(1, len(chunks))
-                log.info(f"Chunk fan-out progress: {done}/{len(chunks)} ({pct:.1f}%)")
-            words = await asr_task
-            tracking_wallclock_s = time.time() - t0
-            stitched = await worker.stitch_tracking_chunks.remote.aio(
-                chunk_results=chunk_results,
-                fps=float(meta.get("fps", 25.0)),
-            )
-            tracks = list(stitched.get("tracks", []))
-            tracking_metrics = dict(stitched.get("tracking_metrics", {}))
-            tracking_metrics["tracking_wallclock_s"] = float(tracking_wallclock_s)
-            total_frames = int(meta.get("total_frames", 0))
-            tracking_metrics["throughput_fps"] = float(total_frames / max(1e-6, tracking_wallclock_s))
+def materialize_phase1_manifest(manifest: Phase1Manifest, *, source_url: str) -> tuple[dict, dict]:
+    # Compatibility bridge: later pipeline phases and Remotion still expect a
+    # local download alongside the JSON ledgers, even though extraction moved to
+    # DigitalOcean jobs.
+    log.info("── Step 3: Local Media Acquisition For Downstream Compatibility ──")
+    download_media(source_url)
 
-            result = await worker.finalize_extraction.remote.aio(
-                audio_wav_bytes=audio_bytes,
-                youtube_url=youtube_url,
-                words=words,
-                tracks=tracks,
-                tracking_metrics=tracking_metrics,
-                job_id=job_id,
-            )
-            try:
-                await worker.cleanup_tracking_job.remote.aio(job_id=job_id)
-            except Exception as e:
-                log.warning(f"Could not cleanup distributed job {job_id[:8]}… ({type(e).__name__}: {e})")
-            elapsed = time.time() - t0
-            log.info(f"Distributed Modal workflow returned in {elapsed:.1f}s")
-            return result
+    phase_1_visual = manifest.artifacts.visual_tracking.model_dump(mode="json")
+    phase_1_audio = manifest.artifacts.transcript.model_dump(mode="json")
 
-    # Detached collection path.
-    def _collect_chunks_blocking():
-        out = []
-        if chunk_mode == "indexed":
-            assert chunk_handle is not None
-            for i in range(len(chunks)):
-                out.append(chunk_handle.get(timeout=None, index=i))
-                pct = (100.0 * (i + 1)) / max(1, len(chunks))
-                log.info(f"Chunk fan-out progress: {i + 1}/{len(chunks)} ({pct:.1f}%)")
-        else:
-            assert chunk_handles is not None
-            for i, h in enumerate(chunk_handles, start=1):
-                out.append(h.get(timeout=None))
-                pct = (100.0 * i) / max(1, len(chunk_handles))
-                log.info(f"Chunk fan-out progress: {i}/{len(chunk_handles)} ({pct:.1f}%)")
-        return out
+    phase_1_visual["video_gcs_uri"] = manifest.canonical_video_gcs_uri
+    phase_1_audio["video_gcs_uri"] = manifest.canonical_video_gcs_uri
 
-    chunk_results = await asyncio.to_thread(_collect_chunks_blocking)
-    words = await asyncio.to_thread(asr_handle.get, None)
-    tracking_wallclock_s = float(time.time() - tracking_submitted_ts)
+    validate_phase_handoff(phase_1_visual, phase_1_audio)
 
-    stitched = await worker.stitch_tracking_chunks.remote.aio(
-        chunk_results=chunk_results,
-        fps=float(meta.get("fps", 25.0)),
-    )
-    tracks = list(stitched.get("tracks", []))
-    tracking_metrics = dict(stitched.get("tracking_metrics", {}))
-    tracking_metrics["tracking_wallclock_s"] = float(tracking_wallclock_s)
-    total_frames = int(meta.get("total_frames", 0))
-    tracking_metrics["throughput_fps"] = float(total_frames / max(1e-6, tracking_wallclock_s))
+    visual_out = OUTPUT_DIR / "phase_1_visual.json"
+    audio_out = OUTPUT_DIR / "phase_1_audio.json"
 
-    result = await worker.finalize_extraction.remote.aio(
-        audio_wav_bytes=audio_bytes,
-        youtube_url=youtube_url,
-        words=words,
-        tracks=tracks,
-        tracking_metrics=tracking_metrics,
-        job_id=job_id,
-    )
+    with open(visual_out, "w", encoding="utf-8") as f:
+        json.dump(phase_1_visual, f, indent=2)
+    log.info(f"Visual ledger saved → {visual_out}")
 
-    # Best-effort staged artifact cleanup.
-    try:
-        await worker.cleanup_tracking_job.remote.aio(job_id=job_id)
-    except Exception as e:
-        log.warning(f"Could not cleanup distributed job {job_id[:8]}… ({type(e).__name__}: {e})")
+    write_visual_ndjson(phase_1_visual, PHASE1_NDJSON_PATH)
 
-    # Mark detached state completed.
-    save_detached_state(
-        {
-            "status": "completed",
-            "job_id": job_id,
-            "completed_at": time.time(),
-            "tracking_metrics": tracking_metrics,
-        }
-    )
+    with open(audio_out, "w", encoding="utf-8") as f:
+        json.dump(phase_1_audio, f, indent=2)
+    log.info(f"Audio ledger saved → {audio_out}")
 
-    elapsed = time.time() - t0
-    log.info(f"Distributed Modal workflow returned in {elapsed:.1f}s")
-    return result
+    return phase_1_visual, phase_1_audio
 
 
 # ──────────────────────────────────────────────
@@ -682,54 +646,22 @@ async def call_modal_worker_distributed(
 async def main(youtube_url: str | None = None):
     url = youtube_url or "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     log.info("=" * 60)
-    log.info("PHASE 1 — Modal Deterministic Extraction")
+    log.info("PHASE 1 — DigitalOcean Async Extraction")
     log.info("=" * 60)
 
-    # Step 1: Download locally
-    log.info("── Step 1: Local Media Acquisition (yt-dlp) ──")
-    video_path, audio_path = download_media(url)
+    log.info("── Step 1: DigitalOcean Job Submission + Polling ──")
+    async with build_phase1_client() as client:
+        job_id = await submit_or_resume_phase1_job(client, url)
+        manifest = await wait_for_phase1_manifest(client, job_id=job_id, source_url=url)
 
-    # Step 2: Send to Modal
-    log.info("── Step 2: Modal GPU Extraction ──")
-    distributed = os.getenv("CLYPT_DISTRIBUTED_MODAL_FANOUT", "1") == "1"
-    if distributed:
-        result = await call_modal_worker_distributed(video_path, audio_path, url)
-    else:
-        result = await call_modal_worker(video_path, audio_path, url)
+    log.info(
+        "DigitalOcean Phase 1 job %s succeeded; consuming manifest artifact URIs %s and %s",
+        manifest.job_id,
+        manifest.artifacts.visual_tracking.uri,
+        manifest.artifacts.transcript.uri,
+    )
 
-    if result.get("status") != "success":
-        log.error(f"Modal worker failed: {result.get('message', 'unknown error')}")
-        raise RuntimeError(f"Phase 1 extraction failed: {result.get('message')}")
-
-    # Step 3: Write output ledgers
-    visual_out = OUTPUT_DIR / "phase_1_visual.json"
-    audio_out = OUTPUT_DIR / "phase_1_audio.json"
-
-    phase_1_visual = result.get("phase_1_visual") or result.get("phase_1a_visual")
-    phase_1_audio = result.get("phase_1_audio") or result.get("phase_1a_audio")
-    if phase_1_visual is None or phase_1_audio is None:
-        raise RuntimeError("Modal worker response missing Phase 1 visual/audio payloads")
-
-    # Step 3A: Upload canonical source video to GCS for downstream Gemini phases.
-    video_gcs_uri = upload_video_to_gcs(video_path)
-
-    # Step 3B: Enrich visual ledger with backward-compatible fields and metadata.
-    phase_1_visual = enrich_visual_ledger_for_downstream(phase_1_visual, phase_1_audio, video_path)
-    phase_1_visual["video_gcs_uri"] = video_gcs_uri
-    phase_1_audio["video_gcs_uri"] = video_gcs_uri
-
-    # Step 3C: Contract validation before writing.
-    validate_phase_handoff(phase_1_visual, phase_1_audio)
-
-    with open(visual_out, "w") as f:
-        json.dump(phase_1_visual, f, indent=2)
-    log.info(f"Visual ledger saved → {visual_out}")
-
-    write_visual_ndjson(phase_1_visual, PHASE1_NDJSON_PATH)
-
-    with open(audio_out, "w") as f:
-        json.dump(phase_1_audio, f, indent=2)
-    log.info(f"Audio ledger saved → {audio_out}")
+    phase_1_visual, phase_1_audio = materialize_phase1_manifest(manifest, source_url=url)
 
     # Summary
     words = phase_1_audio.get("words", [])
@@ -741,6 +673,7 @@ async def main(youtube_url: str | None = None):
     if words:
         log.info(f"  Audio coverage:    {words[-1]['end_time_ms'] / 1000:.1f}s")
     log.info("=" * 60)
+    return manifest
 
 
 if __name__ == "__main__":

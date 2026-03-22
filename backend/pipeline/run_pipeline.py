@@ -4,7 +4,7 @@ Clypt Pipeline Orchestrator
 ============================
 Prompts for a YouTube URL, then runs the full pipeline sequentially:
 
-  Phase 1   →  Modal deterministic extraction
+  Phase 1   →  DigitalOcean async extraction
   FFmpeg    →  Re-encode video for Remotion compatibility
   Phase 2A  →  Content Mechanism Decomposition (Gemini chunked multimodal)
   Phase 2B  →  Narrative Edge Mapping (Gemini text-only)
@@ -202,9 +202,16 @@ def main():
 
     log.info(f"Target: {url}\n")
 
-    # ── Phase 1: Modal deterministic extraction ──
+    # ── Phase 1: DigitalOcean async extraction ──
     from pipeline.phase_1_modal_pipeline import main as phase_1_main
-    asyncio.run(phase_1_main(youtube_url=url))
+    phase_1_manifest = asyncio.run(phase_1_main(youtube_url=url))
+    log.info(
+        "Phase 1 manifest ready: job_id=%s video=%s transcript=%s visual=%s",
+        phase_1_manifest.job_id,
+        phase_1_manifest.canonical_video_gcs_uri,
+        phase_1_manifest.artifacts.transcript.uri,
+        phase_1_manifest.artifacts.visual_tracking.uri,
+    )
 
     # ── FFmpeg Re-encode ──
     banner("RE-ENCODING VIDEO (FFmpeg)")
