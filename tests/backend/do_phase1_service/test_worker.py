@@ -2,7 +2,7 @@ from pathlib import Path
 
 from backend.do_phase1_service.jobs import enqueue_job
 from backend.do_phase1_service.state_store import SQLiteJobStore
-from backend.do_phase1_service.worker import run_worker_once
+from backend.do_phase1_service.worker import run_worker_loop, run_worker_once
 
 
 class DummyResult:
@@ -73,3 +73,64 @@ def test_worker_promotes_job_through_lifecycle(tmp_path: Path, monkeypatch):
     assert job is not None
     assert job.status == "succeeded"
     assert job.manifest_uri == "gs://bucket/manifests/job_123.json"
+
+
+def test_worker_marks_failed_job_and_continues_processing(tmp_path: Path, monkeypatch):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    enqueue_job(store, job_id="job_fail", payload={"source_url": "https://youtube.com/watch?v=fail"})
+    enqueue_job(store, job_id="job_next", payload={"source_url": "https://youtube.com/watch?v=next"})
+    calls = []
+
+    def fake_run_extraction_job(**kwargs):
+        calls.append(kwargs["job_id"])
+        if kwargs["job_id"] == "job_fail":
+            raise RuntimeError("boom")
+        return DummyResult()
+
+    monkeypatch.setattr("backend.do_phase1_service.worker.run_extraction_job", fake_run_extraction_job)
+
+    assert run_worker_once(store, output_root=tmp_path) is True
+
+    failed_job = store.get_job("job_fail")
+    assert failed_job is not None
+    assert failed_job.status == "failed"
+    assert failed_job.failure == {
+        "error_type": "RuntimeError",
+        "error_message": "boom",
+        "failed_step": "extraction",
+    }
+
+    assert run_worker_once(store, output_root=tmp_path) is True
+
+    next_job = store.get_job("job_next")
+    assert next_job is not None
+    assert next_job.status == "succeeded"
+    assert calls == ["job_fail", "job_next"]
+
+
+def test_worker_loop_continues_after_failure(tmp_path: Path, monkeypatch):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    enqueue_job(store, job_id="job_fail", payload={"source_url": "https://youtube.com/watch?v=fail"})
+    enqueue_job(store, job_id="job_next", payload={"source_url": "https://youtube.com/watch?v=next"})
+    seen = []
+
+    def fake_run_extraction_job(**kwargs):
+        seen.append(kwargs["job_id"])
+        if kwargs["job_id"] == "job_fail":
+            raise RuntimeError("boom")
+        return DummyResult()
+
+    def stop_after_idle(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("backend.do_phase1_service.worker.run_extraction_job", fake_run_extraction_job)
+    monkeypatch.setattr("backend.do_phase1_service.worker.time.sleep", stop_after_idle)
+
+    try:
+        run_worker_loop(store=store, output_root=tmp_path, poll_interval_seconds=0)
+    except KeyboardInterrupt:
+        pass
+
+    assert seen == ["job_fail", "job_next"]
+    assert store.get_job("job_fail").status == "failed"
+    assert store.get_job("job_next").status == "succeeded"

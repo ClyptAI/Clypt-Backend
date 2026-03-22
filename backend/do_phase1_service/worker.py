@@ -42,7 +42,7 @@ def run_worker_once(
             error_message=str(exc),
             failed_step="extraction",
         )
-        raise
+        return True
 
     mark_succeeded(
         store,
