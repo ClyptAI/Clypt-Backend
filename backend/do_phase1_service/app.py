@@ -15,38 +15,44 @@ DEFAULT_OUTPUT_ROOT = Path(os.getenv("DO_PHASE1_OUTPUT_ROOT", "backend/do_phase1
 
 
 def create_app(*, store: SQLiteJobStore | None = None, output_root: str | Path | None = None) -> FastAPI:
-    store = store or SQLiteJobStore(DEFAULT_DB_PATH)
     output_root = Path(output_root or DEFAULT_OUTPUT_ROOT)
     output_root.mkdir(parents=True, exist_ok=True)
 
     app = FastAPI(title="Clypt DO Phase 1 Service")
     app.state.store = store
+    app.state.db_path = DEFAULT_DB_PATH
     app.state.output_root = output_root
+
+    def _store() -> SQLiteJobStore:
+        if app.state.store is None:
+            app.state.store = SQLiteJobStore(app.state.db_path)
+        return app.state.store
 
     @app.get("/healthz")
     def healthz() -> dict:
+        live_store = _store()
         return {
             "status": "ok",
-            "sqlite": store.healthcheck(),
-            "db_path": str(store.db_path),
+            "sqlite": live_store.healthcheck(),
+            "db_path": str(live_store.db_path),
             "output_root": str(output_root),
         }
 
     @app.post("/jobs", status_code=202)
     def post_jobs(payload: JobCreatePayload) -> dict:
-        job = create_job(store, payload)
+        job = create_job(_store(), payload)
         return job.model_dump(mode="json")
 
     @app.get("/jobs/{job_id}")
     def get_job_status(job_id: str) -> dict:
-        job = get_job(store, job_id)
+        job = get_job(_store(), job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         return job.model_dump(mode="json")
 
     @app.get("/jobs/{job_id}/result")
     def get_job_result(job_id: str) -> dict:
-        job = get_job(store, job_id)
+        job = get_job(_store(), job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         if job.status != "succeeded" or job.manifest is None:
