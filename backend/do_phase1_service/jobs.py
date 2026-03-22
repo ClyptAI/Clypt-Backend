@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from backend.do_phase1_service.models import JobCreatePayload, JobRecord
 from backend.do_phase1_service.state_store import SQLiteJobStore
@@ -14,6 +15,7 @@ def create_job(store: SQLiteJobStore, payload: JobCreatePayload) -> JobRecord:
         source_url=record.source_url,
         status=record.status,
         retries=record.retries,
+        claim_token=None,
         created_at=record.created_at,
         updated_at=record.updated_at,
     )
@@ -26,6 +28,7 @@ def enqueue_job(store: SQLiteJobStore, *, job_id: str, payload: dict) -> JobReco
         source_url=str(payload["source_url"]),
         status="queued",
         retries=0,
+        claim_token=None,
         created_at=now,
         updated_at=now,
     )
@@ -43,6 +46,7 @@ def mark_running(store: SQLiteJobStore, job_id: str) -> JobRecord:
         source_url=job.source_url,
         status="running",
         retries=job.retries + 1,
+        claim_token=job.claim_token or uuid4().hex,
         manifest=job.manifest,
         manifest_uri=job.manifest_uri,
         failure=job.failure,
@@ -57,23 +61,15 @@ def mark_succeeded(
     store: SQLiteJobStore,
     job_id: str,
     *,
+    claim_token: str,
     manifest: dict,
     manifest_uri: str,
-) -> JobRecord:
-    job = _require_job(store, job_id)
-    now = datetime.now(UTC)
-    return store.save_job(
-        job_id=job.job_id,
-        source_url=job.source_url,
-        status="succeeded",
-        retries=job.retries,
+) -> JobRecord | None:
+    return store.complete_job(
+        job_id=job_id,
+        claim_token=claim_token,
         manifest=manifest,
         manifest_uri=manifest_uri,
-        failure=None,
-        created_at=job.created_at,
-        updated_at=now,
-        started_at=job.started_at,
-        completed_at=now,
     )
 
 
@@ -81,29 +77,17 @@ def mark_failed(
     store: SQLiteJobStore,
     job_id: str,
     *,
+    claim_token: str,
     error_type: str,
     error_message: str,
     failed_step: str | None = None,
-) -> JobRecord:
-    job = _require_job(store, job_id)
-    now = datetime.now(UTC)
-    failure = {
-        "error_type": error_type,
-        "error_message": error_message,
-        "failed_step": failed_step,
-    }
-    return store.save_job(
-        job_id=job.job_id,
-        source_url=job.source_url,
-        status="failed",
-        retries=job.retries,
-        manifest=job.manifest,
-        manifest_uri=job.manifest_uri,
-        failure=failure,
-        created_at=job.created_at,
-        updated_at=now,
-        started_at=job.started_at,
-        completed_at=now,
+) -> JobRecord | None:
+    return store.fail_job(
+        job_id=job_id,
+        claim_token=claim_token,
+        error_type=error_type,
+        error_message=error_message,
+        failed_step=failed_step,
     )
 
 

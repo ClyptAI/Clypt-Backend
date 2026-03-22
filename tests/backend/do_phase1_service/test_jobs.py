@@ -23,14 +23,28 @@ def test_job_lifecycle_updates_status_and_manifest(tmp_path: Path):
 
     running = mark_running(store, created.job_id)
     assert running.status == "running"
+    assert running.claim_token is not None
 
     manifest = {"job_id": created.job_id, "status": "succeeded"}
-    succeeded = mark_succeeded(store, created.job_id, manifest=manifest, manifest_uri="gs://bucket/job.json")
+    succeeded = mark_succeeded(
+        store,
+        created.job_id,
+        claim_token=running.claim_token,
+        manifest=manifest,
+        manifest_uri="gs://bucket/job.json",
+    )
     assert succeeded.status == "succeeded"
     assert succeeded.manifest == manifest
     assert succeeded.manifest_uri == "gs://bucket/job.json"
 
-    failed = mark_failed(store, created.job_id, error_type="RuntimeError", error_message="boom")
+    rerun = mark_running(store, created.job_id)
+    failed = mark_failed(
+        store,
+        created.job_id,
+        claim_token=rerun.claim_token,
+        error_type="RuntimeError",
+        error_message="boom",
+    )
     assert failed.status == "failed"
     assert failed.failure["error_type"] == "RuntimeError"
 

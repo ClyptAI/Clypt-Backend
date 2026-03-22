@@ -33,6 +33,9 @@ def run_worker_once(
     job = store.claim_next_job(stale_after_seconds=stale_after_seconds)
     if job is None:
         return False
+    if job.claim_token is None:
+        logger.warning("Claimed Phase 1 job %s without a claim token; skipping", job.job_id)
+        return True
 
     failed_step = "control_plane"
     heartbeat_stop = threading.Event()
@@ -44,6 +47,7 @@ def run_worker_once(
         heartbeat_thread = _start_heartbeat_thread(
             store,
             job.job_id,
+            claim_token=job.claim_token,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             stop_event=heartbeat_stop,
         )
@@ -62,6 +66,7 @@ def run_worker_once(
         mark_succeeded(
             store,
             job.job_id,
+            claim_token=job.claim_token,
             manifest=_manifest_payload(manifest),
             manifest_uri=manifest.manifest_uri,
         )
@@ -71,6 +76,7 @@ def run_worker_once(
         _mark_job_failed_safely(
             store,
             job.job_id,
+            claim_token=job.claim_token,
             error_type=type(exc).__name__,
             error_message=str(exc),
             failed_step=failed_step,
@@ -118,6 +124,7 @@ def _manifest_payload(manifest) -> dict:
 def _mark_job_failed_safely(
     store: SQLiteJobStore,
     job_id: str,
+    claim_token: str,
     *,
     error_type: str,
     error_message: str,
@@ -127,6 +134,7 @@ def _mark_job_failed_safely(
         mark_failed(
             store,
             job_id,
+            claim_token=claim_token,
             error_type=error_type,
             error_message=error_message,
             failed_step=failed_step,
@@ -138,6 +146,7 @@ def _mark_job_failed_safely(
 def _start_heartbeat_thread(
     store: SQLiteJobStore,
     job_id: str,
+    claim_token: str,
     *,
     heartbeat_interval_seconds: float,
     stop_event: threading.Event,
@@ -145,7 +154,10 @@ def _start_heartbeat_thread(
     def _heartbeat_loop() -> None:
         while not stop_event.wait(heartbeat_interval_seconds):
             try:
-                store.heartbeat_job(job_id)
+                heartbeat = store.heartbeat_job(job_id, claim_token)
+                if heartbeat is None:
+                    logger.info("Phase 1 job %s lost its active claim; stopping heartbeat", job_id)
+                    return
             except Exception:
                 logger.warning("Failed to heartbeat running Phase 1 job %s", job_id, exc_info=True)
 

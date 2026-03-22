@@ -37,10 +37,6 @@ class LocalExtractionRuntimeError(RuntimeError):
     pass
 
 
-class HostExtractionBusyError(RuntimeError):
-    pass
-
-
 def run_extraction_job(
     *,
     source_url: str,
@@ -167,12 +163,7 @@ def host_extraction_lock(lock_path: str | Path) -> Iterator[Path]:
     lock_path = Path(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise HostExtractionBusyError(
-                f"another extraction is already running on this host (lock: {lock_path})"
-            ) from exc
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             yield lock_path
         finally:

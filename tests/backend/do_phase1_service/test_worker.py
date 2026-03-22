@@ -147,10 +147,16 @@ def test_worker_contains_control_plane_failure_and_processes_later_job(tmp_path:
         seen.append(kwargs["job_id"])
         return DummyResult()
 
-    def fake_mark_succeeded(store, job_id, *, manifest, manifest_uri):
+    def fake_mark_succeeded(store, job_id, *, claim_token, manifest, manifest_uri):
         if job_id == "job_fail":
             raise RuntimeError("persist boom")
-        return original_mark_succeeded(store, job_id, manifest=manifest, manifest_uri=manifest_uri)
+        return original_mark_succeeded(
+            store,
+            job_id,
+            claim_token=claim_token,
+            manifest=manifest,
+            manifest_uri=manifest_uri,
+        )
 
     monkeypatch.setattr("backend.do_phase1_service.worker.run_extraction_job", fake_run_extraction_job)
     monkeypatch.setattr("backend.do_phase1_service.worker.mark_succeeded", fake_mark_succeeded)

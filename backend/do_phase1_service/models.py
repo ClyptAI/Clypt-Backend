@@ -22,6 +22,7 @@ class JobRecord(BaseModel):
     source_url: str
     status: JobState | Literal["queued", "running", "succeeded", "failed"]
     retries: int = 0
+    claim_token: str | None = None
     manifest: dict[str, Any] | None = None
     manifest_uri: str | None = None
     failure: dict[str, Any] | None = None

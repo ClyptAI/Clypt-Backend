@@ -4,6 +4,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from backend.do_phase1_service.models import JobRecord
 
@@ -28,6 +29,7 @@ class SQLiteJobStore:
                     source_url TEXT NOT NULL,
                     status TEXT NOT NULL,
                     retries INTEGER NOT NULL DEFAULT 0,
+                    claim_token TEXT,
                     manifest_json TEXT,
                     manifest_uri TEXT,
                     failure_json TEXT,
@@ -38,6 +40,12 @@ class SQLiteJobStore:
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "claim_token" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN claim_token TEXT")
 
     def healthcheck(self) -> bool:
         with self._connect() as connection:
@@ -65,13 +73,14 @@ class SQLiteJobStore:
 
             started_at = row["started_at"] or now.isoformat()
             retries = int(row["retries"]) + 1
+            claim_token = uuid4().hex
             connection.execute(
                 """
                 UPDATE jobs
-                SET status = ?, retries = ?, updated_at = ?, started_at = ?, completed_at = NULL
+                SET status = ?, retries = ?, claim_token = ?, updated_at = ?, started_at = ?, completed_at = NULL
                 WHERE job_id = ?
                 """,
-                ("running", retries, now.isoformat(), started_at, row["job_id"]),
+                ("running", retries, claim_token, now.isoformat(), started_at, row["job_id"]),
             )
             claimed = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (row["job_id"],)).fetchone()
             connection.commit()
@@ -84,6 +93,7 @@ class SQLiteJobStore:
         source_url: str,
         status: str,
         retries: int = 0,
+        claim_token: str | None = None,
         manifest: dict | None = None,
         manifest_uri: str | None = None,
         failure: dict | None = None,
@@ -99,13 +109,14 @@ class SQLiteJobStore:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, source_url, status, retries, manifest_json, manifest_uri,
+                    job_id, source_url, status, retries, claim_token, manifest_json, manifest_uri,
                     failure_json, created_at, updated_at, started_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     source_url=excluded.source_url,
                     status=excluded.status,
                     retries=excluded.retries,
+                    claim_token=excluded.claim_token,
                     manifest_json=excluded.manifest_json,
                     manifest_uri=excluded.manifest_uri,
                     failure_json=excluded.failure_json,
@@ -119,6 +130,7 @@ class SQLiteJobStore:
                     source_url,
                     status,
                     retries,
+                    claim_token,
                     json.dumps(manifest) if manifest is not None else None,
                     manifest_uri,
                     json.dumps(failure) if failure is not None else None,
@@ -130,16 +142,93 @@ class SQLiteJobStore:
             )
         return self.get_job(job_id)
 
-    def heartbeat_job(self, job_id: str) -> JobRecord | None:
+    def heartbeat_job(self, job_id: str, claim_token: str) -> JobRecord | None:
         now = datetime.now(UTC)
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE jobs
                 SET updated_at = ?
-                WHERE job_id = ? AND status = 'running'
+                WHERE job_id = ? AND status = 'running' AND claim_token = ?
                 """,
-                (now.isoformat(), job_id),
+                (now.isoformat(), job_id, claim_token),
+            )
+            if connection.total_changes == 0:
+                return None
+            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def complete_job(
+        self,
+        *,
+        job_id: str,
+        claim_token: str,
+        manifest: dict,
+        manifest_uri: str,
+    ) -> JobRecord | None:
+        now = datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'succeeded',
+                    manifest_json = ?,
+                    manifest_uri = ?,
+                    failure_json = NULL,
+                    updated_at = ?,
+                    completed_at = ?,
+                    claim_token = NULL
+                WHERE job_id = ? AND status = 'running' AND claim_token = ?
+                """,
+                (
+                    json.dumps(manifest),
+                    manifest_uri,
+                    now.isoformat(),
+                    now.isoformat(),
+                    job_id,
+                    claim_token,
+                ),
+            )
+            if connection.total_changes == 0:
+                return None
+            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def fail_job(
+        self,
+        *,
+        job_id: str,
+        claim_token: str,
+        error_type: str,
+        error_message: str,
+        failed_step: str | None = None,
+    ) -> JobRecord | None:
+        now = datetime.now(UTC)
+        failure = json.dumps(
+            {
+                "error_type": error_type,
+                "error_message": error_message,
+                "failed_step": failed_step,
+            }
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'failed',
+                    failure_json = ?,
+                    updated_at = ?,
+                    completed_at = ?,
+                    claim_token = NULL
+                WHERE job_id = ? AND status = 'running' AND claim_token = ?
+                """,
+                (
+                    failure,
+                    now.isoformat(),
+                    now.isoformat(),
+                    job_id,
+                    claim_token,
+                ),
             )
             if connection.total_changes == 0:
                 return None
@@ -165,6 +254,7 @@ class SQLiteJobStore:
             source_url=row["source_url"],
             status=row["status"],
             retries=int(row["retries"]),
+            claim_token=row["claim_token"],
             manifest=json.loads(row["manifest_json"]) if row["manifest_json"] else None,
             manifest_uri=row["manifest_uri"],
             failure=json.loads(row["failure_json"]) if row["failure_json"] else None,
