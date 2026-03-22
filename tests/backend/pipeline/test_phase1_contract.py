@@ -216,3 +216,41 @@ def test_manifest_rejects_semantically_invalid_payload(mutator, expected_match):
 
     with pytest.raises(ValidationError, match=expected_match):
         Phase1Manifest.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "mutator, expected_match",
+    [
+        (
+            lambda payload: payload["artifacts"]["visual_tracking"]["face_detections"][0]["timestamped_objects"][0]["bounding_box"].__setitem__("left", 0.9),
+            "bounding box left must be <= right",
+        ),
+        (
+            lambda payload: payload["artifacts"]["visual_tracking"]["face_detections"][0]["timestamped_objects"][0]["bounding_box"].__setitem__("top", 0.9),
+            "bounding box top must be <= bottom",
+        ),
+        (
+            lambda payload: payload["metadata"]["timings"].__setitem__("ingest_ms", -1),
+            "greater than or equal to 0",
+        ),
+        (
+            lambda payload: payload["metadata"]["retry"].__setitem__("attempts", -1),
+            "greater than or equal to 0",
+        ),
+        (
+            lambda payload: payload["metadata"]["quality_metrics"].__setitem__("schema_pass_rate", 1.2),
+            "less than or equal to 1",
+        ),
+    ],
+)
+def test_manifest_rejects_geometric_and_metadata_semantics(mutator, expected_match):
+    payload = deepcopy(_legacy_manifest_payload())
+    payload["metadata"]["retry"] = {
+        "attempts": 1,
+        "max_attempts": 3,
+        "last_error": None,
+    }
+    mutator(payload)
+
+    with pytest.raises(ValidationError, match=expected_match):
+        Phase1Manifest.model_validate(payload)

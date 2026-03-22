@@ -81,6 +81,14 @@ class Phase1BoundingBox(BaseModel):
     right: Normalized01
     bottom: Normalized01
 
+    @model_validator(mode="after")
+    def _check_geometry(self):
+        if self.left > self.right:
+            raise ValueError("bounding box left must be <= right")
+        if self.top > self.bottom:
+            raise ValueError("bounding box top must be <= bottom")
+        return self
+
 
 class Phase1TimestampedObject(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -223,24 +231,24 @@ class Phase1RuntimeMetadata(BaseModel):
 class Phase1TimingsMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    ingest_ms: int | None = None
-    processing_ms: int | None = None
-    upload_ms: int | None = None
+    ingest_ms: NonNegativeInt | None = None
+    processing_ms: NonNegativeInt | None = None
+    upload_ms: NonNegativeInt | None = None
 
 
 class Phase1QualityMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_pass_rate: float | None = None
-    transcript_coverage: float | None = None
-    tracking_confidence: float | None = None
+    schema_pass_rate: Confidence01 | None = None
+    transcript_coverage: Confidence01 | None = None
+    tracking_confidence: Confidence01 | None = None
 
 
 class Phase1RetryMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    attempts: int | None = None
-    max_attempts: int | None = None
+    attempts: NonNegativeInt | None = None
+    max_attempts: NonNegativeInt | None = None
     last_error: str | None = None
 
 
