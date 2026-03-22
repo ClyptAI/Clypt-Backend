@@ -53,7 +53,6 @@ def test_extract_job_produces_manifest_and_artifacts(tmp_path: Path, monkeypatch
             },
         },
     )
-    monkeypatch.setattr("backend.do_phase1_service.extract.upload_video_to_gcs", lambda video_path: "gs://bucket/phase_1/video.mp4")
     monkeypatch.setattr("backend.do_phase1_service.extract.enrich_visual_ledger_for_downstream", lambda phase_1_visual, phase_1_audio, video_path: phase_1_visual)
     monkeypatch.setattr("backend.do_phase1_service.extract.validate_phase_handoff", lambda visual_ledger, audio_ledger: None)
 
@@ -67,4 +66,4 @@ def test_extract_job_produces_manifest_and_artifacts(tmp_path: Path, monkeypatch
     assert result.status == "succeeded"
     assert result.artifacts.transcript.uri
     assert result.artifacts.visual_tracking.uri
-    assert result.canonical_video_gcs_uri == "gs://bucket/phase_1/video.mp4"
+    assert result.canonical_video_gcs_uri == "gs://bucket/phase_1/jobs/job_123/source_video.mp4"

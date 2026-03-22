@@ -5,7 +5,7 @@ from backend.do_phase1_service.storage import LocalGCSStorage, persist_phase1_ou
 
 def test_manifest_uses_durable_storage_uris(tmp_path: Path):
     storage = LocalGCSStorage(bucket="test-bucket", root_dir=tmp_path / "gcs")
-    canonical_video_uri = storage.upload_bytes(b"video", object_name="phase_1/video.mp4")
+    canonical_video_uri = storage.upload_bytes(b"video", object_name="phase_1/jobs/job_123/source_video.mp4")
 
     manifest = persist_phase1_outputs(
         storage=storage,
@@ -39,3 +39,4 @@ def test_manifest_uses_durable_storage_uris(tmp_path: Path):
     assert manifest.artifacts.transcript.uri.startswith("gs://")
     assert manifest.artifacts.visual_tracking.uri.startswith("gs://")
     assert manifest.canonical_video_gcs_uri == canonical_video_uri
+    assert manifest.canonical_video_gcs_uri.endswith("/phase_1/jobs/job_123/source_video.mp4")

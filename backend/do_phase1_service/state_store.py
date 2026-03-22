@@ -44,6 +44,45 @@ class SQLiteJobStore:
             connection.execute("SELECT 1")
         return True
 
+    def claim_next_job(self, *, stale_after_seconds: int = 1800) -> JobRecord | None:
+        now = datetime.now(UTC)
+        stale_before = now.timestamp() - stale_after_seconds
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE status = 'queued'
+                   OR (
+                        status = 'running'
+                    AND updated_at IS NOT NULL
+                    AND strftime('%s', updated_at) <= ?
+                   )
+                ORDER BY
+                    CASE WHEN status = 'queued' THEN 0 ELSE 1 END,
+                    created_at ASC
+                LIMIT 1
+                """,
+                (stale_before,),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+
+            started_at = row["started_at"] or now.isoformat()
+            retries = int(row["retries"]) + 1
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, retries = ?, updated_at = ?, started_at = ?, completed_at = NULL
+                WHERE job_id = ?
+                """,
+                ("running", retries, now.isoformat(), started_at, row["job_id"]),
+            )
+            claimed = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (row["job_id"],)).fetchone()
+            connection.commit()
+        return self._row_to_job(claimed)
+
     def save_job(
         self,
         *,
@@ -108,10 +147,6 @@ class SQLiteJobStore:
                 "SELECT * FROM jobs WHERE status IN ('queued', 'running') ORDER BY created_at ASC"
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
-
-    def pop_next_job(self) -> JobRecord | None:
-        jobs = self.list_recoverable_jobs()
-        return jobs[0] if jobs else None
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> JobRecord:

@@ -15,19 +15,19 @@ class DummyResult:
             "job_id": "job_123",
             "status": "succeeded",
             "source_video": {"source_url": "https://youtube.com/watch?v=x"},
-            "canonical_video_gcs_uri": "gs://bucket/phase_1/video.mp4",
+            "canonical_video_gcs_uri": "gs://bucket/phase_1/jobs/job_123/source_video.mp4",
             "artifacts": {
                 "transcript": {
                     "uri": "gs://bucket/transcript.json",
                     "source_audio": "https://youtube.com/watch?v=x",
-                    "video_gcs_uri": "gs://bucket/phase_1/video.mp4",
+                    "video_gcs_uri": "gs://bucket/phase_1/jobs/job_123/source_video.mp4",
                     "words": [],
                     "speaker_bindings": [],
                 },
                 "visual_tracking": {
                     "uri": "gs://bucket/visual.json",
                     "source_video": "https://youtube.com/watch?v=x",
-                    "video_gcs_uri": "gs://bucket/phase_1/video.mp4",
+                    "video_gcs_uri": "gs://bucket/phase_1/jobs/job_123/source_video.mp4",
                     "schema_version": "2.0.0",
                     "task_type": "person_tracking",
                     "coordinate_space": "absolute_original_frame_xyxy",
@@ -134,3 +134,37 @@ def test_worker_loop_continues_after_failure(tmp_path: Path, monkeypatch):
     assert seen == ["job_fail", "job_next"]
     assert store.get_job("job_fail").status == "failed"
     assert store.get_job("job_next").status == "succeeded"
+
+
+def test_worker_contains_control_plane_failure_and_processes_later_job(tmp_path: Path, monkeypatch):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    enqueue_job(store, job_id="job_fail", payload={"source_url": "https://youtube.com/watch?v=fail"})
+    enqueue_job(store, job_id="job_next", payload={"source_url": "https://youtube.com/watch?v=next"})
+    seen = []
+    original_mark_succeeded = __import__("backend.do_phase1_service.worker", fromlist=["mark_succeeded"]).mark_succeeded
+
+    def fake_run_extraction_job(**kwargs):
+        seen.append(kwargs["job_id"])
+        return DummyResult()
+
+    def fake_mark_succeeded(store, job_id, *, manifest, manifest_uri):
+        if job_id == "job_fail":
+            raise RuntimeError("persist boom")
+        return original_mark_succeeded(store, job_id, manifest=manifest, manifest_uri=manifest_uri)
+
+    monkeypatch.setattr("backend.do_phase1_service.worker.run_extraction_job", fake_run_extraction_job)
+    monkeypatch.setattr("backend.do_phase1_service.worker.mark_succeeded", fake_mark_succeeded)
+
+    assert run_worker_once(store, output_root=tmp_path) is True
+    failed_job = store.get_job("job_fail")
+    assert failed_job is not None
+    assert failed_job.status == "failed"
+    assert failed_job.failure == {
+        "error_type": "RuntimeError",
+        "error_message": "persist boom",
+        "failed_step": "persist_success",
+    }
+
+    assert run_worker_once(store, output_root=tmp_path) is True
+    assert store.get_job("job_next").status == "succeeded"
+    assert seen == ["job_fail", "job_next"]

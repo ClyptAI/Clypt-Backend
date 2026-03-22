@@ -9,7 +9,6 @@ from backend.modal_worker import ClyptWorker
 from backend.pipeline.phase_1_modal_pipeline import (
     download_media,
     enrich_visual_ledger_for_downstream,
-    upload_video_to_gcs,
     validate_phase_handoff,
 )
 
@@ -40,7 +39,7 @@ def run_extraction_job(
     if phase_1_visual is None or phase_1_audio is None:
         raise RuntimeError("modal worker did not return phase_1_visual and phase_1_audio")
 
-    canonical_video_uri = upload_video_to_gcs(video_path)
+    canonical_video_uri = storage.upload_file(video_path, f"phase_1/jobs/{job_id}/source_video.mp4")
     phase_1_visual = enrich_visual_ledger_for_downstream(phase_1_visual, phase_1_audio, video_path)
     phase_1_visual["video_gcs_uri"] = canonical_video_uri
     phase_1_audio["video_gcs_uri"] = canonical_video_uri

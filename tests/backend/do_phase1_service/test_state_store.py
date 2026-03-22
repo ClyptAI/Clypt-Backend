@@ -22,3 +22,16 @@ def test_recoverable_jobs_include_running_and_queued(tmp_path: Path):
     recoverable_ids = {job.job_id for job in store.list_recoverable_jobs()}
 
     assert recoverable_ids == {"queued_job", "running_job"}
+
+
+def test_claim_next_job_is_atomic_for_queued_work(tmp_path: Path):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    store.save_job(job_id="job_123", source_url="https://youtube.com/watch?v=x", status="queued")
+
+    first_claim = store.claim_next_job(stale_after_seconds=1800)
+    second_claim = store.claim_next_job(stale_after_seconds=1800)
+
+    assert first_claim is not None
+    assert first_claim.job_id == "job_123"
+    assert first_claim.status == "running"
+    assert second_claim is None
