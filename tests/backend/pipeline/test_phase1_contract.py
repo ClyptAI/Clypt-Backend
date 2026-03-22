@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import pytest
 from pydantic import ValidationError
 
@@ -177,6 +179,39 @@ def test_manifest_accepts_realistic_legacy_payload_shape():
 )
 def test_manifest_rejects_invalid_legacy_payload(mutator, expected_match):
     payload = _legacy_manifest_payload()
+    mutator(payload)
+
+    with pytest.raises(ValidationError, match=expected_match):
+        Phase1Manifest.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "mutator, expected_match",
+    [
+        (
+            lambda payload: payload["artifacts"]["transcript"]["words"][0].__setitem__("start_time_ms", 2000),
+            "word start_time_ms",
+        ),
+        (
+            lambda payload: payload["artifacts"]["transcript"]["speaker_bindings"][0].__setitem__("word_count", -1),
+            "greater than or equal to 0",
+        ),
+        (
+            lambda payload: payload["artifacts"]["visual_tracking"]["face_detections"][0].__setitem__("confidence", 1.2),
+            "less than or equal to 1",
+        ),
+        (
+            lambda payload: payload["artifacts"]["visual_tracking"]["tracks"][0]["bbox_norm_xywh"].__setitem__("width", 1.1),
+            "less than or equal to 1",
+        ),
+        (
+            lambda payload: payload["artifacts"]["visual_tracking"]["shot_changes"][0].__setitem__("start_time_ms", 20000),
+            "shot change start_time_ms",
+        ),
+    ],
+)
+def test_manifest_rejects_semantically_invalid_payload(mutator, expected_match):
+    payload = deepcopy(_legacy_manifest_payload())
     mutator(payload)
 
     with pytest.raises(ValidationError, match=expected_match):

@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 
 def _validate_http_url(value: str) -> str:
@@ -23,6 +23,10 @@ def _validate_gcs_uri(value: str) -> str:
 
 HttpUrlStr = Annotated[str, AfterValidator(_validate_http_url)]
 GcsUriStr = Annotated[str, AfterValidator(_validate_gcs_uri)]
+NonNegativeInt = Annotated[int, Field(ge=0)]
+PositiveInt = Annotated[int, Field(gt=0)]
+Confidence01 = Annotated[float, Field(ge=0.0, le=1.0)]
+Normalized01 = Annotated[float, Field(ge=0.0, le=1.0)]
 
 
 class JobState(str, Enum):
@@ -42,36 +46,48 @@ class Phase1Word(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     word: str
-    start_time_ms: int
-    end_time_ms: int
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
     speaker_track_id: str
     speaker_tag: str
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("word start_time_ms must be <= end_time_ms")
+        return self
 
 
 class Phase1SpeakerBinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     track_id: str
-    start_time_ms: int
-    end_time_ms: int
-    word_count: int
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+    word_count: NonNegativeInt
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("speaker binding start_time_ms must be <= end_time_ms")
+        return self
 
 
 class Phase1BoundingBox(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    left: float
-    top: float
-    right: float
-    bottom: float
+    left: Normalized01
+    top: Normalized01
+    right: Normalized01
+    bottom: Normalized01
 
 
 class Phase1TimestampedObject(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    time_ms: int
+    time_ms: NonNegativeInt
     track_id: str
-    confidence: float
+    confidence: Confidence01
     bounding_box: Phase1BoundingBox
 
 
@@ -79,36 +95,42 @@ class Phase1DetectionSegment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     track_id: str
-    confidence: float
-    segment_start_ms: int
-    segment_end_ms: int
-    face_track_index: int | None = None
-    person_track_index: int | None = None
-    object_track_index: int | None = None
-    label_track_index: int | None = None
+    confidence: Confidence01
+    segment_start_ms: NonNegativeInt
+    segment_end_ms: NonNegativeInt
+    face_track_index: NonNegativeInt | None = None
+    person_track_index: NonNegativeInt | None = None
+    object_track_index: NonNegativeInt | None = None
+    label_track_index: NonNegativeInt | None = None
     timestamped_objects: list[Phase1TimestampedObject]
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.segment_start_ms > self.segment_end_ms:
+            raise ValueError("segment_start_ms must be <= segment_end_ms")
+        return self
 
 
 class Phase1TrackBBoxNorm(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    x_center: float
-    y_center: float
-    width: float
-    height: float
+    x_center: Normalized01
+    y_center: Normalized01
+    width: Normalized01
+    height: Normalized01
 
 
 class Phase1Track(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    frame_idx: int
-    local_frame_idx: int
-    chunk_idx: int
+    frame_idx: NonNegativeInt
+    local_frame_idx: NonNegativeInt
+    chunk_idx: NonNegativeInt
     track_id: str
-    local_track_id: int
-    class_id: int
+    local_track_id: NonNegativeInt
+    class_id: NonNegativeInt
     label: str
-    confidence: float
+    confidence: Confidence01
     x1: float
     y1: float
     x2: float
@@ -125,17 +147,23 @@ class Phase1Track(BaseModel):
 class Phase1ShotChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    start_time_ms: int
-    end_time_ms: int
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("shot change start_time_ms must be <= end_time_ms")
+        return self
 
 
 class Phase1VideoMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    width: int
-    height: int
-    fps: float
-    duration_ms: int
+    width: PositiveInt
+    height: PositiveInt
+    fps: Annotated[float, Field(gt=0.0)]
+    duration_ms: NonNegativeInt
 
 
 class Phase1TranscriptArtifact(BaseModel):
