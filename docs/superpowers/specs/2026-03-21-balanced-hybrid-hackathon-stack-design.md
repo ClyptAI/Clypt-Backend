@@ -53,6 +53,12 @@ Scope:
 - Improve onboarding and graph interaction surfaces if time allows.
 - Preserve the core feature set and interactions promised by the current spec.
 
+Preferred implementation posture:
+
+- Treat Lovable as an accelerator for the Cortex-facing app shell and product flows, not as a requirement to do a risky full rewrite from scratch.
+- A Lovable-assisted rebuild of the primary surfaces or a Lovable-assisted refactor of the current UI are both acceptable outcomes.
+- The team should choose the path that produces the strongest visible product result with the least hackathon risk.
+
 Reasoning:
 
 - Cortex is one of Clypt's most differentiated features.
@@ -127,13 +133,26 @@ Required semantic outputs:
 - Optional NDJSON or event-stream artifact if still useful downstream
 - Canonical source video reference
 - Extraction metadata
-- Quality / rollout metrics
+- Optional quality / rollout metrics
 - Stable storage URIs for downstream consumption
 
 Preferred shape:
 
 - A single manifest object describing the full Phase 1 run and all produced artifacts.
 - Downstream phases consume the manifest or a thin adapter around it, rather than assuming Modal-specific file conventions.
+
+Minimum manifest fields:
+
+- `contract_version`
+- `job_id`
+- `status`
+- `source_video`
+- `artifacts.transcript`
+- `artifacts.visual_tracking`
+- `artifacts.events` if produced
+- `metadata.runtime`
+- `metadata.timings`
+- `metadata.quality_metrics` if produced
 
 This contract should preserve what the rest of the app needs, not necessarily how Modal happened to package it.
 
