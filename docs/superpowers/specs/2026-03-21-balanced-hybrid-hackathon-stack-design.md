@@ -58,6 +58,8 @@ Preferred implementation posture:
 - Treat Lovable as an accelerator for the Cortex-facing app shell and product flows, not as a requirement to do a risky full rewrite from scratch.
 - A Lovable-assisted rebuild of the primary surfaces or a Lovable-assisted refactor of the current UI are both acceptable outcomes.
 - The team should choose the path that produces the strongest visible product result with the least hackathon risk.
+- Frontend implementation in Lovable is primarily teammate-owned; this project plan should only define the integration boundaries, backend contracts, and the support work needed to help prompt Lovable well and preserve product coherence.
+- Codex support for the frontend should focus on prompt orchestration, brand tokens, design-system guidance, and integration help when the Lovable output is imported back into this repo.
 
 Reasoning:
 
@@ -79,8 +81,9 @@ Scope:
 Recommended runtime shape:
 
 - A GPU Droplet-hosted extraction backend with explicit job lifecycle management.
-- The orchestrator submits work and receives either a synchronous result for short tasks or a job handle for longer-running tasks.
+- The orchestrator submits work and receives a job handle, because even short source videos are expected to produce long-running extraction work in practice.
 - Artifacts are written to durable storage and returned through a canonical extraction manifest.
+- The system should be optimized toward a long-term target of roughly 10 minutes total compute for a 7 minute YouTube video, while explicitly accepting that early hackathon iterations may exceed that target.
 
 Reasoning:
 
@@ -245,12 +248,13 @@ Reasons:
 Target flow:
 
 1. User submits a YouTube URL or source media.
-2. The orchestrator sends Phase 1 work to the DigitalOcean extraction service.
+2. The orchestrator creates an asynchronous Phase 1 extraction job on the DigitalOcean service.
 3. The extraction service runs deterministic multimodal extraction on a GPU Droplet.
-4. The extraction service emits a canonical Phase 1 manifest and associated artifacts.
-5. Existing Gemini / Vertex-backed downstream phases produce nodes, edges, and embeddings.
-6. Existing Spanner + GCS-backed storage and retrieval continue serving Cortex and rendering.
-7. Lovable-built or Lovable-assisted frontend presents the creator-facing experience.
+4. The orchestrator polls or resumes job state until completion rather than assuming a short-lived request lifecycle.
+5. The extraction service emits a canonical Phase 1 manifest and associated artifacts.
+6. Existing Gemini / Vertex-backed downstream phases produce nodes, edges, and embeddings.
+7. Existing Spanner + GCS-backed storage and retrieval continue serving Cortex and rendering.
+8. Lovable-built frontend work is imported by the team into this repo, with Codex supporting prompting, token/design consistency, and integration.
 
 ## Risks
 
@@ -268,7 +272,7 @@ Mitigation:
 
 ### 2. Long-Running Job Reliability
 
-Phase 1 workloads may exceed comfortable synchronous request lifetimes.
+Phase 1 workloads should be treated as long-running by default, even for relatively short videos.
 
 Impact:
 
@@ -276,7 +280,7 @@ Impact:
 
 Mitigation:
 
-- Design around explicit job lifecycle, resumability, and artifact manifests.
+- Design around explicit job lifecycle, resumability, polling, and artifact manifests from the start.
 
 ### 3. Contract Drift
 
