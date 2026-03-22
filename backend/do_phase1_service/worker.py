@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -14,6 +15,9 @@ DEFAULT_STATE_ROOT = Path(os.getenv("DO_PHASE1_STATE_ROOT", "/var/lib/clypt/do_p
 DEFAULT_DB_PATH = Path(os.getenv("DO_PHASE1_DB_PATH", str(DEFAULT_STATE_ROOT / "jobs.db")))
 DEFAULT_OUTPUT_ROOT = Path(os.getenv("DO_PHASE1_OUTPUT_ROOT", str(DEFAULT_STATE_ROOT / "workdir")))
 DEFAULT_RUNNING_STALE_AFTER_SECONDS = int(os.getenv("DO_PHASE1_RUNNING_STALE_AFTER_SECONDS", "1800"))
+DEFAULT_LOOP_ERROR_BACKOFF_SECONDS = float(os.getenv("DO_PHASE1_LOOP_ERROR_BACKOFF_SECONDS", "2.0"))
+
+logger = logging.getLogger(__name__)
 
 
 def run_worker_once(
@@ -38,6 +42,7 @@ def run_worker_once(
             job_id=job.job_id,
             output_dir=Path(output_root),
             storage=storage,
+            attempt_count=job.retries,
         )
 
         failed_step = "persist_success"
@@ -71,12 +76,14 @@ def run_worker_loop(
     while True:
         try:
             processed = run_worker_once(
-                store,
-                output_root=output_root,
-                storage=storage,
-                stale_after_seconds=DEFAULT_RUNNING_STALE_AFTER_SECONDS,
-            )
+            store,
+            output_root=output_root,
+            storage=storage,
+            stale_after_seconds=DEFAULT_RUNNING_STALE_AFTER_SECONDS,
+        )
         except Exception:
+            logger.exception("Phase 1 worker loop hit an unexpected control-plane error")
+            time.sleep(DEFAULT_LOOP_ERROR_BACKOFF_SECONDS)
             processed = True
         if not processed:
             time.sleep(poll_interval_seconds)

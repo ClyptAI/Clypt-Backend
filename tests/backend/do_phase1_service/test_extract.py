@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from backend.do_phase1_service.extract import run_extraction_job
+import pytest
+
+from backend.do_phase1_service.extract import HostExtractionBusyError, host_extraction_lock, run_extraction_job
 
 
 class FakeStorage:
@@ -61,9 +63,20 @@ def test_extract_job_produces_manifest_and_artifacts(tmp_path: Path, monkeypatch
         job_id="job_123",
         output_dir=tmp_path,
         storage=FakeStorage(),
+        host_lock_path=tmp_path / "extract.lock",
     )
 
     assert result.status == "succeeded"
     assert result.artifacts.transcript.uri
     assert result.artifacts.visual_tracking.uri
     assert result.canonical_video_gcs_uri == "gs://bucket/phase_1/jobs/job_123/source_video.mp4"
+    assert result.metadata.retry is None
+
+
+def test_host_lock_rejects_second_extraction_attempt(tmp_path: Path):
+    lock_path = tmp_path / "extract.lock"
+
+    with host_extraction_lock(lock_path):
+        with pytest.raises(HostExtractionBusyError, match="already running"):
+            with host_extraction_lock(lock_path):
+                pass

@@ -46,24 +46,16 @@ class SQLiteJobStore:
 
     def claim_next_job(self, *, stale_after_seconds: int = 1800) -> JobRecord | None:
         now = datetime.now(UTC)
-        stale_before = now.timestamp() - stale_after_seconds
+        _ = stale_after_seconds
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
                 SELECT * FROM jobs
                 WHERE status = 'queued'
-                   OR (
-                        status = 'running'
-                    AND updated_at IS NOT NULL
-                    AND strftime('%s', updated_at) <= ?
-                   )
-                ORDER BY
-                    CASE WHEN status = 'queued' THEN 0 ELSE 1 END,
-                    created_at ASC
+                ORDER BY created_at ASC
                 LIMIT 1
                 """,
-                (stale_before,),
             ).fetchone()
             if row is None:
                 connection.commit()
@@ -144,7 +136,7 @@ class SQLiteJobStore:
     def list_recoverable_jobs(self) -> list[JobRecord]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM jobs WHERE status IN ('queued', 'running') ORDER BY created_at ASC"
+                "SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at ASC"
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
 

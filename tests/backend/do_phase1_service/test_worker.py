@@ -168,3 +168,31 @@ def test_worker_contains_control_plane_failure_and_processes_later_job(tmp_path:
     assert run_worker_once(store, output_root=tmp_path) is True
     assert store.get_job("job_next").status == "succeeded"
     assert seen == ["job_fail", "job_next"]
+
+
+def test_worker_loop_backs_off_on_unexpected_exception(tmp_path: Path, monkeypatch):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    calls = []
+    sleeps = []
+
+    def fake_run_worker_once(*args, **kwargs):
+        calls.append("run")
+        if len(calls) == 1:
+            raise RuntimeError("claim boom")
+        return False
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("backend.do_phase1_service.worker.run_worker_once", fake_run_worker_once)
+    monkeypatch.setattr("backend.do_phase1_service.worker.time.sleep", fake_sleep)
+
+    try:
+        run_worker_loop(store=store, output_root=tmp_path, poll_interval_seconds=0.5)
+    except KeyboardInterrupt:
+        pass
+
+    assert calls == ["run", "run"]
+    assert sleeps == [2.0, 0.5]
