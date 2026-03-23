@@ -27,6 +27,7 @@ class SQLiteJobStore:
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_id TEXT PRIMARY KEY,
                     source_url TEXT NOT NULL,
+                    runtime_controls_json TEXT,
                     status TEXT NOT NULL,
                     retries INTEGER NOT NULL DEFAULT 0,
                     claim_token TEXT,
@@ -50,6 +51,8 @@ class SQLiteJobStore:
             }
             if "claim_token" not in columns:
                 connection.execute("ALTER TABLE jobs ADD COLUMN claim_token TEXT")
+            if "runtime_controls_json" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN runtime_controls_json TEXT")
             if "current_step" not in columns:
                 connection.execute("ALTER TABLE jobs ADD COLUMN current_step TEXT")
             if "progress_message" not in columns:
@@ -103,6 +106,7 @@ class SQLiteJobStore:
         *,
         job_id: str,
         source_url: str,
+        runtime_controls: dict | None = None,
         status: str,
         retries: int = 0,
         claim_token: str | None = None,
@@ -125,12 +129,13 @@ class SQLiteJobStore:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, source_url, status, retries, claim_token, manifest_json, manifest_uri,
+                    job_id, source_url, runtime_controls_json, status, retries, claim_token, manifest_json, manifest_uri,
                     failure_json, current_step, progress_message, progress_pct, log_path,
                     created_at, updated_at, started_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     source_url=excluded.source_url,
+                    runtime_controls_json=excluded.runtime_controls_json,
                     status=excluded.status,
                     retries=excluded.retries,
                     claim_token=excluded.claim_token,
@@ -149,6 +154,7 @@ class SQLiteJobStore:
                 (
                     job_id,
                     source_url,
+                    json.dumps(runtime_controls) if runtime_controls is not None else None,
                     status,
                     retries,
                     claim_token,
@@ -338,6 +344,7 @@ class SQLiteJobStore:
         return JobRecord(
             job_id=row["job_id"],
             source_url=row["source_url"],
+            runtime_controls=json.loads(row["runtime_controls_json"]) if row["runtime_controls_json"] else None,
             status=row["status"],
             retries=int(row["retries"]),
             claim_token=row["claim_token"],

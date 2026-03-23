@@ -1,8 +1,8 @@
-# modal_worker.py Documentation
+# do_phase1_worker.py Documentation
 
 ## Purpose
 
-`modal_worker.py` is the Phase 1 GPU service for Clypt.  
+`do_phase1_worker.py` is the Phase 1 GPU service for Clypt.  
 It accepts pre-downloaded media bytes and returns:
 
 - word-level ASR (`phase_1_audio.words`)
@@ -28,15 +28,14 @@ This worker is designed to run either:
 
 ### Runtime
 
-`@app.cls(...)` config:
+Primary runtime target:
 
-- `gpu="H100"`
-- `timeout=3600`
-- `max_containers=8`
-- `min_containers=0`
-- `scaledown_window=900`
-- `enable_memory_snapshot=False`
-- shared volume mount: `/vol/clypt-chunks`
+- DigitalOcean GPU extraction worker / service
+- local DO extraction reuse path through `backend/do_phase1_service/extract.py`
+
+Legacy compatibility:
+
+- optional legacy serverless wrapper support remains available when explicitly enabled
 
 ---
 
@@ -280,13 +279,13 @@ Rollout gates:
 
 ```bash
 source .venv/bin/activate
-.venv/bin/modal deploy backend/modal_worker.py
+bash scripts/do_phase1/deploy_phase1_service.sh
 ```
 
 ---
 
 ## Notes for Teammates
 
-- This worker expects media bytes from local pipeline code (`backend/pipeline/phase_1_modal_pipeline.py`), not direct YouTube access from Modal.
+- This worker expects media bytes from local pipeline code (`backend/pipeline/phase_1_do_pipeline.py`), not direct YouTube access from the extraction service.
 - The recommended production path is distributed fan-out from the client with up to 8 GPU workers.
 - Staged chunk artifacts live under `/vol/clypt-chunks/jobs/<job_id>` and should be cleaned with `cleanup_tracking_job`.

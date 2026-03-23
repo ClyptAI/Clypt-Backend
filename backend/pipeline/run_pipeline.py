@@ -203,7 +203,7 @@ def main():
     log.info(f"Target: {url}\n")
 
     # ── Phase 1: DigitalOcean async extraction ──
-    from pipeline.phase_1_modal_pipeline import main as phase_1_main
+    from pipeline.phase_1_do_pipeline import main as phase_1_main
     phase_1_manifest = asyncio.run(phase_1_main(youtube_url=url))
     log.info(
         "Phase 1 manifest ready: job_id=%s video=%s transcript=%s visual=%s",

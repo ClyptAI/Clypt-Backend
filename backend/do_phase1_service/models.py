@@ -13,6 +13,7 @@ class JobCreatePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_url: str
+    runtime_controls: dict[str, Any] | None = None
 
 
 class JobRecord(BaseModel):
@@ -20,6 +21,7 @@ class JobRecord(BaseModel):
 
     job_id: str = Field(default_factory=lambda: f"job_{uuid4().hex}")
     source_url: str
+    runtime_controls: dict[str, Any] | None = None
     status: JobState | Literal["queued", "running", "succeeded", "failed"]
     retries: int = 0
     claim_token: str | None = None

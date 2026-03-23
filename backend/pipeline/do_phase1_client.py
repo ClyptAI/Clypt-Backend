@@ -26,6 +26,7 @@ class Phase1JobRecord(BaseModel):
 
     job_id: str
     source_url: str
+    runtime_controls: dict[str, Any] | None = None
     status: JobState
     retries: int = 0
     claim_token: str | None = None
@@ -79,8 +80,16 @@ class DOPhase1Client:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def submit_job(self, source_url: str) -> Phase1JobSubmission:
-        response = await self._client.post("/jobs", json={"source_url": source_url})
+    async def submit_job(
+        self,
+        source_url: str,
+        *,
+        runtime_controls: dict[str, Any] | None = None,
+    ) -> Phase1JobSubmission:
+        payload: dict[str, Any] = {"source_url": source_url}
+        if runtime_controls is not None:
+            payload["runtime_controls"] = runtime_controls
+        response = await self._client.post("/jobs", json=payload)
         response.raise_for_status()
         return Phase1JobSubmission.model_validate(response.json())
 

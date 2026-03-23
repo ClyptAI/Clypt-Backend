@@ -52,9 +52,17 @@ ROOT = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = ROOT / "downloads"
 OUTPUT_DIR = ROOT / "outputs"
 PHASE1_NDJSON_PATH = OUTPUT_DIR / "phase_1_visual.ndjson"
+PHASE1_RUNTIME_CONTROLS_PATH = OUTPUT_DIR / "phase_1_runtime_controls.json"
 DETACHED_STATE_PATH = OUTPUT_DIR / "phase_1_detached_state.json"
 DEFAULT_DO_PHASE1_POLL_INTERVAL_SECONDS = 10.0
 DEFAULT_DO_PHASE1_TIMEOUT_SECONDS = 60.0 * 30.0
+PHASE1_EVAL_PROFILE_NAMES = {
+    "eval",
+    "evaluation",
+    "podcast_eval",
+    "podcast_framing_eval",
+    "test",
+}
 
 # ──────────────────────────────────────────────
 # Logging
@@ -195,16 +203,64 @@ def _build_shot_changes(duration_ms: int, window_ms: int = 10000) -> list[dict]:
     return out
 
 
+def build_phase1_runtime_controls() -> dict:
+    """Return the effective phase-1 runtime policy for local contract outputs.
+
+    This is intentionally pipeline-side state only. The worker still controls
+    the actual extraction runtime, but downstream consumers and tests can read
+    the requested policy from the local manifest bridge and detached state.
+    """
+    profile_name = (os.getenv("PHASE1_RUNTIME_PROFILE", "production") or "production").strip().lower()
+    eval_mode = profile_name in PHASE1_EVAL_PROFILE_NAMES or os.getenv("PHASE1_FORCE_LRASD", "0") == "1"
+
+    requested_speaker_binding_mode = (os.getenv("PHASE1_SPEAKER_BINDING_MODE", "auto") or "auto").strip().lower()
+    requested_tracking_mode = (os.getenv("PHASE1_TRACKING_MODE", "direct") or "direct").strip().lower()
+    shared_analysis_proxy_enabled = (os.getenv("PHASE1_SHARED_ANALYSIS_PROXY", "1") or "1").strip() != "0"
+    heuristic_binding_enabled_env = os.getenv("PHASE1_HEURISTIC_BINDING_ENABLED")
+
+    speaker_binding_mode = "lrasd" if eval_mode else requested_speaker_binding_mode
+    tracking_mode = "direct" if eval_mode else requested_tracking_mode
+    heuristic_binding_enabled = False if eval_mode else (
+        heuristic_binding_enabled_env is None or heuristic_binding_enabled_env.strip() != "0"
+    )
+
+    return {
+        "profile_name": profile_name,
+        "evaluation_mode": eval_mode,
+        "speaker_binding_mode": speaker_binding_mode,
+        "heuristic_binding_enabled": heuristic_binding_enabled,
+        "tracking_mode": tracking_mode,
+        "shared_analysis_proxy_enabled": shared_analysis_proxy_enabled,
+        "framing_policy": "single_person_plus_two_speaker",
+        "two_speaker_layout_policy": "shared_two_shot_or_explicit_split",
+        "face_detection_provenance": "insightface_roi",
+        "notes": (
+            "Eval profiles request LR-ASD and disable heuristic binding for inspection. "
+            "The worker remains the source of truth for actual extraction runtime."
+        ),
+    }
+
+
+def save_phase1_runtime_controls(runtime_controls: dict):
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    with open(PHASE1_RUNTIME_CONTROLS_PATH, "w", encoding="utf-8") as f:
+        json.dump(runtime_controls, f, indent=2)
+    log.info(f"Phase 1 runtime controls saved → {PHASE1_RUNTIME_CONTROLS_PATH}")
+
+
 def enrich_visual_ledger_for_downstream(
     phase_1_visual: dict,
     phase_1_audio: dict,
     video_path: str,
+    *,
+    runtime_controls: dict | None = None,
 ) -> dict:
     """Add backward-compatible visual fields (shot/person/face/object/label blocks)."""
     tracks = list(phase_1_visual.get("tracks", []))
     w, h, fps_str = probe_video_stream(video_path)
     fps = parse_fps_value(fps_str)
     duration_s = probe_duration_seconds(video_path)
+    runtime_controls = runtime_controls or build_phase1_runtime_controls()
     words = phase_1_audio.get("words", [])
     audio_end_ms = int(words[-1]["end_time_ms"]) if words else 0
     duration_ms = max(int(duration_s * 1000), audio_end_ms, 1)
@@ -237,8 +293,10 @@ def enrich_visual_ledger_for_downstream(
             "bottom": max(0.0, y2),
         }
 
+    existing_person_detections = list(phase_1_visual.get("person_detections", []))
+    existing_face_detections = list(phase_1_visual.get("face_detections", []))
     person_detections = []
-    face_detections = []
+    proxy_face_detections = []
     for idx, (tid, dets) in enumerate(sorted(by_track.items())):
         ts_objs = []
         face_ts_objs = []
@@ -252,6 +310,13 @@ def enrich_visual_ledger_for_downstream(
                     "bounding_box": bbox,
                     "track_id": tid,
                     "confidence": float(d.get("confidence", 0.0)),
+                    "source": "person_track",
+                    "provenance": {
+                        "kind": "person_track",
+                        "derived_from": "tracking_tracks",
+                        "track_id": tid,
+                        "frame_idx": fi,
+                    },
                 }
             )
             # Head-biased proxy face box from person bbox.
@@ -272,6 +337,14 @@ def enrich_visual_ledger_for_downstream(
                     },
                     "track_id": tid,
                     "confidence": float(d.get("confidence", 0.0)),
+                    "source": "compatibility_bridge",
+                    "provenance": {
+                        "kind": "compatibility_bridge",
+                        "derived_from": "person_track_bbox",
+                        "track_id": tid,
+                        "frame_idx": fi,
+                        "basis": "head_biased_crop_from_body_box",
+                    },
                 }
             )
         if not ts_objs:
@@ -284,9 +357,16 @@ def enrich_visual_ledger_for_downstream(
                 "person_track_index": idx,
                 "track_id": tid,
                 "timestamped_objects": ts_objs,
+                "source": "person_track",
+                "provenance": {
+                    "kind": "person_track",
+                    "derived_from": "tracking_tracks",
+                    "track_id": tid,
+                    "track_count": len(ts_objs),
+                },
             }
         )
-        face_detections.append(
+        proxy_face_detections.append(
             {
                 "confidence": float(sum(float(x.get("confidence", 0.0)) for x in face_ts_objs) / max(1, len(face_ts_objs))),
                 "segment_start_ms": int(face_ts_objs[0]["time_ms"]),
@@ -294,15 +374,25 @@ def enrich_visual_ledger_for_downstream(
                 "face_track_index": idx,
                 "track_id": tid,
                 "timestamped_objects": face_ts_objs,
+                "source": "compatibility_bridge",
+                "provenance": {
+                    "kind": "compatibility_bridge",
+                    "derived_from": "person_track_bbox",
+                    "track_id": tid,
+                    "track_count": len(face_ts_objs),
+                    "basis": "head_biased_crop_from_body_box",
+                },
             }
         )
 
     enriched = dict(phase_1_visual)
     enriched["shot_changes"] = _build_shot_changes(duration_ms=duration_ms)
-    enriched["person_detections"] = person_detections
-    enriched["face_detections"] = face_detections
+    enriched["person_detections"] = existing_person_detections or person_detections
+    enriched["face_detections"] = existing_face_detections or proxy_face_detections
+    enriched["proxy_face_detections"] = proxy_face_detections
     enriched["object_tracking"] = list(enriched.get("object_tracking", []))
     enriched["label_detections"] = list(enriched.get("label_detections", []))
+    enriched["runtime_controls"] = runtime_controls
     enriched["video_metadata"] = {
         "width": int(w),
         "height": int(h),
@@ -552,7 +642,8 @@ async def submit_or_resume_phase1_job(client: DOPhase1Client, source_url: str) -
     if resumable_job_id:
         return resumable_job_id
 
-    submission = await client.submit_job(source_url)
+    runtime_controls = build_phase1_runtime_controls()
+    submission = await client.submit_job(source_url, runtime_controls=runtime_controls)
     job_id = str(submission.job_id)
     log.info("Submitted DigitalOcean Phase 1 job %s (status=%s).", job_id, submission.status)
     save_detached_state(
@@ -561,6 +652,7 @@ async def submit_or_resume_phase1_job(client: DOPhase1Client, source_url: str) -
             source_url=source_url,
             status=str(submission.status),
             submitted_at_epoch_s=time.time(),
+            runtime_controls=runtime_controls,
         )
     )
     return job_id
@@ -575,6 +667,7 @@ async def wait_for_phase1_manifest(
     timeout_seconds = get_phase1_timeout_seconds()
     poll_interval_seconds = get_phase1_poll_interval_seconds()
     started_at = time.monotonic()
+    runtime_controls = build_phase1_runtime_controls()
 
     log.info(
         "Polling DigitalOcean Phase 1 job %s every %.1fs (timeout %.1fs).",
@@ -595,6 +688,7 @@ async def wait_for_phase1_manifest(
                 status=status,
                 manifest_uri=getattr(job, "manifest_uri", None),
                 failure=getattr(job, "failure", None),
+                runtime_controls=runtime_controls,
             )
         )
 
@@ -612,6 +706,7 @@ async def wait_for_phase1_manifest(
                     status=status,
                     failure=message,
                     terminal=True,
+                    runtime_controls=runtime_controls,
                 )
             )
             raise RuntimeError(f"Phase 1 extraction failed for job {job_id}: {message}")
@@ -625,6 +720,7 @@ async def wait_for_phase1_manifest(
                     status=status,
                     timeout_seconds=timeout_seconds,
                     resume_hint="Re-run the pipeline to resume polling this job.",
+                    runtime_controls=runtime_controls,
                 )
             )
             log.warning(
@@ -647,9 +743,15 @@ def materialize_phase1_manifest(manifest: Phase1Manifest, *, source_url: str) ->
     # local download alongside the JSON ledgers, even though extraction moved to
     # DigitalOcean jobs.
     log.info("── Step 3: Local Media Acquisition For Downstream Compatibility ──")
-    download_media(source_url)
+    runtime_controls = build_phase1_runtime_controls()
+    video_path, _audio_path = download_media(source_url)
 
-    phase_1_visual = manifest.artifacts.visual_tracking.model_dump(mode="json")
+    phase_1_visual = enrich_visual_ledger_for_downstream(
+        manifest.artifacts.visual_tracking.model_dump(mode="json"),
+        manifest.artifacts.transcript.model_dump(mode="json"),
+        video_path,
+        runtime_controls=runtime_controls,
+    )
     phase_1_audio = manifest.artifacts.transcript.model_dump(mode="json")
 
     phase_1_visual["video_gcs_uri"] = manifest.canonical_video_gcs_uri
@@ -669,6 +771,8 @@ def materialize_phase1_manifest(manifest: Phase1Manifest, *, source_url: str) ->
     with open(audio_out, "w", encoding="utf-8") as f:
         json.dump(phase_1_audio, f, indent=2)
     log.info(f"Audio ledger saved → {audio_out}")
+
+    save_phase1_runtime_controls(runtime_controls)
 
     return phase_1_visual, phase_1_audio
 

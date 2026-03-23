@@ -42,7 +42,7 @@ python -m pip install -r "$REQUIREMENTS_FILE"
 # it can accept jobs. TensorRT export is best effort; the worker falls back to
 # PyTorch weights when no engine is present.
 python - <<'PY'
-from backend.modal_worker import (
+from backend.do_phase1_worker import (
     download_asr_model,
     download_insightface_model,
     download_lrasd_model,

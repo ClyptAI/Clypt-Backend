@@ -7,8 +7,8 @@ Local commit since that pull:
 - `195f378` `did some bugfixing since initial version did not run`
 
 Files changed:
-- `backend/modal_worker.py`
-- `backend/pipeline/phase_1_modal_pipeline.py`
+- `backend/do_phase1_worker.py`
+- `backend/pipeline/phase_1_do_pipeline.py`
 
 ### Summary
 
@@ -22,7 +22,7 @@ This change set mainly fixes distributed Phase 1 execution issues in Modal:
 
 ### Detailed Changes
 
-#### `backend/modal_worker.py`
+#### `backend/do_phase1_worker.py`
 
 1. Increased class timeout from 30 minutes to 60 minutes.
 - Changed `timeout=1800` to `timeout=3600`
@@ -46,7 +46,7 @@ This change set mainly fixes distributed Phase 1 execution issues in Modal:
 - Added `TRACKING_VOLUME.reload()` inside `track_chunk_from_staged(...)`
 - Impact: helps each tracking worker see the latest staged files before processing a chunk
 
-#### `backend/pipeline/phase_1_modal_pipeline.py`
+#### `backend/pipeline/phase_1_do_pipeline.py`
 
 1. Fixed async autoscaler update call.
 - Changed:

@@ -14,8 +14,9 @@ import fcntl
 
 from backend.do_phase1_service.models import PersistedPhase1Manifest
 from backend.do_phase1_service.storage import GCSStorage, StorageBackend, persist_phase1_outputs
-from backend.modal_worker import ClyptWorker, LRASD_MODEL_PATH, LRASD_REPO_ROOT
-from backend.pipeline.phase_1_modal_pipeline import (
+from backend.do_phase1_worker import ClyptWorker, LRASD_MODEL_PATH, LRASD_REPO_ROOT
+from backend.pipeline import phase_1_do_pipeline as phase1_pipeline
+from backend.pipeline.phase_1_do_pipeline import (
     download_media,
     enrich_visual_ledger_for_downstream,
     validate_phase_handoff,
@@ -23,6 +24,7 @@ from backend.pipeline.phase_1_modal_pipeline import (
 
 DEFAULT_STATE_ROOT = Path(os.getenv("DO_PHASE1_STATE_ROOT", "/var/lib/clypt/do_phase1_service"))
 DEFAULT_HOST_LOCK_PATH = Path(os.getenv("DO_PHASE1_HOST_LOCK_PATH", str(DEFAULT_STATE_ROOT / "extract.lock")))
+DEFAULT_GPU_SLOT_POLL_INTERVAL_S = float(os.getenv("DO_PHASE1_GPU_SLOT_POLL_INTERVAL_S", "0.1"))
 
 REQUIRED_RUNTIME_MODULES = (
     "cv2",
@@ -47,6 +49,7 @@ def run_extraction_job(
     *,
     source_url: str,
     job_id: str,
+    runtime_controls: dict[str, object] | None = None,
     output_dir: str | Path,
     storage: StorageBackend | None = None,
     host_lock_path: str | Path | None = None,
@@ -64,24 +67,27 @@ def run_extraction_job(
     progress = progress_callback or (lambda step, message=None, pct=None: None)
     progress("download_media", "Downloading source media", 0.02)
 
-    with _capture_job_logs(log_path, on_line=lambda line: _forward_progress_line(line, progress)):
-        print(f"[DO Phase 1] Starting job {job_id} for {source_url}")
-        with host_extraction_lock(host_lock_path or DEFAULT_HOST_LOCK_PATH):
+    with _job_pipeline_workspace(job_output_dir):
+        with _capture_job_logs(log_path, on_line=lambda line: _forward_progress_line(line, progress)):
+            print(f"[DO Phase 1] Starting job {job_id} for {source_url}")
             video_path, audio_path = download_media(source_url)
             processing_started_at = time.perf_counter()
-            progress("extracting", "Running ASR, tracking, clustering, and speaker binding", 0.1)
-            modal_result = execute_local_extraction(
-                video_path=video_path,
-                audio_path=audio_path,
-                youtube_url=source_url,
-            )
-            if modal_result.get("status") != "success":
-                raise RuntimeError(modal_result.get("message", "phase 1 extraction failed"))
+            progress("awaiting_gpu_slot", "Waiting for a GPU extraction slot", 0.08)
+            with host_extraction_slot(host_lock_path or DEFAULT_HOST_LOCK_PATH):
+                progress("extracting", "Running ASR, tracking, clustering, and speaker binding", 0.1)
+                with _runtime_controls_env(runtime_controls):
+                    extraction_result = execute_local_extraction(
+                        video_path=video_path,
+                        audio_path=audio_path,
+                        youtube_url=source_url,
+                    )
+                if extraction_result.get("status") != "success":
+                    raise RuntimeError(extraction_result.get("message", "phase 1 extraction failed"))
 
-            phase_1_visual = modal_result.get("phase_1_visual") or modal_result.get("phase_1a_visual")
-            phase_1_audio = modal_result.get("phase_1_audio") or modal_result.get("phase_1a_audio")
-            if phase_1_visual is None or phase_1_audio is None:
-                raise RuntimeError("phase 1 extraction did not return phase_1_visual and phase_1_audio")
+                phase_1_visual = extraction_result.get("phase_1_visual") or extraction_result.get("phase_1a_visual")
+                phase_1_audio = extraction_result.get("phase_1_audio") or extraction_result.get("phase_1a_audio")
+                if phase_1_visual is None or phase_1_audio is None:
+                    raise RuntimeError("phase 1 extraction did not return phase_1_visual and phase_1_audio")
 
             progress("uploading_source", "Uploading canonical source video to GCS", 0.92)
             canonical_video_uri = storage.upload_file(video_path, f"phase_1/jobs/{job_id}/source_video.mp4")
@@ -107,7 +113,7 @@ def run_extraction_job(
                     "upload_ms": int(round((time.perf_counter() - upload_started_at) * 1000)),
                 },
             )
-        print(f"[DO Phase 1] Job {job_id} manifest persisted to {manifest.manifest_uri}")
+            print(f"[DO Phase 1] Job {job_id} manifest persisted to {manifest.manifest_uri}")
     progress("complete", "Phase 1 job succeeded", 1.0)
 
     return manifest
@@ -121,7 +127,7 @@ def execute_local_extraction(*, video_path: str, audio_path: str, youtube_url: s
     )
 
 
-class LocalModalPhase1Extractor:
+class LocalDOPhase1Extractor:
     """Run the existing Phase 1 extraction stack inside the DO worker process."""
 
     def __init__(self):
@@ -150,7 +156,7 @@ class LocalModalPhase1Extractor:
             raise LocalExtractionRuntimeError(
                 "DigitalOcean Phase 1 local extraction runtime is not fully provisioned. "
                 "The droplet must provide the Phase 1 ML dependency bundle used by "
-                "backend/modal_worker.py, including GPU-enabled torch, NeMo ASR, "
+                "backend/do_phase1_worker.py, including GPU-enabled torch, NeMo ASR, "
                 "Ultralytics, InsightFace/ONNX Runtime, Decord, OpenCV, OmegaConf, "
                 f"and LR-ASD assets under {LRASD_REPO_ROOT} / {LRASD_MODEL_PATH}. "
                 f"Underlying load error: {type(exc).__name__}: {exc}"
@@ -159,8 +165,8 @@ class LocalModalPhase1Extractor:
 
 
 @lru_cache(maxsize=1)
-def get_local_extractor() -> LocalModalPhase1Extractor:
-    return LocalModalPhase1Extractor()
+def get_local_extractor() -> LocalDOPhase1Extractor:
+    return LocalDOPhase1Extractor()
 
 
 def ensure_local_runtime_prereqs() -> None:
@@ -185,20 +191,81 @@ def ensure_local_runtime_prereqs() -> None:
         raise LocalExtractionRuntimeError(
             "DigitalOcean Phase 1 local extraction runtime prerequisites are missing; "
             + "; ".join(pieces)
-            + ". The droplet must provide the Phase 1 ML bundle expected by backend/modal_worker.py."
+            + ". The droplet must provide the Phase 1 ML bundle expected by backend/do_phase1_worker.py."
         )
 
 
 @contextmanager
 def host_extraction_lock(lock_path: str | Path) -> Iterator[Path]:
+    with host_extraction_slot(lock_path, slot_count=1) as slot:
+        yield slot[0]
+
+
+@contextmanager
+def host_extraction_slot(
+    lock_path: str | Path,
+    *,
+    slot_count: int | None = None,
+    poll_interval_s: float = DEFAULT_GPU_SLOT_POLL_INTERVAL_S,
+) -> Iterator[tuple[Path, int]]:
     lock_path = Path(lock_path)
+    slot_count = max(1, int(slot_count or os.getenv("DO_PHASE1_GPU_SLOTS", "1")))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    lock_file = None
+    acquired_path: Path | None = None
+    acquired_slot = -1
+    while lock_file is None:
+        for slot_idx in range(slot_count):
+            candidate = lock_path.parent / f"{lock_path.name}.slot{slot_idx}"
+            handle = candidate.open("a+", encoding="utf-8")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_file = handle
+                acquired_path = candidate
+                acquired_slot = slot_idx
+                break
+            except BlockingIOError:
+                handle.close()
+        if lock_file is None:
+            time.sleep(max(0.01, float(poll_interval_s)))
+    try:
+        assert acquired_path is not None
+        yield acquired_path, acquired_slot
+    finally:
         try:
-            yield lock_path
-        finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
+
+
+@contextmanager
+def _job_pipeline_workspace(job_output_dir: Path) -> Iterator[tuple[Path, Path]]:
+    workspace_root = job_output_dir / "_workspace"
+    download_dir = workspace_root / "downloads"
+    output_dir = workspace_root / "outputs"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    previous = {
+        "DOWNLOAD_DIR": phase1_pipeline.DOWNLOAD_DIR,
+        "OUTPUT_DIR": phase1_pipeline.OUTPUT_DIR,
+        "PHASE1_NDJSON_PATH": phase1_pipeline.PHASE1_NDJSON_PATH,
+        "PHASE1_RUNTIME_CONTROLS_PATH": phase1_pipeline.PHASE1_RUNTIME_CONTROLS_PATH,
+        "DETACHED_STATE_PATH": phase1_pipeline.DETACHED_STATE_PATH,
+    }
+    phase1_pipeline.DOWNLOAD_DIR = download_dir
+    phase1_pipeline.OUTPUT_DIR = output_dir
+    phase1_pipeline.PHASE1_NDJSON_PATH = output_dir / "phase_1_visual.ndjson"
+    phase1_pipeline.PHASE1_RUNTIME_CONTROLS_PATH = output_dir / "phase_1_runtime_controls.json"
+    phase1_pipeline.DETACHED_STATE_PATH = output_dir / "phase_1_detached_state.json"
+    try:
+        yield download_dir, output_dir
+    finally:
+        phase1_pipeline.DOWNLOAD_DIR = previous["DOWNLOAD_DIR"]
+        phase1_pipeline.OUTPUT_DIR = previous["OUTPUT_DIR"]
+        phase1_pipeline.PHASE1_NDJSON_PATH = previous["PHASE1_NDJSON_PATH"]
+        phase1_pipeline.PHASE1_RUNTIME_CONTROLS_PATH = previous["PHASE1_RUNTIME_CONTROLS_PATH"]
+        phase1_pipeline.DETACHED_STATE_PATH = previous["DETACHED_STATE_PATH"]
 
 
 @contextmanager
@@ -218,6 +285,37 @@ def _forward_progress_line(line: str, callback: ProgressCallback) -> None:
         if pattern.search(normalized):
             callback(step, message or normalized, pct)
             return
+
+
+@contextmanager
+def _runtime_controls_env(runtime_controls: dict[str, object] | None) -> Iterator[None]:
+    runtime_controls = dict(runtime_controls or {})
+    env_map = {
+        "speaker_binding_mode": "CLYPT_SPEAKER_BINDING_MODE",
+        "tracking_mode": "CLYPT_TRACKING_MODE",
+        "shared_analysis_proxy_enabled": "CLYPT_SHARED_ANALYSIS_PROXY",
+    }
+    previous: dict[str, str | None] = {}
+    try:
+        for control_key, env_key in env_map.items():
+            control_value = runtime_controls.get(control_key)
+            if control_value in (None, ""):
+                continue
+            previous[env_key] = os.environ.get(env_key)
+            os.environ[env_key] = str(control_value)
+
+        profile_name = str(runtime_controls.get("profile_name", "") or "").strip().lower()
+        evaluation_mode = bool(runtime_controls.get("evaluation_mode"))
+        if evaluation_mode or profile_name in {"podcast_eval", "podcast", "eval", "test"}:
+            previous["CLYPT_PHASE1_EVAL_PROFILE"] = os.environ.get("CLYPT_PHASE1_EVAL_PROFILE")
+            os.environ["CLYPT_PHASE1_EVAL_PROFILE"] = profile_name or "eval"
+        yield
+    finally:
+        for env_key, old_value in previous.items():
+            if old_value is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = old_value
 
 
 class _LineTee:

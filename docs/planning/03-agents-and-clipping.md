@@ -6,12 +6,12 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 ## Agent Roles (Implemented)
 
 The current system uses a hybrid runtime:
-- **Modal GPU microservice** for deterministic multimodal extraction in Phase 1.
+- **DO GPU microservice** for deterministic multimodal extraction in Phase 1.
 - **Gemini** for semantic reasoning and clip scoring in Phases 2A, 2B, and 5.
 
 | Role | Stage | Runtime | Output |
 |---|---|---|---|
-| **Deterministic Extraction Worker** | Phase 1 | Modal (Parakeet + YOLO11/BoT-SORT + TalkNet) | `phase_1_visual.json`, `phase_1_audio.json` |
+| **Deterministic Extraction Worker** | Phase 1 | DO GPU service (Parakeet + YOLO11/BoT-SORT + TalkNet) | `phase_1_visual.json`, `phase_1_audio.json` |
 | **Content Mechanism Decomposition** | Phase 2A | Gemini 3.1 Pro | `phase_2a_nodes.json` |
 | **Narrative Edge Mapping** | Phase 2B | Gemini 3.1 Pro (text-only) | `phase_2b_narrative_edges.json` |
 | **Auto-Curator ClipScoringAgent** | Phase 5 Auto-Curate | Gemini 3.1 Pro | ranked clip payloads |
@@ -20,12 +20,12 @@ The current system uses a hybrid runtime:
 ---
 ## Phase 1 Extraction Mechanics
 
-`backend/pipeline/phase_1_modal_pipeline.py` now performs three tasks only:
+`backend/pipeline/phase_1_do_pipeline.py` now performs three tasks only:
 1. Build webhook request payload from input YouTube URL.
-2. Call Modal endpoint and wait for extraction completion.
+2. Call the DO endpoint and wait for extraction completion.
 3. Persist returned visual/audio ledgers for downstream phases.
 
-Inside Modal, the extraction stack runs in order:
+Inside the DO extraction worker, the stack runs in order:
 1. `yt-dlp`
 2. NVIDIA Canary-1B-v2 (word-level timestamps + punctuation)
 3. YOLO11 + BoT-SORT (dense persistent tracks)

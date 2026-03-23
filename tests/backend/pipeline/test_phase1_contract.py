@@ -23,7 +23,7 @@ def _legacy_manifest_payload() -> dict:
                         "word": "foundational",
                         "start_time_ms": 1040,
                         "end_time_ms": 1600,
-                        "speaker_track_id": "Global_Person_0",
+                        "speaker_track_id": None,
                         "speaker_tag": "Global_Person_0",
                     }
                 ],
@@ -48,6 +48,19 @@ def _legacy_manifest_payload() -> dict:
                 "tracking_metrics": {
                     "schema_pass_rate": 1.0,
                     "throughput_fps": 35.49084254321749,
+                    "track_identity_features": {
+                        "Global_Person_0": {
+                            "face_observations": [
+                                {
+                                    "frame_idx": 0,
+                                    "confidence": 0.91,
+                                    "source": "face_detector",
+                                    "provenance": "insightface_roi",
+                                }
+                            ]
+                        }
+                    },
+                    "tracking_mode": "direct",
                 },
                 "tracks": [
                     {
@@ -160,9 +173,17 @@ def test_manifest_accepts_realistic_legacy_payload_shape():
     assert manifest.contract_version == "v2"
     assert manifest.canonical_video_gcs_uri == "gs://clypt-storage-v2/phase_1/video.mp4"
     assert manifest.artifacts.transcript.speaker_bindings[0].track_id == "Global_Person_0"
+    assert manifest.artifacts.transcript.words[0].speaker_track_id is None
     assert manifest.artifacts.transcript.words[0].word == "foundational"
     assert manifest.artifacts.visual_tracking.tracks[0].track_id == "Global_Person_0"
     assert manifest.artifacts.visual_tracking.video_metadata.duration_ms == 123456
+    assert manifest.artifacts.visual_tracking.tracking_metrics["tracking_mode"] == "direct"
+    assert (
+        manifest.artifacts.visual_tracking.tracking_metrics["track_identity_features"]["Global_Person_0"][
+            "face_observations"
+        ][0]["provenance"]
+        == "insightface_roi"
+    )
 
 
 @pytest.mark.parametrize(

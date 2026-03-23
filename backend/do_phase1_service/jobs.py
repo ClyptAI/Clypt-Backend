@@ -9,10 +9,17 @@ from backend.do_phase1_service.state_store import SQLiteJobStore
 
 def create_job(store: SQLiteJobStore, payload: JobCreatePayload) -> JobRecord:
     now = datetime.now(UTC)
-    record = JobRecord(source_url=payload.source_url, status="queued", created_at=now, updated_at=now)
+    record = JobRecord(
+        source_url=payload.source_url,
+        runtime_controls=payload.runtime_controls,
+        status="queued",
+        created_at=now,
+        updated_at=now,
+    )
     return store.save_job(
         job_id=record.job_id,
         source_url=record.source_url,
+        runtime_controls=record.runtime_controls,
         status=record.status,
         retries=record.retries,
         claim_token=None,
@@ -29,6 +36,7 @@ def enqueue_job(store: SQLiteJobStore, *, job_id: str, payload: dict) -> JobReco
     return store.save_job(
         job_id=job_id,
         source_url=str(payload["source_url"]),
+        runtime_controls=dict(payload.get("runtime_controls") or {}) or None,
         status="queued",
         retries=0,
         claim_token=None,
@@ -52,6 +60,7 @@ def mark_running(store: SQLiteJobStore, job_id: str) -> JobRecord:
     return store.save_job(
         job_id=job.job_id,
         source_url=job.source_url,
+        runtime_controls=job.runtime_controls,
         status="running",
         retries=job.retries + 1,
         claim_token=job.claim_token or uuid4().hex,

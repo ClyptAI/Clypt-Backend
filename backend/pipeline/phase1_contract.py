@@ -48,7 +48,7 @@ class Phase1Word(BaseModel):
     word: str
     start_time_ms: NonNegativeInt
     end_time_ms: NonNegativeInt
-    speaker_track_id: str
+    speaker_track_id: str | None
     speaker_tag: str
 
     @model_validator(mode="after")
@@ -97,6 +97,8 @@ class Phase1TimestampedObject(BaseModel):
     track_id: str
     confidence: Confidence01
     bounding_box: Phase1BoundingBox
+    source: str | None = None
+    provenance: dict[str, object] | str | None = None
 
 
 class Phase1DetectionSegment(BaseModel):
@@ -110,6 +112,8 @@ class Phase1DetectionSegment(BaseModel):
     person_track_index: NonNegativeInt | None = None
     object_track_index: NonNegativeInt | None = None
     label_track_index: NonNegativeInt | None = None
+    source: str | None = None
+    provenance: dict[str, object] | str | None = None
     timestamped_objects: list[Phase1TimestampedObject]
 
     @model_validator(mode="after")
@@ -195,7 +199,7 @@ class Phase1VisualArtifact(BaseModel):
     coordinate_space: str
     geometry_type: str
     class_taxonomy: dict[str, str]
-    tracking_metrics: dict[str, float | int]
+    tracking_metrics: dict[str, object]
     tracks: list[Phase1Track]
     face_detections: list[Phase1DetectionSegment]
     person_detections: list[Phase1DetectionSegment]

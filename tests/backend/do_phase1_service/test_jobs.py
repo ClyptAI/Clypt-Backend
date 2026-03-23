@@ -9,13 +9,17 @@ from backend.do_phase1_service.state_store import SQLiteJobStore
 
 def test_create_job_returns_queued_manifest(tmp_path: Path):
     store = SQLiteJobStore(tmp_path / "jobs.db")
-    payload = JobCreatePayload(source_url="https://youtube.com/watch?v=x")
+    payload = JobCreatePayload(
+        source_url="https://youtube.com/watch?v=x",
+        runtime_controls={"speaker_binding_mode": "lrasd"},
+    )
 
     job = create_job(store, payload)
 
     assert job.status == "queued"
     assert job.manifest is None
     assert job.retries == 0
+    assert job.runtime_controls == {"speaker_binding_mode": "lrasd"}
 
 
 def test_job_lifecycle_updates_status_and_manifest(tmp_path: Path):

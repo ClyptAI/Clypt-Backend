@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import os
 import threading
 import time
@@ -18,8 +19,16 @@ DEFAULT_OUTPUT_ROOT = Path(os.getenv("DO_PHASE1_OUTPUT_ROOT", str(DEFAULT_STATE_
 DEFAULT_RUNNING_STALE_AFTER_SECONDS = int(os.getenv("DO_PHASE1_RUNNING_STALE_AFTER_SECONDS", "1800"))
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = float(os.getenv("DO_PHASE1_HEARTBEAT_INTERVAL_SECONDS", "30.0"))
 DEFAULT_LOOP_ERROR_BACKOFF_SECONDS = float(os.getenv("DO_PHASE1_LOOP_ERROR_BACKOFF_SECONDS", "2.0"))
+DEFAULT_WORKER_CONCURRENCY = int(os.getenv("DO_PHASE1_WORKER_CONCURRENCY", "1"))
 
 logger = logging.getLogger(__name__)
+
+
+def worker_concurrency() -> int:
+    try:
+        return max(1, int(os.getenv("DO_PHASE1_WORKER_CONCURRENCY", str(DEFAULT_WORKER_CONCURRENCY))))
+    except Exception:
+        return 1
 
 
 def run_worker_once(
@@ -69,6 +78,7 @@ def run_worker_once(
         manifest = run_extraction_job(
             source_url=job.source_url,
             job_id=job.job_id,
+            runtime_controls=job.runtime_controls,
             output_dir=output_root,
             storage=storage,
             log_path=log_path,
@@ -132,6 +142,72 @@ def run_worker_loop(
             processed = True
         if not processed:
             time.sleep(poll_interval_seconds)
+
+
+def _run_worker_child(
+    *,
+    db_path: str,
+    output_root: str,
+    poll_interval_seconds: float,
+) -> None:
+    store = SQLiteJobStore(db_path)
+    run_worker_loop(
+        store=store,
+        output_root=output_root,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+
+def run_worker_supervisor(
+    store: SQLiteJobStore | None = None,
+    *,
+    output_root: str | Path | None = None,
+    storage: StorageBackend | None = None,
+    poll_interval_seconds: float = 2.0,
+    child_count: int | None = None,
+) -> None:
+    concurrency = max(1, int(child_count or worker_concurrency()))
+    if concurrency <= 1:
+        run_worker_loop(
+            store=store,
+            output_root=output_root,
+            storage=storage,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+        return
+
+    db_path = str(store.db_path if store is not None else DEFAULT_DB_PATH)
+    output_root = str(Path(output_root or DEFAULT_OUTPUT_ROOT))
+    ctx = multiprocessing.get_context("spawn")
+    processes = []
+    try:
+        for idx in range(concurrency):
+            proc = ctx.Process(
+                target=_run_worker_child,
+                kwargs={
+                    "db_path": db_path,
+                    "output_root": output_root,
+                    "poll_interval_seconds": poll_interval_seconds,
+                },
+                name=f"phase1-worker-{idx + 1}",
+                daemon=False,
+            )
+            proc.start()
+            processes.append(proc)
+        for proc in processes:
+            proc.join()
+    except KeyboardInterrupt:
+        for proc in processes:
+            if proc.is_alive():
+                proc.terminate()
+        raise
+    finally:
+        for proc in processes:
+            if hasattr(proc, "close"):
+                try:
+                    proc.close()
+                except Exception:
+                    pass
 
 
 def _manifest_payload(manifest) -> dict:
@@ -227,4 +303,4 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         force=True,
     )
-    run_worker_loop()
+    run_worker_supervisor()

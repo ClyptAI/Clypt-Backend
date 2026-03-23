@@ -63,7 +63,7 @@ Clypt-V2/
 │   ├── pipeline/                      # All Python pipeline scripts
 │   │   ├── __init__.py
 │   │   ├── run_pipeline.py            # Orchestrator (entry point)
-│   │   ├── phase_1_modal_pipeline.py  # Deterministic extraction
+│   │   ├── phase_1_do_pipeline.py  # Deterministic extraction
 │   │   ├── phase_2a_make_nodes.py     # Content mechanism decomposition
 │   │   ├── phase_2b_draw_edges.py     # Narrative edge mapping
 │   │   ├── phase_3_multimodal_embeddings.py   # Multimodal embedding
@@ -141,7 +141,7 @@ The orchestrator excludes `phase_5_retrieve.py` since that script is query-based
 
 ---
 
-### Phase 1A: Deterministic Extraction — `backend/pipeline/phase_1_modal_pipeline.py`
+### Phase 1A: Deterministic Extraction — `backend/pipeline/phase_1_do_pipeline.py`
 
 **Purpose:** Establish the mathematical ground truth of the video before any AI reasoning happens.
 

@@ -163,7 +163,7 @@ When:
 - Preventing regressions in schema/contract handling
 
 Prompt pattern:
-- "Use `python-testing-patterns` to add tests for `backend/modal_worker.py` contract validation and track schema output."
+- "Use `python-testing-patterns` to add tests for `backend/do_phase1_worker.py` contract validation and track schema output."
 
 ### 5) Browser E2E for Cortex UI
 

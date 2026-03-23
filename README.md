@@ -1,7 +1,7 @@
 # Clypt: Creator Intelligence and Clipping
 
 Clypt takes a YouTube URL and produces 9:16 short-form clips by combining:
-- Phase 1 Modal GPU extraction (ASR + tracking + speaker binding)
+- Phase 1 DO GPU extraction (ASR + tracking + speaker binding)
 - Gemini reasoning and embeddings over semantic nodes/edges
 - Spanner + GCS storage
 - Remotion rendering
@@ -10,7 +10,7 @@ Clypt takes a YouTube URL and produces 9:16 short-form clips by combining:
 
 ```text
 YouTube URL
-  -> Phase 1   Modal extraction (ASR + tracking + speaker binding)
+  -> Phase 1   DO extraction (ASR + tracking + speaker binding)
   -> Phase 2A  Semantic nodes (Gemini)
   -> Phase 2B  Narrative edges (Gemini)
   -> Phase 3   Gemini Embedding 2 multimodal vectors
@@ -21,17 +21,17 @@ YouTube URL
 
 ## Tech Stack (Current)
 
-### Phase 1 Modal worker (`backend/modal_worker.py`)
+### Phase 1 DO worker (`backend/do_phase1_worker.py`)
 - ASR: NVIDIA Parakeet-TDT-1.1B
 - Tracking: YOLO26s + BoT-SORT (+ chunk fan-out + stitch)
 - Face: InsightFace/ArcFace for ID stabilization
 - Active speaker binding: TalkNet
-- Runtime: Modal `H100`, `max_containers=8`, memory snapshot enabled
+- Runtime: DigitalOcean GPU worker / extraction service
 
-### Local pipeline client (`backend/pipeline/phase_1_modal_pipeline.py`)
+### Local pipeline client (`backend/pipeline/phase_1_do_pipeline.py`)
 - Downloads source media with `yt-dlp`
 - Converts audio to 16kHz mono WAV
-- Calls Modal worker (single-worker or distributed fan-out mode)
+- Calls the DO Phase 1 service
 - Writes canonical JSON and NDJSON handoff files
 
 ## Prerequisites
@@ -39,7 +39,6 @@ YouTube URL
 - Python 3.11+
 - Node.js 18+ and npm
 - `ffmpeg` + `ffprobe`
-- Modal account + CLI auth
 - Google Cloud project access for Vertex AI, Spanner, and GCS
 
 ## Team Setup (Shared Project)
@@ -68,7 +67,6 @@ cd remotion-render && npm install && cd ..
 2. Authenticate CLIs
 
 ```bash
-.venv/bin/modal token new
 gcloud auth login
 gcloud auth application-default login
 gcloud config set project clypt-v2
@@ -117,11 +115,12 @@ gcloud spanner databases ddl update clypt-graph-db-v2 \
   --ddl-file=backend/spanner_schema.sql
 ```
 
-## Deploy Modal Worker
+## Deploy DO Phase 1 Service
 
 ```bash
 source .venv/bin/activate
-.venv/bin/modal deploy backend/modal_worker.py
+DO_PHASE1_BASE_URL=http://<droplet-ip>:8080 \
+.venv/bin/python -m backend.do_phase1_service.app
 ```
 
 ## Run with a Video URL
@@ -130,17 +129,18 @@ source .venv/bin/activate
 
 ```bash
 source .venv/bin/activate
-CLYPT_DISTRIBUTED_MODAL_FANOUT=1 \
-CLYPT_DISTRIBUTED_DETACH=1 \
-CLYPT_DISTRIBUTED_RESUME=1 \
-CLYPT_MAX_GPU_WORKERS=8 \
-.venv/bin/python -c "import asyncio; from backend.pipeline.phase_1_modal_pipeline import main; asyncio.run(main('https://www.youtube.com/watch?v=dXUFsDcC0_4'))"
+DO_PHASE1_BASE_URL=http://<droplet-ip>:8080 \
+PHASE1_RUNTIME_PROFILE=podcast_eval \
+PHASE1_SPEAKER_BINDING_MODE=lrasd \
+PHASE1_TRACKING_MODE=direct \
+PHASE1_SHARED_ANALYSIS_PROXY=1 \
+.venv/bin/python -c "import asyncio; from backend.pipeline.phase_1_do_pipeline import main; asyncio.run(main('https://www.youtube.com/watch?v=dXUFsDcC0_4'))"
 ```
 
 This will:
 - download source media locally
 - upload canonical source video to `gs://clypt-storage-v2/phase_1/video.mp4`
-- run Modal extraction
+- run DO extraction
 - write `backend/outputs/phase_1_visual.json`, `backend/outputs/phase_1_audio.json`, and `backend/outputs/phase_1_visual.ndjson`
 
 ### Option B: Run full pipeline (all phases + render)
@@ -162,15 +162,16 @@ printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python b
 
 ## Important Runtime Flags
 
-### Phase 1 client flags (`backend/pipeline/phase_1_modal_pipeline.py`)
-- `CLYPT_DISTRIBUTED_MODAL_FANOUT` (`1`/`0`): distributed chunk fan-out mode
-- `CLYPT_DISTRIBUTED_DETACH` (`1`/`0`): submit jobs detached and collect later
-- `CLYPT_DISTRIBUTED_RESUME` (`1`/`0`): resume from `backend/outputs/phase_1_detached_state.json`
-- `CLYPT_MAX_GPU_WORKERS` (default `8`, capped to `8`)
-- `GCS_BUCKET` (default `clypt-storage-v2`)
-- `GCS_VIDEO_OBJECT` (default `phase_1/video.mp4`)
+### Phase 1 client flags (`backend/pipeline/phase_1_do_pipeline.py`)
+- `DO_PHASE1_BASE_URL`: base URL for the DO Phase 1 API
+- `DO_PHASE1_POLL_INTERVAL_SECONDS`: job polling interval
+- `DO_PHASE1_TIMEOUT_SECONDS`: total wait timeout
+- `PHASE1_RUNTIME_PROFILE`: `production` or `podcast_eval`
+- `PHASE1_SPEAKER_BINDING_MODE`: `auto`, `heuristic`, or `lrasd`
+- `PHASE1_TRACKING_MODE`: `direct` or `chunked`
+- `PHASE1_SHARED_ANALYSIS_PROXY`: `1`/`0`
 
-### Worker flags (`backend/modal_worker.py`)
+### Worker flags (`backend/do_phase1_worker.py`)
 - `CLYPT_YOLO_IMGSZ` (default `640`)
 - `CLYPT_ENABLE_ROI_DETECT` (`1`/`0`)
 - `CLYPT_TRACK_CHUNK_WORKERS` (local thread workers inside one container)
@@ -203,7 +204,7 @@ printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python b
 
 | Phase | Script |
 |---|---|
-| 1 | `backend/pipeline/phase_1_modal_pipeline.py` |
+| 1 | `backend/pipeline/phase_1_do_pipeline.py` |
 | 2A | `backend/pipeline/phase_2a_make_nodes.py` |
 | 2B | `backend/pipeline/phase_2b_draw_edges.py` |
 | 3 | `backend/pipeline/phase_3_multimodal_embeddings.py` |

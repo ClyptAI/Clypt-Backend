@@ -124,7 +124,7 @@ sudo SKIP_GIT_SYNC=1 \
 
 The deploy script now installs the dedicated Phase 1 droplet dependency set
 from `requirements-do-phase1.txt` and pre-caches the ASR / YOLO / LR-ASD /
-InsightFace assets expected by `backend/modal_worker.py`.
+InsightFace assets expected by `backend/do_phase1_worker.py`.
 
 The worker now runs as a persistent Python process instead of a shell loop
 that launches a new interpreter every idle poll. That keeps GPU-box overhead
@@ -160,8 +160,8 @@ tail -f /var/lib/clypt/do_phase1_service/workdir/logs/JOB_ID.log
 ```
 
 Those per-job logs include the underlying `[Phase 1] Step ...` prints from
-`backend/modal_worker.py`, so they are the closest DO equivalent to the old
-Modal progress view.
+`backend/do_phase1_worker.py`, so they are the closest DO equivalent to the old
+DO progress view.
 
 ## Point the Local Pipeline at DO
 
@@ -171,4 +171,4 @@ On your local machine:
 export DO_PHASE1_BASE_URL=http://YOUR_DROPLET_IP:8080
 ```
 
-The active pipeline path in `backend/pipeline/phase_1_modal_pipeline.py` now submits async Phase 1 jobs to that base URL.
+The active pipeline path in `backend/pipeline/phase_1_do_pipeline.py` now submits async Phase 1 jobs to that base URL.

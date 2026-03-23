@@ -8,7 +8,7 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 | Integration | Usage |
 |---|---|
 | YouTube + `yt-dlp` | Source media acquisition in Phase 1 worker |
-| Modal (FastAPI + serverless GPU) | Hosts deterministic extraction microservice |
+| DigitalOcean GPU service (FastAPI) | Hosts deterministic extraction microservice |
 | NVIDIA Canary-1B-v2 | High-speed transcription with word-level timestamps and punctuation |
 | YOLO11 + BoT-SORT | Dense face/person tracking with persistent IDs |
 | TalkNet + InsightFace | Active speaker binding from audio-visual synchrony |
@@ -23,8 +23,8 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 
 | File | Produced By | Consumed By |
 |---|---|---|
-| `phase_1_visual.json` | Phase 1 Modal worker | 2A, 4, Remotion tracking fetch |
-| `phase_1_audio.json` | Phase 1 Modal worker | 2A, 4, 5 |
+| `phase_1_visual.json` | Phase 1 DO worker | 2A, 4, Remotion tracking fetch |
+| `phase_1_audio.json` | Phase 1 DO worker | 2A, 4, 5 |
 | `phase_2a_nodes.json` | Phase 2A | 2B, 3 |
 | `phase_2b_narrative_edges.json` | Phase 2B | 4 |
 | `phase_3_embeddings.json` | Phase 3 | 4 |
@@ -60,7 +60,7 @@ Artifact notes:
 
 | Resource | Service | Purpose |
 |---|---|---|
-| Modal app endpoint | Modal | Phase 1 extraction webhook target |
+| DO Phase 1 endpoint | DigitalOcean | Phase 1 extraction job target |
 | `clypt-v2` | GCP project | Core cloud project for non-extraction services |
 | `clypt-storage-v2` | Cloud Storage | Uploads + tracking JSON |
 | `clypt-spanner-v2` | Spanner instance | Database host |

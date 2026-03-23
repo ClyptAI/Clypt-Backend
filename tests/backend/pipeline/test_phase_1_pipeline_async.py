@@ -109,6 +109,7 @@ class FakePhase1Client:
         self.statuses = list(statuses)
         self.manifest = manifest
         self.submit_calls: list[str] = []
+        self.submit_runtime_controls: list[dict] = []
         self.get_job_calls: list[str] = []
         self.get_result_calls: list[str] = []
 
@@ -118,8 +119,9 @@ class FakePhase1Client:
     async def __aexit__(self, exc_type, exc, tb):
         return None
 
-    async def submit_job(self, source_url: str):
+    async def submit_job(self, source_url: str, *, runtime_controls: dict | None = None):
         self.submit_calls.append(source_url)
+        self.submit_runtime_controls.append(dict(runtime_controls or {}))
         return SimpleNamespace(job_id=self.manifest.job_id, status="queued")
 
     async def get_job(self, job_id: str):
@@ -159,7 +161,7 @@ class DummyYDL:
 
 @pytest.fixture
 def phase1_subject():
-    import backend.pipeline.phase_1_modal_pipeline as subject
+    import backend.pipeline.phase_1_do_pipeline as subject
 
     return subject
 
@@ -178,6 +180,7 @@ def configured_phase1(tmp_path: Path, monkeypatch, phase1_subject):
     monkeypatch.setattr(phase1_subject, "OUTPUT_DIR", output_dir)
     monkeypatch.setattr(phase1_subject, "DOWNLOAD_DIR", download_dir)
     monkeypatch.setattr(phase1_subject, "PHASE1_NDJSON_PATH", output_dir / "phase_1_visual.ndjson")
+    monkeypatch.setattr(phase1_subject, "PHASE1_RUNTIME_CONTROLS_PATH", output_dir / "phase_1_runtime_controls.json")
     monkeypatch.setattr(phase1_subject, "DETACHED_STATE_PATH", output_dir / "phase_1_detached_state.json")
     monkeypatch.setattr(phase1_subject, "download_media", lambda url: (str(video_path), str(audio_path)))
     monkeypatch.setenv("DO_PHASE1_BASE_URL", "https://do.example")
@@ -199,6 +202,23 @@ def test_phase_1_main_waits_for_manifest_and_writes_compat_outputs(configured_ph
 
     assert result.job_id == "job_123"
     assert fake_client.submit_calls == ["https://youtube.com/watch?v=x"]
+    assert fake_client.submit_runtime_controls == [
+        {
+            "profile_name": "production",
+            "evaluation_mode": False,
+            "speaker_binding_mode": "auto",
+            "heuristic_binding_enabled": True,
+            "tracking_mode": "direct",
+            "shared_analysis_proxy_enabled": True,
+            "framing_policy": "single_person_plus_two_speaker",
+            "two_speaker_layout_policy": "shared_two_shot_or_explicit_split",
+            "face_detection_provenance": "insightface_roi",
+            "notes": (
+                "Eval profiles request LR-ASD and disable heuristic binding for inspection. "
+                "The worker remains the source of truth for actual extraction runtime."
+            ),
+        }
+    ]
     assert fake_client.get_result_calls == ["job_123"]
 
     visual_payload = json.loads((output_dir / "phase_1_visual.json").read_text())
@@ -207,6 +227,9 @@ def test_phase_1_main_waits_for_manifest_and_writes_compat_outputs(configured_ph
 
     assert visual_payload["uri"] == manifest.artifacts.visual_tracking.uri
     assert visual_payload["video_gcs_uri"] == manifest.canonical_video_gcs_uri
+    assert visual_payload["runtime_controls"]["speaker_binding_mode"] == "auto"
+    assert visual_payload["face_detections"][0]["source"] == "compatibility_bridge"
+    assert visual_payload["face_detections"][0]["provenance"]["kind"] == "compatibility_bridge"
     assert audio_payload["uri"] == manifest.artifacts.transcript.uri
     assert audio_payload["video_gcs_uri"] == manifest.canonical_video_gcs_uri
     assert len(ndjson_rows) == 2
@@ -259,7 +282,118 @@ def test_phase_1_main_persists_resume_state_and_logs_timeout(configured_phase1, 
     assert saved_state["provider"] == "digitalocean"
     assert saved_state["job_id"] == "job_123"
     assert saved_state["source_url"] == "https://youtube.com/watch?v=x"
+    assert saved_state["runtime_controls"]["speaker_binding_mode"] == "auto"
     assert "Timeout" in caplog.text or "resume" in caplog.text
+
+
+def test_submit_or_resume_phase1_job_persists_runtime_controls(configured_phase1, monkeypatch):
+    subject, _output_dir, _video_path, _audio_path = configured_phase1
+    manifest = Phase1Manifest.model_validate(_manifest_payload())
+    fake_client = FakePhase1Client(statuses=["running"], manifest=manifest)
+
+    monkeypatch.setenv("PHASE1_RUNTIME_PROFILE", "podcast_eval")
+    monkeypatch.setenv("PHASE1_SPEAKER_BINDING_MODE", "heuristic")
+    monkeypatch.setenv("PHASE1_TRACKING_MODE", "chunked")
+
+    job_id = asyncio.run(subject.submit_or_resume_phase1_job(fake_client, "https://youtube.com/watch?v=x"))
+
+    assert job_id == "job_123"
+    saved_state = json.loads(subject.DETACHED_STATE_PATH.read_text())
+    assert saved_state["runtime_controls"]["profile_name"] == "podcast_eval"
+    assert saved_state["runtime_controls"]["speaker_binding_mode"] == "lrasd"
+    assert saved_state["runtime_controls"]["heuristic_binding_enabled"] is False
+    assert saved_state["runtime_controls"]["tracking_mode"] == "direct"
+
+
+def test_materialize_phase1_manifest_uses_compatibility_bridge_face_fallback_and_runtime_controls(
+    configured_phase1,
+    monkeypatch,
+):
+    subject, output_dir, video_path, audio_path = configured_phase1
+    manifest = Phase1Manifest.model_validate(_manifest_payload())
+    monkeypatch.setenv("PHASE1_RUNTIME_PROFILE", "podcast_eval")
+    monkeypatch.setattr(subject, "download_media", lambda url: (str(video_path), str(audio_path)))
+    monkeypatch.setattr(subject, "probe_video_stream", lambda path: (1920, 1080, "30/1"))
+    monkeypatch.setattr(subject, "probe_duration_seconds", lambda path: 0.5)
+
+    visual_payload, audio_payload = subject.materialize_phase1_manifest(
+        manifest,
+        source_url="https://youtube.com/watch?v=x",
+    )
+
+    assert visual_payload["runtime_controls"]["speaker_binding_mode"] == "lrasd"
+    assert visual_payload["face_detections"][0]["source"] == "compatibility_bridge"
+    assert visual_payload["face_detections"][0]["provenance"]["kind"] == "compatibility_bridge"
+    assert visual_payload["person_detections"][0]["source"] == "person_track"
+    assert audio_payload["words"][0]["speaker_track_id"] == "Global_Person_0"
+
+    persisted_visual = json.loads((output_dir / "phase_1_visual.json").read_text())
+    persisted_controls = json.loads((output_dir / "phase_1_runtime_controls.json").read_text())
+    assert persisted_visual["runtime_controls"]["face_detection_provenance"] == "insightface_roi"
+    assert persisted_controls["speaker_binding_mode"] == "lrasd"
+
+
+def test_materialize_phase1_manifest_preserves_true_face_tracks_when_present(
+    configured_phase1,
+    monkeypatch,
+):
+    subject, _output_dir, video_path, audio_path = configured_phase1
+    payload = _manifest_payload()
+    payload["artifacts"]["visual_tracking"]["face_detections"] = [
+        {
+            "confidence": 0.91,
+            "segment_start_ms": 0,
+            "segment_end_ms": 500,
+            "face_track_index": 0,
+            "track_id": "Global_Person_0",
+            "source": "face_detector",
+            "provenance": "insightface_roi",
+            "timestamped_objects": [
+                {
+                    "time_ms": 0,
+                    "bounding_box": {
+                        "left": 0.1,
+                        "top": 0.1,
+                        "right": 0.2,
+                        "bottom": 0.2,
+                    },
+                    "track_id": "Global_Person_0",
+                    "confidence": 0.91,
+                    "source": "face_detector",
+                    "provenance": "insightface_roi",
+                }
+            ],
+        }
+    ]
+    payload["artifacts"]["visual_tracking"]["person_detections"] = [
+        {
+            "confidence": 0.95,
+            "segment_start_ms": 0,
+            "segment_end_ms": 500,
+            "person_track_index": 0,
+            "track_id": "Global_Person_0",
+            "source": "person_tracker",
+            "provenance": "yolo26_botsort",
+            "timestamped_objects": [],
+        }
+    ]
+    manifest = Phase1Manifest.model_validate(payload)
+
+    monkeypatch.setenv("PHASE1_RUNTIME_PROFILE", "podcast_eval")
+    monkeypatch.setattr(subject, "download_media", lambda url: (str(video_path), str(audio_path)))
+    monkeypatch.setattr(subject, "probe_video_stream", lambda path: (1920, 1080, "30/1"))
+    monkeypatch.setattr(subject, "probe_duration_seconds", lambda path: 0.5)
+
+    visual_payload, _audio_payload = subject.materialize_phase1_manifest(
+        manifest,
+        source_url="https://youtube.com/watch?v=x",
+    )
+
+    assert visual_payload["face_detections"][0]["source"] == "face_detector"
+    assert visual_payload["face_detections"][0]["provenance"] == "insightface_roi"
+    assert visual_payload["person_detections"][0]["source"] == "person_tracker"
+    assert visual_payload["proxy_face_detections"][0]["source"] == "compatibility_bridge"
+    assert visual_payload["proxy_face_detections"][0]["provenance"]["kind"] == "compatibility_bridge"
 
 
 def test_run_pipeline_consumes_async_phase_1_manifest(monkeypatch, caplog):
@@ -276,7 +410,7 @@ def test_run_pipeline_consumes_async_phase_1_manifest(monkeypatch, caplog):
     def _stub(label: str):
         return lambda: calls.append(label)
 
-    phase1_module = ModuleType("pipeline.phase_1_modal_pipeline")
+    phase1_module = ModuleType("pipeline.phase_1_do_pipeline")
     phase1_module.main = fake_phase1_main
 
     phase2a_module = ModuleType("pipeline.phase_2a_make_nodes")
@@ -294,7 +428,7 @@ def test_run_pipeline_consumes_async_phase_1_manifest(monkeypatch, caplog):
     phase5_module = ModuleType("pipeline.phase_5_auto_curate")
     phase5_module.main = _stub("phase5")
 
-    monkeypatch.setitem(sys.modules, "pipeline.phase_1_modal_pipeline", phase1_module)
+    monkeypatch.setitem(sys.modules, "pipeline.phase_1_do_pipeline", phase1_module)
     monkeypatch.setitem(sys.modules, "pipeline.phase_2a_make_nodes", phase2a_module)
     monkeypatch.setitem(sys.modules, "pipeline.phase_2b_draw_edges", phase2b_module)
     monkeypatch.setitem(sys.modules, "pipeline.phase_3_multimodal_embeddings", phase3_module)

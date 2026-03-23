@@ -20,7 +20,7 @@
   Purpose: Contract validation tests and backward-compatibility expectations.
 - Create: `backend/pipeline/do_phase1_client.py`
   Purpose: Client for submitting, polling, resuming, and downloading manifest results from the DO extraction service.
-- Modify: `backend/pipeline/phase_1_modal_pipeline.py`
+- Modify: `backend/pipeline/phase_1_do_pipeline.py`
   Purpose: Replace Modal orchestration with async DO job orchestration while preserving downstream semantics.
 - Modify: `backend/pipeline/run_pipeline.py`
   Purpose: Update end-to-end pipeline entrypoint to use the new Phase 1 job model.
@@ -227,7 +227,7 @@ Update `requirements.txt` to include the minimum stack needed for this service a
 - [ ] **Step 7: Port the actual extraction workload**
 
 Requirements:
-- Reuse logic from `backend/modal_worker.py` by extracting shared code or moving it into `backend/do_phase1_service/extract.py`
+- Reuse logic from `backend/do_phase1_worker.py` by extracting shared code or moving it into `backend/do_phase1_service/extract.py`
 - The job runner must actually perform ASR, tracking, face identity stabilization, and speaker binding
 - The job runner must emit the Phase 1 manifest and artifact set defined by `phase1_contract.py`
 - The job runner must upload transcript and tracking artifacts to durable storage before returning a manifest
@@ -307,7 +307,7 @@ git commit -m "feat: add digitalocean phase 1 service skeleton"
 
 **Files:**
 - Create: `backend/pipeline/do_phase1_client.py`
-- Modify: `backend/pipeline/phase_1_modal_pipeline.py`
+- Modify: `backend/pipeline/phase_1_do_pipeline.py`
 - Modify: `backend/pipeline/run_pipeline.py`
 - Test: `tests/backend/pipeline/test_do_phase1_client.py`
 - Test: `tests/backend/pipeline/test_phase_1_pipeline_async.py`
@@ -363,14 +363,14 @@ Expected: PASS
 - [ ] **Step 8: Commit**
 
 ```bash
-git add backend/pipeline/do_phase1_client.py backend/pipeline/phase_1_modal_pipeline.py backend/pipeline/run_pipeline.py tests/backend/pipeline/test_do_phase1_client.py tests/backend/pipeline/test_phase_1_pipeline_async.py
+git add backend/pipeline/do_phase1_client.py backend/pipeline/phase_1_do_pipeline.py backend/pipeline/run_pipeline.py tests/backend/pipeline/test_do_phase1_client.py tests/backend/pipeline/test_phase_1_pipeline_async.py
 git commit -m "refactor: move phase 1 orchestration to digitalocean jobs"
 ```
 
 ## Task 4: Preserve Downstream Compatibility Through a Manifest Adapter
 
 **Files:**
-- Modify: `backend/pipeline/phase_1_modal_pipeline.py`
+- Modify: `backend/pipeline/phase_1_do_pipeline.py`
 - Modify: `backend/pipeline/phase_2a_make_nodes.py`
 - Modify: `backend/pipeline/phase_4_store_graph.py`
 - Test: `tests/backend/pipeline/test_phase1_manifest_adapter.py`
@@ -415,7 +415,7 @@ Expected: PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/pipeline/phase_1_modal_pipeline.py backend/pipeline/phase_2a_make_nodes.py backend/pipeline/phase_4_store_graph.py tests/backend/pipeline/test_phase1_manifest_adapter.py
+git add backend/pipeline/phase_1_do_pipeline.py backend/pipeline/phase_2a_make_nodes.py backend/pipeline/phase_4_store_graph.py tests/backend/pipeline/test_phase1_manifest_adapter.py
 git commit -m "feat: add phase 1 manifest adapter"
 ```
 
@@ -587,7 +587,7 @@ git commit -m "ops: add digitalocean droplet deployment artifacts"
 
 **Files:**
 - Modify: `README.md`
-- Modify: `docs/modal_worker.md`
+- Modify: `docs/do_phase1_worker.md`
 - Create: `tests/backend/smoke/test_balanced_hybrid_path.py`
 
 - [ ] **Step 1: Write the smoke test**
@@ -629,7 +629,7 @@ Expected: PASS
 - [ ] **Step 7: Commit**
 
 ```bash
-git add README.md docs/modal_worker.md tests/backend/smoke/test_balanced_hybrid_path.py
+git add README.md docs/do_phase1_worker.md tests/backend/smoke/test_balanced_hybrid_path.py
 git commit -m "docs: update runbooks for balanced hybrid stack"
 ```
 

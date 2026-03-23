@@ -84,12 +84,16 @@ def test_submit_job_posts_source_url_and_parses_job_record():
         seen_requests.append(request)
         assert request.method == "POST"
         assert request.url.path == "/jobs"
-        assert json.loads(request.content) == {"source_url": "https://youtube.com/watch?v=x"}
+        assert json.loads(request.content) == {
+            "source_url": "https://youtube.com/watch?v=x",
+            "runtime_controls": {"speaker_binding_mode": "lrasd", "tracking_mode": "direct"},
+        }
         return httpx.Response(
             202,
             json={
                 "job_id": "job_123",
                 "source_url": "https://youtube.com/watch?v=x",
+                "runtime_controls": {"speaker_binding_mode": "lrasd", "tracking_mode": "direct"},
                 "status": "queued",
                 "retries": 0,
                 "claim_token": None,
@@ -105,7 +109,12 @@ def test_submit_job_posts_source_url_and_parses_job_record():
 
     client = DOPhase1Client(base_url="https://do.example", transport=httpx.MockTransport(handler))
     try:
-        job = asyncio.run(client.submit_job("https://youtube.com/watch?v=x"))
+        job = asyncio.run(
+            client.submit_job(
+                "https://youtube.com/watch?v=x",
+                runtime_controls={"speaker_binding_mode": "lrasd", "tracking_mode": "direct"},
+            )
+        )
     finally:
         asyncio.run(client.aclose())
 

@@ -21,3 +21,4 @@ nemo-toolkit[asr]>=2.4.0
 scipy>=1.15.0
 scikit-learn>=1.7.0
 python-speech-features>=0.6
+mediapipe>=0.10.14

@@ -2,7 +2,12 @@ from pathlib import Path
 
 from backend.do_phase1_service.jobs import enqueue_job
 from backend.do_phase1_service.state_store import SQLiteJobStore
-from backend.do_phase1_service.worker import run_worker_loop, run_worker_once
+from backend.do_phase1_service.worker import (
+    run_worker_loop,
+    run_worker_once,
+    run_worker_supervisor,
+    worker_concurrency,
+)
 
 
 class DummyResult:
@@ -57,11 +62,20 @@ class DummyResult:
 
 def test_worker_promotes_job_through_lifecycle(tmp_path: Path, monkeypatch):
     store = SQLiteJobStore(tmp_path / "jobs.db")
-    enqueue_job(store, job_id="job_123", payload={"source_url": "https://youtube.com/watch?v=x"})
+    enqueue_job(
+        store,
+        job_id="job_123",
+        payload={
+            "source_url": "https://youtube.com/watch?v=x",
+            "runtime_controls": {"speaker_binding_mode": "lrasd", "tracking_mode": "direct"},
+        },
+    )
     observed_statuses = []
+    observed_runtime_controls = []
 
     def fake_run_extraction_job(**kwargs):
         observed_statuses.append(store.get_job(kwargs["job_id"]).status)
+        observed_runtime_controls.append(kwargs.get("runtime_controls"))
         return DummyResult()
 
     monkeypatch.setattr("backend.do_phase1_service.worker.run_extraction_job", fake_run_extraction_job)
@@ -69,6 +83,7 @@ def test_worker_promotes_job_through_lifecycle(tmp_path: Path, monkeypatch):
     run_worker_once(store, output_root=tmp_path)
 
     assert observed_statuses == ["running"]
+    assert observed_runtime_controls == [{"speaker_binding_mode": "lrasd", "tracking_mode": "direct"}]
     job = store.get_job("job_123")
     assert job is not None
     assert job.status == "succeeded"
@@ -202,3 +217,51 @@ def test_worker_loop_backs_off_on_unexpected_exception(tmp_path: Path, monkeypat
 
     assert calls == ["run", "run"]
     assert sleeps == [2.0, 0.5]
+
+
+def test_worker_concurrency_clamps_invalid_env(monkeypatch):
+    monkeypatch.setenv("DO_PHASE1_WORKER_CONCURRENCY", "0")
+    assert worker_concurrency() == 1
+
+    monkeypatch.setenv("DO_PHASE1_WORKER_CONCURRENCY", "3")
+    assert worker_concurrency() == 3
+
+
+def test_worker_supervisor_spawns_requested_children(tmp_path: Path, monkeypatch):
+    started = []
+    joined = []
+
+    class FakeProcess:
+        def __init__(self, *, target, kwargs, name, daemon):
+            self.target = target
+            self.kwargs = kwargs
+            self.name = name
+            self.daemon = daemon
+            self._alive = True
+
+        def start(self):
+            started.append((self.name, dict(self.kwargs)))
+
+        def join(self):
+            joined.append(self.name)
+            self._alive = False
+
+        def is_alive(self):
+            return self._alive
+
+        def terminate(self):
+            self._alive = False
+
+        def close(self):
+            return None
+
+    class FakeContext:
+        def Process(self, *, target, kwargs, name, daemon):
+            return FakeProcess(target=target, kwargs=kwargs, name=name, daemon=daemon)
+
+    monkeypatch.setattr("backend.do_phase1_service.worker.multiprocessing.get_context", lambda _mode: FakeContext())
+
+    run_worker_supervisor(output_root=tmp_path, poll_interval_seconds=0.25, child_count=2)
+
+    assert [name for name, _ in started] == ["phase1-worker-1", "phase1-worker-2"]
+    assert joined == ["phase1-worker-1", "phase1-worker-2"]
