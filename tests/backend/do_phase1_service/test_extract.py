@@ -132,6 +132,77 @@ def test_extract_job_records_stage_timings(tmp_path: Path, monkeypatch):
     }
 
 
+def test_extract_job_writes_job_log_and_forwards_progress(tmp_path: Path, monkeypatch):
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"video")
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"audio")
+    progress_events = []
+    log_path = tmp_path / "logs" / "job_123.log"
+
+    monkeypatch.setattr(
+        "backend.do_phase1_service.extract.download_media",
+        lambda url: (str(video_path), str(audio_path)),
+    )
+
+    def fake_execute_local_extraction(*, video_path, audio_path, youtube_url):
+        print("[Phase 1] Received video (10.0 MB) + audio (1.0 MB)")
+        print("[Phase 1] Step 1+2/4: Running Parakeet ASR + YOLO26 tracking concurrently...")
+        print("Tracking complete: 0 boxes across 10 frames, 20.0 effective fps")
+        print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
+        print("[Phase 1] Step 4/4: Running speaker binding...")
+        print("[Phase 1] Complete — 0 words, 0 tracks")
+        return {
+            "status": "success",
+            "phase_1_visual": {
+                "source_video": youtube_url,
+                "schema_version": "2.0.0",
+                "task_type": "person_tracking",
+                "coordinate_space": "absolute_original_frame_xyxy",
+                "geometry_type": "aabb",
+                "class_taxonomy": {"0": "person"},
+                "tracking_metrics": {"schema_pass_rate": 1.0},
+                "tracks": [],
+                "face_detections": [],
+                "person_detections": [],
+                "label_detections": [],
+                "object_tracking": [],
+                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+                "video_metadata": {"width": 1920, "height": 1080, "fps": 30.0, "duration_ms": 1000},
+            },
+            "phase_1_audio": {
+                "source_audio": youtube_url,
+                "words": [],
+                "speaker_bindings": [],
+            },
+        }
+
+    monkeypatch.setattr("backend.do_phase1_service.extract.execute_local_extraction", fake_execute_local_extraction)
+    monkeypatch.setattr(
+        "backend.do_phase1_service.extract.enrich_visual_ledger_for_downstream",
+        lambda phase_1_visual, phase_1_audio, video_path: phase_1_visual,
+    )
+    monkeypatch.setattr("backend.do_phase1_service.extract.validate_phase_handoff", lambda visual_ledger, audio_ledger: None)
+
+    run_extraction_job(
+        source_url="https://youtube.com/watch?v=logs",
+        job_id="job_123",
+        output_dir=tmp_path,
+        storage=FakeStorage(),
+        host_lock_path=tmp_path / "extract.lock",
+        log_path=log_path,
+        progress_callback=lambda step, message=None, pct=None: progress_events.append((step, message, pct)),
+    )
+
+    assert log_path.exists()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "[Phase 1] Step 1+2/4" in log_text
+    assert "[Phase 1] Complete" in log_text
+    assert any(step == "asr_tracking" for step, _, _ in progress_events)
+    assert any(step == "speaker_binding" for step, _, _ in progress_events)
+    assert progress_events[-1][0] == "complete"
+
+
 def test_speaker_binding_proxy_reencodes_large_video(tmp_path: Path, monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -372,6 +443,42 @@ def test_run_tracking_uses_direct_mode(monkeypatch):
     assert tracks == [{"track_id": "t1"}]
     assert metrics == {"tracking_mode": "direct"}
     assert calls == [("direct", "video.mp4")]
+
+
+def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    class _Boxes:
+        xyxy = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([[10, 20, 30, 40]])})()
+        id = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([7])})()
+        conf = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([0.9])})()
+
+    class _Result:
+        boxes = _Boxes()
+        obb = None
+
+    class _Model:
+        def track(self, **kwargs):
+            return [_Result()]
+
+    monkeypatch.setattr(worker, "_ensure_h264", lambda path: path)
+    monkeypatch.setattr(worker, "_probe_video_meta", lambda path: {"fps": 24.0, "total_frames": 1, "width": 1920, "height": 1080})
+    monkeypatch.setattr(worker, "_ensure_botsort_reid_yaml", lambda: "tracker.yaml")
+    monkeypatch.setattr(worker, "_get_tracking_model", lambda: _Model())
+    monkeypatch.setattr(worker, "_compute_letterbox_meta", lambda *args: {})
+    monkeypatch.setattr(worker, "_xyxy_abs_to_xywhn", lambda *args: (0.1, 0.2, 0.3, 0.4))
+    monkeypatch.setattr(worker, "_xywhn_to_xyxy_abs", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_forward_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_inverse_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_xyxy_to_xywh", lambda *args: (20.0, 30.0, 20.0, 20.0))
+
+    tracks, metrics = worker._run_tracking_direct("video.mp4")
+
+    assert tracks[0]["frame_idx"] == 0
+    assert tracks[0]["local_frame_idx"] == 0
+    assert tracks[0]["chunk_idx"] == 0
+    assert "tracking_mode" not in metrics
 
 
 def test_host_lock_serializes_second_extraction_attempt(tmp_path: Path):

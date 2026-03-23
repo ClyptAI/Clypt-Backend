@@ -29,6 +29,17 @@ def test_healthz_reports_ok(tmp_path: Path):
     assert response.json()["status"] == "ok"
 
 
+def test_dashboard_page_renders(tmp_path: Path):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    client = TestClient(create_app(store=store, output_root=tmp_path))
+
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "Clypt Phase 1 Monitor" in response.text
+    assert "/dashboard/api/jobs" in response.text
+
+
 def test_get_jobs_returns_job_status(tmp_path: Path):
     store = SQLiteJobStore(tmp_path / "jobs.db")
     enqueue_job(store, job_id="job_123", payload={"source_url": "https://youtube.com/watch?v=x"})
@@ -109,3 +120,92 @@ def test_get_job_result_returns_manifest_on_success(tmp_path: Path):
     assert response.status_code == 200
     assert response.json()["job_id"] == "job_123"
     assert response.json()["status"] == "succeeded"
+
+
+def test_get_job_logs_returns_tail(tmp_path: Path):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    log_path = tmp_path / "logs" / "job_123.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("line-1\nline-2\nline-3\n", encoding="utf-8")
+    store.save_job(
+        job_id="job_123",
+        source_url="https://youtube.com/watch?v=x",
+        status="running",
+        current_step="asr_tracking",
+        progress_message="Running ASR and tracking",
+        progress_pct=0.2,
+        log_path=str(log_path),
+    )
+    client = TestClient(create_app(store=store, output_root=tmp_path))
+
+    response = client.get("/jobs/job_123/logs?tail_lines=2")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "job_id": "job_123",
+        "log_path": str(log_path),
+        "lines": ["line-2", "line-3"],
+    }
+
+
+def test_dashboard_jobs_lists_recent_jobs(tmp_path: Path):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    store.save_job(
+        job_id="job_1",
+        source_url="https://youtube.com/watch?v=1",
+        status="running",
+        current_step="tracking",
+        progress_message="Running visual tracking",
+        progress_pct=0.3,
+    )
+    store.save_job(
+        job_id="job_2",
+        source_url="https://youtube.com/watch?v=2",
+        status="queued",
+        current_step="queued",
+        progress_message="Queued",
+        progress_pct=0.0,
+    )
+    client = TestClient(create_app(store=store, output_root=tmp_path))
+
+    response = client.get("/dashboard/api/jobs?limit=5")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [job["job_id"] for job in body["jobs"]] == ["job_2", "job_1"]
+
+
+def test_dashboard_proxy_jobs_uses_remote_base(tmp_path: Path, monkeypatch):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    client = TestClient(create_app(store=store, output_root=tmp_path))
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"jobs": [{"job_id": "job_remote"}]}
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            self.base_url = kwargs["base_url"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, path, params=None):
+            assert str(self.base_url) == "http://remote.example"
+            assert path == "/dashboard/api/jobs"
+            assert params == {"limit": 10}
+            return DummyResponse()
+
+    monkeypatch.setenv("DO_PHASE1_DASHBOARD_REMOTE_BASE_URL", "http://remote.example")
+    monkeypatch.setattr("backend.do_phase1_service.app.httpx.AsyncClient", DummyAsyncClient)
+
+    response = client.get("/dashboard/api/jobs?remote=1&limit=10")
+
+    assert response.status_code == 200
+    assert response.json() == {"jobs": [{"job_id": "job_remote"}]}

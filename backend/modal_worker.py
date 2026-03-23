@@ -1240,6 +1240,7 @@ class ClyptWorker:
     # ──────────────────────────────────────────
     def _ensure_h264(self, video_path: str) -> str:
         """Re-encode to H.264 if the video uses AV1 or another codec OpenCV can't decode."""
+        started = time.perf_counter()
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name", "-of", "csv=p=0", video_path],
@@ -1282,6 +1283,8 @@ class ClyptWorker:
                         "libx264",
                         "-preset",
                         "ultrafast",
+                        "-threads",
+                        "0",
                         "-crf",
                         "23",
                         "-an",
@@ -1291,7 +1294,11 @@ class ClyptWorker:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-            print(f"  Re-encoded: {os.path.getsize(h264_path) / 1e6:.1f} MB")
+            elapsed = time.perf_counter() - started
+            print(
+                f"  Re-encoded: {os.path.getsize(h264_path) / 1e6:.1f} MB "
+                f"in {elapsed:.1f}s"
+            )
             return h264_path
         return video_path
 
@@ -2152,6 +2159,8 @@ class ClyptWorker:
                 cx, cy, bw, bh = self._xyxy_to_xywh(x1, y1, x2, y2)
                 out = {
                     "frame_idx": int(frame_idx - 1),
+                    "local_frame_idx": int(frame_idx - 1),
+                    "chunk_idx": 0,
                     "track_id": f"track_{int(tid_raw)}",
                     "local_track_id": int(tid_raw),
                     "class_id": 0,
@@ -2194,7 +2203,6 @@ class ClyptWorker:
         elapsed = max(1e-6, time.time() - started)
         eff_fps = float(total_frames / elapsed)
         metrics = {
-            "tracking_mode": "direct",
             "tracking_wallclock_s": float(elapsed),
             "throughput_fps": float(eff_fps),
             "schema_pass_rate": 1.0,

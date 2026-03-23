@@ -66,6 +66,7 @@ sudo chmod 600 /etc/clypt-phase1/gcp-sa.json
 
 - `DO_REGION`
 - `DO_PHASE1_WORKER_ID`
+- `DO_PHASE1_LOG_ROOT`
 - `GOOGLE_APPLICATION_CREDENTIALS`
 - `GCS_BUCKET`
 - `GOOGLE_CLOUD_PROJECT`
@@ -124,6 +125,43 @@ sudo SKIP_GIT_SYNC=1 \
 The deploy script now installs the dedicated Phase 1 droplet dependency set
 from `requirements-do-phase1.txt` and pre-caches the ASR / YOLO / LR-ASD /
 InsightFace assets expected by `backend/modal_worker.py`.
+
+The worker now runs as a persistent Python process instead of a shell loop
+that launches a new interpreter every idle poll. That keeps GPU-box overhead
+lower and makes logs much easier to follow.
+
+## Watching Progress and Logs
+
+Use the API for job state:
+
+```bash
+curl http://YOUR_DROPLET_IP:8080/jobs/JOB_ID
+curl "http://YOUR_DROPLET_IP:8080/jobs/JOB_ID/logs?tail_lines=200"
+```
+
+The job status payload now includes:
+
+- `current_step`
+- `progress_message`
+- `progress_pct`
+- `log_path`
+
+Use the droplet for service-level logs:
+
+```bash
+sudo journalctl -u clypt-phase1-worker.service -f
+sudo journalctl -u clypt-phase1-api.service -f
+```
+
+Use the per-job log file when you want the exact Phase 1 step stream:
+
+```bash
+tail -f /var/lib/clypt/do_phase1_service/workdir/logs/JOB_ID.log
+```
+
+Those per-job logs include the underlying `[Phase 1] Step ...` prints from
+`backend/modal_worker.py`, so they are the closest DO equivalent to the old
+Modal progress view.
 
 ## Point the Local Pipeline at DO
 

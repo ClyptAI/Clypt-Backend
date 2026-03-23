@@ -132,6 +132,31 @@ class FakePhase1Client:
         return self.manifest
 
 
+class DummyYDL:
+    last_instance = None
+    prepare_filename_path = "/tmp/video.mp4"
+
+    def __init__(self, opts):
+        self.opts = opts
+        self.download_calls = 0
+        DummyYDL.last_instance = self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+    def extract_info(self, url, download=True):
+        self.download_calls += 1
+        if self.opts["format"] == "strict-h264":
+            raise RuntimeError("requested format not available")
+        return {"ext": "mp4", "format_id": "18"}
+
+    def prepare_filename(self, info):
+        return self.prepare_filename_path
+
+
 @pytest.fixture
 def phase1_subject():
     import backend.pipeline.phase_1_modal_pipeline as subject
@@ -296,3 +321,34 @@ def test_run_pipeline_consumes_async_phase_1_manifest(monkeypatch, caplog):
         "render",
     ]
     assert manifest.job_id in caplog.text
+
+
+def test_download_media_tries_h264_first_then_falls_back(monkeypatch, tmp_path, phase1_subject):
+    subject = phase1_subject
+    monkeypatch.setattr(subject, "DOWNLOAD_DIR", tmp_path / "downloads")
+    monkeypatch.setattr(subject, "OUTPUT_DIR", tmp_path / "outputs")
+    subject.DOWNLOAD_DIR.mkdir()
+    subject.OUTPUT_DIR.mkdir()
+    monkeypatch.setattr(subject, "ensure_h264_local", lambda path: path)
+    monkeypatch.setattr(subject, "probe_video_stream", lambda path: (1920, 1080, "30/1"))
+    monkeypatch.setattr(subject, "probe_duration_seconds", lambda path: 10.0)
+    def fake_run(cmd, *args, **kwargs):
+        audio_out = subject.DOWNLOAD_DIR / "audio_16k.wav"
+        audio_out.write_bytes(b"audio")
+        return None
+
+    monkeypatch.setattr(subject, "subprocess", SimpleNamespace(run=fake_run, DEVNULL=-1))
+    monkeypatch.setattr(subject.yt_dlp, "YoutubeDL", DummyYDL)
+    (tmp_path / "video.mp4").write_bytes(b"video")
+    monkeypatch.setattr(subject.log, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(subject.log, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(subject, "YTDLP_VIDEO_FORMAT", "fallback-any")
+    monkeypatch.setattr(subject, "YTDLP_H264_PREFERRED_FORMAT", "strict-h264")
+    DummyYDL.prepare_filename_path = str(tmp_path / "video.mp4")
+
+    video_path, audio_path = subject.download_media("https://youtube.com/watch?v=x")
+
+    assert video_path == str(tmp_path / "video.mp4")
+    assert audio_path == str(subject.DOWNLOAD_DIR / "audio_16k.wav")
+    assert DummyYDL.last_instance is not None
+    assert DummyYDL.last_instance.opts["format"] == "fallback-any"

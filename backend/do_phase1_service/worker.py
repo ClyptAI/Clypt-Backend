@@ -30,12 +30,25 @@ def run_worker_once(
     stale_after_seconds: int = DEFAULT_RUNNING_STALE_AFTER_SECONDS,
     heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
 ) -> bool:
+    output_root = Path(output_root)
     job = store.claim_next_job(stale_after_seconds=stale_after_seconds)
     if job is None:
         return False
     if job.claim_token is None:
         logger.warning("Claimed Phase 1 job %s without a claim token; skipping", job.job_id)
         return True
+    log_root = _resolve_log_root(output_root)
+    log_root.mkdir(parents=True, exist_ok=True)
+    log_path = log_root / f"{job.job_id}.log"
+    _update_job_progress(
+        store,
+        job.job_id,
+        claim_token=job.claim_token,
+        current_step="starting",
+        progress_message="Worker claimed job and is preparing extraction",
+        progress_pct=0.01,
+        log_path=str(log_path),
+    )
 
     failed_step = "control_plane"
     heartbeat_stop = threading.Event()
@@ -56,8 +69,18 @@ def run_worker_once(
         manifest = run_extraction_job(
             source_url=job.source_url,
             job_id=job.job_id,
-            output_dir=Path(output_root),
+            output_dir=output_root,
             storage=storage,
+            log_path=log_path,
+            progress_callback=lambda step, message=None, pct=None: _update_job_progress(
+                store,
+                job.job_id,
+                claim_token=job.claim_token,
+                current_step=step,
+                progress_message=message,
+                progress_pct=pct,
+                log_path=str(log_path),
+            ),
         )
 
         heartbeat_stop.set()
@@ -109,10 +132,6 @@ def run_worker_loop(
             processed = True
         if not processed:
             time.sleep(poll_interval_seconds)
-
-
-if __name__ == "__main__":
-    run_worker_loop()
 
 
 def _manifest_payload(manifest) -> dict:
@@ -170,3 +189,42 @@ def _join_heartbeat_thread(thread: threading.Thread | None) -> None:
     if thread is None:
         return
     thread.join(timeout=1.0)
+
+
+def _update_job_progress(
+    store: SQLiteJobStore,
+    job_id: str,
+    *,
+    claim_token: str,
+    current_step: str | None = None,
+    progress_message: str | None = None,
+    progress_pct: float | None = None,
+    log_path: str | None = None,
+) -> None:
+    try:
+        store.update_job_progress(
+            job_id,
+            claim_token=claim_token,
+            current_step=current_step,
+            progress_message=progress_message,
+            progress_pct=progress_pct,
+            log_path=log_path,
+        )
+    except Exception:
+        logger.warning("Failed to update progress for Phase 1 job %s", job_id, exc_info=True)
+
+
+def _resolve_log_root(output_root: Path) -> Path:
+    configured = os.getenv("DO_PHASE1_LOG_ROOT", "").strip()
+    if configured:
+        return Path(configured)
+    return output_root / "logs"
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=os.getenv("DO_PHASE1_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+    run_worker_loop()

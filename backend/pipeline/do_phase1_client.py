@@ -32,6 +32,10 @@ class Phase1JobRecord(BaseModel):
     manifest: Phase1Manifest | None = None
     manifest_uri: str | None = None
     failure: dict[str, Any] | None = None
+    current_step: str | None = None
+    progress_message: str | None = None
+    progress_pct: float | None = None
+    log_path: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     started_at: datetime | None = None

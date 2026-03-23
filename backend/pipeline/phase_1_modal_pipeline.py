@@ -36,6 +36,15 @@ YTDLP_VIDEO_FORMAT = os.getenv(
         "best[height<=1080]/best"
     ),
 )
+YTDLP_H264_PREFERRED_FORMAT = os.getenv(
+    "YTDLP_H264_PREFERRED_FORMAT",
+    (
+        "bestvideo[vcodec^=avc1][ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
+        "bestvideo[vcodec^=avc1][height<=1080]+bestaudio/"
+        "best[vcodec^=avc1][height<=1080]/"
+        "best[vcodec^=h264][height<=1080]"
+    ),
+)
 YTDLP_MIN_LONG_EDGE = int(os.getenv("YTDLP_MIN_LONG_EDGE", "1080"))
 ALLOW_LOW_RES_VIDEO = os.getenv("ALLOW_LOW_RES_VIDEO", "0") == "1"
 
@@ -148,11 +157,13 @@ def ensure_h264_local(video_path: str) -> str:
 
     h264_path = str(DOWNLOAD_DIR / "video_h264.mp4")
     log.info(f"Re-encoding local video {codec} -> h264 for downstream compatibility…")
+    started_at = time.perf_counter()
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", video_path,
             "-c:v", "libx264",
             "-preset", "ultrafast",
+            "-threads", "0",
             "-crf", "23",
             "-c:a", "copy",
             h264_path,
@@ -163,7 +174,8 @@ def ensure_h264_local(video_path: str) -> str:
     )
     log.info(
         f"Local H.264 ready: {h264_path} "
-        f"({Path(h264_path).stat().st_size / 1e6:.1f} MB)"
+        f"({Path(h264_path).stat().st_size / 1e6:.1f} MB, "
+        f"{time.perf_counter() - started_at:.1f}s)"
     )
     return h264_path
 
@@ -467,17 +479,7 @@ def download_media(url: str) -> tuple[str, str]:
 
     # ── Video + Audio (muxed) ──
     log.info("Downloading video+audio stream…")
-    video_opts = {
-        "format": YTDLP_VIDEO_FORMAT,
-        "outtmpl": str(DOWNLOAD_DIR / "video.%(ext)s"),
-        "merge_output_format": "mp4",
-        "quiet": True,
-        "no_warnings": True,
-        "noprogress": False,
-    }
-    with yt_dlp.YoutubeDL(video_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        video_path = ydl.prepare_filename(info)
+    video_path = _download_video_with_format_fallback(url)
 
     video_path = ensure_h264_local(video_path)
 
@@ -509,6 +511,37 @@ def download_media(url: str) -> tuple[str, str]:
     log.info(f"Audio saved: {audio_path} ({Path(audio_path).stat().st_size / 1e6:.1f} MB)")
 
     return video_path, audio_path
+
+
+def _download_video_with_format_fallback(url: str) -> str:
+    format_attempts = []
+    preferred_format = (os.getenv("YTDLP_H264_PREFERRED_FORMAT", YTDLP_H264_PREFERRED_FORMAT) or "").strip()
+    fallback_format = (os.getenv("YTDLP_VIDEO_FORMAT", YTDLP_VIDEO_FORMAT) or "").strip()
+    if preferred_format:
+        format_attempts.append(("H.264-preferred", preferred_format))
+    if fallback_format and fallback_format not in {preferred_format}:
+        format_attempts.append(("fallback", fallback_format))
+
+    last_error = None
+    for label, format_selector in format_attempts:
+        video_opts = {
+            "format": format_selector,
+            "outtmpl": str(DOWNLOAD_DIR / "video.%(ext)s"),
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": False,
+        }
+        try:
+            log.info("yt-dlp attempt %s with format selector: %s", label, format_selector)
+            with yt_dlp.YoutubeDL(video_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                return ydl.prepare_filename(info)
+        except Exception as exc:
+            last_error = exc
+            log.warning("yt-dlp %s format attempt failed: %s", label, exc)
+
+    raise RuntimeError(f"Failed to download source video with all format selectors: {last_error}")
 
 
 # ──────────────────────────────────────────────
