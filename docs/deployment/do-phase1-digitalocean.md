@@ -66,6 +66,8 @@ sudo chmod 600 /etc/clypt-phase1/gcp-sa.json
 
 - `DO_REGION`
 - `DO_PHASE1_WORKER_ID`
+- `DO_PHASE1_WORKER_CONCURRENCY`
+- `DO_PHASE1_GPU_SLOTS`
 - `DO_PHASE1_LOG_ROOT`
 - `GOOGLE_APPLICATION_CREDENTIALS`
 - `GCS_BUCKET`
@@ -73,6 +75,8 @@ sudo chmod 600 /etc/clypt-phase1/gcp-sa.json
 
 Recommended Phase 1 tuning for large creator videos:
 
+- `DO_PHASE1_WORKER_CONCURRENCY=3`
+- `DO_PHASE1_GPU_SLOTS=1`
 - `CLYPT_SPEAKER_BINDING_MODE=auto`
 - `CLYPT_SPEAKER_BINDING_AUTO_MAX_DURATION_S=180`
 - `CLYPT_SPEAKER_BINDING_AUTO_MAX_LONG_EDGE=1920`
@@ -93,6 +97,11 @@ Recommended Phase 1 tuning for large creator videos:
 long clips, while still using LR-ASD by default on smaller videos. The
 speaker-binding proxy keeps LR-ASD off full-resolution 4K frames while
 preserving the original video for tracking and downstream artifacts.
+`DO_PHASE1_WORKER_CONCURRENCY=3` lets the droplet claim multiple jobs at once
+without forcing three GPU-heavy extractions to overlap immediately.
+`DO_PHASE1_GPU_SLOTS=1` keeps the expensive tracking / face / speaker-binding
+section serialized on a single GPU until higher slot counts are explicitly
+validated.
 `CLYPT_TRACKING_MODE=auto` prefers the simpler direct full-video tracker when
 the droplet is effectively single-worker, which avoids redundant chunk
 re-encodes.

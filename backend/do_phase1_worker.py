@@ -11,7 +11,7 @@ import subprocess
 import time
 
 try:
-    if os.getenv("CLYPT_ENABLE_MODAL_SDK", "0") != "1":
+    if os.getenv("CLYPT_ENABLE_LEGACY_SERVERLESS_SDK", "0") != "1":
         raise ImportError("Legacy serverless SDK disabled for the DO runtime path")
     import modal  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - exercised implicitly by DO runtime import

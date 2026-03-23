@@ -118,10 +118,17 @@ gcloud spanner databases ddl update clypt-graph-db-v2 \
 ## Deploy DO Phase 1 Service
 
 ```bash
-source .venv/bin/activate
-DO_PHASE1_BASE_URL=http://<droplet-ip>:8080 \
-.venv/bin/python -m backend.do_phase1_service.app
+sudo REPO_DIR=/opt/clypt-phase1/repo \
+  BRANCH=codex/balanced-hybrid-phase1-contract \
+  ENV_FILE=/etc/clypt-phase1/do-phase1.env \
+  REQUIREMENTS_FILE=requirements-do-phase1.txt \
+  bash scripts/do_phase1/deploy_phase1_service.sh
 ```
+
+This installs the droplet-specific dependency bundle, pre-caches the Phase 1
+models, and starts both systemd services:
+- `clypt-phase1-api.service`
+- `clypt-phase1-worker.service`
 
 ## Run with a Video URL
 
@@ -176,6 +183,7 @@ printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python b
 - `CLYPT_ENABLE_ROI_DETECT` (`1`/`0`)
 - `CLYPT_TRACK_CHUNK_WORKERS` (local thread workers inside one container)
 - `CLYPT_ENFORCE_ROLLOUT_GATES` (`1`/`0`)
+- `CLYPT_ENABLE_LEGACY_SERVERLESS_SDK` (`1` only when intentionally testing the old optional wrapper shim)
 - Gate thresholds:
   - `CLYPT_GATE_MIN_IDF1_PROXY`
   - `CLYPT_GATE_MIN_MOTA_PROXY`
@@ -183,6 +191,12 @@ printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python b
   - `CLYPT_GATE_MIN_THROUGHPUT_FPS`
   - `CLYPT_GATE_MAX_WALLCLOCK_S`
   - `CLYPT_GATE_MIN_SCHEMA_PASS_RATE`
+
+### DO worker service flags (`backend/do_phase1_service/*.py`)
+- `DO_PHASE1_WORKER_CONCURRENCY`: number of worker processes that can claim jobs
+- `DO_PHASE1_GPU_SLOTS`: number of extraction jobs allowed into the GPU-heavy critical section at once
+- `DO_PHASE1_STATE_ROOT`, `DO_PHASE1_DB_PATH`, `DO_PHASE1_OUTPUT_ROOT`, `DO_PHASE1_LOG_ROOT`
+- `DO_PHASE1_HOST_LOCK_PATH`: base path used to derive GPU-slot lock files
 
 ## Expected Outputs
 
