@@ -6,7 +6,7 @@ Status: Approved in chat, pending spec review and user review
 
 ## Summary
 
-For the Multimodal Frontier Hackathon, Clypt should keep the product behavior and differentiators described in [Clypt-V2.html](/Users/rithvik/CascadeProjects/Clypt-V2/docs/planning/Clypt-V2.html) while reshaping the stack into a sponsor-aligned balanced hybrid:
+For the Multimodal Frontier Hackathon, Clypt should keep the product behavior and differentiators described in [current planning docs](/Users/rithvik/CascadeProjects/Clypt-V2/docs/planning/README.md) while reshaping the stack into a sponsor-aligned balanced hybrid:
 
 - Keep Google DeepMind / GCP central for multimodal reasoning, semantic graph construction, embeddings, and existing graph storage.
 - Replace Modal with a DigitalOcean GPU Droplet-hosted Phase 1 extraction service.
@@ -311,7 +311,7 @@ Mitigation:
 ## Success Criteria
 
 - Phase 1 runs end-to-end on DigitalOcean instead of Modal.
-- The core features in [Clypt-V2.html](/Users/rithvik/CascadeProjects/Clypt-V2/docs/planning/Clypt-V2.html) still work as promised.
+- The core features in [current planning docs](/Users/rithvik/CascadeProjects/Clypt-V2/docs/planning/README.md) still work as promised.
 - The Cortex / creator-facing frontend is visibly improved and credibly associated with Lovable.
 - The architecture can be explained simply:
   - DigitalOcean powers extraction.

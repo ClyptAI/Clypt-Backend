@@ -1,6 +1,11 @@
 # Clypt Planning Docs
 
-This planning content has been split into focused documents.
+These planning docs have been trimmed to match the active architecture more closely.
+
+For **Phase 1**, the real source of truth is code, not planning prose:
+- `backend/do_phase1_worker.py`
+- `backend/do_phase1_service/`
+- `backend/pipeline/phase_1_do_pipeline.py`
 
 ## Read Order
 1. [Product and Demo](./01-product-and-demo.md)
@@ -9,11 +14,11 @@ This planning content has been split into focused documents.
 4. [Data, Integrations, and Reference](./04-data-integrations-and-reference.md)
 
 ## Doc Map
-- `01-product-and-demo.md`: product framing and demo narrative aligned to the current semantic graph pipeline.
-- `02-system-architecture.md`: runtime architecture and pipeline stage responsibilities.
-- `03-agents-and-clipping.md`: implemented model roles and clipping behavior.
-- `04-data-integrations-and-reference.md`: integrations, artifacts, storage model, and runtime dependencies.
+- `01-product-and-demo.md`: current product framing and demo narrative.
+- `02-system-architecture.md`: current runtime architecture and phase responsibilities.
+- `03-agents-and-clipping.md`: implemented agent/model roles and clipping behavior.
+- `04-data-integrations-and-reference.md`: integrations, artifacts, and storage/runtime reference.
 
-## Legacy Combined Doc
-- [Legacy Combined](./legacy-combined.md) remains as the original single-file source of truth archive.
-- [Semantic Graph Architecture](./Semantic_Graph_Architecture.md) is now a legacy reference and includes a warning banner.
+## Legacy Material
+- [Legacy Combined](./legacy-combined.md) is preserved as archive material only.
+- Older planning docs that described Google Video Intelligence, `phase_1a_reconcile`, TalkNet, or YOLO11 are no longer authoritative for Phase 1.

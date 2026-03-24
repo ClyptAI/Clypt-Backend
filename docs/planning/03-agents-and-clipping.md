@@ -1,79 +1,66 @@
 # Agents and Clipping
 
-See also: [Planning Index](./README.md), [System Architecture](./02-system-architecture.md), [Data/Integrations](./04-data-integrations-and-reference.md), [Semantic Graph Source](./Semantic_Graph_Architecture.md)
+See also: [Planning Index](./README.md), [System Architecture](./02-system-architecture.md), [Data/Integrations](./04-data-integrations-and-reference.md)
 
----
-## Agent Roles (Implemented)
+## Agent Roles (Current)
 
 The current system uses a hybrid runtime:
-- **DO GPU microservice** for deterministic multimodal extraction in Phase 1.
-- **Gemini** for semantic reasoning and clip scoring in Phases 2A, 2B, and 5.
+- **DO GPU extraction service** for deterministic Phase 1 grounding
+- **Gemini** for semantic reasoning and clip scoring in later phases
 
 | Role | Stage | Runtime | Output |
 |---|---|---|---|
-| **Deterministic Extraction Worker** | Phase 1 | DO GPU service (Parakeet + YOLO11/BoT-SORT + TalkNet) | `phase_1_visual.json`, `phase_1_audio.json` |
-| **Content Mechanism Decomposition** | Phase 2A | Gemini 3.1 Pro | `phase_2a_nodes.json` |
-| **Narrative Edge Mapping** | Phase 2B | Gemini 3.1 Pro (text-only) | `phase_2b_narrative_edges.json` |
-| **Auto-Curator ClipScoringAgent** | Phase 5 Auto-Curate | Gemini 3.1 Pro | ranked clip payloads |
-| **Retrieve ClipScoringAgent** | Phase 5 Retrieve | Gemini 3.1 Pro | query-specific clip payload |
+| Deterministic extraction worker | Phase 1 | DO GPU service | `phase_1_visual.json`, `phase_1_audio.json`, manifest artifacts |
+| Content mechanism decomposition | Phase 2A | Gemini | `phase_2a_nodes.json` |
+| Narrative edge mapping | Phase 2B | Gemini | `phase_2b_narrative_edges.json` |
+| Clip scoring / auto-curation | Phase 5 | Gemini | ranked clip payloads |
+| Retrieve clip scoring | Phase 5 retrieve | Gemini | query-specific clip payload |
 
----
 ## Phase 1 Extraction Mechanics
 
-`backend/pipeline/phase_1_do_pipeline.py` now performs three tasks only:
-1. Build webhook request payload from input YouTube URL.
-2. Call the DO endpoint and wait for extraction completion.
-3. Persist returned visual/audio ledgers for downstream phases.
+Inside the worker, the stack is currently:
+1. Parakeet ASR
+2. YOLO26s + BoT-SORT tracking
+3. early face observations + identity features
+4. global identity clustering
+5. LR-ASD or heuristic speaker binding
+6. final visual/audio ledger construction
 
-Inside the DO extraction worker, the stack runs in order:
-1. `yt-dlp`
-2. NVIDIA Canary-1B-v2 (word-level timestamps + punctuation)
-3. YOLO11 + BoT-SORT (dense persistent tracks)
-4. TalkNet (active speaker to `track_id` binding)
+Notes:
+- LR-ASD is the active audiovisual speaker-binding model path.
+- Heuristic binding still exists as a fallback or explicit mode.
+- Face observations are reused across clustering, LR-ASD, and final ledgers.
 
-No separate reconciliation phase exists after extraction.
-
----
 ## Clipping Logic
 
-### Auto-Curate Mode
-1. Load all nodes + edges from Spanner.
+### Auto-curate mode
+1. Load nodes + edges.
 2. Build narrative chapters via graph connectivity.
-3. Score each chapter with ClipScoringAgent using hook/payoff/pacing criteria.
-4. Keep clips scoring 85+, or fallback to top 3.
-5. Emit Remotion-ready payloads with `active_speaker_timeline` built from `speaker_track_id` bindings.
+3. Score windows for hook, payoff, pacing, and clip worthiness.
+4. Emit render-ready payloads.
 
-### Retrieve Mode
-1. Embed query into 1408-d vector.
-2. Find anchor node via ScaNN cosine search.
-3. Expand with 1-hop graph neighbors.
-4. Score the local sub-graph for optimal boundaries.
-5. Emit single Remotion payload.
+### Retrieve mode
+1. Embed the query.
+2. Find anchor nodes via vector search.
+3. Expand through the local narrative neighborhood.
+4. Score boundaries and emit focused clip payloads.
 
----
-## Scoring Criteria (Current)
+## Current Framing Policy Inputs
 
-Clip scoring prompt evaluates:
-- **Hook strength** in opening moments
-- **Payoff quality** based on semantic mechanisms
-- **Narrative coherence** from included nodes
-- **Pacing and target duration** (short-form friendly)
+Phase 1 runtime controls currently encode:
+- `single_person_plus_two_speaker`
+- `shared_two_shot_or_explicit_split`
 
----
-## Remotion Clip Construction
+That means downstream renderers can distinguish between:
+- single-person framing
+- two-speaker shared shots
+- two-speaker explicit split layouts
 
-The clip renderer uses:
-- `clip_start_ms` / `clip_end_ms` from Phase 5 output
-- `tracking_uris` merged into `merged_tracking.json`
-- `active_speaker_timeline` for speaker-aware camera following
-- direct per-frame `x/y` transforms from BoT-SORT trajectories in `ClyptViralShort.tsx`
+## Remotion / QA Construction
 
-The renderer no longer depends on additional smoothing logic because Phase 1 tracking data is already dense and smoothed.
+Current clip rendering consumes:
+- clip timing from later phases
+- Phase 1 tracking and speaker-binding outputs
+- composition metadata and per-frame geometry
 
----
-## What Is Not Yet Reflected Here
-
-- No Gemini Live API runtime loop is wired into this pipeline path yet.
-- No ADK bidi-streaming session orchestration is currently part of the scripted phases.
-
-These can be layered on top of the existing semantic graph backend.
+The QA renderer and Remotion-facing tooling are still evolving, but they both assume Phase 1 is the deterministic source for geometry and speaker-aware framing inputs.

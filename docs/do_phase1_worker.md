@@ -1,291 +1,166 @@
-# do_phase1_worker.py Documentation
+# DO Phase 1 Worker
+
+This document describes the active Phase 1 extraction stack implemented in:
+- `backend/do_phase1_worker.py`
+- `backend/do_phase1_service/extract.py`
+- `backend/pipeline/phase_1_do_pipeline.py`
+
+For Phase 1 behavior, those files are the source of truth.
 
 ## Purpose
 
-`do_phase1_worker.py` is the Phase 1 GPU service for Clypt.  
-It accepts pre-downloaded media bytes and returns:
+The worker accepts a muxed MP4 video plus a 16kHz mono WAV and returns:
+- `phase_1_visual`
+- `phase_1_audio`
+- compatibility aliases `phase_1a_visual` and `phase_1a_audio`
 
-- word-level ASR (`phase_1_audio.words`)
-- person tracking (`phase_1_visual.tracks`)
-- speaker-word bindings (`phase_1_audio.speaker_bindings`)
-- tracking quality/runtime metrics (`phase_1_visual.tracking_metrics`)
+The active production path runs inside the DigitalOcean Phase 1 service, which calls the worker in-process.
 
-This worker is designed to run either:
-
-- as one end-to-end call (`extract`)
-- or as distributed fan-out primitives (`stage_video_for_tracking`, `track_chunk_from_staged`, `stitch_tracking_chunks`, `finalize_extraction`)
-
----
-
-## Current Stack
-
-### Models
+## Current Model Stack
 
 - ASR: `nvidia/parakeet-tdt-1.1b`
-- Detector/tracker: `YOLO26s + BoT-SORT (ReID + GMC)`
-- Face ID for clustering: InsightFace (`buffalo_l`, ArcFace embeddings)
-- Active speaker detection: LR-ASD
+- Tracking: `YOLO26s + BoT-SORT`
+- Face observations: InsightFace ROI detections with MediaPipe fallback
+- Identity features: InsightFace embeddings when available, histogram fallback otherwise
+- Speaker binding: LR-ASD primary, heuristic fallback, `auto` selection for larger videos
 
-### Runtime
+Notes:
+- The active path does **not** use TalkNet.
+- The active path does **not** use Google Video Intelligence or any `phase_1a_reconcile` stage.
+- The active path still exposes optional legacy serverless compatibility shims, but DigitalOcean is the real runtime.
 
-Primary runtime target:
+## End-to-End Execution Order
 
-- DigitalOcean GPU extraction worker / service
-- local DO extraction reuse path through `backend/do_phase1_service/extract.py`
+`extract(video_bytes, audio_wav_bytes, youtube_url)` currently runs:
 
-Legacy compatibility:
+1. Persist incoming media to local temp files.
+2. Run Parakeet ASR.
+3. Run tracking on the same GPU after ASR completes.
+4. Finalize from `words + tracks`:
+   - build canonical face observations
+   - cluster tracklets into global identities
+   - run speaker binding
+   - build visual ledgers and metrics
+   - package Phase 1 outputs
 
-- optional legacy serverless wrapper support remains available when explicitly enabled
+ASR and tracking are intentionally serialized on the GPU so NeMo CUDA-graph decoding does not conflict with YOLO GPU work.
 
----
+## Tracking Modes
 
-## Build-Time Caching
+Supported tracking modes are selected in worker code:
+- `direct`
+- `chunked`
+- `shared_analysis_proxy`
+- `auto`
 
-During image build, the worker caches:
+Behavior today:
+- `direct` and `shared_analysis_proxy` use the direct full-video tracker path
+- `chunked` uses staged chunk tracking plus stitching
+- `auto` resolves based on runtime heuristics in the worker
 
-- Parakeet weights
-- YOLO26s weights
-- best-effort YOLO ONNX export and TensorRT/OpenVINO artifacts
-- LR-ASD checkpoint + source files
-- InsightFace model pack
+The direct path is the most common path during current podcast evaluation.
 
-This reduces cold-start time and avoids runtime model downloads.
+## Shared Analysis Proxy
 
----
+When enabled, the worker prepares one shared analysis video path for:
+- tracking
+- face observation extraction
+- LR-ASD
 
-## Public Remote Methods
+This avoids duplicating large-video preprocessing for each subsystem.
 
-## 1) End-to-end path
+## Face and Identity Pipeline
 
-### `extract(video_bytes, audio_wav_bytes, youtube_url) -> dict`
+The worker builds face observations early and reuses them across later stages.
 
-Runs full Phase 1:
+### Canonical face observations
+- detector-derived face observations are attached to person tracks inside ROIs
+- provenance is recorded on emitted ledgers
+- real face observations are preferred everywhere downstream
 
-1. ASR + tracking concurrently
-2. global tracklet clustering
-3. speaker binding (LR-ASD, heuristic fallback)
-4. contract validation + rollout gates
+### Fallback behavior
+- MediaPipe can act as a lightweight fallback when InsightFace coverage is missing
+- histogram features are used when high-quality face embeddings are unavailable
 
-Response includes both modern and compatibility keys:
-
-- `phase_1_visual`, `phase_1_audio`
-- `phase_1a_visual`, `phase_1a_audio` (compat)
-
----
-
-## 2) Distributed fan-out path
-
-### `stage_video_for_tracking(video_bytes) -> manifest`
-
-- writes video to volume
-- ensures decodable codec (H.264 if needed)
-- probes metadata
-- builds overlapping chunk plan
-- returns manifest:
-  - `job_id`
-  - `video_path`
-  - `meta`
-  - `chunks`
-
-### `run_asr_only(audio_wav_bytes) -> words`
-
-- ASR-only helper for distributed orchestration
-
-### `track_chunk_from_staged(job_id, video_path, meta, chunk) -> chunk_result`
-
-- tracks one chunk on GPU
-- emits per-chunk NDJSON + embeddings
-
-### `stitch_tracking_chunks(chunk_results, fps) -> {tracks, tracking_metrics}`
-
-- merges chunk-local IDs to global IDs on overlap windows
-
-### `finalize_extraction(video_bytes, audio_wav_bytes, youtube_url, words, tracks, tracking_metrics) -> dict`
-
-- runs clustering + speaker binding + final packaging
-
-### `cleanup_tracking_job(job_id)`
-
-- removes staged volume artifacts for that distributed job
-
----
-
-## Tracking Pipeline (Phase 1 Step 2)
-
-## 1) Codec normalization
-
-`_ensure_h264` checks codec via `ffprobe`.
-If source is AV1/VP9/HEVC, it re-encodes to H.264 (`h264_nvenc` preferred, `libx264` fallback).
-
-## 2) Chunk plan
-
-`_build_chunk_plan` uses:
-
-- chunk size: `60s`
-- overlap: `2s`
-
-This enables parallel chunk tracking and overlap stitching.
-
-## 3) Per-chunk tracking
-
-`_track_single_chunk`:
-
-- runs YOLO26s track with BoT-SORT config
-- uses `vid_stride=2` on long chunks (speed path)
-- confidence-triggered dense rerun when sparse pass quality is weak
-- optional ROI refinement on propagated detections (`CLYPT_ENABLE_ROI_DETECT=1`)
-
-## 4) Canonical coordinates and metadata
-
-Each detection is canonicalized to:
-
-- absolute original-frame `xyxy`
-- label taxonomy (`class_id=0`, `label="person"`)
-- normalized `bbox_norm_xywh` (aux field)
-
-Worker explicitly computes and writes letterbox metadata and forward/inverse transforms:
-
-- `_compute_letterbox_meta`
-- `_forward_letterbox_xyxy`
-- `_inverse_letterbox_xyxy`
-
-Per-chunk NDJSON contains:
-
-- one header record (schema/task/coordinate space/geometry/taxonomy/letterbox)
-- one record per detection
-
-## 5) Overlap stitching
-
-`_stitch_chunk_tracks` uses overlap windows + assignment:
-
-- TrackTrack-style local candidate pruning
-- cost from IoU + embedding distance
-- Hungarian assignment
-- track-aware initialization for short unmatched tracks
-- dedupe on `(frame_idx, track_id)` keeping higher confidence
-
-Returned tracking metrics include:
-
-- `idf1_proxy`
-- `mota_proxy`
-- `track_fragmentation_rate`
-- `chunk_processed_frames`
-- `chunk_elapsed_s`
-- `chunk_throughput_fps`
-- then wall-clock + throughput appended by caller
-
----
-
-## Global ID Clustering (Phase 1 Step 3)
-
-`_cluster_tracklets` merges fragmented tracker IDs into `Global_Person_k`:
-
-- multi-frame sampling per tracklet
-- ArcFace embeddings for high-quality faces
-- histogram fallback for low-quality/no-face cases
-- DBSCAN on face embeddings
-- conservative tiny-cluster and cross-cluster merges
-- histogram tracklet attachment to nearest face cluster
-- final contiguous renumbering
-
-This stage is designed to reduce ID fragmentation without hardcoding a fixed speaker/person count.
-
----
-
-## Speaker Binding (Phase 1 Step 4)
-
-Primary path: `LR-ASD` (`_run_lrasd_binding`)
-
-- builds contiguous frame subchunks
-- fault-tolerant face crop path with anchor projection fallback
-- computes MFCC audio features aligned to visual chunks
-- batches by temporal length
-- outputs per-frame speaking probabilities
-- assigns words to tracks with confidence + margin gates
-- applies local smoothing
-
-Fallback path: `_run_speaker_binding_heuristic`
-
-- motion/confidence/area based scoring
-- optional lip-landmark tie-break when available
-
-If LR-ASD confidence/coverage is too low, worker falls back automatically.
-
----
-
-## Contracts and Rollout Gates
-
-Before final response, worker enforces:
-
-- schema contract validation for tracks
-- schema pass-rate computation
-- rollout gates from `tracking_metrics`
-
-Configurable gate env vars:
-
-- `CLYPT_ENFORCE_ROLLOUT_GATES`
-- `CLYPT_GATE_MIN_IDF1_PROXY`
-- `CLYPT_GATE_MIN_MOTA_PROXY`
-- `CLYPT_GATE_MAX_FRAGMENTATION`
-- `CLYPT_GATE_MIN_THROUGHPUT_FPS`
-- `CLYPT_GATE_MAX_WALLCLOCK_S`
-- `CLYPT_GATE_MIN_SCHEMA_PASS_RATE`
-
-If enforcement is enabled and gates fail, worker raises.
-
----
-
-## Output Shape (Final)
-
-## `phase_1_visual`
-
-- `source_video`
-- `schema_version` (`2.0.0`)
-- `task_type` (`person_tracking`)
-- `coordinate_space` (`absolute_original_frame_xyxy`)
-- `geometry_type` (`aabb` or `mixed` when OBB records exist)
-- `class_taxonomy`
+### Output ledgers
+The worker emits:
+- `face_detections`
+- `person_detections`
+- `tracks`
 - `tracking_metrics`
-- `tracks` (per-frame detections)
 
-## `phase_1_audio`
+`face_detections` are intended to be real detector-derived tracks.
+`proxy_face_detections` are created later by the pipeline bridge only as a compatibility fallback for older consumers.
 
-- `source_audio`
-- `words` (word-level timestamps + speaker tags)
-- `speaker_bindings` (merged speech segments per track)
+## Speaker Binding
 
----
+Supported speaker-binding modes:
+- `auto`
+- `lrasd`
+- `heuristic`
+- `shared_analysis_proxy`
 
-## Key Environment Variables
+Behavior today:
+- `lrasd` uses the LR-ASD path and cached assets under `/root/lrasd` and `/root/.cache/clypt/finetuning_TalkSet.model`
+- `heuristic` uses a lightweight visual heuristic binder
+- `auto` chooses the path based on video size / complexity limits
+- `shared_analysis_proxy` resolves through the LR-ASD-oriented path, using the shared proxy pipeline
 
-General/debug:
+The active binding path consumes the canonical face stream first instead of rediscovering faces independently.
 
-- `CLYPT_MODEL_DEBUG`
-- `CLYPT_MODEL_DEBUG_EVERY`
+## Outputs
 
-Tracking:
+The worker response includes:
+- `phase_1_visual`
+- `phase_1_audio`
+- `phase_1a_visual`
+- `phase_1a_audio`
 
-- `CLYPT_YOLO_IMGSZ`
+The DigitalOcean extraction service enriches and validates those artifacts, uploads them to GCS, and persists a contract `v2` manifest.
+
+## DigitalOcean Service Flow
+
+The service in `backend/do_phase1_service/extract.py` does this:
+1. Download source media for the submitted URL.
+2. Wait for a bounded GPU extraction slot.
+3. Run the worker locally in-process.
+4. Upload the canonical source video to GCS.
+5. Enrich and validate `phase_1_visual` / `phase_1_audio`.
+6. Persist `manifest.json`, `phase_1_visual.json`, and `phase_1_audio.json`.
+
+## Runtime Controls
+
+### Local pipeline controls
+- `PHASE1_RUNTIME_PROFILE`
+- `PHASE1_FORCE_LRASD`
+- `PHASE1_SPEAKER_BINDING_MODE`
+- `PHASE1_TRACKING_MODE`
+- `PHASE1_SHARED_ANALYSIS_PROXY`
+- `PHASE1_HEURISTIC_BINDING_ENABLED`
+
+### Worker controls
+- `CLYPT_TRACKING_MODE`
 - `CLYPT_TRACK_CHUNK_WORKERS`
-- `CLYPT_ENABLE_ROI_DETECT`
+- `CLYPT_SPEAKER_BINDING_MODE`
+- `CLYPT_LRASD_BATCH_SIZE`
+- `CLYPT_LRASD_PIPELINE_OVERLAP`
+- `CLYPT_LRASD_MAX_INFLIGHT`
+- rollout gate thresholds in `backend/do_phase1_worker.py`
 
-Rollout gates:
+### Service controls
+- `DO_PHASE1_WORKER_CONCURRENCY`
+- `DO_PHASE1_GPU_SLOTS`
+- `DO_PHASE1_STATE_ROOT`
+- `DO_PHASE1_DB_PATH`
+- `DO_PHASE1_OUTPUT_ROOT`
+- `DO_PHASE1_LOG_ROOT`
 
-- all `CLYPT_GATE_*` vars listed above
+## Current Downstream Compatibility Bridge
 
----
+After the DO job succeeds, `backend/pipeline/phase_1_do_pipeline.py` still re-downloads the source media locally so later phases and render tooling can keep using local JSON + local video assumptions.
 
-## Deploy
-
-```bash
-source .venv/bin/activate
-bash scripts/do_phase1/deploy_phase1_service.sh
-```
-
----
-
-## Notes for Teammates
-
-- This worker expects media bytes from local pipeline code (`backend/pipeline/phase_1_do_pipeline.py`), not direct YouTube access from the extraction service.
-- The recommended production path is distributed fan-out from the client with up to 8 GPU workers.
-- Staged chunk artifacts live under `/vol/clypt-chunks/jobs/<job_id>` and should be cleaned with `cleanup_tracking_job`.
+That bridge currently writes:
+- `backend/outputs/phase_1_visual.json`
+- `backend/outputs/phase_1_audio.json`
+- `backend/outputs/phase_1_visual.ndjson`
+- `backend/outputs/phase_1_runtime_controls.json`

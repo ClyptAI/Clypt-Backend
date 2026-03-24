@@ -1,93 +1,61 @@
 # Data, Integrations, and Reference
 
-See also: [Planning Index](./README.md), [System Architecture](./02-system-architecture.md), [Agents and Clipping](./03-agents-and-clipping.md), [Semantic Graph Source](./Semantic_Graph_Architecture.md)
+See also: [Planning Index](./README.md), [System Architecture](./02-system-architecture.md), [Agents and Clipping](./03-agents-and-clipping.md)
 
----
 ## Primary Integrations
 
 | Integration | Usage |
 |---|---|
-| YouTube + `yt-dlp` | Source media acquisition in Phase 1 worker |
-| DigitalOcean GPU service (FastAPI) | Hosts deterministic extraction microservice |
-| NVIDIA Canary-1B-v2 | High-speed transcription with word-level timestamps and punctuation |
-| YOLO11 + BoT-SORT | Dense face/person tracking with persistent IDs |
-| TalkNet + InsightFace | Active speaker binding from audio-visual synchrony |
-| Gemini 3.1 Pro | Decomposition, edge mapping, clip scoring |
-| Multimodal Embeddings (`multimodalembedding@001`) | Node and query vectorization |
-| Cloud Spanner | Node/edge relational graph + vector index + property graph |
-| Cloud Storage | Intermediate artifacts + per-node tracking payloads |
-| Remotion | Final clip rendering |
+| YouTube + `yt-dlp` | source media acquisition |
+| DigitalOcean Phase 1 service | async extraction API + worker runtime |
+| Parakeet TDT 1.1B | transcription with word-level timing |
+| YOLO26s + BoT-SORT | person tracking |
+| InsightFace + MediaPipe fallback | face observations and identity features |
+| LR-ASD + heuristic fallback | speaker binding |
+| Gemini | node decomposition, narrative edges, clip scoring |
+| Vertex embeddings | node and query vectorization |
+| Cloud Spanner | graph + vector storage |
+| Cloud Storage | artifact persistence |
+| Remotion / QA renderers | final clips and inspection renders |
 
----
 ## Core Data Artifacts
 
 | File | Produced By | Consumed By |
 |---|---|---|
-| `phase_1_visual.json` | Phase 1 DO worker | 2A, 4, Remotion tracking fetch |
-| `phase_1_audio.json` | Phase 1 DO worker | 2A, 4, 5 |
-| `phase_2a_nodes.json` | Phase 2A | 2B, 3 |
-| `phase_2b_narrative_edges.json` | Phase 2B | 4 |
-| `phase_3_embeddings.json` | Phase 3 | 4 |
-| `remotion_payloads_array.json` | Phase 5 Auto-Curate | Remotion |
-| `remotion_payload.json` | Phase 5 Retrieve | Remotion standalone |
+| `phase_1_visual.json` | Phase 1 DO pipeline materialization | later phases, renderers, QA tools |
+| `phase_1_audio.json` | Phase 1 DO pipeline materialization | later phases, clip scoring, QA tools |
+| `phase_1_visual.ndjson` | Phase 1 DO pipeline materialization | compatibility consumers |
+| `phase_2a_nodes.json` | Phase 2A | 2B, 3, 4, 5 |
+| `phase_2b_narrative_edges.json` | Phase 2B | 4, 5 |
+| `phase_3_embeddings.json` | Phase 3 | 4, 5 |
+| `remotion_payloads_array.json` | Phase 5 auto-curate | renderers |
+| `remotion_payload.json` | Phase 5 retrieve | renderers |
 
 Artifact notes:
-- `phase_1_visual.json` contains dense 60fps BoT-SORT arrays with persistent `track_id` assignments.
-- `phase_1_audio.json` contains NVIDIA Canary-1B-v2 transcript words with direct `speaker_track_id` mapping.
-- `phase_1a_speaker_map.json` is removed because speaker-to-track binding is native to Phase 1.
+- `phase_1_visual.json` includes `tracks`, `person_detections`, `face_detections`, and `tracking_metrics`.
+- `phase_1_audio.json` includes word timings and speaker bindings.
+- `proxy_face_detections` may exist as a compatibility bridge even though real `face_detections` are preferred.
+- No `phase_1a_speaker_map.json` is part of the active path.
 
----
-## Spanner Model
+## Manifest Flow
 
-### `SemanticClipNode`
-- `node_id`
-- `start_time_ms`, `end_time_ms`
-- transcript and mechanism fields
-- `embedding` as `ARRAY<FLOAT32>(vector_length=>1408)`
-- `spatial_tracking_uri`
+The DO service persists a contract `v2` manifest plus uploaded artifacts. The local pipeline fetches the manifest from the DO API and materializes local copies for downstream compatibility.
 
-### `NarrativeEdge`
-- `edge_id`
-- `from_node_id`, `to_node_id`
-- edge label/classification/confidence
-
-### Index / Graph
-- `ClyptSemanticIndex` (ScaNN cosine vector index)
-- `ClyptGraph` (property graph over nodes + edges)
-
----
 ## Infrastructure Summary
 
 | Resource | Service | Purpose |
 |---|---|---|
-| DO Phase 1 endpoint | DigitalOcean | Phase 1 extraction job target |
-| `clypt-v2` | GCP project | Core cloud project for non-extraction services |
-| `clypt-storage-v2` | Cloud Storage | Uploads + tracking JSON |
-| `clypt-spanner-v2` | Spanner instance | Database host |
-| `clypt-graph-db-v2` | Spanner database | Graph + vectors |
-| `gemini-3.1-pro-preview` | Vertex AI | LLM reasoning stages |
-| `multimodalembedding@001` | Vertex AI | 1408-d embeddings |
+| DO Phase 1 endpoint | DigitalOcean | async extraction job target |
+| `clypt-v2` | GCP project | non-extraction cloud resources |
+| `clypt-storage-v2` | Cloud Storage | artifact storage |
+| `clypt-spanner-v2` | Spanner instance | database host |
+| `clypt-graph-db-v2` | Spanner database | graph + vectors |
 
----
-## Challenge-Relevant References
-
-- [Gemini Live API](https://ai.google.dev/gemini-api/docs/live)
-- [Google ADK Documentation](https://google.github.io/adk-docs/)
-- [ADK Bidi-Streaming Dev Guide](https://google.github.io/adk-docs/streaming/dev-guide/part1/)
-- [Live API Notebooks/Apps (Google Cloud)](https://github.com/GoogleCloudPlatform/generative-ai/tree/main/gemini/multimodal-live-api)
-- [Gemini API Docs](https://ai.google.dev/gemini-api/docs)
-- [Challenge FAQ](https://geminiliveagentchallenge.devpost.com/details/faqs)
-
----
 ## Runtime Dependencies
 
-Python (`requirements.txt`):
-- `modal`
-- `google-cloud-storage`
-- `google-genai`
-- `google-cloud-aiplatform`
-- `google-cloud-spanner`
-- `yt-dlp`
+Python:
+- Phase 1: `requirements-do-phase1.txt`
+- broader local pipeline: `requirements.txt`
 
-Node (`remotion-render/`):
-- Remotion render stack (`npm install` in render engine directory)
+Node:
+- `remotion-render/` for render-time dependencies
