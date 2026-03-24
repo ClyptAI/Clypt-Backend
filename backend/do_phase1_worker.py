@@ -379,7 +379,7 @@ def prepare_yolo_onnx_tensorrt():
     if not os.path.exists(YOLO_ONNX_PATH):
         try:
             print("Exporting YOLO26s to ONNX...")
-            onnx_out = model.export(format="onnx", dynamic=True, simplify=True, opset=17)
+            onnx_out = model.export(format="onnx", imgsz=640, dynamic=False, simplify=True, opset=17)
             if isinstance(onnx_out, str) and os.path.exists(onnx_out) and onnx_out != YOLO_ONNX_PATH:
                 os.replace(onnx_out, YOLO_ONNX_PATH)
         except Exception as e:
@@ -394,7 +394,7 @@ def prepare_yolo_onnx_tensorrt():
                     f"--onnx={YOLO_ONNX_PATH}",
                     f"--saveEngine={YOLO_ENGINE_PATH}",
                     "--fp16",
-                    "--workspace=4096",
+                    "--memPoolSize=workspace:4096",
                 ],
                 check=True,
                 stdout=subprocess.DEVNULL,
