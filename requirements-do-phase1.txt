@@ -10,7 +10,9 @@ httpx>=0.28.0
 pydantic>=2.11.0
 
 numpy>=2.2.0
-torch>=2.6.0
+torch==2.7.1
+torchvision==0.22.1
+torchaudio==2.7.1
 opencv-python-headless>=4.11.0
 decord>=0.6.0
 ultralytics>=8.3.0
