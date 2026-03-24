@@ -127,223 +127,6 @@ def _cluster_extraction_config() -> dict:
     }
 
 
-def _build_cluster_sample_plan(tracklets: dict[str, list[dict]], config: dict) -> tuple[dict[str, list[dict]], set[int]]:
-    """Pick representative detections per tracklet for face embedding extraction."""
-    sampled_by_tid: dict[str, list[dict]] = {}
-    needed_frames: set[int] = set()
-    max_frames_per_tracklet = int(config["max_frames_per_tracklet"])
-    max_ranked_candidates = int(config["max_ranked_candidates"])
-
-    for tid in sorted(tracklets.keys()):
-        detections = tracklets.get(tid, [])
-        if not detections:
-            continue
-
-        ranked_dets = sorted(
-            detections,
-            key=lambda d: (
-                float(d.get("confidence", 0.0)),
-                float(d.get("width", 0.0)) * float(d.get("height", 0.0)),
-            ),
-            reverse=True,
-        )
-
-        sampled_dets = []
-        seen_frames = set()
-        for det in ranked_dets[:max_ranked_candidates]:
-            frame_idx = int(det.get("frame_idx", -1))
-            if frame_idx < 0 or frame_idx in seen_frames:
-                continue
-            seen_frames.add(frame_idx)
-            sampled_dets.append(det)
-            if len(sampled_dets) >= max_frames_per_tracklet:
-                break
-
-        if not sampled_dets:
-            ordered = sorted(detections, key=lambda d: int(d.get("frame_idx", -1)))
-            sampled_dets = [ordered[len(ordered) // 2]]
-
-        sampled_by_tid[tid] = sampled_dets
-        needed_frames.update(int(d.get("frame_idx", -1)) for d in sampled_dets if int(d.get("frame_idx", -1)) >= 0)
-
-    return sampled_by_tid, needed_frames
-
-
-def _extract_cluster_embeddings_subset(
-    face_analyzer,
-    read_path: str,
-    sampled_by_tid_subset: dict[str, list[dict]],
-    config: dict,
-    log_prefix: str = "",
-) -> dict:
-    """Extract one embedding per tracklet for a subset of track IDs."""
-    import cv2
-    import numpy as np
-    from decord import VideoReader, cpu
-
-    if not sampled_by_tid_subset:
-        return {
-            "embeddings": {},
-            "fallback_ids": [],
-            "face_accept_count": 0,
-            "face_reject_lowq_count": 0,
-            "sampled_frames": 0,
-            "tracklets_processed": 0,
-        }
-
-    target_face_encodings_per_tracklet = int(config["target_face_encodings_per_tracklet"])
-    cluster_face_min_det_score = float(config["cluster_face_min_det_score"])
-    cluster_face_min_side_px = float(config["cluster_face_min_side_px"])
-    cluster_face_min_rel_area = float(config["cluster_face_min_rel_area"])
-
-    needed_frames = sorted(
-        {
-            int(det.get("frame_idx", -1))
-            for sampled_dets in sampled_by_tid_subset.values()
-            for det in sampled_dets
-            if int(det.get("frame_idx", -1)) >= 0
-        }
-    )
-    if not needed_frames:
-        return {
-            "embeddings": {},
-            "fallback_ids": [],
-            "face_accept_count": 0,
-            "face_reject_lowq_count": 0,
-            "sampled_frames": 0,
-            "tracklets_processed": 0,
-        }
-
-    vr = VideoReader(read_path, ctx=cpu(0))
-    valid_needed = [fi for fi in needed_frames if 0 <= fi < len(vr)]
-    if not valid_needed:
-        return {
-            "embeddings": {},
-            "fallback_ids": [],
-            "face_accept_count": 0,
-            "face_reject_lowq_count": 0,
-            "sampled_frames": 0,
-            "tracklets_processed": 0,
-        }
-
-    batch = vr.get_batch(valid_needed).asnumpy()
-    frame_map: dict[int, np.ndarray] = {fi: batch[i] for i, fi in enumerate(valid_needed)}
-
-    embeddings: dict[str, np.ndarray] = {}
-    fallback_ids: list[str] = []
-    face_accept_count = 0
-    face_reject_lowq_count = 0
-    total_tids = len(sampled_by_tid_subset)
-
-    for tid_idx, tid in enumerate(sorted(sampled_by_tid_subset.keys()), start=1):
-        sampled_dets = sampled_by_tid_subset.get(tid, [])
-        if not sampled_dets:
-            continue
-
-        face_vectors = []
-        hist_vectors = []
-        for det in sampled_dets:
-            frame_idx = int(det.get("frame_idx", -1))
-            frame = frame_map.get(frame_idx)
-            if frame is None:
-                continue
-
-            cx = float(det.get("x_center", 0.0))
-            cy = float(det.get("y_center", 0.0))
-            w = float(det.get("width", 0.0))
-            h = float(det.get("height", 0.0))
-            fh, fw = frame.shape[:2]
-            x1 = max(0, int(cx - 0.55 * w))
-            y1 = max(0, int(cy - 0.78 * h))
-            x2 = min(fw, int(cx + 0.55 * w))
-            y2 = min(fh, int(cy + 0.18 * h))
-
-            crop = frame[y1:y2, x1:x2]
-            if crop.size == 0:
-                continue
-            ch, cw = crop.shape[:2]
-            if min(ch, cw) < 128:
-                scale = max(1.0, 128.0 / max(1.0, min(ch, cw)))
-                crop = cv2.resize(
-                    crop,
-                    (max(2, int(round(cw * scale))), max(2, int(round(ch * scale)))),
-                    interpolation=cv2.INTER_CUBIC,
-                )
-
-            used_face_encoding = False
-            if face_analyzer is not None:
-                try:
-                    faces = face_analyzer.get(cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
-                    if faces:
-                        best_face = max(
-                            faces,
-                            key=lambda f: float(
-                                max(0.0, f.bbox[2] - f.bbox[0])
-                                * max(0.0, f.bbox[3] - f.bbox[1])
-                                * getattr(f, "det_score", 1.0)
-                            ),
-                        )
-                        fb = np.asarray(best_face.bbox, dtype=np.float32)
-                        face_w = float(max(0.0, fb[2] - fb[0]))
-                        face_h = float(max(0.0, fb[3] - fb[1]))
-                        det_score = float(getattr(best_face, "det_score", 0.0))
-                        rel_area = (face_w * face_h) / max(1.0, float(crop.shape[0] * crop.shape[1]))
-                        is_high_quality = (
-                            det_score >= cluster_face_min_det_score
-                            and face_w >= cluster_face_min_side_px
-                            and face_h >= cluster_face_min_side_px
-                            and rel_area >= cluster_face_min_rel_area
-                        )
-                        if is_high_quality:
-                            emb = np.asarray(best_face.normed_embedding, dtype=np.float32)
-                            face_vectors.append(emb)
-                            used_face_encoding = True
-                            face_accept_count += 1
-                        else:
-                            face_reject_lowq_count += 1
-                except Exception:
-                    used_face_encoding = False
-
-            if not used_face_encoding:
-                hist = cv2.calcHist(
-                    [crop], [0, 1, 2], None, [8, 8, 8],
-                    [0, 256, 0, 256, 0, 256],
-                )
-                hist = cv2.normalize(hist, hist).flatten()
-                if len(hist) < 512:
-                    hist = np.pad(hist, (0, 512 - len(hist)))
-                else:
-                    hist = hist[:512]
-                hist_vectors.append(hist.astype(np.float32))
-
-            if len(face_vectors) >= target_face_encodings_per_tracklet:
-                break
-
-        if face_vectors:
-            embeddings[tid] = np.mean(np.asarray(face_vectors, dtype=np.float32), axis=0).astype(np.float32)
-        elif hist_vectors:
-            embeddings[tid] = np.mean(np.asarray(hist_vectors, dtype=np.float32), axis=0).astype(np.float32)
-            fallback_ids.append(tid)
-        else:
-            embeddings[tid] = np.zeros(512, dtype=np.float32)
-            fallback_ids.append(tid)
-
-        if tid_idx % 10 == 0 or tid_idx == total_tids:
-            print(
-                f"{log_prefix}Embedding progress: {tid_idx}/{total_tids} tracklets "
-                f"(accepted={face_accept_count}, fallback={len(fallback_ids)})"
-            )
-
-    return {
-        "embeddings": embeddings,
-        "fallback_ids": fallback_ids,
-        "face_accept_count": face_accept_count,
-        "face_reject_lowq_count": face_reject_lowq_count,
-        "sampled_frames": len(valid_needed),
-        "tracklets_processed": total_tids,
-    }
-
-
 def download_asr_model():
     """Download Parakeet weights at image build time so they're cached."""
     import nemo.collections.asr as nemo_asr
@@ -461,90 +244,6 @@ clypt_image = (
 # ──────────────────────────────────────────────
 # GPU Worker (class-based for VRAM persistence)
 # ──────────────────────────────────────────────
-@app.cls(
-    image=clypt_image,
-    gpu="H100",
-    timeout=3600,
-    max_containers=4,
-    min_containers=0,
-    scaledown_window=120,
-    enable_memory_snapshot=False,
-    secrets=[MODEL_DEBUG_SECRET],
-    volumes={"/vol/clypt-chunks": TRACKING_VOLUME},
-)
-class ClusterEmbeddingWorker:
-
-    @modal.enter()
-    def load_face_model(self):
-        from insightface.app import FaceAnalysis
-
-        self.face_analyzer = None
-        try:
-            print("Loading InsightFace for cluster embedding shard worker...")
-            self.face_analyzer = FaceAnalysis(
-                name="buffalo_l",
-                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-            )
-            self.face_analyzer.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.15)
-            print("Cluster shard InsightFace ready.")
-        except Exception as e:
-            print(
-                "Warning: cluster shard InsightFace initialization failed "
-                f"({type(e).__name__}: {e})"
-            )
-
-    @modal.method()
-    def extract_cluster_embeddings_shard(
-        self,
-        video_path: str,
-        sampled_by_tid_subset: dict[str, list[dict]],
-        shard_idx: int,
-        total_shards: int,
-    ) -> dict:
-        import time
-
-        if video_path.startswith("/vol/"):
-            try:
-                TRACKING_VOLUME.reload()
-            except Exception:
-                pass
-
-        config = _cluster_extraction_config()
-        print(
-            f"[cluster-shard {shard_idx}/{total_shards}] Starting "
-            f"{len(sampled_by_tid_subset)} tracklets"
-        )
-        started = time.time()
-        result = _extract_cluster_embeddings_subset(
-            face_analyzer=self.face_analyzer,
-            read_path=video_path,
-            sampled_by_tid_subset=sampled_by_tid_subset,
-            config=config,
-            log_prefix=f"  [cluster-shard {shard_idx}/{total_shards}] ",
-        )
-        embeddings = {
-            tid: vec.tolist()
-            for tid, vec in result.get("embeddings", {}).items()
-        }
-        elapsed_s = float(time.time() - started)
-        print(
-            f"[cluster-shard {shard_idx}/{total_shards}] Complete "
-            f"tracklets={result.get('tracklets_processed', 0)} "
-            f"accepted={result.get('face_accept_count', 0)} "
-            f"fallback={len(result.get('fallback_ids', []))} "
-            f"elapsed={elapsed_s:.1f}s"
-        )
-        return {
-            "embeddings": embeddings,
-            "fallback_ids": list(result.get("fallback_ids", [])),
-            "face_accept_count": int(result.get("face_accept_count", 0)),
-            "face_reject_lowq_count": int(result.get("face_reject_lowq_count", 0)),
-            "sampled_frames": int(result.get("sampled_frames", 0)),
-            "tracklets_processed": int(result.get("tracklets_processed", 0)),
-            "elapsed_s": elapsed_s,
-        }
-
-
 @app.cls(
     image=clypt_image,
     gpu="H100",
@@ -2150,7 +1849,6 @@ class ClyptWorker:
         import nemo.collections.asr as nemo_asr
         import torch
         from insightface import model_zoo
-        from insightface.app import FaceAnalysis
         from ultralytics import YOLO
         from omegaconf import open_dict
 
@@ -2225,25 +1923,6 @@ class ClyptWorker:
         except Exception as e:
             print(
                 "Warning: ArcFace recognizer initialization failed "
-                f"({type(e).__name__}: {e})"
-            )
-        self.face_analyzer = None
-        try:
-            print("Loading InsightFace (buffalo_l) models...")
-            self.face_analyzer = FaceAnalysis(
-                name=self._face_runtime_name,
-                providers=self._face_runtime_providers,
-            )
-            # Lower threshold to retain extreme profile faces in podcast footage.
-            self.face_analyzer.prepare(
-                ctx_id=self._face_runtime_ctx_id,
-                det_size=self._face_runtime_det_size,
-                det_thresh=self._face_runtime_det_thresh,
-            )
-            print("InsightFace ready.")
-        except Exception as e:
-            print(
-                "Warning: InsightFace initialization failed; clustering will use histogram fallback "
                 f"({type(e).__name__}: {e})"
             )
         # --- Load LR-ASD ---
@@ -3855,15 +3534,15 @@ class ClyptWorker:
         covisibility_conflict_rejections = 0
         histogram_attach_rejections = 0
         face_track_seeded_tracklets = 0
+        face_track_gap_propagated_tracklets = 0
         face_track_raw_clusters = 0
         seed_label_by_tid: dict[str, int] = {}
         seed_embedding_by_tid: dict[str, np.ndarray] = {}
 
-        embeddings = {}  # track_id → 512D face/hist embedding
-        fallback_ids = []  # track_ids where face encoding failed
+        embeddings = {}  # track_id → 512D face embedding
+        fallback_ids = []  # track_ids using non-face fallback embeddings
         face_accept_count = 0
         face_reject_lowq_count = 0
-        precomputed_identity_frames: set[int] = set()
         precomputed_feature_tracklets = 0
 
         if track_identity_features:
@@ -3887,10 +3566,6 @@ class ClyptWorker:
                     face_accept_count += max(1, int(feature.get("embedding_count", 1)))
                 else:
                     fallback_ids.append(tid)
-                for observation in feature.get("face_observations", []):
-                    frame_idx = int(observation.get("frame_idx", -1))
-                    if frame_idx >= 0:
-                        precomputed_identity_frames.add(frame_idx)
 
         if isinstance(face_track_features, dict) and face_track_features:
             face_track_ids = sorted(
@@ -3955,20 +3630,8 @@ class ClyptWorker:
                         f"{face_track_seeded_tracklets} tracklets"
                     )
 
-        sampled_by_tid, needed_frames = _build_cluster_sample_plan(tracklets, extraction_cfg)
-        missing_sampled_by_tid = {
-            tid: sampled_dets
-            for tid, sampled_dets in sampled_by_tid.items()
-            if tid not in embeddings
-        }
-        missing_needed_frames = {
-            int(det.get("frame_idx", -1))
-            for sampled_dets in missing_sampled_by_tid.values()
-            for det in sampled_dets
-            if int(det.get("frame_idx", -1)) >= 0
-        }
-        if not needed_frames and not embeddings:
-            print("  No usable sampled frames for clustering")
+        if not embeddings and not seed_label_by_tid:
+            print("  No usable face identity features for clustering")
             self._last_clustering_metrics = {
                 "cluster_visible_people_estimate": visible_people_est,
                 "overfragmentation_proxy": round(float(len(unique_ids) / max(1, visible_people_est)), 3),
@@ -3978,6 +3641,7 @@ class ClyptWorker:
                 ),
                 "covisibility_conflict_rejections": 0,
                 "histogram_attach_rejections": 0,
+                "face_track_gap_propagated_tracklets": 0,
             }
             self._last_track_identity_features_after_clustering = (
                 dict(track_identity_features) if isinstance(track_identity_features, dict) else None
@@ -3988,133 +3652,8 @@ class ClyptWorker:
             print(
                 "  Cluster identity features: "
                 f"precomputed={precomputed_feature_tracklets}, "
-                f"remaining={max(0, len(sampled_by_tid) - precomputed_feature_tracklets)}"
+                f"remaining={max(0, len(unique_ids) - precomputed_feature_tracklets - len(seed_label_by_tid))}"
             )
-
-        shard_workers = max(1, min(4, int(os.getenv("CLYPT_CLUSTER_SHARD_WORKERS", "4"))))
-        min_shard_tracklets = max(8, int(os.getenv("CLYPT_CLUSTER_MIN_SHARD_TRACKLETS", "24")))
-        can_shard_remotely = (
-            shard_workers > 1
-            and len(missing_sampled_by_tid) >= min_shard_tracklets
-            and read_path.startswith("/vol/")
-        )
-
-        extraction_result = None
-        if can_shard_remotely:
-            shard_tid_order = sorted(missing_sampled_by_tid.keys())
-            shard_count = min(shard_workers, len(shard_tid_order))
-            shard_size = max(1, (len(shard_tid_order) + shard_count - 1) // shard_count)
-            shards = []
-            for shard_idx in range(shard_count):
-                start = shard_idx * shard_size
-                end = min(len(shard_tid_order), start + shard_size)
-                shard_tids = shard_tid_order[start:end]
-                if not shard_tids:
-                    continue
-                shards.append(
-                    {
-                        "shard_idx": shard_idx + 1,
-                        "sampled_by_tid": {
-                            tid: missing_sampled_by_tid[tid]
-                            for tid in shard_tids
-                            if tid in missing_sampled_by_tid
-                        },
-                    }
-                )
-
-            if len(shards) > 1:
-                print(
-                    "  Cluster embedding fan-out: "
-                    f"{len(shards)} shards across up to {shard_workers} workers"
-                )
-                try:
-                    cluster_worker = modal.Cls.from_name(app.name, "ClusterEmbeddingWorker")()
-                    shard_handles = [
-                        cluster_worker.extract_cluster_embeddings_shard.spawn(
-                            video_path=read_path,
-                            sampled_by_tid_subset=shard["sampled_by_tid"],
-                            shard_idx=int(shard["shard_idx"]),
-                            total_shards=len(shards),
-                        )
-                        for shard in shards
-                    ]
-
-                    merged_embeddings: dict[str, np.ndarray] = dict(embeddings)
-                    merged_fallbacks: list[str] = list(fallback_ids)
-                    sampled_frames_total = len(precomputed_identity_frames)
-                    for idx, handle in enumerate(shard_handles, start=1):
-                        shard_result = handle.get(timeout=None)
-                        sampled_frames_total += int(shard_result.get("sampled_frames", 0))
-                        face_accept_count += int(shard_result.get("face_accept_count", 0))
-                        face_reject_lowq_count += int(shard_result.get("face_reject_lowq_count", 0))
-                        merged_fallbacks.extend(str(tid) for tid in shard_result.get("fallback_ids", []))
-                        for tid, vec in shard_result.get("embeddings", {}).items():
-                            merged_embeddings[str(tid)] = np.asarray(vec, dtype=np.float32)
-                        print(
-                            "  Cluster embedding shard "
-                            f"{idx}/{len(shard_handles)} collected: "
-                            f"tracklets={int(shard_result.get('tracklets_processed', 0))}, "
-                            f"accepted={int(shard_result.get('face_accept_count', 0))}, "
-                            f"fallback={len(shard_result.get('fallback_ids', []))}, "
-                            f"elapsed={float(shard_result.get('elapsed_s', 0.0)):.1f}s"
-                        )
-
-                    extraction_result = {
-                        "embeddings": merged_embeddings,
-                        "fallback_ids": merged_fallbacks,
-                        "face_accept_count": face_accept_count,
-                        "face_reject_lowq_count": face_reject_lowq_count,
-                        "sampled_frames": sampled_frames_total,
-                    }
-                except Exception as e:
-                    print(
-                        "  Warning: cluster embedding fan-out failed; "
-                        f"falling back to local extraction ({type(e).__name__}: {e})"
-                    )
-
-        if extraction_result is None:
-            print(
-                "  Cluster embedding mode: local "
-                f"({len(missing_sampled_by_tid)} tracklets, {len(missing_needed_frames)} sampled frames)"
-            )
-            if missing_sampled_by_tid:
-                extraction_result = _extract_cluster_embeddings_subset(
-                    face_analyzer=self.face_analyzer,
-                    read_path=read_path,
-                    sampled_by_tid_subset=missing_sampled_by_tid,
-                    config=extraction_cfg,
-                    log_prefix="  [cluster-local] ",
-                )
-                extraction_result["embeddings"] = {
-                    **embeddings,
-                    **extraction_result.get("embeddings", {}),
-                }
-                extraction_result["fallback_ids"] = list(fallback_ids) + [
-                    str(tid) for tid in extraction_result.get("fallback_ids", [])
-                ]
-                extraction_result["face_accept_count"] = int(extraction_result.get("face_accept_count", 0)) + face_accept_count
-                extraction_result["face_reject_lowq_count"] = int(
-                    extraction_result.get("face_reject_lowq_count", 0)
-                ) + face_reject_lowq_count
-                extraction_result["sampled_frames"] = int(extraction_result.get("sampled_frames", 0)) + len(
-                    precomputed_identity_frames
-                )
-            else:
-                extraction_result = {
-                    "embeddings": dict(embeddings),
-                    "fallback_ids": list(fallback_ids),
-                    "face_accept_count": face_accept_count,
-                    "face_reject_lowq_count": face_reject_lowq_count,
-                    "sampled_frames": len(precomputed_identity_frames),
-                    "tracklets_processed": precomputed_feature_tracklets,
-                }
-
-        embeddings = dict(extraction_result.get("embeddings", {}))
-        fallback_ids = [str(tid) for tid in extraction_result.get("fallback_ids", [])]
-        face_accept_count = int(extraction_result.get("face_accept_count", face_accept_count))
-        face_reject_lowq_count = int(
-            extraction_result.get("face_reject_lowq_count", face_reject_lowq_count)
-        )
 
         for tid, emb in seed_embedding_by_tid.items():
             if tid not in embeddings:
@@ -4138,19 +3677,6 @@ class ClyptWorker:
                 dict(track_identity_features) if isinstance(track_identity_features, dict) else None
             )
             return tracks
-
-        # Separate face embeddings from histogram fallbacks. We do NOT cluster both
-        # together because they live in different feature spaces.
-        tid_order_all = sorted(embeddings.keys())
-        seeded_tids = set(seed_label_by_tid.keys())
-        face_tids = [tid for tid in tid_order_all if tid not in fallback_ids and tid not in seeded_tids]
-        hist_tids = [tid for tid in tid_order_all if tid in fallback_ids and tid not in seeded_tids]
-        print(
-            "  Face quality gate: "
-            f"accepted={face_accept_count}, rejected_lowq={face_reject_lowq_count}, "
-            f"min_det_score={float(extraction_cfg['cluster_face_min_det_score']):.2f}"
-        )
-        print(f"  Face encodings: {len(face_tids)}, histogram fallbacks: {len(hist_tids)}")
 
         def _cluster_to_indices(current_labels: np.ndarray) -> dict[int, list[int]]:
             out: dict[int, list[int]] = {}
@@ -4192,6 +3718,102 @@ class ClyptWorker:
             dw = np.log(max(a[2], 1.0) / max(b[2], 1.0))
             dh = np.log(max(a[3], 1.0) / max(b[3], 1.0))
             return float(dx * dx + dy * dy + 0.25 * (dw * dw + dh * dh))
+
+        def _track_boundary_gap_frames(tid_a: str, tid_b: str) -> int:
+            dets_a = tracklets.get(tid_a, [])
+            dets_b = tracklets.get(tid_b, [])
+            if not dets_a or not dets_b:
+                return 1_000_000
+            a_start = min(int(d.get("frame_idx", -1)) for d in dets_a)
+            a_end = max(int(d.get("frame_idx", -1)) for d in dets_a)
+            b_start = min(int(d.get("frame_idx", -1)) for d in dets_b)
+            b_end = max(int(d.get("frame_idx", -1)) for d in dets_b)
+            if a_end < b_start:
+                return max(0, b_start - a_end)
+            if b_end < a_start:
+                return max(0, a_start - b_end)
+            return 0
+
+        def _propagate_face_identity_across_short_gaps() -> int:
+            max_gap_frames = max(0, int(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_MAX_GAP_FRAMES", "48")))
+            max_sig_dist = float(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_MAX_SIG_DIST", "0.18"))
+            ambiguity_margin = float(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_AMBIGUITY_MARGIN", "0.08"))
+            pending_tids = [tid for tid in unique_ids if tid not in seed_label_by_tid and tid not in embeddings]
+            if not pending_tids or not seed_label_by_tid:
+                return 0
+
+            propagated = 0
+            seed_signature_by_tid = {
+                tid: _track_signature(tid)
+                for tid in seed_label_by_tid.keys()
+                if tid in tracklets
+            }
+            for tid in pending_tids:
+                sig = _track_signature(tid)
+                candidates: list[tuple[float, int, float, str]] = []
+                for seeded_tid, seeded_label in seed_label_by_tid.items():
+                    seeded_sig = seed_signature_by_tid.get(seeded_tid)
+                    if seeded_sig is None:
+                        continue
+                    if self._clusters_conflict_by_visibility(tracklets, [tid], [seeded_tid]):
+                        continue
+                    if not self._clusters_have_compatible_seat_signature(
+                        tracklets,
+                        [tid],
+                        [seeded_tid],
+                        max_signature_distance=max_sig_dist,
+                    ):
+                        continue
+                    gap_frames = _track_boundary_gap_frames(tid, seeded_tid)
+                    if gap_frames > max_gap_frames:
+                        continue
+                    sig_dist = _sig_dist(sig, seeded_sig)
+                    if sig_dist > max_sig_dist:
+                        continue
+                    score = (gap_frames / max(1.0, float(max_gap_frames or 1))) + sig_dist
+                    candidates.append((score, gap_frames, sig_dist, seeded_tid))
+                if not candidates:
+                    continue
+                candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+                best_score, _, _, best_seeded_tid = candidates[0]
+                best_label = seed_label_by_tid[best_seeded_tid]
+                if len(candidates) > 1:
+                    competing = [
+                        cand
+                        for cand in candidates[1:]
+                        if seed_label_by_tid[cand[3]] != best_label
+                    ]
+                    if competing and (competing[0][0] - best_score) < ambiguity_margin:
+                        continue
+                seed_label_by_tid[tid] = int(best_label)
+                source_embedding = seed_embedding_by_tid.get(best_seeded_tid)
+                if source_embedding is None:
+                    source_embedding = embeddings.get(best_seeded_tid)
+                if source_embedding is not None:
+                    seed_embedding_by_tid[tid] = np.asarray(source_embedding, dtype=np.float32)
+                propagated += 1
+            return propagated
+
+        if face_track_seeded_tracklets:
+            face_track_gap_propagated_tracklets = _propagate_face_identity_across_short_gaps()
+            if face_track_gap_propagated_tracklets:
+                print(
+                    "  Face-track gap propagation: "
+                    f"{face_track_gap_propagated_tracklets} tracklets"
+                )
+
+        # Separate face embeddings from signature-only fallbacks. We do NOT cluster both
+        # together because they live in different feature spaces.
+        tid_order_all = sorted(set(unique_ids) | set(embeddings.keys()) | set(seed_label_by_tid.keys()))
+        seeded_tids = set(seed_label_by_tid.keys())
+        face_tids = [tid for tid in tid_order_all if tid in embeddings and tid not in fallback_ids and tid not in seeded_tids]
+        hist_tids = [tid for tid in tid_order_all if tid not in face_tids and tid not in seeded_tids]
+        print(
+            "  Face quality gate: "
+            f"accepted={face_accept_count}, rejected_lowq={face_reject_lowq_count}, "
+            f"min_det_score={float(extraction_cfg['cluster_face_min_det_score']):.2f}"
+        )
+        print(f"  Face encodings: {len(face_tids)}, signature fallbacks: {len(hist_tids)}")
 
         id_map: dict[str, str] = {
             tid: f"Global_Person_{int(label)}"
@@ -4455,6 +4077,7 @@ class ClyptWorker:
             "histogram_attach_rejections": histogram_attach_rejections,
             "face_track_raw_clusters": face_track_raw_clusters,
             "face_track_seeded_tracklets": face_track_seeded_tracklets,
+            "face_track_gap_propagated_tracklets": face_track_gap_propagated_tracklets,
             "cluster_cross_merge_cos_threshold": cross_cluster_merge_base_cos,
             "cluster_hist_attach_max_sig": histogram_attach_max_sig,
             **repair_metrics,

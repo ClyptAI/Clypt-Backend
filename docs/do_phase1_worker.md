@@ -20,8 +20,8 @@ The active production path runs inside the DigitalOcean Phase 1 service, which c
 
 - ASR: `nvidia/parakeet-tdt-1.1b`
 - Tracking: `YOLO26s + BoT-SORT`
-- Face observations: InsightFace ROI detections with MediaPipe fallback
-- Identity features: InsightFace embeddings when available, histogram fallback otherwise
+- Face observations: full-frame `SCRFD` detections on the shared analysis video, then contiguous face tracks
+- Identity features: `ArcFace/InsightFace` embeddings on face tracks, short-gap propagation across missed stretches, then signature-only attachment for remaining fragments
 - Speaker binding: LR-ASD primary, heuristic fallback, `auto` selection for larger videos
 
 Notes:

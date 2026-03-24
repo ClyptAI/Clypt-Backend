@@ -1126,6 +1126,115 @@ def test_repair_covisible_cluster_merges_splits_invalid_global_identity():
     assert metrics["repaired_conflict_pair_count"] >= 1
 
 
+
+
+def test_cluster_tracklets_propagates_face_seed_across_short_gap(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    class _FakeDBSCAN:
+        def __init__(self, eps, min_samples, metric):
+            self.labels_ = None
+
+        def fit(self, X):
+            if len(X) <= 1:
+                self.labels_ = np.zeros(len(X), dtype=int)
+            else:
+                self.labels_ = np.arange(len(X), dtype=int)
+            return self
+
+    sklearn_cluster = types.ModuleType("sklearn.cluster")
+    sklearn_cluster.DBSCAN = _FakeDBSCAN
+    sklearn_pkg = types.ModuleType("sklearn")
+    sklearn_pkg.cluster = sklearn_cluster
+    monkeypatch.setitem(sys.modules, "sklearn", sklearn_pkg)
+    monkeypatch.setitem(sys.modules, "sklearn.cluster", sklearn_cluster)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "host_a",
+            "x_center": 240.0,
+            "y_center": 320.0,
+            "width": 180.0,
+            "height": 280.0,
+            "confidence": 0.95,
+        },
+        {
+            "frame_idx": 1,
+            "track_id": "host_a",
+            "x_center": 242.0,
+            "y_center": 322.0,
+            "width": 182.0,
+            "height": 282.0,
+            "confidence": 0.94,
+        },
+        {
+            "frame_idx": 4,
+            "track_id": "host_b",
+            "x_center": 245.0,
+            "y_center": 324.0,
+            "width": 181.0,
+            "height": 281.0,
+            "confidence": 0.92,
+        },
+        {
+            "frame_idx": 5,
+            "track_id": "host_b",
+            "x_center": 247.0,
+            "y_center": 326.0,
+            "width": 183.0,
+            "height": 283.0,
+            "confidence": 0.91,
+        },
+    ]
+    tracklets = {
+        "host_a": [tracks[0], tracks[1]],
+        "host_b": [tracks[2], tracks[3]],
+    }
+    identity_features = {
+        "host_a": {
+            "embedding": [1.0, 0.0, 0.0],
+            "embedding_source": "face",
+            "embedding_count": 2,
+            "face_observations": [
+                {"frame_idx": 0, "confidence": 0.95, "associated_track_id": "host_a"},
+                {"frame_idx": 1, "confidence": 0.94, "associated_track_id": "host_a"},
+            ],
+        },
+    }
+    face_track_features = {
+        "face_0_0": {
+            "face_track_id": "face_0_0",
+            "embedding": [1.0, 0.0, 0.0],
+            "embedding_source": "face",
+            "embedding_count": 2,
+            "face_observations": [
+                {"frame_idx": 0, "confidence": 0.95, "associated_track_id": "host_a"},
+                {"frame_idx": 1, "confidence": 0.94, "associated_track_id": "host_a"},
+            ],
+            "associated_track_counts": {"host_a": 2},
+            "dominant_track_id": "host_a",
+        }
+    }
+
+    clustered = worker._cluster_tracklets(
+        video_path="video.mp4",
+        tracks=[dict(track) for track in tracks],
+        track_to_dets=tracklets,
+        track_identity_features=identity_features,
+        face_track_features=face_track_features,
+    )
+
+    mapped = {}
+    for det in clustered:
+        mapped.setdefault(det["track_id"], set()).add(det["frame_idx"])
+
+    assert len(mapped) == 1
+    assert mapped[next(iter(mapped.keys()))] == {0, 1, 4, 5}
+    metrics = worker._last_clustering_metrics
+    assert metrics["face_track_gap_propagated_tracklets"] >= 1
+
 def test_cluster_tracklets_keeps_histogram_fragment_separate_when_attachment_is_not_plausible(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)

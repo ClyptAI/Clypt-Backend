@@ -31,8 +31,8 @@ YouTube URL
 ### Models and major components
 - ASR: `nvidia/parakeet-tdt-1.1b`
 - Tracking: `YOLO26s + BoT-SORT`
-- Face pipeline: InsightFace ROI face observations with MediaPipe fallback
-- Identity stabilization: InsightFace embeddings when available, histogram fallback when not
+- Face pipeline: full-frame `SCRFD` face detection on the shared analysis video, then face-track building
+- Identity stabilization: `ArcFace/InsightFace` embeddings on face tracks, short-gap face-track propagation, then signature-only attachment for remaining fragments
 - Active speaker binding: **LR-ASD primary**, heuristic fallback, `auto` runtime mode for large videos
 
 ### Important Phase 1 behavior
