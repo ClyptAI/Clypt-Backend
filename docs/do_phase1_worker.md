@@ -74,13 +74,14 @@ This avoids duplicating large-video preprocessing for each subsystem.
 The worker builds face observations early and reuses them across later stages.
 
 ### Canonical face observations
-- detector-derived face observations are attached to person tracks inside ROIs
+- detector-derived face observations come from full-frame SCRFD detections, then get associated back onto person tracks
+- face tracks are the canonical identity source that later stages reuse
 - provenance is recorded on emitted ledgers
-- real face observations are preferred everywhere downstream
 
 ### Fallback behavior
-- MediaPipe can act as a lightweight fallback when InsightFace coverage is missing
-- histogram features are used when high-quality face embeddings are unavailable
+- short missed-face stretches are bridged by propagating nearby seeded face identities across small temporal gaps
+- any remaining unseeded fragments use signature-only attachment based on spatial/seat compatibility
+- ROI face rediscovery is not part of the active clustering path anymore
 
 ### Output ledgers
 The worker emits:

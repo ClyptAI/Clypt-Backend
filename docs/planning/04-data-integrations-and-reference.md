@@ -10,7 +10,7 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 | DigitalOcean Phase 1 service | async extraction API + worker runtime |
 | Parakeet TDT 1.1B | transcription with word-level timing |
 | YOLO26s + BoT-SORT | person tracking |
-| InsightFace + MediaPipe fallback | face observations and identity features |
+| SCRFD + ArcFace/InsightFace face-track pipeline | face observations, identity stabilization, and canonical face stream |
 | LR-ASD + heuristic fallback | speaker binding |
 | Gemini | node decomposition, narrative edges, clip scoring |
 | Vertex embeddings | node and query vectorization |

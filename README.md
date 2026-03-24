@@ -132,6 +132,14 @@ This installs the dedicated Phase 1 dependency bundle, pre-caches the active mod
 - `clypt-phase1-api.service`
 - `clypt-phase1-worker.service`
 
+Restart notes that are worth keeping in mind:
+- Preferred provisioning target is `atl1 + gpu-h200x1-141gb + gpu-h100x1-base` (`NVIDIA AI/ML Ready`).
+- If `atl1` is capacity-blocked, the last known good fallback we actually deployed was `nyc2` with the same `H200 + AI/ML Ready` shape.
+- Repo path on droplet: `/opt/clypt-phase1/repo`
+- Env file on droplet: `/etc/clypt-phase1/do-phase1.env`
+- GCP service account path on droplet: `/etc/clypt-phase1/gcp-sa.json`
+- Recommended worker settings for current Phase 1 evals: `DO_PHASE1_WORKER_CONCURRENCY=3`, `DO_PHASE1_GPU_SLOTS=1`
+
 ## Run Phase 1 Against a Video URL
 
 ```bash
