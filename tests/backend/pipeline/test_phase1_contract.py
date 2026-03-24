@@ -55,7 +55,7 @@ def _legacy_manifest_payload() -> dict:
                                     "frame_idx": 0,
                                     "confidence": 0.91,
                                     "source": "face_detector",
-                                    "provenance": "insightface_roi",
+                                    "provenance": "scrfd_fullframe",
                                 }
                             ]
                         }
@@ -182,7 +182,7 @@ def test_manifest_accepts_realistic_legacy_payload_shape():
         manifest.artifacts.visual_tracking.tracking_metrics["track_identity_features"]["Global_Person_0"][
             "face_observations"
         ][0]["provenance"]
-        == "insightface_roi"
+        == "scrfd_fullframe"
     )
 
 

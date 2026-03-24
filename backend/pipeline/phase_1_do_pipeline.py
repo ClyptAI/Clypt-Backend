@@ -233,7 +233,7 @@ def build_phase1_runtime_controls() -> dict:
         "shared_analysis_proxy_enabled": shared_analysis_proxy_enabled,
         "framing_policy": "single_person_plus_two_speaker",
         "two_speaker_layout_policy": "shared_two_shot_or_explicit_split",
-        "face_detection_provenance": "insightface_roi",
+        "face_detection_provenance": "scrfd_fullframe",
         "notes": (
             "Eval profiles request LR-ASD and disable heuristic binding for inspection. "
             "The worker remains the source of truth for actual extraction runtime."

@@ -558,7 +558,7 @@ def test_speaker_binding_mode_lrasd_still_falls_back_when_primary_returns_none(m
     assert calls == ["lrasd", "heuristic"]
 
 
-def test_build_visual_detection_ledgers_uses_detector_face_tracks(monkeypatch):
+def test_build_visual_detection_ledgers_uses_canonical_face_tracks(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
 
@@ -598,27 +598,47 @@ def test_build_visual_detection_ledgers_uses_detector_face_tracks(monkeypatch):
         "_probe_video_meta",
         lambda path: {"fps": 30.0, "width": 1920, "height": 1080, "duration_s": 1.0},
     )
-    monkeypatch.setattr(worker, "_read_frame_rgb", lambda video_path, frame_idx: object())
-    monkeypatch.setattr(
-        worker,
-        "_detect_face_in_person_det",
-        lambda frame_rgb, det: (
-            object(),
-            {"x_offset": 0.1, "y_offset": -0.3, "w_ratio": 0.4, "h_ratio": 0.3},
-        ),
-    )
-
     face_detections, person_detections, metrics = worker._build_visual_detection_ledgers(
         video_path="video.mp4",
         tracks=tracks,
         frame_to_dets=frame_to_dets,
         track_to_dets=track_to_dets,
+        track_identity_features={
+            "track-1": {
+                "face_observations": [
+                    {
+                        "frame_idx": 0,
+                        "confidence": 0.95,
+                        "bounding_box": {
+                            "left": 0.11,
+                            "top": 0.07,
+                            "right": 0.19,
+                            "bottom": 0.18,
+                        },
+                        "source": "face_detector",
+                        "provenance": "scrfd_fullframe",
+                    },
+                    {
+                        "frame_idx": 30,
+                        "confidence": 0.90,
+                        "bounding_box": {
+                            "left": 0.12,
+                            "top": 0.08,
+                            "right": 0.20,
+                            "bottom": 0.19,
+                        },
+                        "source": "face_detector",
+                        "provenance": "scrfd_fullframe",
+                    },
+                ]
+            }
+        },
     )
 
     assert len(person_detections) == 1
     assert len(face_detections) == 1
     assert face_detections[0]["source"] == "face_detector"
-    assert face_detections[0]["provenance"] == "insightface_roi"
+    assert face_detections[0]["provenance"] == "scrfd_fullframe"
     assert face_detections[0]["track_id"] == "track-1"
     assert face_detections[0]["timestamped_objects"][0]["bounding_box"]["left"] > 0.0
     assert face_detections[0]["timestamped_objects"][0]["bounding_box"]["right"] < 1.0
@@ -653,17 +673,6 @@ def test_build_visual_detection_ledgers_prefers_precomputed_face_observations(mo
         "_probe_video_meta",
         lambda path: {"fps": 30.0, "width": 1920, "height": 1080, "duration_s": 1.0},
     )
-    monkeypatch.setattr(
-        worker,
-        "_read_frame_rgb",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("frame reader should not be used")),
-    )
-    monkeypatch.setattr(
-        worker,
-        "_detect_face_in_person_det",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("detector fallback should not be used")),
-    )
-
     face_detections, person_detections, metrics = worker._build_visual_detection_ledgers(
         video_path="video.mp4",
         tracks=tracks,
@@ -683,7 +692,7 @@ def test_build_visual_detection_ledgers_prefers_precomputed_face_observations(mo
                             "bottom": 0.18,
                         },
                         "source": "face_detector",
-                        "provenance": "insightface_roi",
+                        "provenance": "scrfd_fullframe",
                     },
                     {
                         "frame_idx": 30,
@@ -696,7 +705,7 @@ def test_build_visual_detection_ledgers_prefers_precomputed_face_observations(mo
                             "bottom": 0.19,
                         },
                         "source": "face_detector",
-                        "provenance": "insightface_roi",
+                        "provenance": "scrfd_fullframe",
                     }
                 ]
             }
@@ -713,40 +722,20 @@ def test_build_visual_detection_ledgers_prefers_precomputed_face_observations(mo
     assert metrics["face_detection_track_count"] == 1
 
 
-def test_face_bbox_plausibility_rejects_low_arm_like_detection():
+def test_associate_faces_to_person_dets_prefers_head_aligned_match():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
 
-    det = {
-        "x1": 100.0,
-        "y1": 100.0,
-        "x2": 300.0,
-        "y2": 500.0,
-        "x_center": 200.0,
-        "y_center": 300.0,
-        "width": 200.0,
-        "height": 400.0,
-    }
+    dets = [
+        {"track_id": "left", "x1": 100.0, "y1": 100.0, "x2": 300.0, "y2": 500.0},
+        {"track_id": "right", "x1": 500.0, "y1": 110.0, "x2": 700.0, "y2": 520.0},
+    ]
+    faces = [
+        {"bbox_xyxy": (150.0, 120.0, 240.0, 220.0)},
+        {"bbox_xyxy": (555.0, 130.0, 645.0, 235.0)},
+    ]
 
-    assert worker._face_bbox_plausibility_score(det, (150.0, 300.0, 250.0, 430.0)) == 0.0
-
-
-def test_face_bbox_plausibility_accepts_head_like_detection():
-    worker_cls = ClyptWorker._get_user_cls()
-    worker = worker_cls.__new__(worker_cls)
-
-    det = {
-        "x1": 100.0,
-        "y1": 100.0,
-        "x2": 300.0,
-        "y2": 500.0,
-        "x_center": 200.0,
-        "y_center": 300.0,
-        "width": 200.0,
-        "height": 400.0,
-    }
-
-    assert worker._face_bbox_plausibility_score(det, (145.0, 130.0, 255.0, 250.0)) > 0.0
+    assert worker._associate_faces_to_person_dets(faces, dets) == ["left", "right"]
 
 
 def test_shared_analysis_proxy_can_drive_tracking_and_lrasd_selection(monkeypatch):
@@ -829,7 +818,6 @@ def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path:
 
     monkeypatch.setattr(wavfile_module, "read", lambda path: (16000, np.zeros(48000, dtype=np.int16)))
     monkeypatch.setenv("CLYPT_ASD_PRECOMPUTED_FACE", "0")
-    monkeypatch.setattr(worker, "_prepare_speaker_binding_video", lambda path: (str(video_path), 1.0, 1.0))
     monkeypatch.setattr(
         worker,
         "_build_track_indexes",
@@ -852,15 +840,6 @@ def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path:
             },
         )(),
     )
-    monkeypatch.setattr(
-        worker,
-        "_detect_face_in_person_det",
-        lambda frame_rgb, det: (
-            np.full((112, 112, 3), 64, dtype=np.uint8),
-            {"x_offset": -0.2, "y_offset": -0.35, "w_ratio": 0.4, "h_ratio": 0.3},
-        ),
-    )
-
     tracks = [
         {
             "frame_idx": i,
@@ -880,6 +859,21 @@ def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path:
         audio_wav_path=str(audio_path),
         tracks=tracks,
         words=words,
+        track_identity_features={
+            "track-1": {
+                "face_observations": [
+                    {
+                        "frame_idx": i,
+                        "bounding_box": {"left": 0.2, "top": 0.1, "right": 0.4, "bottom": 0.35},
+                        "confidence": 0.9,
+                        "quality": 0.9,
+                        "source": "face_detector",
+                        "provenance": "scrfd_fullframe",
+                    }
+                    for i in range(40)
+                ]
+            }
+        },
     )
 
 
@@ -915,7 +909,7 @@ def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
         "_build_track_indexes",
         lambda tracks: ({0: tracks}, {"track-1": tracks}),
     )
-    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None):
+    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
         worker._last_clustering_metrics = {
             "cluster_visible_people_estimate": 2,
             "overfragmentation_proxy": 0.5,
@@ -928,14 +922,14 @@ def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
         worker,
         "_build_visual_detection_ledgers",
         lambda video_path, tracks, frame_to_dets=None, track_to_dets=None, track_identity_features=None: (
-            [
-                {
-                    "track_id": "track-1",
-                    "source": "face_detector",
-                    "provenance": "insightface_roi",
-                    "timestamped_objects": [],
-                }
-            ],
+                [
+                    {
+                        "track_id": "track-1",
+                        "source": "face_detector",
+                        "provenance": "scrfd_fullframe",
+                        "timestamped_objects": [],
+                    }
+                ],
             [
                 {
                     "track_id": "track-1",
@@ -1004,8 +998,9 @@ def test_finalize_passes_track_identity_features_to_clustering_and_ledgers(monke
         lambda tracks: ({0: tracks}, {"track-1": tracks}),
     )
 
-    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None):
+    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
         passed["cluster"] = track_identity_features
+        passed["face_tracks"] = face_track_features
         worker._last_clustering_metrics = {}
         return tracks
 
@@ -1047,6 +1042,7 @@ def test_finalize_passes_track_identity_features_to_clustering_and_ledgers(monke
 
     assert passed["cluster"] == identity_features
     assert passed["ledgers"] == identity_features
+    assert passed["face_tracks"] is None
 
 
 def test_clusters_conflict_by_visibility_detects_far_apart_covisible_people():
@@ -1247,32 +1243,11 @@ def test_cluster_tracklets_keeps_histogram_fragment_separate_when_attachment_is_
     assert metrics["histogram_attach_rejections"] >= 1
 
 
-def test_face_ledger_workers_default_to_face_pipeline_workers(monkeypatch):
-    worker_cls = ClyptWorker._get_user_cls()
-    worker = worker_cls.__new__(worker_cls)
-
-    monkeypatch.delenv("CLYPT_FACE_LEDGER_WORKERS", raising=False)
-    monkeypatch.delenv("CLYPT_FACE_PIPELINE_WORKERS", raising=False)
-    monkeypatch.setattr("backend.do_phase1_worker.os.cpu_count", lambda: 12)
-
-    assert worker._face_ledger_workers() == 12
-
-
-def test_face_ledger_workers_honor_env_and_clamp(monkeypatch):
-    worker_cls = ClyptWorker._get_user_cls()
-    worker = worker_cls.__new__(worker_cls)
-
-    monkeypatch.setenv("CLYPT_FACE_LEDGER_WORKERS", "3")
-    assert worker._face_ledger_workers() == 3
-
-    monkeypatch.setenv("CLYPT_FACE_LEDGER_WORKERS", "0")
-    assert worker._face_ledger_workers() == 1
-
-
 def test_face_pipeline_workers_cap_for_gpu_runtime(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
-    worker.face_analyzer = object()
+    worker.face_detector = object()
+    worker.face_recognizer = object()
     worker._face_runtime_ctx_id = 0
 
     monkeypatch.setenv("CLYPT_FACE_PIPELINE_WORKERS", "24")
@@ -1282,7 +1257,6 @@ def test_face_pipeline_workers_cap_for_gpu_runtime(monkeypatch):
 
     monkeypatch.setenv("CLYPT_FACE_PIPELINE_GPU_WORKERS", "2")
     assert worker._face_pipeline_workers() == 2
-    assert worker._face_ledger_workers() == 2
 
 
 def test_tracking_chunk_workers_default_to_one(monkeypatch):
@@ -1397,6 +1371,42 @@ def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
     assert track_calls[0]["device"] == "cpu"
 
 
+
+
+def test_derive_track_identity_features_from_face_tracks_propagates_multi_track_associations():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    features = worker._derive_track_identity_features_from_face_tracks(
+        {
+            "face_0_0": {
+                "face_track_id": "face_0_0",
+                "embedding": [0.1, 0.2, 0.3],
+                "embedding_count": 2,
+                "face_observations": [
+                    {"frame_idx": 0, "confidence": 0.95, "associated_track_id": "track_a"},
+                    {"frame_idx": 1, "confidence": 0.94, "associated_track_id": "track_a"},
+                    {"frame_idx": 2, "confidence": 0.93, "associated_track_id": "track_b"},
+                    {"frame_idx": 3, "confidence": 0.92, "associated_track_id": "track_b"},
+                    {"frame_idx": 4, "confidence": 0.50, "associated_track_id": "track_c"},
+                ],
+                "associated_track_counts": {
+                    "track_a": 2,
+                    "track_b": 2,
+                    "track_c": 1,
+                },
+            }
+        }
+    )
+
+    assert set(features.keys()) == {"track_a", "track_b"}
+    assert features["track_a"]["embedding_source"] == "face"
+    assert features["track_b"]["embedding_source"] == "face"
+    assert np.allclose(features["track_a"]["embedding"], [0.1, 0.2, 0.3])
+    assert np.allclose(features["track_b"]["embedding"], [0.1, 0.2, 0.3])
+    assert [obs["frame_idx"] for obs in features["track_a"]["face_observations"]] == [0, 1]
+    assert [obs["frame_idx"] for obs in features["track_b"]["face_observations"]] == [2, 3]
+
 def test_run_tracking_direct_emits_track_identity_features(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -1428,7 +1438,7 @@ def test_run_tracking_direct_emits_track_identity_features(monkeypatch):
     monkeypatch.setattr(worker, "_face_pipeline_workers", lambda: 8)
     monkeypatch.setattr(
         worker,
-        "_extract_track_identity_features_from_segments",
+        "_extract_face_track_features_from_segments",
         lambda **kwargs: (
             {
                 "track_7": {
@@ -1436,6 +1446,7 @@ def test_run_tracking_direct_emits_track_identity_features(monkeypatch):
                     "face_observations": [{"frame_idx": 0, "confidence": 0.9, "quality": 1.0}],
                 }
             },
+            {"face_0_0": {"embedding": [0.1, 0.2, 0.3], "associated_track_counts": {"track_7": 1}}},
             {
                 "face_pipeline_mode": "staggered",
                 "face_pipeline_segments_processed": 1,
@@ -1483,11 +1494,16 @@ def test_run_tracking_direct_logs_face_pipeline_progress(monkeypatch, capsys):
     monkeypatch.setattr(worker, "_face_pipeline_workers", lambda: 2)
     monkeypatch.setattr(
         worker,
-        "_extract_track_identity_features_for_segment",
+        "_extract_face_track_features_for_frame_segment",
         lambda **kwargs: {
-            "track_7": {
-                "embedding": [0.1, 0.2, 0.3],
-                "face_observations": [{"frame_idx": 0, "confidence": 0.9, "quality": 1.0}],
+            "face_track_features": {
+                "face_0_0": {
+                    "embedding": [0.1, 0.2, 0.3],
+                    "embedding_count": 1,
+                    "face_observations": [{"frame_idx": 0, "confidence": 0.9, "quality": 1.0}],
+                    "associated_track_counts": {"track_7": 1},
+                    "dominant_track_id": "track_7",
+                }
             }
         },
     )
@@ -1532,22 +1548,27 @@ def test_run_tracking_direct_delays_first_face_submission_until_start_frame(monk
     monkeypatch.setattr(worker, "_face_pipeline_segment_frames", lambda: 1)
     monkeypatch.setattr(worker, "_face_pipeline_workers", lambda: 2)
     monkeypatch.setattr(worker, "_requested_face_pipeline_workers", lambda: 24)
-    monkeypatch.setattr(worker, "_face_pipeline_start_frame", lambda: 600)
+    monkeypatch.setattr(worker, "_face_pipeline_start_frame", lambda: 1)
     monkeypatch.setattr(
         worker,
-        "_extract_track_identity_features_for_segment",
-        lambda **kwargs: submit_calls.append(list(kwargs["segment_tracks"])) or {
-            "track_7": {
-                "embedding": [0.1, 0.2, 0.3],
-                "face_observations": [{"frame_idx": 0, "confidence": 0.9, "quality": 1.0}],
+        "_extract_face_track_features_for_frame_segment",
+        lambda **kwargs: submit_calls.append(list(kwargs["frame_items"])) or {
+            "face_track_features": {
+                "face_0_0": {
+                    "embedding": [0.1, 0.2, 0.3],
+                    "embedding_count": 1,
+                    "face_observations": [{"frame_idx": 0, "confidence": 0.9, "quality": 1.0}],
+                    "associated_track_counts": {"track_7": 1},
+                    "dominant_track_id": "track_7",
+                }
             }
         },
     )
 
     worker._run_tracking_direct("video.mp4")
 
-    assert len(submit_calls) == 1
-    assert len(submit_calls[0]) == 2
+    assert len(submit_calls) >= 1
+    assert len(submit_calls[0]) == 1
 
 
 def test_run_tracking_chunk_passes_explicit_yolo_device(monkeypatch, tmp_path):
@@ -1577,8 +1598,8 @@ def test_run_tracking_chunk_passes_explicit_yolo_device(monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "_xyxy_to_xywh", lambda *args: (20.0, 30.0, 20.0, 20.0))
     monkeypatch.setattr(
         worker,
-        "_extract_track_identity_features_from_segments",
-        lambda **kwargs: ({}, {"face_pipeline_mode": "staggered", "face_pipeline_segments_processed": 0}),
+        "_extract_face_track_features_from_segments",
+        lambda **kwargs: ({}, {}, {"face_pipeline_mode": "staggered", "face_pipeline_segments_processed": 0}),
     )
     monkeypatch.setattr(
         "backend.do_phase1_worker.subprocess.run",

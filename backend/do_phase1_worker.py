@@ -884,31 +884,14 @@ class ClyptWorker:
         return max(0, requested)
 
     def _face_pipeline_uses_gpu(self) -> bool:
-        if getattr(self, "face_analyzer", None) is None:
+        if getattr(self, "face_detector", None) is None:
+            return False
+        if getattr(self, "face_recognizer", None) is None:
             return False
         return bool(getattr(self, "_face_runtime_ctx_id", 0) >= 0)
 
     def _face_pipeline_workers(self) -> int:
         requested = self._requested_face_pipeline_workers()
-        if self._face_pipeline_uses_gpu():
-            return min(requested, self._face_pipeline_gpu_worker_cap())
-        return requested
-
-    @staticmethod
-    def _requested_face_ledger_workers(face_pipeline_default: int) -> int:
-        try:
-            requested = int(
-                os.getenv(
-                    "CLYPT_FACE_LEDGER_WORKERS",
-                    str(face_pipeline_default),
-                )
-            )
-        except Exception:
-            requested = face_pipeline_default
-        return max(1, requested)
-
-    def _face_ledger_workers(self) -> int:
-        requested = self._requested_face_ledger_workers(self._face_pipeline_workers())
         if self._face_pipeline_uses_gpu():
             return min(requested, self._face_pipeline_gpu_worker_cap())
         return requested
@@ -945,23 +928,19 @@ class ClyptWorker:
         return max(0, requested)
 
     @staticmethod
-    def _split_tracks_into_face_segments(
-        tracks: list[dict],
+    def _split_frame_items_into_segments(
+        frame_to_dets: dict[int, list[dict]],
         segment_frames: int,
-    ) -> list[list[dict]]:
-        from collections import defaultdict
-
-        if not tracks:
+    ) -> list[list[tuple[int, list[dict]]]]:
+        if not frame_to_dets:
             return []
-
-        grouped: dict[int, list[dict]] = defaultdict(list)
-        for det in tracks:
-            frame_idx = int(det.get("frame_idx", -1))
-            if frame_idx < 0:
+        grouped: dict[int, list[tuple[int, list[dict]]]] = {}
+        for frame_idx in sorted(int(fi) for fi in frame_to_dets.keys()):
+            dets = list(frame_to_dets.get(frame_idx, []))
+            if frame_idx < 0 or not dets:
                 continue
             segment_idx = frame_idx // max(1, segment_frames)
-            grouped[segment_idx].append(det)
-
+            grouped.setdefault(segment_idx, []).append((frame_idx, dets))
         return [grouped[idx] for idx in sorted(grouped.keys()) if grouped[idx]]
 
     @staticmethod
@@ -1023,526 +1002,116 @@ class ClyptWorker:
             return 1.0
         return float(scale)
 
-    @staticmethod
-    def _person_bbox_xyxy_from_det(det: dict) -> tuple[float, float, float, float] | None:
-        if not isinstance(det, dict):
-            return None
-        if all(key in det for key in ("x1", "y1", "x2", "y2")):
-            x1 = float(det.get("x1", 0.0))
-            y1 = float(det.get("y1", 0.0))
-            x2 = float(det.get("x2", x1))
-            y2 = float(det.get("y2", y1))
-        else:
-            cx = float(det.get("x_center", 0.0))
-            cy = float(det.get("y_center", 0.0))
-            width = float(det.get("width", 0.0))
-            height = float(det.get("height", 0.0))
-            x1 = cx - (0.5 * width)
-            y1 = cy - (0.5 * height)
-            x2 = cx + (0.5 * width)
-            y2 = cy + (0.5 * height)
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return x1, y1, x2, y2
+    def _create_scrfd_detector(self):
+        from insightface import model_zoo
 
-    def _face_bbox_plausibility_score(
-        self,
-        det: dict,
-        bbox_xyxy: tuple[float, float, float, float] | None,
-    ) -> float:
-        if bbox_xyxy is None:
-            return 0.0
-
-        person_bbox = self._person_bbox_xyxy_from_det(det)
-        if person_bbox is None:
-            return 0.0
-
-        px1, py1, px2, py2 = person_bbox
-        fx1, fy1, fx2, fy2 = [float(v) for v in bbox_xyxy]
-        person_w = max(1.0, px2 - px1)
-        person_h = max(1.0, py2 - py1)
-        face_w = max(1.0, fx2 - fx1)
-        face_h = max(1.0, fy2 - fy1)
-        width_ratio = face_w / person_w
-        height_ratio = face_h / person_h
-        face_center_x = ((fx1 + fx2) * 0.5 - px1) / person_w
-        face_center_y = ((fy1 + fy2) * 0.5 - py1) / person_h
-        face_bottom_y = (fy2 - py1) / person_h
-        aspect_ratio = face_w / max(face_h, 1.0)
-
-        if not (0.08 <= width_ratio <= 0.58):
-            return 0.0
-        if not (0.08 <= height_ratio <= 0.52):
-            return 0.0
-        if not (0.12 <= face_center_x <= 0.88):
-            return 0.0
-        if not (0.05 <= face_center_y <= 0.46):
-            return 0.0
-        if face_bottom_y > 0.62:
-            return 0.0
-        if not (0.55 <= aspect_ratio <= 1.65):
-            return 0.0
-
-        center_x_bonus = 1.0 - min(1.0, abs(face_center_x - 0.5) / 0.38)
-        center_y_bonus = 1.0 - min(1.0, abs(face_center_y - 0.28) / 0.24)
-        size_bonus = 1.0 - min(1.0, abs(width_ratio - 0.24) / 0.20)
-        return max(0.0, (0.35 * center_x_bonus) + (0.35 * center_y_bonus) + (0.30 * size_bonus))
-
-    def _create_face_analyzer(self):
-        from insightface.app import FaceAnalysis
-
-        providers = list(
-            getattr(
-                self,
-                "_face_runtime_providers",
-                ["CUDAExecutionProvider", "CPUExecutionProvider"],
-            )
+        detector = model_zoo.get_model(
+            str(getattr(self, "_face_detector_model_file", "")),
+            providers=list(getattr(self, "_face_runtime_providers", ["CUDAExecutionProvider", "CPUExecutionProvider"])),
         )
-        analyzer = FaceAnalysis(
-            name=str(getattr(self, "_face_runtime_name", "buffalo_l")),
-            providers=providers,
-        )
-        analyzer.prepare(
+        detector.prepare(
             ctx_id=int(getattr(self, "_face_runtime_ctx_id", 0)),
-            det_size=tuple(getattr(self, "_face_runtime_det_size", (640, 640))),
+            input_size=tuple(getattr(self, "_face_detector_input_size", (640, 640))),
             det_thresh=float(getattr(self, "_face_runtime_det_thresh", 0.15)),
         )
-        return analyzer
-
-    def _get_thread_face_analyzer(self):
-        import threading
-
-        shared = getattr(self, "face_analyzer", None)
-        if shared is None:
-            return None
-
-        main_thread_ident = getattr(self, "_face_runtime_main_thread_ident", None)
-        if main_thread_ident is None or threading.get_ident() == main_thread_ident:
-            return shared
-
-        local = getattr(self, "_face_runtime_local", None)
-        if local is None:
-            local = threading.local()
-            self._face_runtime_local = local
-
-        analyzer = getattr(local, "face_analyzer", None)
-        if analyzer is None:
-            analyzer = self._create_face_analyzer()
-            local.face_analyzer = analyzer
-        return analyzer
-
-    def _create_mediapipe_face_detector(self):
-        import mediapipe as mp
-
-        return mp.solutions.face_detection.FaceDetection(
-            model_selection=1,
-            min_detection_confidence=0.20,
-        )
-
-    def _get_thread_mediapipe_face_detector(self):
-        import threading
-
-        shared = getattr(self, "mediapipe_face_detector", None)
-        if shared is None:
-            return None
-
-        main_thread_ident = getattr(self, "_face_runtime_main_thread_ident", None)
-        if main_thread_ident is None or threading.get_ident() == main_thread_ident:
-            return shared
-
-        local = getattr(self, "_face_runtime_local", None)
-        if local is None:
-            local = threading.local()
-            self._face_runtime_local = local
-
-        detector = getattr(local, "mediapipe_face_detector", None)
-        if detector is None:
-            detector = self._create_mediapipe_face_detector()
-            local.mediapipe_face_detector = detector
         return detector
 
-    def _analyze_face_in_person_det(self, frame_rgb, det: dict):
-        """Detect and analyze the strongest face inside a person bbox."""
-        import cv2
-        import numpy as np
+    def _create_arcface_recognizer(self):
+        from insightface import model_zoo
 
-        face_analyzer = self._get_thread_face_analyzer()
-        if face_analyzer is None or frame_rgb is None:
-            return None
-
-        fh, fw = frame_rgb.shape[:2]
-        person_bbox = self._person_bbox_xyxy_from_det(det)
-        if person_bbox is None:
-            return None
-        px1, py1, px2, py2 = person_bbox
-        cx = 0.5 * (px1 + px2)
-        cy = 0.5 * (py1 + py2)
-        w = max(1.0, px2 - px1)
-        h = max(1.0, py2 - py1)
-
-        # Limit face search to the head/shoulder band to avoid elbow/torso false positives.
-        x1 = max(0, int(np.floor(px1 - (0.10 * w))))
-        x2 = min(fw, int(np.ceil(px2 + (0.10 * w))))
-        y1 = max(0, int(np.floor(py1 - (0.04 * h))))
-        y2 = min(fh, int(np.ceil(py1 + (0.58 * h))))
-        if x2 <= x1 or y2 <= y1:
-            return None
-
-        roi_rgb = frame_rgb[y1:y2, x1:x2]
-        if roi_rgb.size == 0:
-            return None
-
-        faces = None
-        if face_analyzer is not None:
-            try:
-                faces = face_analyzer.get(cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR))
-            except Exception:
-                faces = None
-        if not faces:
-            return self._analyze_face_in_person_det_with_mediapipe(
-                frame_rgb=frame_rgb,
-                det=det,
-                roi_rgb=roi_rgb,
-                roi_origin=(x1, y1),
-            )
-
-        scored_faces = []
-        for face in faces:
-            fb = np.asarray(face.bbox, dtype=np.float32)
-            fx1_raw, fy1_raw, fx2_raw, fy2_raw = fb.tolist()
-            candidate_bbox = (
-                float(x1 + fx1_raw),
-                float(y1 + fy1_raw),
-                float(x1 + fx2_raw),
-                float(y1 + fy2_raw),
-            )
-            plausibility = self._face_bbox_plausibility_score(det, candidate_bbox)
-            if plausibility <= 0.0:
-                continue
-            scored_faces.append(
-                (
-                    (0.70 * float(getattr(face, "det_score", 0.0)))
-                    + (0.30 * plausibility),
-                    face,
-                )
-            )
-        if not scored_faces:
-            return self._analyze_face_in_person_det_with_mediapipe(
-                frame_rgb=frame_rgb,
-                det=det,
-                roi_rgb=roi_rgb,
-                roi_origin=(x1, y1),
-            )
-
-        _, best_face = max(scored_faces, key=lambda item: item[0])
-        fb = np.asarray(best_face.bbox, dtype=np.float32)
-        fx1, fy1, fx2, fy2 = fb.tolist()
-        fw_face = max(2.0, fx2 - fx1)
-        fh_face = max(2.0, fy2 - fy1)
-        fx1 = max(0, int(np.floor(fx1 - 0.10 * fw_face)))
-        fy1 = max(0, int(np.floor(fy1 - 0.10 * fh_face)))
-        fx2 = min(roi_rgb.shape[1], int(np.ceil(fx2 + 0.10 * fw_face)))
-        fy2 = min(roi_rgb.shape[0], int(np.ceil(fy2 + 0.10 * fh_face)))
-        if fx2 <= fx1 or fy2 <= fy1:
-            return None
-
-        gx1 = x1 + fx1
-        gy1 = y1 + fy1
-        gx2 = x1 + fx2
-        gy2 = y1 + fy2
-        if gx2 <= gx1 or gy2 <= gy1:
-            return None
-        if self._face_bbox_plausibility_score(det, (float(gx1), float(gy1), float(gx2), float(gy2))) <= 0.0:
-            return self._analyze_face_in_person_det_with_mediapipe(
-                frame_rgb=frame_rgb,
-                det=det,
-                roi_rgb=roi_rgb,
-                roi_origin=(x1, y1),
-            )
-
-        face_rgb = frame_rgb[gy1:gy2, gx1:gx2]
-        if face_rgb.size == 0:
-            return None
-        face_rgb = cv2.resize(face_rgb, (112, 112), interpolation=cv2.INTER_LINEAR)
-
-        anchor = {
-            "x_offset": (float(gx1) - cx) / w,
-            "y_offset": (float(gy1) - cy) / h,
-            "w_ratio": (float(gx2 - gx1)) / w,
-            "h_ratio": (float(gy2 - gy1)) / h,
-        }
-        embedding = getattr(best_face, "normed_embedding", None)
-        embedding_vec = None
-        if embedding is not None:
-            emb_arr = np.asarray(embedding, dtype=np.float32)
-            if emb_arr.size > 0:
-                embedding_vec = emb_arr
-
-        return {
-            "face_rgb": face_rgb,
-            "anchor": anchor,
-            "bbox_xyxy": (float(gx1), float(gy1), float(gx2), float(gy2)),
-            "det_score": float(getattr(best_face, "det_score", 0.0)),
-            "embedding": embedding_vec,
-        }
-
-    def _analyze_face_in_person_det_with_mediapipe(
-        self,
-        *,
-        frame_rgb,
-        det: dict,
-        roi_rgb,
-        roi_origin: tuple[int, int],
-    ):
-        import cv2
-        import numpy as np
-
-        detector = self._get_thread_mediapipe_face_detector()
-        if detector is None or frame_rgb is None or roi_rgb is None:
-            return None
-
-        try:
-            result = detector.process(roi_rgb)
-        except Exception:
-            return None
-        detections = getattr(result, "detections", None) or []
-        if not detections:
-            return None
-
-        best_det = max(
-            detections,
-            key=lambda item: float(getattr(item, "score", [0.0])[0]),
+        recognizer = model_zoo.get_model(
+            str(getattr(self, "_face_recognizer_model_file", "")),
+            providers=list(getattr(self, "_face_runtime_providers", ["CUDAExecutionProvider", "CPUExecutionProvider"])),
         )
-        rel_bbox = getattr(getattr(best_det, "location_data", None), "relative_bounding_box", None)
-        if rel_bbox is None:
-            return None
+        recognizer.prepare(ctx_id=int(getattr(self, "_face_runtime_ctx_id", 0)))
+        return recognizer
 
-        roi_h, roi_w = roi_rgb.shape[:2]
-        ox, oy = roi_origin
-        fx1 = max(0, int(np.floor(float(rel_bbox.xmin) * roi_w)))
-        fy1 = max(0, int(np.floor(float(rel_bbox.ymin) * roi_h)))
-        fx2 = min(roi_w, int(np.ceil((float(rel_bbox.xmin) + float(rel_bbox.width)) * roi_w)))
-        fy2 = min(roi_h, int(np.ceil((float(rel_bbox.ymin) + float(rel_bbox.height)) * roi_h)))
-        if fx2 <= fx1 or fy2 <= fy1:
-            return None
+    def _get_thread_face_runtime(self):
+        import threading
 
-        gx1 = ox + fx1
-        gy1 = oy + fy1
-        gx2 = ox + fx2
-        gy2 = oy + fy2
-        if self._face_bbox_plausibility_score(det, (float(gx1), float(gy1), float(gx2), float(gy2))) <= 0.0:
-            return None
-        face_rgb = frame_rgb[gy1:gy2, gx1:gx2]
-        if face_rgb.size == 0:
-            return None
-        face_rgb = cv2.resize(face_rgb, (112, 112), interpolation=cv2.INTER_LINEAR)
-
-        cx = float(det.get("x_center", 0.0))
-        cy = float(det.get("y_center", 0.0))
-        w = float(det.get("width", 0.0))
-        h = float(det.get("height", 0.0))
-        if w <= 1e-6 or h <= 1e-6:
-            return None
-
-        return {
-            "face_rgb": face_rgb,
-            "anchor": {
-                "x_offset": (float(gx1) - cx) / w,
-                "y_offset": (float(gy1) - cy) / h,
-                "w_ratio": (float(gx2 - gx1)) / w,
-                "h_ratio": (float(gy2 - gy1)) / h,
-            },
-            "bbox_xyxy": (float(gx1), float(gy1), float(gx2), float(gy2)),
-            "det_score": float(getattr(best_det, "score", [0.0])[0]),
-            "embedding": None,
-        }
-
-    def _detect_face_in_person_det(self, frame_rgb, det: dict):
-        """Detect a face inside a person bbox and return (112x112 crop, relative anchor)."""
-        analysis = self._analyze_face_in_person_det(frame_rgb, det)
-        if analysis is None:
+        detector = getattr(self, "face_detector", None)
+        recognizer = getattr(self, "face_recognizer", None)
+        if detector is None or recognizer is None:
             return None, None
-        return analysis["face_rgb"], analysis["anchor"]
 
-    def _extract_hist_embedding_from_det(self, frame_rgb, det: dict):
+        main_thread_ident = getattr(self, "_face_runtime_main_thread_ident", None)
+        if main_thread_ident is None or threading.get_ident() == main_thread_ident:
+            return detector, recognizer
+
+        local = getattr(self, "_face_runtime_local", None)
+        if local is None:
+            local = threading.local()
+            self._face_runtime_local = local
+
+        local_detector = getattr(local, "face_detector", None)
+        local_recognizer = getattr(local, "face_recognizer", None)
+        if local_detector is None or local_recognizer is None:
+            local_detector = self._create_scrfd_detector()
+            local_recognizer = self._create_arcface_recognizer()
+            local.face_detector = local_detector
+            local.face_recognizer = local_recognizer
+        return local_detector, local_recognizer
+
+    def _detect_faces_full_frame(self, frame_rgb, *, max_faces: int = 0) -> list[dict]:
         import cv2
         import numpy as np
+        from insightface.app.common import Face
 
-        if frame_rgb is None:
-            return None
+        detector, recognizer = self._get_thread_face_runtime()
+        if detector is None or recognizer is None or frame_rgb is None:
+            return []
+
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        try:
+            det, kpss = detector.detect(
+                frame_bgr,
+                input_size=tuple(getattr(self, "_face_detector_input_size", (640, 640))),
+                max_num=int(max_faces or 0),
+            )
+        except Exception:
+            return []
+        if det is None or len(det) == 0:
+            return []
 
         fh, fw = frame_rgb.shape[:2]
-        x1 = max(0, min(fw - 1, int(round(float(det.get("x1", 0.0))))))
-        y1 = max(0, min(fh - 1, int(round(float(det.get("y1", 0.0))))))
-        x2 = max(x1 + 1, min(fw, int(round(float(det.get("x2", x1 + 1.0))))))
-        y2 = max(y1 + 1, min(fh, int(round(float(det.get("y2", y1 + 1.0))))))
-        crop = frame_rgb[y1:y2, x1:x2]
-        if crop.size == 0:
-            return None
-
-        hist = cv2.calcHist([crop], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-        hist = cv2.normalize(hist, hist).flatten()
-        if len(hist) < 512:
-            hist = np.pad(hist, (0, 512 - len(hist)))
-        else:
-            hist = hist[:512]
-        return hist.astype(np.float32)
-
-    def _extract_track_identity_features_for_segment(
-        self,
-        *,
-        video_path: str,
-        segment_tracks: list[dict],
-        fps: float,
-        frame_width: int,
-        frame_height: int,
-        output_frame_width: int | None = None,
-        output_frame_height: int | None = None,
-        coord_scale_x: float = 1.0,
-        coord_scale_y: float = 1.0,
-    ) -> dict[str, dict]:
-        import numpy as np
-        from collections import defaultdict
-
-        if not segment_tracks:
-            return {}
-
-        config = _cluster_extraction_config()
-        cluster_face_min_det_score = float(config["cluster_face_min_det_score"])
-        max_face_embeddings = int(config["target_face_encodings_per_tracklet"]) * 3
-
-        frame_to_dets: dict[int, list[dict]] = defaultdict(list)
-        for det in segment_tracks:
-            frame_idx = int(det.get("frame_idx", -1))
-            if frame_idx < 0:
+        out: list[dict] = []
+        min_face_size = float(os.getenv("CLYPT_FULLFRAME_FACE_MIN_SIZE", "28"))
+        for idx, row in enumerate(np.asarray(det)):
+            if len(row) < 5:
                 continue
-            frame_to_dets[frame_idx].append(det)
-
-        frame_map = {}
-        try:
-            from decord import VideoReader, cpu
-
-            vr = VideoReader(video_path, ctx=cpu(0))
-            total_frames = len(vr)
-            needed_frames = [fi for fi in sorted(frame_to_dets.keys()) if 0 <= fi < total_frames]
-            if not needed_frames:
-                return {}
-            batch = vr.get_batch(needed_frames).asnumpy()
-            frame_map = {fi: batch[idx] for idx, fi in enumerate(needed_frames)}
-        except Exception:
-            needed_frames = sorted(frame_to_dets.keys())
-            frame_map = {
-                fi: self._read_frame_rgb(video_path, fi)
-                for fi in needed_frames
-            }
-        if not needed_frames:
-            return {}
-
-        features: dict[str, dict] = {}
-        out_w = int(output_frame_width or frame_width)
-        out_h = int(output_frame_height or frame_height)
-        inv_scale_x = self._normalize_scale_factor(coord_scale_x)
-        inv_scale_y = self._normalize_scale_factor(coord_scale_y)
-
-        for frame_idx in needed_frames:
-            frame_rgb = frame_map.get(frame_idx)
-            if frame_rgb is None:
+            x1, y1, x2, y2, score = [float(v) for v in row[:5]]
+            bw = max(0.0, x2 - x1)
+            bh = max(0.0, y2 - y1)
+            if min(bw, bh) < min_face_size:
                 continue
-            best_by_track: dict[str, dict] = {}
-            for det in frame_to_dets[frame_idx]:
-                tid = str(det.get("track_id", ""))
-                if not tid:
-                    continue
-                previous = best_by_track.get(tid)
-                if previous is None or float(det.get("confidence", 0.0)) > float(
-                    previous.get("confidence", 0.0)
-                ):
-                    best_by_track[tid] = det
-
-            for tid, det in best_by_track.items():
-                slot = features.setdefault(
-                    tid,
-                    {
-                        "face_observations": [],
-                        "face_embeddings": [],
-                        "hist_embeddings": [],
-                    },
-                )
-                analysis = self._analyze_face_in_person_det(frame_rgb, det)
-                if analysis is not None:
-                    gx1, gy1, gx2, gy2 = analysis["bbox_xyxy"]
-                    bbox = self._normalize_bbox(
-                        float(gx1) / inv_scale_x,
-                        float(gy1) / inv_scale_y,
-                        float(gx2) / inv_scale_x,
-                        float(gy2) / inv_scale_y,
-                        out_w,
-                        out_h,
+            x1 = max(0.0, min(float(max(0, fw - 1)), x1))
+            y1 = max(0.0, min(float(max(0, fh - 1)), y1))
+            x2 = max(x1 + 1.0, min(float(max(1, fw)), x2))
+            y2 = max(y1 + 1.0, min(float(max(1, fh)), y2))
+            kps = None if kpss is None or idx >= len(kpss) else np.asarray(kpss[idx], dtype=np.float32)
+            embedding_vec = None
+            if kps is not None and kps.size > 0:
+                try:
+                    face = Face(
+                        bbox=np.asarray([x1, y1, x2, y2], dtype=np.float32),
+                        kps=kps,
+                        det_score=float(score),
                     )
-                    slot["face_observations"].append(
-                        {
-                            "frame_idx": int(frame_idx),
-                            "time_ms": int(round((frame_idx / max(1e-6, fps)) * 1000.0)),
-                            "bounding_box": bbox,
-                            "track_id": tid,
-                            "confidence": float(max(det.get("confidence", 0.0), analysis["det_score"])),
-                            "quality": float(analysis["det_score"]),
-                            "source": "face_detector",
-                            "provenance": "insightface_roi",
-                        }
-                    )
-                    embedding = analysis.get("embedding")
-                    if (
-                        embedding is not None
-                        and float(analysis.get("det_score", 0.0)) >= cluster_face_min_det_score
-                        and len(slot["face_embeddings"]) < max_face_embeddings
-                    ):
-                        slot["face_embeddings"].append(np.asarray(embedding, dtype=np.float32))
-                        continue
-
-                if len(slot["hist_embeddings"]) < max_face_embeddings:
-                    hist = self._extract_hist_embedding_from_det(frame_rgb, det)
-                    if hist is not None:
-                        slot["hist_embeddings"].append(hist)
-
-        finalized: dict[str, dict] = {}
-        for tid, feature in features.items():
-            face_embeddings = feature.get("face_embeddings", [])
-            hist_embeddings = feature.get("hist_embeddings", [])
-            if face_embeddings:
-                emb = np.mean(np.stack(face_embeddings, axis=0), axis=0).astype(np.float32).tolist()
-                source = "face"
-                count = len(face_embeddings)
-            elif hist_embeddings:
-                emb = np.mean(np.stack(hist_embeddings, axis=0), axis=0).astype(np.float32).tolist()
-                source = "histogram"
-                count = len(hist_embeddings)
-            else:
-                emb = None
-                source = "none"
-                count = 0
-
-            face_observations = sorted(
-                feature.get("face_observations", []),
-                key=lambda obs: (int(obs.get("frame_idx", -1)), -float(obs.get("confidence", 0.0))),
+                    emb = recognizer.get(frame_bgr, face)
+                    emb_arr = np.asarray(emb, dtype=np.float32)
+                    if emb_arr.size > 0:
+                        embedding_vec = emb_arr
+                except Exception:
+                    embedding_vec = None
+            out.append(
+                {
+                    "bbox_xyxy": (float(x1), float(y1), float(x2), float(y2)),
+                    "det_score": float(score),
+                    "kps": None if kps is None else kps.astype(np.float32),
+                    "embedding": embedding_vec,
+                }
             )
-            deduped_face_observations: list[dict] = []
-            seen_frames: set[int] = set()
-            for observation in face_observations:
-                frame_idx = int(observation.get("frame_idx", -1))
-                if frame_idx in seen_frames:
-                    continue
-                seen_frames.add(frame_idx)
-                deduped_face_observations.append(observation)
-
-            finalized[tid] = {
-                "embedding": emb,
-                "embedding_source": source,
-                "embedding_count": count,
-                "face_observations": deduped_face_observations,
-                "face_observation_count": len(deduped_face_observations),
-            }
-        return finalized
+        return out
 
     def _merge_track_identity_feature_sets(self, feature_maps: list[dict[str, dict]]) -> dict[str, dict]:
         import numpy as np
@@ -1606,7 +1175,446 @@ class ClyptWorker:
             }
         return finalized
 
-    def _extract_track_identity_features_from_segments(
+    def _associate_faces_to_person_dets(
+        self,
+        face_detections: list[dict],
+        person_dets: list[dict],
+    ) -> list[str | None]:
+        assignments: list[str | None] = []
+        for face in face_detections:
+            fx1, fy1, fx2, fy2 = face.get("bbox_xyxy", (0.0, 0.0, 0.0, 0.0))
+            fcx = 0.5 * (float(fx1) + float(fx2))
+            fcy = 0.5 * (float(fy1) + float(fy2))
+            best_tid = None
+            best_score = None
+            for det in person_dets:
+                tid = str(det.get("track_id", ""))
+                if not tid:
+                    continue
+                px1 = float(det.get("x1", 0.0))
+                py1 = float(det.get("y1", 0.0))
+                px2 = float(det.get("x2", px1 + 1.0))
+                py2 = float(det.get("y2", py1 + 1.0))
+                pw = max(1.0, px2 - px1)
+                ph = max(1.0, py2 - py1)
+                if not (px1 - 0.05 * pw <= fcx <= px2 + 0.05 * pw):
+                    continue
+                if not (py1 - 0.08 * ph <= fcy <= py1 + 0.68 * ph):
+                    continue
+                head_box = (
+                    px1,
+                    max(0.0, py1 - 0.04 * ph),
+                    px2,
+                    py1 + (0.62 * ph),
+                )
+                iou = self._bbox_iou_xyxy((fx1, fy1, fx2, fy2), head_box)
+                center_x_bonus = 1.0 - min(1.0, abs(fcx - (0.5 * (px1 + px2))) / max(1.0, 0.55 * pw))
+                center_y_bonus = 1.0 - min(1.0, abs(fcy - (py1 + 0.26 * ph)) / max(1.0, 0.32 * ph))
+                score = (0.55 * iou) + (0.25 * center_x_bonus) + (0.20 * center_y_bonus)
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_tid = tid
+            assignments.append(best_tid)
+        return assignments
+
+    def _extract_face_track_features_for_frame_segment(
+        self,
+        *,
+        video_path: str,
+        frame_items: list[tuple[int, list[dict]]],
+        fps: float,
+        frame_width: int,
+        frame_height: int,
+        output_frame_width: int | None = None,
+        output_frame_height: int | None = None,
+        coord_scale_x: float = 1.0,
+        coord_scale_y: float = 1.0,
+    ) -> dict:
+        import numpy as np
+        from collections import defaultdict
+        from scipy.optimize import linear_sum_assignment
+
+        frame_items = [(int(frame_idx), list(dets)) for frame_idx, dets in frame_items if dets]
+        if not frame_items:
+            return {"face_track_features": {}}
+
+        try:
+            from decord import VideoReader, cpu
+
+            vr = VideoReader(video_path, ctx=cpu(0))
+            valid_items = [(frame_idx, dets) for frame_idx, dets in frame_items if 0 <= frame_idx < len(vr)]
+            if not valid_items:
+                return {"face_track_features": {}}
+            frame_indices = [frame_idx for frame_idx, _ in valid_items]
+            batch = vr.get_batch(frame_indices).asnumpy()
+            frame_map = {frame_idx: batch[idx] for idx, frame_idx in enumerate(frame_indices)}
+        except Exception:
+            valid_items = list(frame_items)
+            frame_map = {
+                frame_idx: self._read_frame_rgb(video_path, frame_idx)
+                for frame_idx, _ in valid_items
+            }
+
+        out_w = int(output_frame_width or frame_width or 1)
+        out_h = int(output_frame_height or frame_height or 1)
+        inv_scale_x = self._normalize_scale_factor(coord_scale_x)
+        inv_scale_y = self._normalize_scale_factor(coord_scale_y)
+        segment_start = int(valid_items[0][0]) if valid_items else 0
+        max_gap = max(2, int(os.getenv("CLYPT_FACE_TRACK_MAX_GAP", "8")))
+        match_cost_threshold = float(os.getenv("CLYPT_FACE_TRACK_MATCH_COST", "0.78"))
+        next_local_track_id = 0
+        active_tracks: dict[int, dict] = {}
+        face_tracks: dict[int, dict] = {}
+
+        def _center_dist(box_a, box_b) -> float:
+            ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
+            bx1, by1, bx2, by2 = [float(v) for v in box_b]
+            acx, acy = 0.5 * (ax1 + ax2), 0.5 * (ay1 + ay2)
+            bcx, bcy = 0.5 * (bx1 + bx2), 0.5 * (by1 + by2)
+            aw = max(1.0, ax2 - ax1)
+            ah = max(1.0, ay2 - ay1)
+            bw = max(1.0, bx2 - bx1)
+            bh = max(1.0, by2 - by1)
+            norm = max(1.0, 0.5 * (aw + bw), 0.5 * (ah + bh))
+            return float((((acx - bcx) ** 2) + ((acy - bcy) ** 2)) ** 0.5 / norm)
+
+        def _emb_dist(emb_a, emb_b) -> float:
+            if emb_a is None or emb_b is None:
+                return 0.45
+            return self._cosine_dist(np.asarray(emb_a, dtype=np.float32), np.asarray(emb_b, dtype=np.float32))
+
+        for frame_idx, dets in valid_items:
+            frame_rgb = frame_map.get(frame_idx)
+            if frame_rgb is None:
+                continue
+            detections = self._detect_faces_full_frame(frame_rgb)
+            if not detections:
+                # retire stale tracks even on empty frames
+                stale_ids = [
+                    local_id
+                    for local_id, state in active_tracks.items()
+                    if frame_idx - int(state.get("last_frame_idx", frame_idx)) > max_gap
+                ]
+                for local_id in stale_ids:
+                    active_tracks.pop(local_id, None)
+                continue
+
+            assignments = self._associate_faces_to_person_dets(detections, dets)
+
+            active_candidates = [
+                (local_id, state)
+                for local_id, state in active_tracks.items()
+                if frame_idx - int(state.get("last_frame_idx", frame_idx)) <= max_gap
+            ]
+            matched_detection_indices: set[int] = set()
+            matched_track_ids: set[int] = set()
+            if active_candidates and detections:
+                cost = np.full((len(active_candidates), len(detections)), fill_value=10.0, dtype=np.float32)
+                for row_idx, (local_id, state) in enumerate(active_candidates):
+                    for col_idx, detection in enumerate(detections):
+                        iou = self._bbox_iou_xyxy(state.get("last_bbox"), detection.get("bbox_xyxy"))
+                        if iou <= 0.01 and _center_dist(state.get("last_bbox"), detection.get("bbox_xyxy")) > 1.5:
+                            continue
+                        score = (
+                            0.50 * (1.0 - iou)
+                            + 0.25 * _center_dist(state.get("last_bbox"), detection.get("bbox_xyxy"))
+                            + 0.25 * _emb_dist(state.get("last_embedding"), detection.get("embedding"))
+                        )
+                        cost[row_idx, col_idx] = float(score)
+                row_idx, col_idx = linear_sum_assignment(cost)
+                for r_i, c_i in zip(row_idx, col_idx):
+                    if float(cost[r_i, c_i]) > match_cost_threshold:
+                        continue
+                    local_id = int(active_candidates[r_i][0])
+                    matched_detection_indices.add(int(c_i))
+                    matched_track_ids.add(local_id)
+                    detection = detections[c_i]
+                    track = face_tracks.setdefault(
+                        local_id,
+                        {
+                            "observations": [],
+                            "embeddings": [],
+                            "associated_track_counts": defaultdict(int),
+                        },
+                    )
+                    obs = self._face_detection_observation(
+                        detection=detection,
+                        frame_idx=frame_idx,
+                        fps=fps,
+                        output_frame_width=out_w,
+                        output_frame_height=out_h,
+                        inv_scale_x=inv_scale_x,
+                        inv_scale_y=inv_scale_y,
+                        associated_track_id=assignments[c_i],
+                    )
+                    track["observations"].append(obs)
+                    if obs.get("associated_track_id"):
+                        track["associated_track_counts"][str(obs["associated_track_id"])] += 1
+                    embedding = detection.get("embedding")
+                    if embedding is not None:
+                        track["embeddings"].append(np.asarray(embedding, dtype=np.float32))
+                    active_tracks[local_id] = {
+                        "last_bbox": tuple(detection.get("bbox_xyxy", (0.0, 0.0, 0.0, 0.0))),
+                        "last_embedding": detection.get("embedding"),
+                        "last_frame_idx": frame_idx,
+                    }
+
+            for det_idx, detection in enumerate(detections):
+                if det_idx in matched_detection_indices:
+                    continue
+                local_id = next_local_track_id
+                next_local_track_id += 1
+                track = face_tracks.setdefault(
+                    local_id,
+                    {
+                        "observations": [],
+                        "embeddings": [],
+                        "associated_track_counts": defaultdict(int),
+                    },
+                )
+                obs = self._face_detection_observation(
+                    detection=detection,
+                    frame_idx=frame_idx,
+                    fps=fps,
+                    output_frame_width=out_w,
+                    output_frame_height=out_h,
+                    inv_scale_x=inv_scale_x,
+                    inv_scale_y=inv_scale_y,
+                    associated_track_id=assignments[det_idx],
+                )
+                track["observations"].append(obs)
+                if obs.get("associated_track_id"):
+                    track["associated_track_counts"][str(obs["associated_track_id"])] += 1
+                embedding = detection.get("embedding")
+                if embedding is not None:
+                    track["embeddings"].append(np.asarray(embedding, dtype=np.float32))
+                active_tracks[local_id] = {
+                    "last_bbox": tuple(detection.get("bbox_xyxy", (0.0, 0.0, 0.0, 0.0))),
+                    "last_embedding": detection.get("embedding"),
+                    "last_frame_idx": frame_idx,
+                }
+
+            stale_ids = [
+                local_id
+                for local_id, state in active_tracks.items()
+                if frame_idx - int(state.get("last_frame_idx", frame_idx)) > max_gap
+            ]
+            for local_id in stale_ids:
+                active_tracks.pop(local_id, None)
+
+        finalized_face_tracks: dict[str, dict] = {}
+        for local_id, feature in face_tracks.items():
+            observations = sorted(
+                feature.get("observations", []),
+                key=lambda obs: (int(obs.get("frame_idx", -1)), -float(obs.get("confidence", 0.0))),
+            )
+            if not observations:
+                continue
+            embeddings = feature.get("embeddings", [])
+            emb = None
+            if embeddings:
+                emb = np.mean(np.stack(embeddings, axis=0), axis=0).astype(np.float32).tolist()
+            face_track_id = f"face_{segment_start}_{int(local_id)}"
+            associated_counts = {
+                str(tid): int(count)
+                for tid, count in dict(feature.get("associated_track_counts", {})).items()
+                if str(tid)
+            }
+            dominant_track_id = None
+            if associated_counts:
+                dominant_track_id = max(associated_counts.items(), key=lambda item: item[1])[0]
+            finalized_face_tracks[face_track_id] = {
+                "face_track_id": face_track_id,
+                "embedding": emb,
+                "embedding_source": "face" if emb is not None else "none",
+                "embedding_count": len(embeddings),
+                "face_observations": observations,
+                "face_observation_count": len(observations),
+                "associated_track_counts": associated_counts,
+                "dominant_track_id": dominant_track_id,
+            }
+        return {"face_track_features": finalized_face_tracks}
+
+    def _face_detection_observation(
+        self,
+        *,
+        detection: dict,
+        frame_idx: int,
+        fps: float,
+        output_frame_width: int,
+        output_frame_height: int,
+        inv_scale_x: float,
+        inv_scale_y: float,
+        associated_track_id: str | None,
+    ) -> dict:
+        gx1, gy1, gx2, gy2 = [float(v) for v in detection.get("bbox_xyxy", (0.0, 0.0, 1.0, 1.0))]
+        bbox = self._normalize_bbox(
+            float(gx1) / inv_scale_x,
+            float(gy1) / inv_scale_y,
+            float(gx2) / inv_scale_x,
+            float(gy2) / inv_scale_y,
+            int(output_frame_width),
+            int(output_frame_height),
+        )
+        return {
+            "frame_idx": int(frame_idx),
+            "time_ms": int(round((frame_idx / max(1e-6, fps)) * 1000.0)),
+            "bounding_box": bbox,
+            "confidence": float(detection.get("det_score", 0.0)),
+            "quality": float(detection.get("det_score", 0.0)),
+            "source": "face_detector",
+            "provenance": "scrfd_fullframe",
+            "associated_track_id": associated_track_id,
+        }
+
+    def _merge_face_track_feature_sets(self, feature_maps: list[dict[str, dict]]) -> dict[str, dict]:
+        import numpy as np
+        from collections import defaultdict
+
+        merged: dict[str, dict] = {}
+        for feature_map in feature_maps:
+            for face_track_id, feature in (feature_map or {}).items():
+                slot = merged.setdefault(
+                    str(face_track_id),
+                    {
+                        "embeddings": [],
+                        "observations": [],
+                        "associated_track_counts": defaultdict(int),
+                    },
+                )
+                embedding = feature.get("embedding")
+                if embedding is not None:
+                    emb_arr = np.asarray(embedding, dtype=np.float32)
+                    if emb_arr.size > 0:
+                        repeat = max(1, int(feature.get("embedding_count", 1)))
+                        slot["embeddings"].extend([emb_arr] * repeat)
+                slot["observations"].extend(list(feature.get("face_observations", [])))
+                for tid, count in dict(feature.get("associated_track_counts", {})).items():
+                    if str(tid):
+                        slot["associated_track_counts"][str(tid)] += int(count)
+
+        finalized: dict[str, dict] = {}
+        for face_track_id, feature in merged.items():
+            emb = None
+            if feature["embeddings"]:
+                emb = np.mean(np.stack(feature["embeddings"], axis=0), axis=0).astype(np.float32).tolist()
+            observations = sorted(
+                feature["observations"],
+                key=lambda obs: (int(obs.get("frame_idx", -1)), -float(obs.get("confidence", 0.0))),
+            )
+            associated_counts = {
+                str(tid): int(count)
+                for tid, count in dict(feature["associated_track_counts"]).items()
+                if str(tid)
+            }
+            dominant_track_id = None
+            if associated_counts:
+                dominant_track_id = max(associated_counts.items(), key=lambda item: item[1])[0]
+            finalized[face_track_id] = {
+                "face_track_id": face_track_id,
+                "embedding": emb,
+                "embedding_source": "face" if emb is not None else "none",
+                "embedding_count": len(feature["embeddings"]),
+                "face_observations": observations,
+                "face_observation_count": len(observations),
+                "associated_track_counts": associated_counts,
+                "dominant_track_id": dominant_track_id,
+            }
+        return finalized
+
+    def _derive_track_identity_features_from_face_tracks(
+        self,
+        face_track_features: dict[str, dict],
+    ) -> dict[str, dict]:
+        import math
+        import numpy as np
+
+        per_track: dict[str, dict] = {}
+        for _, feature in (face_track_features or {}).items():
+            associated_counts = {
+                str(tid): int(count)
+                for tid, count in dict(feature.get("associated_track_counts", {})).items()
+                if str(tid) and int(count) > 0
+            }
+            if not associated_counts:
+                continue
+            dominant_track_id, dominant_count = max(
+                associated_counts.items(),
+                key=lambda item: item[1],
+            )
+            total_count = max(1, sum(associated_counts.values()))
+            min_count = max(2, int(os.getenv("CLYPT_FACE_TRACK_MIN_ASSOC_COUNT", "2")))
+            min_share = float(os.getenv("CLYPT_FACE_TRACK_MIN_ASSOC_SHARE", "0.20"))
+            dominant_ratio = float(os.getenv("CLYPT_FACE_TRACK_MIN_DOMINANT_RATIO", "0.50"))
+            min_count_from_dominant = max(1, int(math.ceil(float(dominant_count) * dominant_ratio)))
+            eligible_track_ids = {
+                tid
+                for tid, count in associated_counts.items()
+                if count >= min_count
+                and (count / total_count) >= min_share
+                and count >= min_count_from_dominant
+            }
+            if not eligible_track_ids:
+                eligible_track_ids = {str(dominant_track_id)}
+
+            embedding = feature.get("embedding")
+            emb_arr = None
+            if embedding is not None:
+                emb_arr = np.asarray(embedding, dtype=np.float32)
+                if emb_arr.size == 0:
+                    emb_arr = None
+            repeat = max(1, int(feature.get("embedding_count", 1)))
+            face_track_id = str(feature.get("face_track_id", ""))
+            for tid in sorted(eligible_track_ids):
+                slot = per_track.setdefault(
+                    tid,
+                    {
+                        "face_vectors": [],
+                        "face_observations": [],
+                        "face_track_ids": set(),
+                    },
+                )
+                if emb_arr is not None:
+                    weight = max(1, associated_counts.get(tid, 1))
+                    slot["face_vectors"].extend([emb_arr] * max(repeat, weight))
+                if face_track_id:
+                    slot["face_track_ids"].add(face_track_id)
+            for observation in feature.get("face_observations", []):
+                associated_track_id = str(observation.get("associated_track_id", "") or "")
+                if associated_track_id not in eligible_track_ids:
+                    continue
+                obs = dict(observation)
+                obs["track_id"] = associated_track_id
+                per_track[associated_track_id]["face_observations"].append(obs)
+
+        finalized: dict[str, dict] = {}
+        for tid, feature in per_track.items():
+            emb = None
+            if feature["face_vectors"]:
+                emb = np.mean(np.stack(feature["face_vectors"], axis=0), axis=0).astype(np.float32).tolist()
+            observations = sorted(
+                feature["face_observations"],
+                key=lambda obs: (int(obs.get("frame_idx", -1)), -float(obs.get("confidence", 0.0))),
+            )
+            deduped = []
+            seen_frames = set()
+            for obs in observations:
+                frame_idx = int(obs.get("frame_idx", -1))
+                if frame_idx in seen_frames:
+                    continue
+                seen_frames.add(frame_idx)
+                deduped.append(obs)
+            finalized[tid] = {
+                "embedding": emb,
+                "embedding_source": "face" if emb is not None else "none",
+                "embedding_count": len(feature["face_vectors"]),
+                "face_observations": deduped,
+                "face_observation_count": len(deduped),
+                "face_track_ids": sorted(feature["face_track_ids"]),
+            }
+        return finalized
+
+    def _extract_face_track_features_from_segments(
         self,
         *,
         video_path: str,
@@ -1617,26 +1625,26 @@ class ClyptWorker:
         output_frame_height: int | None = None,
         coord_scale_x: float = 1.0,
         coord_scale_y: float = 1.0,
-        segments: list[list[dict]] | None = None,
+        frame_segments: list[list[tuple[int, list[dict]]]] | None = None,
         segment_futures=None,
-    ) -> tuple[dict[str, dict], dict]:
+    ) -> tuple[dict[str, dict], dict[str, dict], dict]:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        segments = [segment for segment in (segments or []) if segment]
+        frame_segments = [segment for segment in (frame_segments or []) if segment]
         workers = self._face_pipeline_workers()
-        segment_results: list[dict[str, dict]] = []
+        segment_results: list[dict] = []
 
         if segment_futures is not None:
             for future in as_completed(segment_futures):
                 segment_results.append(future.result())
             mode = "staggered"
-        elif not segments:
+        elif not frame_segments:
             mode = "disabled"
-        elif workers <= 1 or len(segments) <= 1:
+        elif workers <= 1 or len(frame_segments) <= 1:
             segment_results = [
-                self._extract_track_identity_features_for_segment(
+                self._extract_face_track_features_for_frame_segment(
                     video_path=video_path,
-                    segment_tracks=segment,
+                    frame_items=segment,
                     fps=fps,
                     frame_width=frame_width,
                     frame_height=frame_height,
@@ -1645,16 +1653,16 @@ class ClyptWorker:
                     coord_scale_x=coord_scale_x,
                     coord_scale_y=coord_scale_y,
                 )
-                for segment in segments
+                for segment in frame_segments
             ]
             mode = "serial"
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [
                     pool.submit(
-                        self._extract_track_identity_features_for_segment,
+                        self._extract_face_track_features_for_frame_segment,
                         video_path=video_path,
-                        segment_tracks=segment,
+                        frame_items=segment,
                         fps=fps,
                         frame_width=frame_width,
                         frame_height=frame_height,
@@ -1663,22 +1671,26 @@ class ClyptWorker:
                         coord_scale_x=coord_scale_x,
                         coord_scale_y=coord_scale_y,
                     )
-                    for segment in segments
+                    for segment in frame_segments
                 ]
                 for future in as_completed(futures):
                     segment_results.append(future.result())
             mode = "parallel"
 
-        merged = self._merge_track_identity_feature_sets(segment_results)
+        face_track_features = self._merge_face_track_feature_sets(
+            [result.get("face_track_features", {}) for result in segment_results]
+        )
+        track_identity_features = self._derive_track_identity_features_from_face_tracks(face_track_features)
         metrics = {
             "face_pipeline_mode": mode,
             "face_pipeline_worker_count": workers,
             "face_pipeline_gpu_enabled": self._face_pipeline_uses_gpu(),
-            "face_pipeline_segment_count": len(segments) if segment_futures is None else len(segment_futures),
+            "face_pipeline_segment_count": len(frame_segments) if segment_futures is None else len(segment_futures),
             "face_pipeline_segments_processed": len(segment_results),
-            "face_pipeline_track_count": len(merged),
+            "face_pipeline_track_count": len(track_identity_features),
+            "face_track_count": len(face_track_features),
         }
-        return merged, metrics
+        return track_identity_features, face_track_features, metrics
 
     def _read_frame_rgb(self, video_path: str, frame_idx: int):
         """Load a single RGB frame for downstream face-ledger extraction."""
@@ -1737,28 +1749,6 @@ class ClyptWorker:
             "bottom": max(top, bottom),
         }
 
-    def _anchor_to_face_bbox(
-        self,
-        det: dict,
-        anchor: dict | None,
-        frame_width: int,
-        frame_height: int,
-    ) -> dict | None:
-        if not anchor:
-            return None
-
-        cx = float(det.get("x_center", 0.0))
-        cy = float(det.get("y_center", 0.0))
-        width = max(1.0, float(det.get("width", 1.0)))
-        height = max(1.0, float(det.get("height", 1.0)))
-        x1 = cx + (float(anchor.get("x_offset", 0.0)) * width)
-        y1 = cy + (float(anchor.get("y_offset", 0.0)) * height)
-        x2 = x1 + max(1.0, float(anchor.get("w_ratio", 0.0)) * width)
-        y2 = y1 + max(1.0, float(anchor.get("h_ratio", 0.0)) * height)
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return self._normalize_bbox(x1, y1, x2, y2, frame_width, frame_height)
-
     def _build_visual_detection_ledgers(
         self,
         video_path: str,
@@ -1767,7 +1757,7 @@ class ClyptWorker:
         track_to_dets: dict[str, list[dict]] | None = None,
         track_identity_features: dict[str, dict] | None = None,
     ) -> tuple[list[dict], list[dict], dict]:
-        """Build downstream person/face ledgers using true detector-derived face tracks."""
+        """Build downstream person/face ledgers from canonical face observations."""
         started_at = time.perf_counter()
         meta = self._probe_video_meta(video_path)
         fps = float(meta.get("fps", 0.0) or 0.0) or 30.0
@@ -1851,7 +1841,7 @@ class ClyptWorker:
                             "track_id": tid,
                             "confidence": float(observation.get("confidence", 0.0)),
                             "source": str(observation.get("source", "face_detector")),
-                            "provenance": observation.get("provenance", "insightface_roi"),
+                            "provenance": observation.get("provenance", "scrfd_fullframe"),
                         }
                 if deduped_by_frame:
                     face_ts_by_track[tid] = [
@@ -1861,101 +1851,7 @@ class ClyptWorker:
                     precomputed_frames.update(deduped_by_frame.keys())
 
         sampled_frames = len(precomputed_frames)
-        missing_face_track_ids = {
-            str(tid) for tid in track_to_dets.keys() if not face_ts_by_track.get(str(tid))
-        }
-        frame_items = []
-        for frame_idx in sorted(frame_to_dets.keys()):
-            dets = [
-                det
-                for det in frame_to_dets.get(frame_idx, [])
-                if str(det.get("track_id", "")) in missing_face_track_ids
-            ]
-            if dets:
-                frame_items.append((frame_idx, dets))
-        face_worker_count = self._face_ledger_workers()
-        segment_size = max(1, int(os.getenv("CLYPT_FACE_LEDGER_SEGMENT_FRAMES", "240")))
-        segment_count = 0 if not frame_items else max(1, len(frame_items) // max(1, segment_size))
-
-        def _consume_frame_items(items: list[tuple[int, list[dict]]]) -> tuple[dict[str, list[dict]], int]:
-            local_face_ts_by_track: dict[str, list[dict]] = {}
-            local_sampled_frames = 0
-            if not items:
-                return local_face_ts_by_track, local_sampled_frames
-            try:
-                from decord import VideoReader, cpu
-
-                vr = VideoReader(video_path, ctx=cpu(0))
-                valid_items = [(int(frame_idx), dets) for frame_idx, dets in items if 0 <= int(frame_idx) < len(vr)]
-                if not valid_items:
-                    return local_face_ts_by_track, local_sampled_frames
-                frame_indices = [frame_idx for frame_idx, _ in valid_items]
-                batch = vr.get_batch(frame_indices).asnumpy()
-                frame_map = {frame_idx: batch[idx] for idx, frame_idx in enumerate(frame_indices)}
-            except Exception:
-                valid_items = [(int(frame_idx), dets) for frame_idx, dets in items]
-                frame_map = {
-                    frame_idx: self._read_frame_rgb(video_path, frame_idx)
-                    for frame_idx, _ in valid_items
-                }
-
-            for frame_idx, dets in valid_items:
-                frame_rgb = frame_map.get(frame_idx)
-                if frame_rgb is None:
-                    continue
-                local_sampled_frames += 1
-                best_by_track: dict[str, dict] = {}
-                for det in dets:
-                    tid = str(det.get("track_id", ""))
-                    if not tid:
-                        continue
-                    previous = best_by_track.get(tid)
-                    if previous is None or float(det.get("confidence", 0.0)) > float(
-                        previous.get("confidence", 0.0)
-                    ):
-                        best_by_track[tid] = det
-
-                for tid, det in best_by_track.items():
-                    _, anchor = self._detect_face_in_person_det(frame_rgb, det)
-                    bbox = self._anchor_to_face_bbox(det, anchor, frame_width, frame_height)
-                    if bbox is None:
-                        continue
-                    local_face_ts_by_track.setdefault(tid, []).append(
-                        {
-                            "time_ms": int(round((frame_idx / max(1e-6, fps)) * 1000.0)),
-                            "bounding_box": bbox,
-                            "track_id": tid,
-                            "confidence": float(det.get("confidence", 0.0)),
-                            "source": "face_detector",
-                            "provenance": "insightface_roi",
-                        }
-                    )
-            return local_face_ts_by_track, local_sampled_frames
-
-        if face_worker_count <= 1 or len(frame_items) <= segment_size:
-            local_face_ts_by_track, local_sampled_frames = _consume_frame_items(frame_items)
-            sampled_frames += local_sampled_frames
-            for tid, ts_objs in local_face_ts_by_track.items():
-                face_ts_by_track.setdefault(tid, []).extend(ts_objs)
-            segment_count = max(segment_count, 1 if frame_items else 0)
-        else:
-            from concurrent.futures import ThreadPoolExecutor
-
-            segments = [
-                frame_items[idx : idx + segment_size]
-                for idx in range(0, len(frame_items), segment_size)
-            ]
-            segment_count = max(segment_count, len(segments))
-            with ThreadPoolExecutor(max_workers=face_worker_count) as pool:
-                futures = [
-                    pool.submit(_consume_frame_items, segment)
-                    for segment in segments
-                ]
-                for fut in futures:
-                    local_face_ts_by_track, local_sampled_frames = fut.result()
-                    sampled_frames += local_sampled_frames
-                    for tid, ts_objs in local_face_ts_by_track.items():
-                        face_ts_by_track.setdefault(tid, []).extend(ts_objs)
+        segment_count = 0
 
         face_detections = []
         for idx, tid in enumerate(sorted(face_ts_by_track.keys())):
@@ -1972,7 +1868,7 @@ class ClyptWorker:
                     "face_track_index": idx,
                     "track_id": tid,
                     "source": "face_detector",
-                    "provenance": "insightface_roi",
+                    "provenance": str(ts_objs[0].get("provenance", "scrfd_fullframe")),
                     "timestamped_objects": ts_objs,
                 }
             )
@@ -1982,7 +1878,7 @@ class ClyptWorker:
             "face_detection_frame_samples": sampled_frames,
             "face_detection_track_count": len(face_detections),
             "face_detection_segment_count": segment_count,
-            "face_detection_worker_count": face_worker_count,
+            "face_detection_worker_count": 0,
         }
         return face_detections, person_detections, metrics
 
@@ -2032,178 +1928,6 @@ class ClyptWorker:
                     * min(float(dl.get("confidence", 0.0)), float(dr.get("confidence", 0.0))),
                     "interpolated": True,
                 }
-        return out
-
-    def _build_sparse_face_box_map(
-        self,
-        video_path: str,
-        frame_to_dets: dict[int, list[dict]],
-        track_to_dets: dict[str, list[dict]],
-        fps: float,
-        target_fps: float,
-        relevant_frames: set[int] | None = None,
-        scale_x: float = 1.0,
-        scale_y: float = 1.0,
-    ) -> dict[tuple[str, int], tuple[int, int, int, int, float, float]]:
-        """Precompute per-track face boxes at sparse FPS and interpolate short gaps.
-
-        Returns:
-            {(track_id, frame_idx): (x1, y1, x2, y2, det_conf, quality)}
-            quality=1.0 direct detector hit, <1.0 interpolated/propagated.
-        """
-        import os
-        import cv2
-        import numpy as np
-        from bisect import bisect_left
-        from collections import defaultdict
-        from decord import VideoReader, cpu
-
-        h264_path = video_path.replace(".mp4", "_h264.mp4")
-        read_path = h264_path if os.path.exists(h264_path) else video_path
-
-        try:
-            vr = VideoReader(read_path, ctx=cpu(0))
-        except Exception as e:
-            print(
-                "  Warning: sparse face precompute could not open video "
-                f"({type(e).__name__}: {e})"
-            )
-            return {}
-
-        total_frames = len(vr)
-        if total_frames <= 0:
-            return {}
-
-        # Sparse sampling controls.
-        sample_stride = max(1, int(round(max(1e-6, fps) / max(0.1, target_fps))))
-        min_det_conf = float(os.getenv("CLYPT_ASD_FACE_MIN_DET_CONF", "0.25"))
-        min_area_ratio = float(os.getenv("CLYPT_ASD_FACE_MIN_AREA_RATIO", "0.0004"))
-        max_interp_gap = int(
-            os.getenv(
-                "CLYPT_ASD_FACE_MAX_INTERP_GAP",
-                str(max(4, int(round(max(1.0, fps) * 1.0)))),
-            )
-        )
-
-        sample_frames = set(range(0, total_frames, sample_stride))
-        # Anchor endpoints for each track to improve interpolation continuity.
-        for dets in track_to_dets.values():
-            if not dets:
-                continue
-            sample_frames.add(int(dets[0]["frame_idx"]))
-            sample_frames.add(int(dets[-1]["frame_idx"]))
-        sample_frames = sorted(fi for fi in sample_frames if 0 <= fi < total_frames)
-        # When caller provides relevant_frames (e.g. frames overlapping word
-        # timestamps), skip sampling frames that can't contribute to binding.
-        if relevant_frames is not None:
-            sample_frames = [fi for fi in sample_frames if fi in relevant_frames]
-            print(f"  Sparse precompute restricted to {len(sample_frames)} word-relevant frames")
-
-        sampled: dict[str, dict[int, tuple[int, int, int, int, float, float]]] = defaultdict(dict)
-        for fi in sample_frames:
-            dets = frame_to_dets.get(fi, [])
-            if not dets:
-                continue
-            try:
-                frame = vr[fi].asnumpy()  # RGB
-            except Exception:
-                continue
-            if frame is None or frame.size == 0:
-                continue
-
-            fh, fw = frame.shape[:2]
-            frame_area = float(max(1, fh * fw))
-            # Keep strongest detection per track at frame fi.
-            best_by_track: dict[str, dict] = {}
-            for d in dets:
-                tid = str(d.get("track_id", ""))
-                if not tid:
-                    continue
-                cur = best_by_track.get(tid)
-                if cur is None or float(d.get("confidence", 0.0)) > float(cur.get("confidence", 0.0)):
-                    best_by_track[tid] = d
-
-            for tid, d in best_by_track.items():
-                d_scaled = self._scale_detection_geometry(d, scale_x=scale_x, scale_y=scale_y)
-                conf = float(d_scaled.get("confidence", 0.0))
-                if conf < min_det_conf:
-                    continue
-                area = float(d_scaled.get("width", 0.0)) * float(d_scaled.get("height", 0.0))
-                if area < (min_area_ratio * frame_area):
-                    continue
-                crop, anchor = self._detect_face_in_person_det(frame, d_scaled)
-                if crop is None or anchor is None:
-                    continue
-                cx = float(d_scaled.get("x_center", 0.0))
-                cy = float(d_scaled.get("y_center", 0.0))
-                bw = float(d_scaled.get("width", 0.0))
-                bh = float(d_scaled.get("height", 0.0))
-                if bw <= 1e-6 or bh <= 1e-6:
-                    continue
-                x1 = int(round(cx + float(anchor["x_offset"]) * bw))
-                y1 = int(round(cy + float(anchor["y_offset"]) * bh))
-                ww = int(round(max(2.0, float(anchor["w_ratio"]) * bw)))
-                hh = int(round(max(2.0, float(anchor["h_ratio"]) * bh)))
-                x1 = max(0, min(fw - 1, x1))
-                y1 = max(0, min(fh - 1, y1))
-                x2 = max(x1 + 1, min(fw, x1 + ww))
-                y2 = max(y1 + 1, min(fh, y1 + hh))
-                sampled[tid][fi] = (x1, y1, x2, y2, conf, 1.0)
-
-        # Interpolate sparse boxes onto dense track frames.
-        out: dict[tuple[str, int], tuple[int, int, int, int, float, float]] = {}
-        for tid, dets in track_to_dets.items():
-            frames = sorted({int(d.get("frame_idx", -1)) for d in dets if int(d.get("frame_idx", -1)) >= 0})
-            if not frames:
-                continue
-            s = sampled.get(tid, {})
-            if not s:
-                continue
-            s_keys = sorted(s.keys())
-            for fi in frames:
-                key = (tid, fi)
-                if fi in s:
-                    out[key] = s[fi]
-                    continue
-                pos = bisect_left(s_keys, fi)
-                left = s_keys[pos - 1] if pos > 0 else None
-                right = s_keys[pos] if pos < len(s_keys) else None
-                chosen = None
-                if left is not None and right is not None:
-                    gap = right - left
-                    if gap > 0 and gap <= max_interp_gap:
-                        a = (fi - left) / float(gap)
-                        l = np.array(s[left][:4], dtype=np.float32)
-                        r = np.array(s[right][:4], dtype=np.float32)
-                        b = (1.0 - a) * l + a * r
-                        x1, y1, x2, y2 = [int(round(v)) for v in b.tolist()]
-                        # Clamp and sanitize via known frame dimensions from track box.
-                        dref = next((d for d in dets if int(d.get("frame_idx", -1)) == fi), None)
-                        if dref is not None:
-                            cx = float(dref.get("x_center", 0.0))
-                            cy = float(dref.get("y_center", 0.0))
-                            bw = float(dref.get("width", 1.0))
-                            bh = float(dref.get("height", 1.0))
-                            x1 = int(round(max(0.0, min(x1, cx + 1.2 * bw))))
-                            y1 = int(round(max(0.0, min(y1, cy + 1.2 * bh))))
-                            x2 = int(round(max(x1 + 1.0, x2)))
-                            y2 = int(round(max(y1 + 1.0, y2)))
-                        conf = float((s[left][4] + s[right][4]) * 0.5)
-                        chosen = (x1, y1, x2, y2, conf, 0.7)
-                if chosen is None:
-                    nearest = None
-                    if left is not None:
-                        nearest = left
-                    if right is not None and (
-                        nearest is None or abs(right - fi) < abs(nearest - fi)
-                    ):
-                        nearest = right
-                    if nearest is not None and abs(nearest - fi) <= max(1, max_interp_gap // 2):
-                        x1, y1, x2, y2, conf, _ = s[nearest]
-                        chosen = (x1, y1, x2, y2, conf, 0.5)
-                if chosen is not None:
-                    out[key] = chosen
-
         return out
 
     @staticmethod
@@ -2425,6 +2149,7 @@ class ClyptWorker:
         import threading
         import nemo.collections.asr as nemo_asr
         import torch
+        from insightface import model_zoo
         from insightface.app import FaceAnalysis
         from ultralytics import YOLO
         from omegaconf import open_dict
@@ -2464,8 +2189,44 @@ class ClyptWorker:
         self._face_runtime_ctx_id = 0 if torch.cuda.is_available() else -1
         self._face_runtime_det_size = (640, 640)
         self._face_runtime_det_thresh = 0.15
+        self._face_detector_input_size = (640, 640)
+        self._face_model_root = os.path.expanduser("~/.insightface/models/buffalo_l")
+        self._face_detector_model_file = os.path.join(self._face_model_root, "det_10g.onnx")
+        self._face_recognizer_model_file = os.path.join(self._face_model_root, "w600k_r50.onnx")
         self._face_runtime_main_thread_ident = threading.get_ident()
         self._face_runtime_local = threading.local()
+        self.face_detector = None
+        self.face_recognizer = None
+        try:
+            print("Loading SCRFD face detector into GPU VRAM...")
+            self.face_detector = model_zoo.get_model(
+                self._face_detector_model_file,
+                providers=self._face_runtime_providers,
+            )
+            self.face_detector.prepare(
+                ctx_id=self._face_runtime_ctx_id,
+                input_size=self._face_detector_input_size,
+                det_thresh=self._face_runtime_det_thresh,
+            )
+            print("SCRFD face detector ready.")
+        except Exception as e:
+            print(
+                "Warning: SCRFD detector initialization failed "
+                f"({type(e).__name__}: {e})"
+            )
+        try:
+            print("Loading ArcFace recognizer into GPU VRAM...")
+            self.face_recognizer = model_zoo.get_model(
+                self._face_recognizer_model_file,
+                providers=self._face_runtime_providers,
+            )
+            self.face_recognizer.prepare(ctx_id=self._face_runtime_ctx_id)
+            print("ArcFace recognizer ready.")
+        except Exception as e:
+            print(
+                "Warning: ArcFace recognizer initialization failed "
+                f"({type(e).__name__}: {e})"
+            )
         self.face_analyzer = None
         try:
             print("Loading InsightFace (buffalo_l) models...")
@@ -2485,16 +2246,6 @@ class ClyptWorker:
                 "Warning: InsightFace initialization failed; clustering will use histogram fallback "
                 f"({type(e).__name__}: {e})"
             )
-        self.mediapipe_face_detector = None
-        try:
-            self.mediapipe_face_detector = self._create_mediapipe_face_detector()
-            print("MediaPipe face fallback ready.")
-        except Exception as e:
-            print(
-                "Warning: MediaPipe face fallback unavailable "
-                f"({type(e).__name__}: {e})"
-            )
-
         # --- Load LR-ASD ---
         self.lrasd_model = None
         self.lrasd_loss_av = None
@@ -3193,202 +2944,6 @@ class ClyptWorker:
                     )
         return out
 
-    def _compute_track_embeddings_for_chunk(
-        self,
-        chunk_video_path: str,
-        chunk_tracks: list[dict],
-    ) -> dict[str, list[float]]:
-        """Compute per-track ArcFace embeddings on sampled person ROIs."""
-        import cv2
-        import numpy as np
-        from collections import defaultdict
-
-        if self.face_analyzer is None or not chunk_tracks:
-            return {}
-
-        by_tid = defaultdict(list)
-        for d in chunk_tracks:
-            by_tid[str(d["track_id"])].append(d)
-        samples_by_tid = {}
-        for tid, dets in by_tid.items():
-            ranked = sorted(
-                dets,
-                key=lambda d: float(d.get("confidence", 0.0))
-                * max(1.0, float(d.get("width", 1.0)) * float(d.get("height", 1.0))),
-                reverse=True,
-            )
-            seen = set()
-            sampled = []
-            for d in ranked:
-                fi = int(d["local_frame_idx"])
-                if fi in seen:
-                    continue
-                seen.add(fi)
-                sampled.append(d)
-                if len(sampled) >= 4:
-                    break
-            samples_by_tid[tid] = sampled
-
-        cap = cv2.VideoCapture(chunk_video_path)
-        if not cap.isOpened():
-            return {}
-
-        out = {}
-        for tid, sampled in samples_by_tid.items():
-            vecs = []
-            for d in sampled:
-                fi = int(d["local_frame_idx"])
-                cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    continue
-                h, w = frame.shape[:2]
-                x1 = max(0, min(w - 1, int(round(float(d["x1"])))))
-                y1 = max(0, min(h - 1, int(round(float(d["y1"])))))
-                x2 = max(0, min(w, int(round(float(d["x2"])))))
-                y2 = max(0, min(h, int(round(float(d["y2"])))))
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                crop = frame[y1:y2, x1:x2]
-                if crop.size == 0:
-                    continue
-                try:
-                    faces = self.face_analyzer.get(crop)
-                except Exception:
-                    continue
-                if not faces:
-                    continue
-                best_face = max(
-                    faces,
-                    key=lambda f: float(
-                        max(0.0, f.bbox[2] - f.bbox[0])
-                        * max(0.0, f.bbox[3] - f.bbox[1])
-                        * getattr(f, "det_score", 1.0)
-                    ),
-                )
-                emb = np.asarray(getattr(best_face, "normed_embedding", None), dtype=np.float32)
-                if emb.size > 0:
-                    vecs.append(emb)
-            if vecs:
-                out[tid] = np.mean(np.stack(vecs, axis=0), axis=0).astype(np.float32).tolist()
-        cap.release()
-        return out
-
-    def _roi_refine_interpolated_tracks(
-        self,
-        chunk_video_path: str,
-        tracks: list[dict],
-        model,
-        width: int,
-        height: int,
-        infer_imgsz: int,
-    ) -> tuple[list[dict], int]:
-        """Refine propagated detections using detector-on-ROI rather than full-frame inference."""
-        import cv2
-        import numpy as np
-        from collections import defaultdict
-
-        if not tracks:
-            return tracks, 0
-
-        # Group propagated detections by local frame for single frame decode.
-        by_local_fi: dict[int, list[int]] = defaultdict(list)
-        for i, d in enumerate(tracks):
-            if str(d.get("source", "")) != "propagated":
-                continue
-            fi = int(d.get("local_frame_idx", -1))
-            if fi < 0:
-                continue
-            by_local_fi[fi].append(i)
-
-        if not by_local_fi:
-            return tracks, 0
-
-        cap = cv2.VideoCapture(chunk_video_path)
-        if not cap.isOpened():
-            return tracks, 0
-
-        refined = 0
-        for local_fi in sorted(by_local_fi.keys()):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(local_fi))
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-
-            fh, fw = frame.shape[:2]
-            for idx in by_local_fi[local_fi]:
-                d = tracks[idx]
-                x1 = float(d.get("x1", 0.0))
-                y1 = float(d.get("y1", 0.0))
-                x2 = float(d.get("x2", x1 + 1.0))
-                y2 = float(d.get("y2", y1 + 1.0))
-                bw = max(1.0, x2 - x1)
-                bh = max(1.0, y2 - y1)
-
-                # ROI predicted around propagated box (expanded context).
-                rx1 = max(0, int(np.floor(x1 - 0.35 * bw)))
-                ry1 = max(0, int(np.floor(y1 - 0.35 * bh)))
-                rx2 = min(fw, int(np.ceil(x2 + 0.35 * bw)))
-                ry2 = min(fh, int(np.ceil(y2 + 0.35 * bh)))
-                if rx2 <= rx1 or ry2 <= ry1:
-                    continue
-                roi = frame[ry1:ry2, rx1:rx2]
-                if roi.size == 0:
-                    continue
-
-                try:
-                    pred = model.predict(
-                        source=roi,
-                        classes=[0],
-                        conf=0.15,
-                        verbose=False,
-                        imgsz=infer_imgsz,
-                        device=self._yolo_device_arg(),
-                    )
-                except Exception:
-                    continue
-                if not pred:
-                    continue
-                r = pred[0]
-                if r.boxes is None or len(r.boxes) == 0:
-                    continue
-
-                roi_boxes = r.boxes.xyxy.cpu().numpy()
-                roi_confs = r.boxes.conf.cpu().numpy()
-                best = None
-                for bxyxy, conf in zip(roi_boxes, roi_confs):
-                    bx1, by1, bx2, by2 = [float(v) for v in bxyxy]
-                    gx1 = min(max(0.0, bx1 + rx1), float(max(0, width - 1)))
-                    gy1 = min(max(0.0, by1 + ry1), float(max(0, height - 1)))
-                    gx2 = min(max(gx1 + 1.0, bx2 + rx1), float(max(1, width)))
-                    gy2 = min(max(gy1 + 1.0, by2 + ry1), float(max(1, height)))
-                    iou = self._bbox_iou_xyxy((x1, y1, x2, y2), (gx1, gy1, gx2, gy2))
-                    score = (0.7 * iou) + (0.3 * float(conf))
-                    if best is None or score > best[0]:
-                        best = (score, gx1, gy1, gx2, gy2, float(conf), iou)
-
-                if best is None:
-                    continue
-                _, gx1, gy1, gx2, gy2, conf_best, iou_best = best
-                if iou_best < 0.2 and conf_best < 0.45:
-                    continue
-
-                cx, cy, nw, nh = self._xyxy_to_xywh(gx1, gy1, gx2, gy2)
-                d["x1"] = float(gx1)
-                d["y1"] = float(gy1)
-                d["x2"] = float(gx2)
-                d["y2"] = float(gy2)
-                d["x_center"] = float(cx)
-                d["y_center"] = float(cy)
-                d["width"] = float(nw)
-                d["height"] = float(nh)
-                d["confidence"] = float(max(float(d.get("confidence", 0.0)), conf_best))
-                d["source"] = "roi_refine"
-                refined += 1
-
-        cap.release()
-        return tracks, refined
-
     def _track_single_chunk(
         self,
         video_path: str,
@@ -3530,7 +3085,10 @@ class ClyptWorker:
                     )
                 )
 
-        track_identity_features, face_pipeline_metrics = self._extract_track_identity_features_from_segments(
+        frame_to_analysis_dets: dict[int, list[dict]] = {}
+        for det in analysis_tracks:
+            frame_to_analysis_dets.setdefault(int(det.get("frame_idx", -1)), []).append(det)
+        track_identity_features, face_track_features, face_pipeline_metrics = self._extract_face_track_features_from_segments(
             video_path=chunk_video_path,
             fps=fps,
             frame_width=width,
@@ -3539,7 +3097,10 @@ class ClyptWorker:
             output_frame_height=output_height,
             coord_scale_x=coord_scale_x,
             coord_scale_y=coord_scale_y,
-            segments=self._split_tracks_into_face_segments(analysis_tracks, self._face_pipeline_segment_frames()),
+            frame_segments=self._split_frame_items_into_segments(
+                frame_to_analysis_dets,
+                self._face_pipeline_segment_frames(),
+            ),
         )
         emb_map = {
             tid: feature.get("embedding")
@@ -3589,6 +3150,7 @@ class ClyptWorker:
             "tracks": tracks,
             "embeddings": emb_map,
             "track_identity_features": track_identity_features,
+            "face_track_features": face_track_features,
             "face_pipeline_metrics": face_pipeline_metrics,
             "ndjson_path": ndjson_path,
         }
@@ -3625,7 +3187,7 @@ class ClyptWorker:
         requested_face_pipeline_workers = self._requested_face_pipeline_workers()
         face_pipeline_workers = self._face_pipeline_workers()
         face_pipeline_start_frame = self._face_pipeline_start_frame()
-        pending_face_segment_tracks: list[dict] = []
+        pending_face_segment_frames: list[tuple[int, list[dict]]] = []
         face_segment_futures = []
         face_segments_submitted = 0
 
@@ -3654,20 +3216,25 @@ class ClyptWorker:
         n_boxes = 0
         with ThreadPoolExecutor(max_workers=face_pipeline_workers) as face_pool:
             for frame_idx, r in enumerate(results, start=1):
+                frame_face_dets: list[dict] = []
                 if r.boxes is None or r.boxes.id is None:
                     if (
                         frame_idx >= face_pipeline_start_frame
                         and frame_idx % face_pipeline_segment_frames == 0
-                        and pending_face_segment_tracks
+                        and pending_face_segment_frames
                     ):
                         face_segment_futures.append(
                             face_pool.submit(
-                                self._extract_track_identity_features_for_segment,
+                                self._extract_face_track_features_for_frame_segment,
                                 video_path=video_path,
-                                segment_tracks=list(pending_face_segment_tracks),
+                                frame_items=list(pending_face_segment_frames),
                                 fps=fps,
                                 frame_width=width,
                                 frame_height=height,
+                                output_frame_width=source_width or width,
+                                output_frame_height=source_height or height,
+                                coord_scale_x=scale_x,
+                                coord_scale_y=scale_y,
                             )
                         )
                         face_segments_submitted += 1
@@ -3677,7 +3244,7 @@ class ClyptWorker:
                                 f"{face_segments_submitted} segments, "
                                 f"workers={face_pipeline_workers}"
                             )
-                        pending_face_segment_tracks = []
+                        pending_face_segment_frames = []
                     continue
 
                 boxes_xyxy = r.boxes.xyxy.cpu().numpy()
@@ -3731,7 +3298,7 @@ class ClyptWorker:
                         pts = obb_polys[i].reshape(-1, 2).tolist()
                         out["geometry_type"] = "obb"
                         out["polygon"] = [[float(px), float(py)] for px, py in pts]
-                    pending_face_segment_tracks.append(dict(out))
+                    frame_face_dets.append(dict(out))
                     projected_out = self._scale_detection_geometry(
                         out,
                         scale_x=(1.0 / max(scale_x, 1e-6)),
@@ -3760,16 +3327,19 @@ class ClyptWorker:
                     tracks.append(projected_out)
                     n_boxes += 1
 
+                if frame_face_dets:
+                    pending_face_segment_frames.append((int(frame_idx - 1), frame_face_dets))
+
                 if (
                     frame_idx >= face_pipeline_start_frame
                     and frame_idx % face_pipeline_segment_frames == 0
-                    and pending_face_segment_tracks
+                    and pending_face_segment_frames
                 ):
                     face_segment_futures.append(
                         face_pool.submit(
-                            self._extract_track_identity_features_for_segment,
+                            self._extract_face_track_features_for_frame_segment,
                             video_path=tracking_video_path,
-                            segment_tracks=list(pending_face_segment_tracks),
+                            frame_items=list(pending_face_segment_frames),
                             fps=fps,
                             frame_width=width,
                             frame_height=height,
@@ -3786,7 +3356,7 @@ class ClyptWorker:
                             f"{face_segments_submitted} segments, "
                             f"workers={face_pipeline_workers}"
                         )
-                    pending_face_segment_tracks = []
+                    pending_face_segment_frames = []
 
                 if frame_idx % log_every_n_frames == 0:
                     elapsed = max(1e-6, time.time() - started)
@@ -3798,12 +3368,12 @@ class ClyptWorker:
                         f"{n_boxes} boxes, {fps_eff:.1f} fps"
                     )
 
-            if pending_face_segment_tracks:
+            if pending_face_segment_frames:
                 face_segment_futures.append(
                     face_pool.submit(
-                        self._extract_track_identity_features_for_segment,
+                        self._extract_face_track_features_for_frame_segment,
                         video_path=tracking_video_path,
-                        segment_tracks=list(pending_face_segment_tracks),
+                        frame_items=list(pending_face_segment_frames),
                         fps=fps,
                         frame_width=width,
                         frame_height=height,
@@ -3830,7 +3400,7 @@ class ClyptWorker:
                 len({str(t.get("track_id")) for t in tracks}) / max(1.0, len(tracks) ** 0.5)
             ),
         }
-        track_identity_features, face_pipeline_metrics = self._extract_track_identity_features_from_segments(
+        track_identity_features, face_track_features, face_pipeline_metrics = self._extract_face_track_features_from_segments(
             video_path=tracking_video_path,
             fps=fps,
             frame_width=width,
@@ -3845,11 +3415,14 @@ class ClyptWorker:
         metrics["analysis_context"] = analysis_context
         if track_identity_features:
             metrics["track_identity_features"] = track_identity_features
+        if face_track_features:
+            metrics["face_track_features"] = face_track_features
         print(
             "  Face pipeline complete: "
             f"{int(face_pipeline_metrics.get('face_pipeline_segments_processed', 0))}/"
             f"{int(face_pipeline_metrics.get('face_pipeline_segment_count', len(face_segment_futures)))} segments, "
-            f"{int(face_pipeline_metrics.get('face_pipeline_track_count', len(track_identity_features or {})))} tracks"
+            f"{int(face_pipeline_metrics.get('face_track_count', len(face_track_features or {})))} face tracks, "
+            f"{int(face_pipeline_metrics.get('face_pipeline_track_count', len(track_identity_features or {})))} body-linked tracks"
         )
         print(
             "Tracking complete: "
@@ -4113,6 +3686,7 @@ class ClyptWorker:
 
         unified = sorted(dedupe.values(), key=lambda x: (int(x["frame_idx"]), str(x["track_id"])))
         merged_feature_maps: list[dict[str, dict]] = []
+        merged_face_track_feature_maps: list[dict[str, dict]] = []
         for chunk_data in chunk_results:
             cidx = int(chunk_data["chunk_idx"])
             local_features = chunk_data.get("track_identity_features", {}) or {}
@@ -4124,7 +3698,30 @@ class ClyptWorker:
                 mapped_features[gid] = feature
             if mapped_features:
                 merged_feature_maps.append(mapped_features)
+            local_face_track_features = chunk_data.get("face_track_features", {}) or {}
+            mapped_face_track_features: dict[str, dict] = {}
+            for face_track_id, feature in local_face_track_features.items():
+                if not isinstance(feature, dict):
+                    continue
+                mapped_feature = dict(feature)
+                associated_counts = {}
+                for local_tid, count in dict(feature.get("associated_track_counts", {})).items():
+                    gid = local_to_global.get((cidx, str(local_tid)))
+                    if not gid:
+                        continue
+                    associated_counts[gid] = associated_counts.get(gid, 0) + int(count)
+                mapped_feature["associated_track_counts"] = associated_counts
+                dominant_local_tid = str(feature.get("dominant_track_id", "") or "")
+                mapped_feature["dominant_track_id"] = (
+                    local_to_global.get((cidx, dominant_local_tid))
+                    if dominant_local_tid
+                    else None
+                )
+                mapped_face_track_features[str(face_track_id)] = mapped_feature
+            if mapped_face_track_features:
+                merged_face_track_feature_maps.append(mapped_face_track_features)
         stitched_track_identity_features = self._merge_track_identity_feature_sets(merged_feature_maps)
+        stitched_face_track_features = self._merge_face_track_feature_sets(merged_face_track_feature_maps)
         total_track_ids = len(set(d["track_id"] for d in unified))
         fragments = sum(1 for _, tid in dedupe.keys() if tid is not None)
         idf1_proxy = (2.0 * matches) / max(1.0, (2.0 * matches) + unmatched_left_total + unmatched_right_total)
@@ -4156,6 +3753,9 @@ class ClyptWorker:
         if stitched_track_identity_features:
             metrics["track_identity_features"] = stitched_track_identity_features
             metrics["face_pipeline_track_count"] = len(stitched_track_identity_features)
+        if stitched_face_track_features:
+            metrics["face_track_features"] = stitched_face_track_features
+            metrics["face_track_count"] = len(stitched_face_track_features)
         _ = fragments
         return unified, metrics
 
@@ -4188,6 +3788,7 @@ class ClyptWorker:
         tracks: list[dict],
         track_to_dets: dict[str, list[dict]] | None = None,
         track_identity_features: dict[str, dict] | None = None,
+        face_track_features: dict[str, dict] | None = None,
     ) -> list[dict]:
         """Cluster fragmented BoT-SORT track IDs into global person IDs via GPU face embeddings."""
         import os
@@ -4253,6 +3854,10 @@ class ClyptWorker:
         )
         covisibility_conflict_rejections = 0
         histogram_attach_rejections = 0
+        face_track_seeded_tracklets = 0
+        face_track_raw_clusters = 0
+        seed_label_by_tid: dict[str, int] = {}
+        seed_embedding_by_tid: dict[str, np.ndarray] = {}
 
         embeddings = {}  # track_id → 512D face/hist embedding
         fallback_ids = []  # track_ids where face encoding failed
@@ -4286,6 +3891,69 @@ class ClyptWorker:
                     frame_idx = int(observation.get("frame_idx", -1))
                     if frame_idx >= 0:
                         precomputed_identity_frames.add(frame_idx)
+
+        if isinstance(face_track_features, dict) and face_track_features:
+            face_track_ids = sorted(
+                [
+                    str(face_track_id)
+                    for face_track_id, feature in face_track_features.items()
+                    if isinstance(feature, dict) and feature.get("embedding") is not None
+                ]
+            )
+            if face_track_ids:
+                X_face_tracks = np.array(
+                    [
+                        np.asarray(face_track_features[face_track_id]["embedding"], dtype=np.float32)
+                        for face_track_id in face_track_ids
+                    ],
+                    dtype=np.float32,
+                )
+                face_track_labels = DBSCAN(
+                    eps=dbscan_eps,
+                    min_samples=dbscan_min_samples,
+                    metric="cosine",
+                ).fit(X_face_tracks).labels_.astype(int)
+                if len(set(face_track_labels) - {-1}) == 0:
+                    face_track_labels = np.arange(len(face_track_ids), dtype=int)
+                face_track_raw_clusters = len(set(int(lbl) for lbl in face_track_labels if int(lbl) >= 0))
+                print(
+                    "  Face-track clustering: "
+                    f"raw_clusters={face_track_raw_clusters}, tracklets={len(face_track_ids)}"
+                )
+                cluster_centroids: dict[int, list[np.ndarray]] = {}
+                votes_by_tid: dict[str, dict[int, int]] = {}
+                for idx, face_track_id in enumerate(face_track_ids):
+                    label = int(face_track_labels[idx])
+                    if label < 0:
+                        continue
+                    cluster_centroids.setdefault(label, []).append(X_face_tracks[idx])
+                    feature = face_track_features.get(face_track_id, {})
+                    for tid, count in dict(feature.get("associated_track_counts", {})).items():
+                        tid = str(tid)
+                        if not tid:
+                            continue
+                        votes_by_tid.setdefault(tid, {})
+                        votes_by_tid[tid][label] = votes_by_tid[tid].get(label, 0) + int(count)
+                centroid_by_label = {
+                    int(label): np.mean(np.stack(vecs, axis=0), axis=0).astype(np.float32)
+                    for label, vecs in cluster_centroids.items()
+                    if vecs
+                }
+                for tid, vote_map in votes_by_tid.items():
+                    if not vote_map:
+                        continue
+                    best_label, best_votes = max(vote_map.items(), key=lambda item: item[1])
+                    if best_votes <= 0:
+                        continue
+                    seed_label_by_tid[tid] = int(best_label)
+                    if best_label in centroid_by_label:
+                        seed_embedding_by_tid[tid] = centroid_by_label[best_label]
+                face_track_seeded_tracklets = len(seed_label_by_tid)
+                if face_track_seeded_tracklets:
+                    print(
+                        "  Face-track-first seeding: "
+                        f"{face_track_seeded_tracklets} tracklets"
+                    )
 
         sampled_by_tid, needed_frames = _build_cluster_sample_plan(tracklets, extraction_cfg)
         missing_sampled_by_tid = {
@@ -4448,6 +4116,12 @@ class ClyptWorker:
             extraction_result.get("face_reject_lowq_count", face_reject_lowq_count)
         )
 
+        for tid, emb in seed_embedding_by_tid.items():
+            if tid not in embeddings:
+                embeddings[tid] = np.asarray(emb, dtype=np.float32)
+            if tid in fallback_ids:
+                fallback_ids = [fallback_tid for fallback_tid in fallback_ids if fallback_tid != tid]
+
         if not embeddings:
             print("  No embeddings extracted, skipping clustering")
             self._last_clustering_metrics = {
@@ -4468,8 +4142,9 @@ class ClyptWorker:
         # Separate face embeddings from histogram fallbacks. We do NOT cluster both
         # together because they live in different feature spaces.
         tid_order_all = sorted(embeddings.keys())
-        face_tids = [tid for tid in tid_order_all if tid not in fallback_ids]
-        hist_tids = [tid for tid in tid_order_all if tid in fallback_ids]
+        seeded_tids = set(seed_label_by_tid.keys())
+        face_tids = [tid for tid in tid_order_all if tid not in fallback_ids and tid not in seeded_tids]
+        hist_tids = [tid for tid in tid_order_all if tid in fallback_ids and tid not in seeded_tids]
         print(
             "  Face quality gate: "
             f"accepted={face_accept_count}, rejected_lowq={face_reject_lowq_count}, "
@@ -4518,8 +4193,11 @@ class ClyptWorker:
             dh = np.log(max(a[3], 1.0) / max(b[3], 1.0))
             return float(dx * dx + dy * dy + 0.25 * (dw * dw + dh * dh))
 
-        id_map: dict[str, str] = {}
-        n_face_clusters = 0
+        id_map: dict[str, str] = {
+            tid: f"Global_Person_{int(label)}"
+            for tid, label in seed_label_by_tid.items()
+        }
+        n_face_clusters = len(set(seed_label_by_tid.values()))
 
         if face_tids:
             tid_order_face = sorted(face_tids)
@@ -4684,16 +4362,17 @@ class ClyptWorker:
             final_label_map = {old: new for new, old in enumerate(unique_final_labels)}
             labels = np.array([final_label_map[int(lbl)] for lbl in labels], dtype=int)
 
+            label_offset = n_face_clusters
             for tid, label in zip(tid_order_face, labels):
-                id_map[tid] = f"Global_Person_{int(label)}"
-            n_face_clusters = len(set(labels))
+                id_map[tid] = f"Global_Person_{int(label_offset + int(label))}"
+            n_face_clusters = label_offset + len(set(labels))
 
         # Attach histogram-only tracklets to nearest face cluster by spatial signature.
         if hist_tids:
             if n_face_clusters > 0:
                 face_label_by_tid = {
                     tid: int(id_map[tid].split("_")[-1])
-                    for tid in face_tids
+                    for tid in sorted(set(face_tids) | seeded_tids)
                     if tid in id_map
                 }
                 cluster_sigs: dict[int, list[np.ndarray]] = {}
@@ -4774,6 +4453,8 @@ class ClyptWorker:
             ),
             "covisibility_conflict_rejections": covisibility_conflict_rejections,
             "histogram_attach_rejections": histogram_attach_rejections,
+            "face_track_raw_clusters": face_track_raw_clusters,
+            "face_track_seeded_tracklets": face_track_seeded_tracklets,
             "cluster_cross_merge_cos_threshold": cross_cluster_merge_base_cos,
             "cluster_hist_attach_max_sig": histogram_attach_max_sig,
             **repair_metrics,
@@ -4953,10 +4634,24 @@ class ClyptWorker:
                         }
 
             if crop is None:
-                det_crop, det_anchor = self._detect_face_in_person_det(frame, det)
-                if det_crop is not None:
-                    crop = det_crop
-                    anchor = det_anchor
+                if bw > 1e-6 and bh > 1e-6:
+                    head_x1 = int(round(cx - (0.28 * bw)))
+                    head_x2 = int(round(cx + (0.28 * bw)))
+                    head_y1 = int(round(cy - (0.48 * bh)))
+                    head_y2 = int(round(cy - (0.02 * bh)))
+                    head_x1 = max(0, min(fw - 1, head_x1))
+                    head_y1 = max(0, min(fh - 1, head_y1))
+                    head_x2 = max(head_x1 + 1, min(fw, head_x2))
+                    head_y2 = max(head_y1 + 1, min(fh, head_y2))
+                    face_crop = frame[head_y1:head_y2, head_x1:head_x2]
+                    if face_crop is not None and face_crop.size > 0:
+                        crop = cv2.resize(face_crop, (112, 112), interpolation=cv2.INTER_LINEAR)
+                        anchor = {
+                            "x_offset": (float(head_x1) - cx) / bw,
+                            "y_offset": (float(head_y1) - cy) / bh,
+                            "w_ratio": float(head_x2 - head_x1) / bw,
+                            "h_ratio": float(head_y2 - head_y1) / bh,
+                        }
 
             return _cache_and_return(crop, anchor)
 
@@ -5817,6 +5512,7 @@ class ClyptWorker:
         """Finalize extraction from precomputed ASR words + tracking tracks."""
         metrics = dict(tracking_metrics) if isinstance(tracking_metrics, dict) else {}
         track_identity_features = metrics.pop("track_identity_features", None)
+        face_track_features = metrics.pop("face_track_features", None)
         analysis_context = metrics.get("analysis_context") if isinstance(metrics.get("analysis_context"), dict) else None
         metrics["schema_pass_rate"] = self._tracking_contract_pass_rate(tracks)
         self._validate_tracking_contract(tracks)
@@ -5836,6 +5532,7 @@ class ClyptWorker:
             tracks,
             track_to_dets=track_to_dets,
             track_identity_features=track_identity_features,
+            face_track_features=face_track_features,
         )
         cluster_elapsed_s = time.perf_counter() - cluster_started_at
         metrics["cluster_tracklets_wallclock_s"] = round(cluster_elapsed_s, 3)

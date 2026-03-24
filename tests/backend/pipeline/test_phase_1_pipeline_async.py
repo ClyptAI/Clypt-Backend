@@ -212,7 +212,7 @@ def test_phase_1_main_waits_for_manifest_and_writes_compat_outputs(configured_ph
             "shared_analysis_proxy_enabled": True,
             "framing_policy": "single_person_plus_two_speaker",
             "two_speaker_layout_policy": "shared_two_shot_or_explicit_split",
-            "face_detection_provenance": "insightface_roi",
+            "face_detection_provenance": "scrfd_fullframe",
             "notes": (
                 "Eval profiles request LR-ASD and disable heuristic binding for inspection. "
                 "The worker remains the source of truth for actual extraction runtime."
@@ -329,7 +329,7 @@ def test_materialize_phase1_manifest_uses_compatibility_bridge_face_fallback_and
 
     persisted_visual = json.loads((output_dir / "phase_1_visual.json").read_text())
     persisted_controls = json.loads((output_dir / "phase_1_runtime_controls.json").read_text())
-    assert persisted_visual["runtime_controls"]["face_detection_provenance"] == "insightface_roi"
+    assert persisted_visual["runtime_controls"]["face_detection_provenance"] == "scrfd_fullframe"
     assert persisted_controls["speaker_binding_mode"] == "lrasd"
 
 
@@ -347,7 +347,7 @@ def test_materialize_phase1_manifest_preserves_true_face_tracks_when_present(
             "face_track_index": 0,
             "track_id": "Global_Person_0",
             "source": "face_detector",
-            "provenance": "insightface_roi",
+            "provenance": "scrfd_fullframe",
             "timestamped_objects": [
                 {
                     "time_ms": 0,
@@ -360,7 +360,7 @@ def test_materialize_phase1_manifest_preserves_true_face_tracks_when_present(
                     "track_id": "Global_Person_0",
                     "confidence": 0.91,
                     "source": "face_detector",
-                    "provenance": "insightface_roi",
+                    "provenance": "scrfd_fullframe",
                 }
             ],
         }
@@ -390,7 +390,7 @@ def test_materialize_phase1_manifest_preserves_true_face_tracks_when_present(
     )
 
     assert visual_payload["face_detections"][0]["source"] == "face_detector"
-    assert visual_payload["face_detections"][0]["provenance"] == "insightface_roi"
+    assert visual_payload["face_detections"][0]["provenance"] == "scrfd_fullframe"
     assert visual_payload["person_detections"][0]["source"] == "person_tracker"
     assert visual_payload["proxy_face_detections"][0]["source"] == "compatibility_bridge"
     assert visual_payload["proxy_face_detections"][0]["provenance"]["kind"] == "compatibility_bridge"
