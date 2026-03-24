@@ -290,7 +290,7 @@ def _dashboard_html() -> str:
     <div class="controls">
       <div>
         <label>Remote Mode</label>
-        <input id="remoteToggle" value="1" />
+        <input id="remoteToggle" value="0" />
       </div>
       <div>
         <label>Refresh (sec)</label>
@@ -347,6 +347,9 @@ def _dashboard_html() -> str:
     async function loadJobs() {
       const res = await fetch(apiPath(`/dashboard/api/jobs?limit=${jobLimit()}`));
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || `Failed to load jobs (${res.status})`);
+      }
       renderJobs(data.jobs || []);
       return data.jobs || [];
     }
@@ -358,6 +361,12 @@ def _dashboard_html() -> str:
       ]);
       const job = await statusRes.json();
       const logs = await logsRes.json();
+      if (!statusRes.ok) {
+        throw new Error(job.detail || `Failed to load job (${statusRes.status})`);
+      }
+      if (!logsRes.ok) {
+        throw new Error(logs.detail || `Failed to load logs (${logsRes.status})`);
+      }
       renderDetail(job, logs);
     }
 
@@ -430,12 +439,22 @@ def _dashboard_html() -> str:
     }
 
     async function refresh() {
-      const jobs = await loadJobs();
-      if (!jobs.length) return;
-      if (!state.selectedJobId) state.selectedJobId = jobs[0].job_id;
-      const selected = jobs.find((job) => job.job_id === state.selectedJobId) || jobs[0];
-      state.selectedJobId = selected.job_id;
-      await loadJob(selected.job_id);
+      try {
+        const jobs = await loadJobs();
+        if (!jobs.length) {
+          qs('detailBody').innerHTML = '<div class="empty">Choose a job to inspect progress.</div>';
+          return;
+        }
+        if (!state.selectedJobId) state.selectedJobId = jobs[0].job_id;
+        const selected = jobs.find((job) => job.job_id === state.selectedJobId) || jobs[0];
+        state.selectedJobId = selected.job_id;
+        await loadJob(selected.job_id);
+      } catch (error) {
+        const message = escapeHtml(error?.message || String(error));
+        qs('jobsMeta').textContent = 'Error';
+        qs('jobsList').innerHTML = `<div class="empty">${message}</div>`;
+        qs('detailBody').innerHTML = `<div class="empty">${message}</div>`;
+      }
     }
 
     function armTimer() {

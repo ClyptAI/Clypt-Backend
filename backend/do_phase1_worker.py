@@ -104,9 +104,6 @@ ASR_MODEL_NAME = "nvidia/parakeet-tdt-1.1b"
 LRASD_MODEL_PATH = "/root/.cache/clypt/finetuning_TalkSet.model"
 LRASD_REPO_ROOT = "/root/lrasd"
 YOLO_WEIGHTS_PATH = "yolo26s.pt"
-YOLO_ONNX_PATH = "/root/.cache/clypt/yolo26s.onnx"
-YOLO_ENGINE_PATH = "/root/.cache/clypt/yolo26s.engine"
-YOLO_OPENVINO_DIR = "/root/.cache/clypt/yolo26s_openvino_model"
 PHASE1_SCHEMA_VERSION = "2.0.0"
 PHASE1_TASK_TYPE = "person_tracking"
 PHASE1_COORDINATE_SPACE = "absolute_original_frame_xyxy"
@@ -363,57 +360,6 @@ def download_yolo_model():
     YOLO(YOLO_WEIGHTS_PATH)
 
 
-def prepare_yolo_onnx_tensorrt():
-    """Best-effort export to ONNX + TensorRT engine at build time.
-
-    If TensorRT tooling is unavailable during image build, we keep the worker
-    functional by falling back to PyTorch weights at runtime.
-    """
-    import os
-    import subprocess
-    from ultralytics import YOLO
-
-    os.makedirs("/root/.cache/clypt", exist_ok=True)
-    model = YOLO(YOLO_WEIGHTS_PATH)
-
-    if not os.path.exists(YOLO_ONNX_PATH):
-        try:
-            print("Exporting YOLO26s to ONNX...")
-            onnx_out = model.export(format="onnx", imgsz=640, dynamic=False, simplify=True, opset=17)
-            if isinstance(onnx_out, str) and os.path.exists(onnx_out) and onnx_out != YOLO_ONNX_PATH:
-                os.replace(onnx_out, YOLO_ONNX_PATH)
-        except Exception as e:
-            print(f"Warning: ONNX export failed ({type(e).__name__}: {e})")
-
-    if not os.path.exists(YOLO_ENGINE_PATH) and os.path.exists(YOLO_ONNX_PATH):
-        try:
-            print("Compiling YOLO26s ONNX -> TensorRT engine...")
-            subprocess.run(
-                [
-                    "trtexec",
-                    f"--onnx={YOLO_ONNX_PATH}",
-                    f"--saveEngine={YOLO_ENGINE_PATH}",
-                    "--fp16",
-                    "--memPoolSize=workspace:4096",
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as e:
-            print(
-                "Warning: TensorRT engine compile unavailable; "
-                f"using PyTorch/ONNX fallback ({type(e).__name__}: {e})"
-            )
-
-    if not os.path.exists(YOLO_OPENVINO_DIR):
-        try:
-            print("Exporting YOLO26s to OpenVINO...")
-            model.export(format="openvino")
-        except Exception as e:
-            print(f"Warning: OpenVINO export failed ({type(e).__name__}: {e})")
-
-
 def download_lrasd_model():
     """Cache LR-ASD checkpoint + architecture files at image build time."""
     import os
@@ -507,7 +453,6 @@ clypt_image = (
     # Step 3: Cache model weights at build time
     .run_function(download_asr_model)
     .run_function(download_yolo_model)
-    .run_function(prepare_yolo_onnx_tensorrt)
     .run_function(download_lrasd_model)
     .run_function(download_insightface_model)
 )
@@ -910,20 +855,7 @@ class ClyptWorker:
         }
 
     @staticmethod
-    def _face_ledger_workers() -> int:
-        try:
-            requested = int(
-                os.getenv(
-                    "CLYPT_FACE_LEDGER_WORKERS",
-                    str(ClyptWorker._face_pipeline_workers()),
-                )
-            )
-        except Exception:
-            requested = ClyptWorker._face_pipeline_workers()
-        return max(1, requested)
-
-    @staticmethod
-    def _face_pipeline_workers() -> int:
+    def _requested_face_pipeline_workers() -> int:
         raw = os.getenv("CLYPT_FACE_PIPELINE_WORKERS", "").strip()
         if not raw:
             raw = os.getenv("CLYPT_FACE_LEDGER_WORKERS", "").strip()
@@ -932,6 +864,54 @@ class ClyptWorker:
         except Exception:
             requested = int(os.cpu_count() or 8)
         return max(1, min(32, requested))
+
+    @staticmethod
+    def _face_pipeline_gpu_worker_cap() -> int:
+        raw = os.getenv("CLYPT_FACE_PIPELINE_GPU_WORKERS", "").strip()
+        try:
+            requested = int(raw) if raw else 1
+        except Exception:
+            requested = 1
+        return max(1, min(4, requested))
+
+    @staticmethod
+    def _face_pipeline_start_frame() -> int:
+        raw = os.getenv("CLYPT_FACE_PIPELINE_START_FRAME", "").strip()
+        try:
+            requested = int(raw) if raw else 600
+        except Exception:
+            requested = 600
+        return max(0, requested)
+
+    def _face_pipeline_uses_gpu(self) -> bool:
+        if getattr(self, "face_analyzer", None) is None:
+            return False
+        return bool(getattr(self, "_face_runtime_ctx_id", 0) >= 0)
+
+    def _face_pipeline_workers(self) -> int:
+        requested = self._requested_face_pipeline_workers()
+        if self._face_pipeline_uses_gpu():
+            return min(requested, self._face_pipeline_gpu_worker_cap())
+        return requested
+
+    @staticmethod
+    def _requested_face_ledger_workers(face_pipeline_default: int) -> int:
+        try:
+            requested = int(
+                os.getenv(
+                    "CLYPT_FACE_LEDGER_WORKERS",
+                    str(face_pipeline_default),
+                )
+            )
+        except Exception:
+            requested = face_pipeline_default
+        return max(1, requested)
+
+    def _face_ledger_workers(self) -> int:
+        requested = self._requested_face_ledger_workers(self._face_pipeline_workers())
+        if self._face_pipeline_uses_gpu():
+            return min(requested, self._face_pipeline_gpu_worker_cap())
+        return requested
 
     @staticmethod
     def _face_pipeline_segment_frames() -> int:
@@ -1108,12 +1088,86 @@ class ClyptWorker:
         size_bonus = 1.0 - min(1.0, abs(width_ratio - 0.24) / 0.20)
         return max(0.0, (0.35 * center_x_bonus) + (0.35 * center_y_bonus) + (0.30 * size_bonus))
 
+    def _create_face_analyzer(self):
+        from insightface.app import FaceAnalysis
+
+        providers = list(
+            getattr(
+                self,
+                "_face_runtime_providers",
+                ["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+        )
+        analyzer = FaceAnalysis(
+            name=str(getattr(self, "_face_runtime_name", "buffalo_l")),
+            providers=providers,
+        )
+        analyzer.prepare(
+            ctx_id=int(getattr(self, "_face_runtime_ctx_id", 0)),
+            det_size=tuple(getattr(self, "_face_runtime_det_size", (640, 640))),
+            det_thresh=float(getattr(self, "_face_runtime_det_thresh", 0.15)),
+        )
+        return analyzer
+
+    def _get_thread_face_analyzer(self):
+        import threading
+
+        shared = getattr(self, "face_analyzer", None)
+        if shared is None:
+            return None
+
+        main_thread_ident = getattr(self, "_face_runtime_main_thread_ident", None)
+        if main_thread_ident is None or threading.get_ident() == main_thread_ident:
+            return shared
+
+        local = getattr(self, "_face_runtime_local", None)
+        if local is None:
+            local = threading.local()
+            self._face_runtime_local = local
+
+        analyzer = getattr(local, "face_analyzer", None)
+        if analyzer is None:
+            analyzer = self._create_face_analyzer()
+            local.face_analyzer = analyzer
+        return analyzer
+
+    def _create_mediapipe_face_detector(self):
+        import mediapipe as mp
+
+        return mp.solutions.face_detection.FaceDetection(
+            model_selection=1,
+            min_detection_confidence=0.20,
+        )
+
+    def _get_thread_mediapipe_face_detector(self):
+        import threading
+
+        shared = getattr(self, "mediapipe_face_detector", None)
+        if shared is None:
+            return None
+
+        main_thread_ident = getattr(self, "_face_runtime_main_thread_ident", None)
+        if main_thread_ident is None or threading.get_ident() == main_thread_ident:
+            return shared
+
+        local = getattr(self, "_face_runtime_local", None)
+        if local is None:
+            local = threading.local()
+            self._face_runtime_local = local
+
+        detector = getattr(local, "mediapipe_face_detector", None)
+        if detector is None:
+            detector = self._create_mediapipe_face_detector()
+            local.mediapipe_face_detector = detector
+        return detector
+
     def _analyze_face_in_person_det(self, frame_rgb, det: dict):
         """Detect and analyze the strongest face inside a person bbox."""
         import cv2
         import numpy as np
 
-        if self.face_analyzer is None or frame_rgb is None:
+        face_analyzer = self._get_thread_face_analyzer()
+        if face_analyzer is None or frame_rgb is None:
             return None
 
         fh, fw = frame_rgb.shape[:2]
@@ -1139,9 +1193,9 @@ class ClyptWorker:
             return None
 
         faces = None
-        if self.face_analyzer is not None:
+        if face_analyzer is not None:
             try:
-                faces = self.face_analyzer.get(cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR))
+                faces = face_analyzer.get(cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR))
             except Exception:
                 faces = None
         if not faces:
@@ -1243,7 +1297,7 @@ class ClyptWorker:
         import cv2
         import numpy as np
 
-        detector = getattr(self, "mediapipe_face_detector", None)
+        detector = self._get_thread_mediapipe_face_detector()
         if detector is None or frame_rgb is None or roi_rgb is None:
             return None
 
@@ -1619,6 +1673,7 @@ class ClyptWorker:
         metrics = {
             "face_pipeline_mode": mode,
             "face_pipeline_worker_count": workers,
+            "face_pipeline_gpu_enabled": self._face_pipeline_uses_gpu(),
             "face_pipeline_segment_count": len(segments) if segment_futures is None else len(segment_futures),
             "face_pipeline_segments_processed": len(segment_results),
             "face_pipeline_track_count": len(merged),
@@ -2367,6 +2422,7 @@ class ClyptWorker:
         """Load Parakeet, YOLO, and LR-ASD into GPU VRAM."""
         import os
         import sys
+        import threading
         import nemo.collections.asr as nemo_asr
         import torch
         from insightface.app import FaceAnalysis
@@ -2401,30 +2457,28 @@ class ClyptWorker:
         # --- Load YOLOv26 ---
         print("Loading YOLO26s into GPU VRAM...")
         self.yolo_model = YOLO(YOLO_WEIGHTS_PATH)
-        try:
-            # Avoid runtime TensorRT export on cold start; only load an existing
-            # prebuilt engine if it is already present.
-            if os.path.exists(YOLO_ENGINE_PATH):
-                print("Loading YOLO26s TensorRT engine...")
-                self.yolo_model = YOLO(YOLO_ENGINE_PATH)
-            else:
-                print("Using PyTorch YOLO26s weights (no TensorRT engine found).")
-        except Exception as e:
-            print(
-                "Warning: TensorRT engine load failed; using PyTorch YOLO model "
-                f"({type(e).__name__}: {e})"
-            )
 
         self.gpu_device = torch.device("cuda")
+        self._face_runtime_name = "buffalo_l"
+        self._face_runtime_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        self._face_runtime_ctx_id = 0 if torch.cuda.is_available() else -1
+        self._face_runtime_det_size = (640, 640)
+        self._face_runtime_det_thresh = 0.15
+        self._face_runtime_main_thread_ident = threading.get_ident()
+        self._face_runtime_local = threading.local()
         self.face_analyzer = None
         try:
             print("Loading InsightFace (buffalo_l) models...")
             self.face_analyzer = FaceAnalysis(
-                name="buffalo_l",
-                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                name=self._face_runtime_name,
+                providers=self._face_runtime_providers,
             )
             # Lower threshold to retain extreme profile faces in podcast footage.
-            self.face_analyzer.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.15)
+            self.face_analyzer.prepare(
+                ctx_id=self._face_runtime_ctx_id,
+                det_size=self._face_runtime_det_size,
+                det_thresh=self._face_runtime_det_thresh,
+            )
             print("InsightFace ready.")
         except Exception as e:
             print(
@@ -2433,12 +2487,7 @@ class ClyptWorker:
             )
         self.mediapipe_face_detector = None
         try:
-            import mediapipe as mp
-
-            self.mediapipe_face_detector = mp.solutions.face_detection.FaceDetection(
-                model_selection=1,
-                min_detection_confidence=0.20,
-            )
+            self.mediapipe_face_detector = self._create_mediapipe_face_detector()
             print("MediaPipe face fallback ready.")
         except Exception as e:
             print(
@@ -2616,8 +2665,13 @@ class ClyptWorker:
     def _build_tracking_model():
         from ultralytics import YOLO
 
-        model_path = YOLO_ENGINE_PATH if os.path.exists(YOLO_ENGINE_PATH) else YOLO_WEIGHTS_PATH
-        return YOLO(model_path)
+        return YOLO(YOLO_WEIGHTS_PATH)
+
+    @staticmethod
+    def _yolo_device_arg():
+        import torch
+
+        return 0 if torch.cuda.is_available() else "cpu"
 
     def _select_tracking_mode(self) -> str:
         requested_mode = os.getenv("CLYPT_TRACKING_MODE", "auto").strip().lower()
@@ -3289,6 +3343,7 @@ class ClyptWorker:
                         conf=0.15,
                         verbose=False,
                         imgsz=infer_imgsz,
+                        device=self._yolo_device_arg(),
                     )
                 except Exception:
                     continue
@@ -3401,6 +3456,7 @@ class ClyptWorker:
             verbose=False,
             vid_stride=stride,
             imgsz=infer_imgsz,
+            device=self._yolo_device_arg(),
         )
 
         tracks = []
@@ -3566,10 +3622,21 @@ class ClyptWorker:
         started = time.time()
         log_every_n_frames = 600
         face_pipeline_segment_frames = self._face_pipeline_segment_frames()
+        requested_face_pipeline_workers = self._requested_face_pipeline_workers()
         face_pipeline_workers = self._face_pipeline_workers()
+        face_pipeline_start_frame = self._face_pipeline_start_frame()
         pending_face_segment_tracks: list[dict] = []
         face_segment_futures = []
         face_segments_submitted = 0
+
+        print(
+            "  Face pipeline config: "
+            f"requested_workers={requested_face_pipeline_workers}, "
+            f"effective_workers={face_pipeline_workers}, "
+            f"gpu={'on' if self._face_pipeline_uses_gpu() else 'off'}, "
+            f"start_frame={face_pipeline_start_frame}, "
+            f"segment_frames={face_pipeline_segment_frames}"
+        )
 
         results = model.track(
             source=tracking_video_path,
@@ -3580,6 +3647,7 @@ class ClyptWorker:
             verbose=False,
             vid_stride=1,
             imgsz=infer_imgsz,
+            device=self._yolo_device_arg(),
         )
 
         tracks = []
@@ -3587,7 +3655,11 @@ class ClyptWorker:
         with ThreadPoolExecutor(max_workers=face_pipeline_workers) as face_pool:
             for frame_idx, r in enumerate(results, start=1):
                 if r.boxes is None or r.boxes.id is None:
-                    if frame_idx % face_pipeline_segment_frames == 0 and pending_face_segment_tracks:
+                    if (
+                        frame_idx >= face_pipeline_start_frame
+                        and frame_idx % face_pipeline_segment_frames == 0
+                        and pending_face_segment_tracks
+                    ):
                         face_segment_futures.append(
                             face_pool.submit(
                                 self._extract_track_identity_features_for_segment,
@@ -3688,7 +3760,11 @@ class ClyptWorker:
                     tracks.append(projected_out)
                     n_boxes += 1
 
-                if frame_idx % face_pipeline_segment_frames == 0 and pending_face_segment_tracks:
+                if (
+                    frame_idx >= face_pipeline_start_frame
+                    and frame_idx % face_pipeline_segment_frames == 0
+                    and pending_face_segment_tracks
+                ):
                     face_segment_futures.append(
                         face_pool.submit(
                             self._extract_track_identity_features_for_segment,

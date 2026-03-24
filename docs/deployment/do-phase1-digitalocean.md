@@ -147,7 +147,7 @@ sudo SKIP_GIT_SYNC=1 \
 
 The deploy script installs the dedicated Phase 1 dependency set and pre-caches the active Phase 1 assets:
 - Parakeet ASR
-- YOLO26s / TensorRT artifacts when available
+- YOLO26s PyTorch weights
 - LR-ASD repo + checkpoint assets
 - InsightFace packs
 

@@ -16,12 +16,11 @@ torchaudio==2.7.1
 opencv-python-headless>=4.11.0
 decord>=0.6.0
 ultralytics>=8.3.0
+lap>=0.5.12
 omegaconf>=2.3.0
 insightface>=0.7.3
-onnxruntime-gpu>=1.22.0
-onnxslim>=0.1.71
+onnxruntime-gpu==1.23.2
 nemo-toolkit[asr]>=2.4.0
-openvino>=2024.0.0
 scipy>=1.15.0
 scikit-learn>=1.7.0
 python-speech-features>=0.6

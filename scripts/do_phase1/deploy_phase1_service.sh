@@ -6,7 +6,6 @@ BRANCH="${BRANCH:-codex/balanced-hybrid-phase1-contract}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase1/do-phase1.env}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-requirements-do-phase1.txt}"
 SKIP_GIT_SYNC="${SKIP_GIT_SYNC:-0}"
-REQUIRE_TENSORRT="${REQUIRE_TENSORRT:-1}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing env file: $ENV_FILE" >&2
@@ -34,54 +33,54 @@ if [[ ! -f "$REQUIREMENTS_FILE" ]]; then
   exit 1
 fi
 
-python3 -m venv --system-site-packages .venv
+python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r "$REQUIREMENTS_FILE"
+# InsightFace can pull in the CPU-only onnxruntime package transitively. Keep
+# only the GPU build so CUDAExecutionProvider is available at runtime.
+python -m pip uninstall -y onnxruntime || true
+python -m pip install --force-reinstall --no-deps onnxruntime-gpu==1.23.2
 
-if [[ "$REQUIRE_TENSORRT" == "1" ]]; then
-  if ! command -v trtexec >/dev/null 2>&1; then
-    echo "Missing TensorRT binary: trtexec" >&2
-    exit 1
-  fi
-  python - <<'PY'
-import importlib.util
-import sys
-
-if importlib.util.find_spec("tensorrt") is None:
-    print("Missing TensorRT Python bindings in deploy environment.", file=sys.stderr)
-    raise SystemExit(1)
-PY
-fi
+PYTHON_MM="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+SITE_PACKAGES="$REPO_DIR/.venv/lib/python${PYTHON_MM}/site-packages"
+NVIDIA_LIB_PATHS=(
+  "$SITE_PACKAGES/nvidia/cudnn/lib"
+  "$SITE_PACKAGES/nvidia/cublas/lib"
+  "$SITE_PACKAGES/nvidia/cuda_runtime/lib"
+  "$SITE_PACKAGES/nvidia/cufft/lib"
+  "$SITE_PACKAGES/nvidia/curand/lib"
+  "$SITE_PACKAGES/nvidia/cusolver/lib"
+  "$SITE_PACKAGES/nvidia/cusparse/lib"
+  "$SITE_PACKAGES/nvidia/nvjitlink/lib"
+  "/usr/local/cuda/targets/x86_64-linux/lib"
+  "/usr/local/cuda/lib64"
+)
+LD_LIBRARY_PATH_VALUE="$(IFS=:; echo "${NVIDIA_LIB_PATHS[*]}")"
 
 # Cache the Phase 1 model/artifact bundle that the DO worker requires before
-# it can accept jobs. TensorRT export is best effort; the worker falls back to
-# PyTorch weights when no engine is present.
+# it can accept jobs.
 python - <<'PY'
 from backend.do_phase1_worker import (
     download_asr_model,
     download_insightface_model,
     download_lrasd_model,
     download_yolo_model,
-    prepare_yolo_onnx_tensorrt,
 )
 
 download_asr_model()
 download_yolo_model()
 download_lrasd_model()
 download_insightface_model()
-prepare_yolo_onnx_tensorrt()
 PY
-
-if [[ "$REQUIRE_TENSORRT" == "1" ]]; then
-  if [[ ! -f /root/.cache/clypt/yolo26s.engine ]]; then
-    echo "TensorRT engine build did not produce /root/.cache/clypt/yolo26s.engine" >&2
-    exit 1
-  fi
-fi
 
 install -D -m 0644 scripts/do_phase1/systemd/clypt-phase1-api.service /etc/systemd/system/clypt-phase1-api.service
 install -D -m 0644 scripts/do_phase1/systemd/clypt-phase1-worker.service /etc/systemd/system/clypt-phase1-worker.service
+install -d /etc/systemd/system/clypt-phase1-worker.service.d
+cat >/etc/systemd/system/clypt-phase1-worker.service.d/10-venv-libs.conf <<EOF
+[Service]
+Environment="LD_LIBRARY_PATH=${LD_LIBRARY_PATH_VALUE}"
+EOF
 
 systemctl daemon-reload
 systemctl enable clypt-phase1-api.service

@@ -1269,6 +1269,22 @@ def test_face_ledger_workers_honor_env_and_clamp(monkeypatch):
     assert worker._face_ledger_workers() == 1
 
 
+def test_face_pipeline_workers_cap_for_gpu_runtime(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.face_analyzer = object()
+    worker._face_runtime_ctx_id = 0
+
+    monkeypatch.setenv("CLYPT_FACE_PIPELINE_WORKERS", "24")
+    monkeypatch.delenv("CLYPT_FACE_PIPELINE_GPU_WORKERS", raising=False)
+
+    assert worker._face_pipeline_workers() == 1
+
+    monkeypatch.setenv("CLYPT_FACE_PIPELINE_GPU_WORKERS", "2")
+    assert worker._face_pipeline_workers() == 2
+    assert worker._face_ledger_workers() == 2
+
+
 def test_tracking_chunk_workers_default_to_one(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -1345,6 +1361,7 @@ def test_run_tracking_uses_direct_mode(monkeypatch):
 def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
+    track_calls = []
 
     class _Boxes:
         xyxy = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([[10, 20, 30, 40]])})()
@@ -1357,6 +1374,7 @@ def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
 
     class _Model:
         def track(self, **kwargs):
+            track_calls.append(kwargs)
             return [_Result()]
 
     monkeypatch.setattr(worker, "_ensure_h264", lambda path: path)
@@ -1376,6 +1394,7 @@ def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
     assert tracks[0]["local_frame_idx"] == 0
     assert tracks[0]["chunk_idx"] == 0
     assert "tracking_mode" not in metrics
+    assert track_calls[0]["device"] == "cpu"
 
 
 def test_run_tracking_direct_emits_track_identity_features(monkeypatch):
@@ -1478,6 +1497,110 @@ def test_run_tracking_direct_logs_face_pipeline_progress(monkeypatch, capsys):
     captured = capsys.readouterr().out
     assert "Face pipeline queued:" in captured
     assert "Face pipeline complete:" in captured
+
+
+def test_run_tracking_direct_delays_first_face_submission_until_start_frame(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    submit_calls = []
+
+    class _Boxes:
+        def __init__(self):
+            self.xyxy = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([[10, 20, 30, 40]])})()
+            self.id = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([7])})()
+            self.conf = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([0.9])})()
+
+    class _Result:
+        def __init__(self):
+            self.boxes = _Boxes()
+            self.obb = None
+
+    class _Model:
+        def track(self, **kwargs):
+            return [_Result(), _Result()]
+
+    monkeypatch.setattr(worker, "_ensure_h264", lambda path: path)
+    monkeypatch.setattr(worker, "_probe_video_meta", lambda path: {"fps": 24.0, "total_frames": 2, "width": 1920, "height": 1080})
+    monkeypatch.setattr(worker, "_ensure_botsort_reid_yaml", lambda: "tracker.yaml")
+    monkeypatch.setattr(worker, "_get_tracking_model", lambda: _Model())
+    monkeypatch.setattr(worker, "_compute_letterbox_meta", lambda *args: {})
+    monkeypatch.setattr(worker, "_xyxy_abs_to_xywhn", lambda *args: (0.1, 0.2, 0.3, 0.4))
+    monkeypatch.setattr(worker, "_xywhn_to_xyxy_abs", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_forward_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_inverse_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_xyxy_to_xywh", lambda *args: (20.0, 30.0, 20.0, 20.0))
+    monkeypatch.setattr(worker, "_face_pipeline_segment_frames", lambda: 1)
+    monkeypatch.setattr(worker, "_face_pipeline_workers", lambda: 2)
+    monkeypatch.setattr(worker, "_requested_face_pipeline_workers", lambda: 24)
+    monkeypatch.setattr(worker, "_face_pipeline_start_frame", lambda: 600)
+    monkeypatch.setattr(
+        worker,
+        "_extract_track_identity_features_for_segment",
+        lambda **kwargs: submit_calls.append(list(kwargs["segment_tracks"])) or {
+            "track_7": {
+                "embedding": [0.1, 0.2, 0.3],
+                "face_observations": [{"frame_idx": 0, "confidence": 0.9, "quality": 1.0}],
+            }
+        },
+    )
+
+    worker._run_tracking_direct("video.mp4")
+
+    assert len(submit_calls) == 1
+    assert len(submit_calls[0]) == 2
+
+
+def test_run_tracking_chunk_passes_explicit_yolo_device(monkeypatch, tmp_path):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    track_calls = []
+
+    class _Boxes:
+        xyxy = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([[10, 20, 30, 40]])})()
+        id = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([7])})()
+        conf = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([0.9])})()
+
+    class _Result:
+        boxes = _Boxes()
+        obb = None
+
+    class _Model:
+        def track(self, **kwargs):
+            track_calls.append(kwargs)
+            return [_Result()]
+
+    monkeypatch.setattr(worker, "_compute_letterbox_meta", lambda *args: {})
+    monkeypatch.setattr(worker, "_xyxy_abs_to_xywhn", lambda *args: (0.1, 0.2, 0.3, 0.4))
+    monkeypatch.setattr(worker, "_xywhn_to_xyxy_abs", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_forward_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_inverse_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_xyxy_to_xywh", lambda *args: (20.0, 30.0, 20.0, 20.0))
+    monkeypatch.setattr(
+        worker,
+        "_extract_track_identity_features_from_segments",
+        lambda **kwargs: ({}, {"face_pipeline_mode": "staggered", "face_pipeline_segments_processed": 0}),
+    )
+    monkeypatch.setattr(
+        "backend.do_phase1_worker.subprocess.run",
+        lambda *args, **kwargs: type("Completed", (), {"returncode": 0, "stderr": b""})(),
+    )
+
+    chunk_dir = tmp_path / "chunk0"
+    chunk_dir.mkdir()
+    result = worker._track_single_chunk(
+        video_path="video.mp4",
+        meta={"fps": 24.0, "width": 1920, "height": 1080},
+        chunk={"start_frame": 0, "end_frame": 1, "overlap_frames": 0, "chunk_idx": 0},
+        tracker_cfg="tracker.yaml",
+        chunk_dir=str(chunk_dir),
+        output_meta={"width": 1920, "height": 1080},
+        coord_scale_x=1.0,
+        coord_scale_y=1.0,
+        model=_Model(),
+    )
+
+    assert result["processed_frames"] == 1
+    assert track_calls[0]["device"] == "cpu"
 
 
 def test_host_lock_serializes_second_extraction_attempt(tmp_path: Path):
