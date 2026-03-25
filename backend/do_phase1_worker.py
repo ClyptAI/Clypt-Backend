@@ -1195,6 +1195,36 @@ class ClyptWorker:
             projected.append(local_binding)
         return projected
 
+    @staticmethod
+    def _build_bindings_from_word_track_field(
+        words: list[dict],
+        *,
+        field_name: str,
+    ) -> list[dict]:
+        bindings: list[dict] = []
+        cur = None
+        for word in words:
+            tid = word.get(field_name)
+            ws = int(word.get("start_time_ms", 0) or 0)
+            we = int(word.get("end_time_ms", 0) or 0)
+            if not tid:
+                continue
+            if cur and cur["track_id"] == tid and ws <= cur["end_time_ms"] + 600:
+                cur["end_time_ms"] = we
+                cur["word_count"] += 1
+            else:
+                if cur:
+                    bindings.append(cur)
+                cur = {
+                    "track_id": str(tid),
+                    "start_time_ms": ws,
+                    "end_time_ms": we,
+                    "word_count": 1,
+                }
+        if cur:
+            bindings.append(cur)
+        return bindings
+
     def _build_speaker_binding_track_quality(
         self,
         track_to_dets: dict[str, list[dict]],
@@ -5853,27 +5883,45 @@ class ClyptWorker:
             if best_tid is not None and confident_pick:
                 w["speaker_track_id"] = best_tid
                 w["speaker_tag"] = best_tid
+                w["speaker_local_track_id"] = str(best_candidate["local_tid"])
+                w["speaker_local_tag"] = str(best_candidate["local_tid"])
                 assigned += 1
             else:
                 w["speaker_track_id"] = None
                 w["speaker_tag"] = "unknown"
+                w["speaker_local_track_id"] = None
+                w["speaker_local_tag"] = "unknown"
 
         # Smooth local flicker.
         seq = [w.get("speaker_track_id") for w in words]
         smoothed = seq[:]
+        local_seq = [w.get("speaker_local_track_id") for w in words]
+        local_smoothed = local_seq[:]
         win = 2
         for i in range(len(seq)):
             lo = max(0, i - win)
             hi = min(len(seq), i + win + 1)
             neigh = [t for t in seq[lo:hi] if t]
             if not neigh:
+                local_neigh = [t for t in local_seq[lo:hi] if t]
+                if local_neigh:
+                    local_major, local_cnt = Counter(local_neigh).most_common(1)[0]
+                    if local_cnt >= 2:
+                        local_smoothed[i] = local_major
                 continue
             major, cnt = Counter(neigh).most_common(1)[0]
             if cnt >= 2:
                 smoothed[i] = major
-        for w, tid in zip(words, smoothed):
+            local_neigh = [t for t in local_seq[lo:hi] if t]
+            if local_neigh:
+                local_major, local_cnt = Counter(local_neigh).most_common(1)[0]
+                if local_cnt >= 2:
+                    local_smoothed[i] = local_major
+        for w, tid, local_tid in zip(words, smoothed, local_smoothed):
             w["speaker_track_id"] = tid
             w["speaker_tag"] = tid or "unknown"
+            w["speaker_local_track_id"] = local_tid
+            w["speaker_local_tag"] = local_tid or "unknown"
 
         bindings: list[dict] = []
         cur = None
@@ -6141,35 +6189,54 @@ class ClyptWorker:
 
         assigned = 0
         for w in words:
-            tid = _assign_word(w)
-            if tid is not None:
-                tid = remap.get(str(tid), str(tid))
+            local_tid = _assign_word(w)
+            tid = None
+            if local_tid is not None:
+                tid = remap.get(str(local_tid), str(local_tid))
             if tid is not None:
                 w["speaker_track_id"] = tid
                 # Compatibility for downstream phases that still read speaker_tag.
                 w["speaker_tag"] = tid
+                w["speaker_local_track_id"] = str(local_tid)
+                w["speaker_local_tag"] = str(local_tid)
                 assigned += 1
             else:
                 w["speaker_track_id"] = None
                 w["speaker_tag"] = "unknown"
+                w["speaker_local_track_id"] = None
+                w["speaker_local_tag"] = "unknown"
 
         # Smooth flicker: majority vote in a small local word window.
         track_seq = [w.get("speaker_track_id") for w in words]
         smoothed = track_seq[:]
+        local_track_seq = [w.get("speaker_local_track_id") for w in words]
+        local_smoothed = local_track_seq[:]
         win = 2
         for i in range(len(track_seq)):
             lo = max(0, i - win)
             hi = min(len(track_seq), i + win + 1)
             neigh = [t for t in track_seq[lo:hi] if t]
             if not neigh:
+                local_neigh = [t for t in local_track_seq[lo:hi] if t]
+                if local_neigh:
+                    local_major, local_cnt = Counter(local_neigh).most_common(1)[0]
+                    if local_cnt >= 2:
+                        local_smoothed[i] = local_major
                 continue
             major, cnt = Counter(neigh).most_common(1)[0]
             if cnt >= 2:
                 smoothed[i] = major
+            local_neigh = [t for t in local_track_seq[lo:hi] if t]
+            if local_neigh:
+                local_major, local_cnt = Counter(local_neigh).most_common(1)[0]
+                if local_cnt >= 2:
+                    local_smoothed[i] = local_major
 
-        for w, tid in zip(words, smoothed):
+        for w, tid, local_tid in zip(words, smoothed, local_smoothed):
             w["speaker_track_id"] = tid
             w["speaker_tag"] = tid or "unknown"
+            w["speaker_local_track_id"] = local_tid
+            w["speaker_local_tag"] = local_tid or "unknown"
 
         # Build compact speaker bindings timeline.
         bindings: list[dict] = []
@@ -6375,10 +6442,15 @@ class ClyptWorker:
         speaker_bindings_local: list[dict] = []
         speaker_follow_bindings_local: list[dict] = []
         if self._local_clip_bindings_enabled():
-            speaker_bindings_local = self._project_bindings_to_local_track_space(
-                speaker_bindings,
-                cluster_id_remap,
+            speaker_bindings_local = self._build_bindings_from_word_track_field(
+                words,
+                field_name="speaker_local_track_id",
             )
+            if not speaker_bindings_local:
+                speaker_bindings_local = self._project_bindings_to_local_track_space(
+                    speaker_bindings,
+                    cluster_id_remap,
+                )
             speaker_follow_bindings_local = self._build_speaker_follow_bindings(
                 speaker_bindings_local
             )
@@ -6414,6 +6486,8 @@ class ClyptWorker:
             "face_detections": face_detections,
             "person_detections": person_detections,
         }
+        if self._local_clip_bindings_enabled():
+            phase_1_visual["tracks_local"] = [dict(track) for track in precluster_tracks]
 
         phase_1_audio = {
             "source_audio": youtube_url,

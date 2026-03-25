@@ -2213,6 +2213,15 @@ def select_render_bindings(audio: dict) -> list[dict]:
     return selected
 
 
+def select_render_tracks(visual: dict) -> tuple[list[dict], str]:
+    use_local = os.getenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "").strip().lower() in {"1", "true", "yes", "on"}
+    if use_local:
+        tracks_local = list(visual.get("tracks_local", []))
+        if tracks_local:
+            return tracks_local, "tracks_local"
+    return list(visual.get("tracks", [])), "tracks"
+
+
 def _bindings_for_interval(bindings: list[dict], clip_start_s: float, clip_end_s: float) -> list[dict]:
     selected: list[dict] = []
     for binding in bindings:
@@ -2436,6 +2445,7 @@ def main() -> None:
     audio = load_json(AUDIO_PATH)
     tracks = list(visual.get("tracks", []))
     bindings, raw_bindings, follow_bindings, binding_source = select_binding_sets(audio)
+    tracks, track_source = select_render_tracks(visual)
     if not tracks or not bindings:
         raise RuntimeError("Need non-empty tracks and speaker_bindings to render clips")
 
@@ -2460,7 +2470,7 @@ def main() -> None:
     print(f"Selected {len(windows)} windows from current outputs:")
     print(
         "Camera target mode: "
-        f"body-only ({len(person_track_index)} person tracks)"
+        f"body-only ({len(person_track_index)} person tracks via {track_source})"
     )
     if RENDER_DEBUG_MODE:
         print(

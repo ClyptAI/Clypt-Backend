@@ -617,6 +617,21 @@ def test_select_binding_sets_prefers_local_follow_stream_when_experiment_enabled
     assert source == "speaker_follow_bindings_local"
 
 
+def test_select_render_tracks_prefers_local_tracks_when_experiment_enabled(monkeypatch):
+    mod = load_module()
+    visual = {
+        "tracks": [{"track_id": "Global_Person_0", "frame_idx": 0}],
+        "tracks_local": [{"track_id": "local-1", "frame_idx": 0}],
+    }
+
+    monkeypatch.setenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "1")
+
+    tracks, source = mod.select_render_tracks(visual)
+
+    assert tracks == [{"track_id": "local-1", "frame_idx": 0}]
+    assert source == "tracks_local"
+
+
 def test_build_overlay_filters_include_track_label_text():
     mod = load_module()
     overlay = mod.OverlayPath(

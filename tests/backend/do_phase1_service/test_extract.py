@@ -1185,6 +1185,44 @@ def test_run_lrasd_binding_rejects_tiny_edge_fragment_candidate(monkeypatch, tmp
     assert bindings[0]["track_id"] == "speaker"
 
 
+def test_run_lrasd_binding_preserves_local_track_id_when_global_remap_applies(monkeypatch, tmp_path: Path):
+    _, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "lawyer_local": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 74.0,
+                "height": 156.0,
+                "confidence": 0.92,
+                "intensity": 210,
+            },
+            "listener_local": {
+                "x_center": 228.0,
+                "y_center": 105.0,
+                "width": 80.0,
+                "height": 156.0,
+                "confidence": 0.88,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "lawyer_local": 0.82,
+            "listener_local": 0.21,
+        },
+        track_id_remap={
+            "lawyer_local": "Global_Person_0",
+            "listener_local": "Global_Person_0",
+        },
+    )
+
+    assert words[0]["speaker_track_id"] == "Global_Person_0"
+    assert words[0]["speaker_local_track_id"] == "lawyer_local"
+    assert words[0]["speaker_local_tag"] == "lawyer_local"
+    assert bindings[0]["track_id"] == "Global_Person_0"
+
+
 def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -1604,6 +1642,7 @@ def test_finalize_emits_local_speaker_bindings_when_experiment_enabled(monkeypat
     assert result["phase_1_audio"]["speaker_follow_bindings_local"] == [
         {"track_id": "local-1", "start_time_ms": 0, "end_time_ms": 100, "word_count": 1}
     ]
+    assert result["phase_1_visual"]["tracks_local"][0]["track_id"] == "local-1"
 
 
 def test_clusters_conflict_by_visibility_detects_far_apart_covisible_people():
