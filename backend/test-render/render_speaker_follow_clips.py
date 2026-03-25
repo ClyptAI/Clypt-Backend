@@ -2,8 +2,7 @@
 
 This is a lightweight QA renderer:
 - picks strong ~40s windows from speaker_bindings
-- follows the active speaker's face center when available
-- falls back to the person track center when face detections are missing
+- follows the active speaker's person/body track center
 - outputs 9:16 clips with original audio preserved
 """
 
@@ -15,6 +14,7 @@ import math
 import os
 import subprocess
 import statistics
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,11 +25,13 @@ VISUAL_PATH = ROOT / "outputs" / "phase_1_visual.json"
 AUDIO_PATH = ROOT / "outputs" / "phase_1_audio.json"
 OUTPUT_DIR = ROOT / "outputs" / "clips"
 
-NUM_CLIPS = 3
-CLIP_DURATION_S = 40
+NUM_CLIPS = int(os.getenv("CLYPT_RENDER_NUM_CLIPS", "3"))
+CLIP_DURATION_S = int(os.getenv("CLYPT_RENDER_CLIP_DURATION_S", "40"))
 WINDOW_STEP_S = 5
 KEYFRAME_STEP_S = 0.5
 WINDOW_MIN_GAP_S = 20
+RENDER_DEBUG_MODE = os.getenv("CLYPT_RENDER_DEBUG_MODE", "1").strip() != "0"
+RENDER_DEBUG_SHOW_FACES = os.getenv("CLYPT_RENDER_DEBUG_SHOW_FACES", "1").strip() != "0"
 
 OUT_W = 1080
 OUT_H = 1920
@@ -41,6 +43,16 @@ EMA_SMOOTHING = 6
 OVERLAY_BOX_COLOR = "0x00FF88"
 OVERLAY_SECONDARY_BOX_COLOR = "0xFFB347"
 OVERLAY_BOX_THICKNESS = 6
+DEBUG_DEFAULT_BOX_COLOR = "0x4FC3F7"
+DEBUG_FOLLOW_BOX_COLOR = "0x00FF88"
+DEBUG_RAW_ACTIVE_BOX_COLOR = "0xFFD54F"
+DEBUG_FACE_BOX_COLOR = "0xFF6F61"
+DEBUG_TIMELINE_RAW_Y = OUT_H - 96
+DEBUG_TIMELINE_FOLLOW_Y = OUT_H - 52
+DEBUG_TIMELINE_HEIGHT = 24
+DEBUG_TIMELINE_LEFT = 120
+DEBUG_TIMELINE_RIGHT_PAD = 32
+DEBUG_HUD_FONT_SIZE = 28
 MAX_EXPR_KEYFRAMES = 96
 FACE_PLAUSIBILITY_MIN_WIDTH_RATIO = 0.10
 FACE_PLAUSIBILITY_MAX_WIDTH_RATIO = 0.78
@@ -59,6 +71,11 @@ SHARED_TWO_SHOT_MAX_UNION_WIDTH_RATIO = 0.66
 SHARED_TWO_SHOT_MAX_UNION_HEIGHT_RATIO = 0.88
 SHARED_CAMERA_ZOOM = 1.10
 SPLIT_PANEL_HEIGHT = OUT_H // 2
+SPLIT_ADAPTIVE_STEP_S = 0.5
+SPLIT_MIN_SEGMENT_S = 1.0
+SPLIT_MIN_DISTINCT_CENTER_GAP_RATIO = 0.16
+SPLIT_MAX_OVERLAP_IOU = 0.28
+SINGLE_SPEAKER_MIN_SEGMENT_S = 0.45
 
 
 @dataclass
@@ -107,6 +124,18 @@ class OverlayPath:
     box_w_keyframes: list[tuple[float, float]]
     box_h_keyframes: list[tuple[float, float]]
     color: str = OVERLAY_BOX_COLOR
+    label: str | None = None
+    box_thickness: int = OVERLAY_BOX_THICKNESS
+    text_color: str = "white"
+
+
+@dataclass(frozen=True)
+class AdaptiveSegment:
+    mode: str
+    start_s: float
+    end_s: float
+    primary_track_id: str | None
+    secondary_track_id: str | None = None
 
 
 def _face_detection_is_plausible(person_det: Detection | None, face_det: Detection | None) -> bool:
@@ -158,15 +187,36 @@ def _track_anchor_candidate(
     track_id: str | None,
     frame_idx: int,
     fps: float,
+    src_w: int,
+    src_h: int,
     person_track_index: dict[str, list[Detection]],
     face_track_index: dict[str, list[Detection]],
+    frame_detection_index: dict[int, list[dict]] | None = None,
 ) -> Detection | None:
     if not track_id:
         return None
+    if frame_detection_index:
+        frame_detections = frame_detection_index.get(frame_idx, [])
+        chosen = resolve_follow_box(
+            track_id,
+            frame_detections,
+            src_w,
+            src_h,
+        )
+        if chosen is not None:
+            return _render_target_to_detection(chosen, frame_idx, src_w, src_h)
+        fallback = fallback_anchor_for_missing_clean_target(
+            frame_detections,
+            "single_person",
+            src_w,
+            src_h,
+        )
+        if fallback is not None:
+            return fallback
     person_det = interpolate_detection(person_track_index.get(track_id), frame_idx, fps)
-    face_det = interpolate_detection(face_track_index.get(track_id), frame_idx, fps)
-    if _face_detection_is_plausible(person_det, face_det):
-        return face_det
+    # Renderer is currently body-led by design. We keep the face index plumbed
+    # through for compatibility with older call sites, but camera/overlay
+    # anchors intentionally ignore face tracks here.
     return person_det
 
 
@@ -389,6 +439,14 @@ def build_track_index(tracks: list[dict]) -> dict[str, list[Detection]]:
     return resolved_by_track
 
 
+def build_frame_detection_index(tracks: list[dict]) -> dict[int, list[dict]]:
+    frame_index: dict[int, list[dict]] = {}
+    for track in tracks:
+        frame_idx = int(track.get("frame_idx", 0))
+        frame_index.setdefault(frame_idx, []).append(track)
+    return frame_index
+
+
 def build_face_index(face_detections: list[dict], src_w: int, src_h: int, fps: float) -> dict[str, list[Detection]]:
     by_track: dict[str, list[Detection]] = {}
     for track_block in face_detections:
@@ -485,6 +543,17 @@ def active_track_at(bindings: list[dict], target_ms: int) -> str | None:
     return None
 
 
+def resolve_follow_identity(bindings: list[dict], abs_ms: int) -> str | None:
+    for binding in reversed(bindings):
+        if int(binding["start_time_ms"]) == abs_ms:
+            return str(binding["track_id"])
+
+    binding = active_track_at(bindings, abs_ms)
+    if binding is None:
+        return None
+    return binding
+
+
 def choose_windows(bindings: list[dict], duration_s: float) -> list[tuple[int, int, float]]:
     candidates: list[tuple[float, int, int]] = []
     max_start = max(0, int(math.floor(duration_s)) - CLIP_DURATION_S)
@@ -542,10 +611,713 @@ def _track_anchor_at_frame(
     track_id: str | None,
     frame_idx: int,
     fps: float,
+    src_w: int,
+    src_h: int,
     person_track_index: dict[str, list[Detection]],
     face_track_index: dict[str, list[Detection]],
+    frame_detection_index: dict[int, list[dict]] | None = None,
 ) -> Detection | None:
-    return _track_anchor_candidate(track_id, frame_idx, fps, person_track_index, face_track_index)
+    return _track_anchor_candidate(
+        track_id,
+        frame_idx,
+        fps,
+        src_w,
+        src_h,
+        person_track_index,
+        face_track_index,
+        frame_detection_index,
+    )
+
+
+def _detection_iou(left: Detection, right: Detection) -> float:
+    left_x1 = float(left.x_center) - (0.5 * float(left.width))
+    left_y1 = float(left.y_center) - (0.5 * float(left.height))
+    left_x2 = left_x1 + float(left.width)
+    left_y2 = left_y1 + float(left.height)
+    right_x1 = float(right.x_center) - (0.5 * float(right.width))
+    right_y1 = float(right.y_center) - (0.5 * float(right.height))
+    right_x2 = right_x1 + float(right.width)
+    right_y2 = right_y1 + float(right.height)
+    ix1 = max(left_x1, right_x1)
+    iy1 = max(left_y1, right_y1)
+    ix2 = min(left_x2, right_x2)
+    iy2 = min(left_y2, right_y2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    union = max(
+        1.0,
+        (left_x2 - left_x1) * (left_y2 - left_y1)
+        + (right_x2 - right_x1) * (right_y2 - right_y1)
+        - inter,
+    )
+    return float(inter / union)
+
+
+def _bbox_in_unit_space(bbox: list[float], frame_width: int, frame_height: int) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = [float(value) for value in bbox[:4]]
+    if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5:
+        return x1, y1, x2, y2
+
+    norm_w = max(1.0, float(frame_width))
+    norm_h = max(1.0, float(frame_height))
+    return x1 / norm_w, y1 / norm_h, x2 / norm_w, y2 / norm_h
+
+
+def bbox_geometry_metrics(bbox: list[float], frame_width: int, frame_height: int) -> dict[str, float]:
+    x1, y1, x2, y2 = _bbox_in_unit_space(bbox, frame_width, frame_height)
+    w = max(0.0, x2 - x1)
+    h = max(0.0, y2 - y1)
+    area = w * h
+    aspect = w / h if h > 1e-6 else 0.0
+    return {
+        "w": w,
+        "h": h,
+        "area": area,
+        "aspect": aspect,
+        "center_y": (y1 + y2) / 2.0,
+        "bottom": y2,
+    }
+
+
+def score_render_target_candidate(det: dict, frame_width: int, frame_height: int) -> float:
+    metrics = bbox_geometry_metrics(det["bbox"], frame_width, frame_height)
+    score = float(det.get("score", 0.0))
+
+    score += 0.6 * metrics["h"]
+    if metrics["h"] < 0.30:
+        score -= 2.0
+    if metrics["bottom"] > 0.96 and metrics["center_y"] > 0.72:
+        score -= 1.5
+    if metrics["aspect"] > 0.95:
+        score -= 1.0
+    if metrics["area"] < 0.05:
+        score -= 1.0
+    return score
+
+
+def is_plausible_render_target(det: dict, frame_width: int, frame_height: int) -> bool:
+    return score_render_target_candidate(det, frame_width, frame_height) >= 0.25
+
+
+def _render_target_selection_key(det: dict, frame_width: int, frame_height: int) -> tuple[float, float, float, float, float]:
+    metrics = bbox_geometry_metrics(det["bbox"], frame_width, frame_height)
+    return (
+        -score_render_target_candidate(det, frame_width, frame_height),
+        -float(det.get("score", 0.0)),
+        -metrics["area"],
+        -metrics["h"],
+        float(det.get("frame_idx", 0)),
+    )
+
+
+def _render_target_bbox_iou(left: dict, right: dict, frame_width: int, frame_height: int) -> float:
+    left_x1, left_y1, left_x2, left_y2 = _bbox_in_unit_space(left["bbox"], frame_width, frame_height)
+    right_x1, right_y1, right_x2, right_y2 = _bbox_in_unit_space(right["bbox"], frame_width, frame_height)
+    ix1 = max(left_x1, right_x1)
+    iy1 = max(left_y1, right_y1)
+    ix2 = min(left_x2, right_x2)
+    iy2 = min(left_y2, right_y2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    union = max(
+        1e-6,
+        (left_x2 - left_x1) * (left_y2 - left_y1)
+        + (right_x2 - right_x1) * (right_y2 - right_y1)
+        - inter,
+    )
+    return float(inter / union)
+
+
+def is_duplicate_fragment(primary: dict, other: dict, frame_width: int, frame_height: int) -> bool:
+    if str(primary.get("track_id", "")) != str(other.get("track_id", "")):
+        return False
+    if "bbox" not in primary or "bbox" not in other:
+        return False
+    return _render_target_bbox_iou(primary, other, frame_width, frame_height) >= 0.45
+
+
+def _group_duplicate_render_targets(frame_detections: list[dict], frame_width: int, frame_height: int) -> list[dict]:
+    grouped: list[dict] = []
+    for det in sorted(frame_detections, key=lambda item: _render_target_selection_key(item, frame_width, frame_height)):
+        if any(is_duplicate_fragment(kept, det, frame_width, frame_height) for kept in grouped):
+            continue
+        grouped.append(det)
+    return grouped
+
+
+def choose_clean_render_target(
+    *,
+    target_track_id: str,
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> dict | None:
+    candidates = [
+        det
+        for det in frame_detections
+        if str(det.get("track_id", "")) == target_track_id
+        and "bbox" in det
+        and is_plausible_render_target(det, frame_width, frame_height)
+    ]
+    if not candidates:
+        return None
+
+    grouped = _group_duplicate_render_targets(candidates, frame_width, frame_height)
+    return grouped[0] if grouped else None
+
+
+def resolve_follow_box(
+    track_id: str | None,
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> dict | None:
+    if not track_id:
+        return None
+    return choose_clean_render_target(
+        target_track_id=track_id,
+        frame_detections=frame_detections,
+        frame_width=frame_width,
+        frame_height=frame_height,
+    )
+
+
+def _detection_bbox_to_pixels(det: dict, frame_width: int, frame_height: int) -> tuple[float, float, float, float] | None:
+    bbox = det.get("bbox")
+    if not bbox or len(bbox) < 4:
+        return None
+    x1, y1, x2, y2 = _bbox_in_unit_space(bbox, frame_width, frame_height)
+    scale_w = max(1.0, float(frame_width))
+    scale_h = max(1.0, float(frame_height))
+    return x1 * scale_w, y1 * scale_h, x2 * scale_w, y2 * scale_h
+
+
+def estimate_shared_context_bbox(
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> Detection | None:
+    boxes: list[tuple[float, float, float, float]] = []
+    frame_idxs: list[int] = []
+    confidences: list[float] = []
+    for det in frame_detections:
+        box = _detection_bbox_to_pixels(det, frame_width, frame_height)
+        if box is None:
+            continue
+        boxes.append(box)
+        frame_idxs.append(int(det.get("frame_idx", 0)))
+        confidences.append(float(det.get("score", det.get("confidence", 0.0))))
+
+    if not boxes:
+        return None
+
+    x1 = min(box[0] for box in boxes)
+    y1 = min(box[1] for box in boxes)
+    x2 = max(box[2] for box in boxes)
+    y2 = max(box[3] for box in boxes)
+
+    union_w = max(1.0, x2 - x1)
+    union_h = max(1.0, y2 - y1)
+    pad_x = max(union_w * 0.24, float(frame_width) * 0.08)
+    pad_y = max(union_h * 0.20, float(frame_height) * 0.05)
+    x1 = clamp(x1 - pad_x, 0.0, float(frame_width))
+    x2 = clamp(x2 + pad_x, 0.0, float(frame_width))
+    y1 = clamp(y1 - pad_y, 0.0, float(frame_height))
+    y2 = clamp(y2 + pad_y, 0.0, float(frame_height))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return Detection(
+        frame_idx=int(round(statistics.median(frame_idxs))) if frame_idxs else 0,
+        x_center=(x1 + x2) / 2.0,
+        y_center=(y1 + y2) / 2.0,
+        width=x2 - x1,
+        height=y2 - y1,
+        confidence=max(confidences) if confidences else 0.0,
+    )
+
+
+def fallback_anchor_for_missing_clean_target(
+    frame_detections: list[dict],
+    composition_mode: str,
+    frame_width: int,
+    frame_height: int,
+) -> Detection | None:
+    if composition_mode != "single_person":
+        return None
+    return estimate_shared_context_bbox(frame_detections, frame_width, frame_height)
+
+
+def score_context_fallback_quality(fallback: Detection | None, frame_width: int, frame_height: int) -> float:
+    if fallback is None:
+        return 0.0
+
+    frame_w = max(1.0, float(frame_width))
+    frame_h = max(1.0, float(frame_height))
+    frame_area = frame_w * frame_h
+    area_ratio = clamp((float(fallback.width) * float(fallback.height)) / frame_area, 0.0, 1.0)
+    coverage_score = clamp(area_ratio * 2.0, 0.0, 1.0)
+
+    fallback_aspect = float(fallback.width) / max(1.0, float(fallback.height))
+    frame_aspect = frame_w / frame_h
+    aspect_distance = abs(math.log(max(1e-6, fallback_aspect / frame_aspect)))
+    aspect_score = clamp(1.0 - (aspect_distance / 1.25), 0.0, 1.0)
+
+    center_x = clamp(float(fallback.x_center) / frame_w, 0.0, 1.0)
+    center_y = clamp(float(fallback.y_center) / frame_h, 0.0, 1.0)
+    center_distance = math.hypot(center_x - 0.5, center_y - 0.5)
+    center_score = clamp(1.0 - (center_distance / 0.75), 0.0, 1.0)
+
+    return round((0.45 * coverage_score) + (0.35 * center_score) + (0.20 * aspect_score), 2)
+
+
+def _render_target_to_detection(det: dict, frame_idx: int, frame_width: int, frame_height: int) -> Detection:
+    x1, y1, x2, y2 = [float(value) for value in det["bbox"][:4]]
+    if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.5:
+        x1 *= max(1.0, float(frame_width))
+        x2 *= max(1.0, float(frame_width))
+        y1 *= max(1.0, float(frame_height))
+        y2 *= max(1.0, float(frame_height))
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+    return Detection(
+        frame_idx=int(det.get("frame_idx", frame_idx)),
+        x_center=x1 + (width / 2.0),
+        y_center=y1 + (height / 2.0),
+        width=width,
+        height=height,
+        confidence=float(det.get("score", det.get("confidence", 0.0))),
+    )
+
+
+def _render_target_debug_rejections(
+    *,
+    chosen: dict | None,
+    candidates: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> list[dict]:
+    rejections: list[dict] = []
+    for det in candidates:
+        if chosen is not None and det is chosen:
+            continue
+        if not is_plausible_render_target(det, frame_width, frame_height):
+            reason = "partial_body"
+        elif chosen is not None and is_duplicate_fragment(chosen, det, frame_width, frame_height):
+            reason = "duplicate_fragment"
+        else:
+            reason = "lower_quality_clean_candidate"
+        rejections.append(
+            {
+                "reason": reason,
+                "bbox": list(det.get("bbox", [])),
+                "score": round(float(det.get("score", det.get("confidence", 0.0))), 3),
+            }
+        )
+    return rejections
+
+
+def build_render_target_debug_info(
+    *,
+    track_id: str | None,
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+    composition_mode: str,
+) -> dict:
+    track_id_str = str(track_id or "")
+    candidates = [
+        det
+        for det in frame_detections
+        if str(det.get("track_id", "")) == track_id_str and "bbox" in det
+    ]
+    chosen = choose_clean_render_target(
+        target_track_id=track_id_str,
+        frame_detections=frame_detections,
+        frame_width=frame_width,
+        frame_height=frame_height,
+    ) if track_id_str else None
+    rejections = _render_target_debug_rejections(
+        chosen=chosen,
+        candidates=candidates,
+        frame_width=frame_width,
+        frame_height=frame_height,
+    )
+
+    if chosen is not None:
+        return {
+            "target_track_id": track_id_str or None,
+            "target_quality": round(score_render_target_candidate(chosen, frame_width, frame_height), 2),
+            "target_source": "clean_body_box",
+            "fallback_used": False,
+            "fallback_quality": None,
+            "candidate_count": len(candidates),
+            "rejections": rejections,
+        }
+
+    fallback = fallback_anchor_for_missing_clean_target(
+        frame_detections,
+        composition_mode,
+        frame_width,
+        frame_height,
+    )
+    if fallback is not None:
+        fallback_quality = score_context_fallback_quality(fallback, frame_width, frame_height)
+        return {
+            "target_track_id": track_id_str or None,
+            "target_quality": fallback_quality,
+            "target_source": "context_fallback",
+            "fallback_used": True,
+            "fallback_quality": fallback_quality,
+            "candidate_count": len(candidates),
+            "rejections": rejections,
+        }
+
+    return {
+        "target_track_id": track_id_str or None,
+        "target_quality": None,
+        "target_source": "track_interpolation" if track_id_str else "none",
+        "fallback_used": False,
+        "fallback_quality": None,
+        "candidate_count": len(candidates),
+        "rejections": rejections,
+    }
+
+
+def build_render_segment_debug_payload(
+    *,
+    segment: AdaptiveSegment,
+    fps: float,
+    src_w: int,
+    src_h: int,
+    frame_detection_index: dict[int, list[dict]] | None,
+) -> dict:
+    decision_frame_idx = int(round(float(segment.start_s) * float(fps)))
+    frame_detections = frame_detection_index.get(decision_frame_idx, []) if frame_detection_index else []
+    targets = [
+        build_render_target_debug_info(
+            track_id=track_id,
+            frame_detections=frame_detections,
+            frame_width=src_w,
+            frame_height=src_h,
+            composition_mode=segment.mode,
+        )
+        for track_id in (segment.primary_track_id, segment.secondary_track_id)
+        if track_id
+    ]
+    payload = dict(segment.__dict__)
+    payload["decision_frame_idx"] = decision_frame_idx
+    payload["target_debug"] = targets
+    return payload
+
+
+def build_render_debug_sidecar_payload(
+    *,
+    clip_name: str,
+    window: dict,
+    binding_source: str,
+    debug_mode: bool,
+    debug_show_faces: bool,
+    composition: CompositionPlan,
+    segments: list[AdaptiveSegment],
+    fps: float,
+    src_w: int,
+    src_h: int,
+    frame_detection_index: dict[int, list[dict]] | None,
+) -> dict:
+    return {
+        "clip_name": clip_name,
+        "window": window,
+        "binding_source": binding_source,
+        "debug_mode": debug_mode,
+        "debug_show_faces": debug_show_faces,
+        "composition": composition.__dict__,
+        "segments": [
+            build_render_segment_debug_payload(
+                segment=segment,
+                fps=fps,
+                src_w=src_w,
+                src_h=src_h,
+                frame_detection_index=frame_detection_index,
+            )
+            for segment in segments
+        ],
+    }
+
+
+def _split_frame_is_plausible(
+    *,
+    primary_det: Detection | None,
+    secondary_det: Detection | None,
+    src_w: int,
+) -> bool:
+    if primary_det is None or secondary_det is None:
+        return False
+    avg_w = max(1.0, 0.5 * (float(primary_det.width) + float(secondary_det.width)))
+    center_gap = abs(float(primary_det.x_center) - float(secondary_det.x_center))
+    if center_gap < max(src_w * SPLIT_MIN_DISTINCT_CENTER_GAP_RATIO, 0.55 * avg_w):
+        return False
+    if _detection_iou(primary_det, secondary_det) > SPLIT_MAX_OVERLAP_IOU:
+        return False
+    return True
+
+
+def choose_adaptive_split_segments(
+    *,
+    primary_track_id: str,
+    secondary_track_id: str,
+    clip_start_s: int,
+    clip_end_s: int,
+    fps: float,
+    src_w: int,
+    src_h: int,
+    bindings: list[dict],
+    person_track_index: dict[str, list[Detection]],
+    face_track_index: dict[str, list[Detection]],
+    frame_detection_index: dict[int, list[dict]] | None = None,
+) -> list[AdaptiveSegment]:
+    samples: list[AdaptiveSegment] = []
+    t = 0.0
+    while t <= (clip_end_s - clip_start_s + 1e-6):
+        abs_s = clip_start_s + t
+        abs_ms = int(round(abs_s * 1000.0))
+        frame_idx = int(round((abs_ms / 1000.0) * fps))
+        primary_det = _track_anchor_at_frame(
+            primary_track_id,
+            frame_idx,
+            fps,
+            src_w,
+            src_h,
+            person_track_index,
+            face_track_index,
+            frame_detection_index,
+        )
+        secondary_det = _track_anchor_at_frame(
+            secondary_track_id,
+            frame_idx,
+            fps,
+            src_w,
+            src_h,
+            person_track_index,
+            face_track_index,
+            frame_detection_index,
+        )
+        if _split_frame_is_plausible(primary_det=primary_det, secondary_det=secondary_det, src_w=src_w):
+            sample = AdaptiveSegment(
+                mode="two_split",
+                start_s=abs_s,
+                end_s=min(clip_end_s, abs_s + SPLIT_ADAPTIVE_STEP_S),
+                primary_track_id=primary_track_id,
+                secondary_track_id=secondary_track_id,
+            )
+        else:
+            active_tid = active_track_at(bindings, abs_ms)
+            if active_tid not in {primary_track_id, secondary_track_id}:
+                if primary_det is not None and secondary_det is None:
+                    active_tid = primary_track_id
+                elif secondary_det is not None and primary_det is None:
+                    active_tid = secondary_track_id
+                else:
+                    active_tid = primary_track_id
+            sample = AdaptiveSegment(
+                mode="single_person",
+                start_s=abs_s,
+                end_s=min(clip_end_s, abs_s + SPLIT_ADAPTIVE_STEP_S),
+                primary_track_id=active_tid,
+                secondary_track_id=None,
+            )
+        samples.append(sample)
+        t += SPLIT_ADAPTIVE_STEP_S
+
+    if not samples:
+        return [
+            AdaptiveSegment(
+                mode="single_person",
+                start_s=float(clip_start_s),
+                end_s=float(clip_end_s),
+                primary_track_id=primary_track_id,
+                secondary_track_id=None,
+            )
+        ]
+
+    merged: list[AdaptiveSegment] = []
+    for sample in samples:
+        if (
+            merged
+            and merged[-1].mode == sample.mode
+            and merged[-1].primary_track_id == sample.primary_track_id
+            and merged[-1].secondary_track_id == sample.secondary_track_id
+        ):
+            prev = merged[-1]
+            merged[-1] = AdaptiveSegment(
+                mode=prev.mode,
+                start_s=prev.start_s,
+                end_s=sample.end_s,
+                primary_track_id=prev.primary_track_id,
+                secondary_track_id=prev.secondary_track_id,
+            )
+        else:
+            merged.append(sample)
+
+    stabilized: list[AdaptiveSegment] = []
+    for segment in merged:
+        duration = float(segment.end_s - segment.start_s)
+        if stabilized and duration < SPLIT_MIN_SEGMENT_S:
+            prev = stabilized[-1]
+            stabilized[-1] = AdaptiveSegment(
+                mode=prev.mode,
+                start_s=prev.start_s,
+                end_s=segment.end_s,
+                primary_track_id=prev.primary_track_id,
+                secondary_track_id=prev.secondary_track_id,
+            )
+        else:
+            stabilized.append(segment)
+
+    if stabilized:
+        first = stabilized[0]
+        stabilized[0] = AdaptiveSegment(
+            mode=first.mode,
+            start_s=float(clip_start_s),
+            end_s=first.end_s,
+            primary_track_id=first.primary_track_id,
+            secondary_track_id=first.secondary_track_id,
+        )
+        last = stabilized[-1]
+        stabilized[-1] = AdaptiveSegment(
+            mode=last.mode,
+            start_s=last.start_s,
+            end_s=float(clip_end_s),
+            primary_track_id=last.primary_track_id,
+            secondary_track_id=last.secondary_track_id,
+        )
+    return stabilized
+
+
+def choose_active_speaker_segments(
+    *,
+    clip_start_s: float,
+    clip_end_s: float,
+    bindings: list[dict],
+    fallback_track_id: str | None = None,
+) -> list[AdaptiveSegment]:
+    clipped: list[AdaptiveSegment] = []
+    for binding in bindings:
+        track_id = str(binding.get("track_id", "") or "")
+        if not track_id:
+            continue
+        start_s = max(float(clip_start_s), float(binding.get("start_time_ms", 0)) / 1000.0)
+        end_s = min(float(clip_end_s), float(binding.get("end_time_ms", 0)) / 1000.0)
+        if end_s <= start_s:
+            continue
+        clipped.append(
+            AdaptiveSegment(
+                mode="single_person",
+                start_s=start_s,
+                end_s=end_s,
+                primary_track_id=track_id,
+                secondary_track_id=None,
+            )
+        )
+
+    if not clipped:
+        return [
+            AdaptiveSegment(
+                mode="single_person",
+                start_s=float(clip_start_s),
+                end_s=float(clip_end_s),
+                primary_track_id=fallback_track_id,
+                secondary_track_id=None,
+            )
+        ]
+
+    clipped.sort(key=lambda segment: (segment.start_s, segment.end_s, segment.primary_track_id or ""))
+
+    merged: list[AdaptiveSegment] = []
+    for segment in clipped:
+        if (
+            merged
+            and merged[-1].primary_track_id == segment.primary_track_id
+            and segment.start_s <= (merged[-1].end_s + 1e-3)
+        ):
+            prev = merged[-1]
+            merged[-1] = AdaptiveSegment(
+                mode="single_person",
+                start_s=prev.start_s,
+                end_s=max(prev.end_s, segment.end_s),
+                primary_track_id=prev.primary_track_id,
+                secondary_track_id=None,
+            )
+        else:
+            merged.append(segment)
+
+    stabilized: list[AdaptiveSegment] = []
+    idx = 0
+    while idx < len(merged):
+        segment = merged[idx]
+        duration = float(segment.end_s - segment.start_s)
+        prev_segment = stabilized[-1] if stabilized else None
+        next_segment = merged[idx + 1] if idx + 1 < len(merged) else None
+        if (
+            duration < SINGLE_SPEAKER_MIN_SEGMENT_S
+            and prev_segment is not None
+            and next_segment is not None
+            and prev_segment.primary_track_id == next_segment.primary_track_id
+        ):
+            stabilized[-1] = AdaptiveSegment(
+                mode="single_person",
+                start_s=prev_segment.start_s,
+                end_s=next_segment.end_s,
+                primary_track_id=prev_segment.primary_track_id,
+                secondary_track_id=None,
+            )
+            idx += 2
+            continue
+
+        if prev_segment is not None and segment.start_s > prev_segment.end_s:
+            stabilized[-1] = AdaptiveSegment(
+                mode="single_person",
+                start_s=prev_segment.start_s,
+                end_s=segment.start_s,
+                primary_track_id=prev_segment.primary_track_id,
+                secondary_track_id=None,
+            )
+        stabilized.append(segment)
+        idx += 1
+
+    if stabilized:
+        first = stabilized[0]
+        stabilized[0] = AdaptiveSegment(
+            mode="single_person",
+            start_s=float(clip_start_s),
+            end_s=first.end_s,
+            primary_track_id=first.primary_track_id or fallback_track_id,
+            secondary_track_id=None,
+        )
+        for idx in range(1, len(stabilized)):
+            prev = stabilized[idx - 1]
+            cur = stabilized[idx]
+            if cur.start_s > prev.end_s:
+                stabilized[idx] = AdaptiveSegment(
+                    mode="single_person",
+                    start_s=prev.end_s,
+                    end_s=cur.end_s,
+                    primary_track_id=cur.primary_track_id,
+                    secondary_track_id=None,
+                )
+        last = stabilized[-1]
+        stabilized[-1] = AdaptiveSegment(
+            mode="single_person",
+            start_s=last.start_s,
+            end_s=float(clip_end_s),
+            primary_track_id=last.primary_track_id or fallback_track_id,
+            secondary_track_id=None,
+        )
+
+    return stabilized
 
 
 def _sample_window_track_stats(
@@ -578,7 +1350,7 @@ def _sample_window_track_stats(
         abs_ms = int(round((clip_start_s + t) * 1000.0))
         frame_idx = int(round((abs_ms / 1000.0) * fps))
         for tid in track_ids:
-            det = _track_anchor_at_frame(tid, frame_idx, fps, person_track_index, face_track_index)
+            det = _track_anchor_at_frame(tid, frame_idx, fps, 0, 0, person_track_index, face_track_index)
             if det is None:
                 continue
             track_visible_samples[tid] = track_visible_samples.get(tid, 0) + 1
@@ -713,6 +1485,7 @@ def build_camera_path(
     bindings: list[dict],
     person_track_index: dict[str, list[Detection]],
     face_track_index: dict[str, list[Detection]],
+    frame_detection_index: dict[int, list[dict]] | None = None,
     motion_profile: MotionProfile | None = None,
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     motion_profile = motion_profile or motion_profile_for_composition("single_person")
@@ -754,9 +1527,18 @@ def build_camera_path(
     while t <= (clip_end_s - clip_start_s + 1e-6):
         abs_ms = int(round((clip_start_s + t) * 1000.0))
         frame_idx = int(round((abs_ms / 1000.0) * fps))
-        tid = active_track_at(bindings, abs_ms)
+        tid = resolve_follow_identity(bindings, abs_ms)
         person_det = interpolate_detection(person_track_index.get(tid), frame_idx, fps) if tid else None
-        det = _track_anchor_candidate(tid, frame_idx, fps, person_track_index, face_track_index)
+        det = _track_anchor_candidate(
+            tid,
+            frame_idx,
+            fps,
+            src_w,
+            src_h,
+            person_track_index,
+            face_track_index,
+            frame_detection_index,
+        )
         if det is not None and person_det is not None and det is person_det:
             last_cx = person_det.x_center
             last_cy = person_det.y_center - (motion_profile.y_head_bias * person_det.height)
@@ -788,6 +1570,7 @@ def build_single_track_path(
     src_h: int,
     person_track_index: dict[str, list[Detection]],
     face_track_index: dict[str, list[Detection]],
+    frame_detection_index: dict[int, list[dict]] | None = None,
     out_w: int = OUT_W,
     out_h: int = OUT_H,
     camera_zoom: float = CAMERA_ZOOM,
@@ -817,7 +1600,16 @@ def build_single_track_path(
         abs_ms = int(round((clip_start_s + t) * 1000.0))
         frame_idx = int(round((abs_ms / 1000.0) * fps))
         person_det = interpolate_detection(person_track_index.get(track_id), frame_idx, fps)
-        det = _track_anchor_candidate(track_id, frame_idx, fps, person_track_index, face_track_index)
+        det = _track_anchor_candidate(
+            track_id,
+            frame_idx,
+            fps,
+            src_w,
+            src_h,
+            person_track_index,
+            face_track_index,
+            frame_detection_index,
+        )
         if det is not None and person_det is not None and det is person_det:
             last_cx = person_det.x_center
             last_cy = person_det.y_center - (y_head_bias * person_det.height)
@@ -853,6 +1645,7 @@ def build_shared_two_shot_path(
     src_h: int,
     person_track_index: dict[str, list[Detection]],
     face_track_index: dict[str, list[Detection]],
+    frame_detection_index: dict[int, list[dict]] | None = None,
     out_w: int = OUT_W,
     out_h: int = OUT_H,
     motion_profile: MotionProfile | None = None,
@@ -879,8 +1672,26 @@ def build_shared_two_shot_path(
     while t <= (clip_end_s - clip_start_s + 1e-6):
         abs_ms = int(round((clip_start_s + t) * 1000.0))
         frame_idx = int(round((abs_ms / 1000.0) * fps))
-        primary_det = _track_anchor_at_frame(primary_track_id, frame_idx, fps, person_track_index, face_track_index)
-        secondary_det = _track_anchor_at_frame(secondary_track_id, frame_idx, fps, person_track_index, face_track_index)
+        primary_det = _track_anchor_at_frame(
+            primary_track_id,
+            frame_idx,
+            fps,
+            src_w,
+            src_h,
+            person_track_index,
+            face_track_index,
+            frame_detection_index,
+        )
+        secondary_det = _track_anchor_at_frame(
+            secondary_track_id,
+            frame_idx,
+            fps,
+            src_w,
+            src_h,
+            person_track_index,
+            face_track_index,
+            frame_detection_index,
+        )
         dets = [det for det in (primary_det, secondary_det) if det is not None]
         if dets:
             last_cx = sum(det.x_center for det in dets) / len(dets)
@@ -926,6 +1737,7 @@ def build_overlay_path(
     y_keyframes: list[tuple[float, float]],
     person_track_index: dict[str, list[Detection]],
     face_track_index: dict[str, list[Detection]],
+    frame_detection_index: dict[int, list[dict]] | None = None,
     out_w: int = OUT_W,
     out_h: int = OUT_H,
     camera_zoom: float = CAMERA_ZOOM,
@@ -958,7 +1770,16 @@ def build_overlay_path(
     while t <= (clip_end_s - clip_start_s + 1e-6):
         abs_ms = int(round((clip_start_s + t) * 1000.0))
         frame_idx = int(round((abs_ms / 1000.0) * fps))
-        det = _track_anchor_candidate(track_id, frame_idx, fps, person_track_index, face_track_index)
+        det = _track_anchor_candidate(
+            track_id,
+            frame_idx,
+            fps,
+            src_w,
+            src_h,
+            person_track_index,
+            face_track_index,
+            frame_detection_index,
+        )
 
         crop_x = interpolate_keyframes(x_keyframes, t)
         crop_y = interpolate_keyframes(y_keyframes, t)
@@ -1002,6 +1823,7 @@ def build_overlay_box_path(
     src_h: int,
     person_track_index: dict[str, list[Detection]],
     face_track_index: dict[str, list[Detection]],
+    frame_detection_index: dict[int, list[dict]] | None = None,
     out_w: int = OUT_W,
     out_h: int = OUT_H,
     camera_zoom: float = CAMERA_ZOOM,
@@ -1023,6 +1845,7 @@ def build_overlay_box_path(
         src_h=src_h,
         person_track_index=person_track_index,
         face_track_index=face_track_index,
+        frame_detection_index=frame_detection_index,
         out_w=out_w,
         out_h=out_h,
         camera_zoom=camera_zoom,
@@ -1039,6 +1862,7 @@ def build_overlay_box_path(
         y_keyframes=y_keyframes,
         person_track_index=person_track_index,
         face_track_index=face_track_index,
+        frame_detection_index=frame_detection_index,
         out_w=out_w,
         out_h=out_h,
         camera_zoom=camera_zoom,
@@ -1057,6 +1881,89 @@ def build_overlay_box_path(
     )
 
 
+def build_projected_overlay_path(
+    *,
+    track_id: str,
+    clip_start_s: float,
+    clip_end_s: float,
+    fps: float,
+    src_w: int,
+    src_h: int,
+    x_keyframes: list[tuple[float, float]],
+    y_keyframes: list[tuple[float, float]],
+    detection_index: dict[str, list[Detection]],
+    out_w: int = OUT_W,
+    out_h: int = OUT_H,
+    camera_zoom: float = CAMERA_ZOOM,
+    keyframe_step_s: float = KEYFRAME_STEP_S,
+    color: str = OVERLAY_BOX_COLOR,
+    label: str | None = None,
+    box_thickness: int = OVERLAY_BOX_THICKNESS,
+    text_color: str = "white",
+) -> OverlayPath | None:
+    crop_w, crop_h = crop_dimensions(
+        src_w,
+        src_h,
+        out_w=out_w,
+        out_h=out_h,
+        camera_zoom=camera_zoom,
+    )
+
+    box_x_keyframes: list[tuple[float, float]] = []
+    box_y_keyframes: list[tuple[float, float]] = []
+    box_w_keyframes: list[tuple[float, float]] = []
+    box_h_keyframes: list[tuple[float, float]] = []
+    saw_anchor = False
+    last_rel = (0.0, 0.0, 0.0, 0.0)
+
+    t = 0.0
+    while t <= (clip_end_s - clip_start_s + 1e-6):
+        abs_ms = int(round((clip_start_s + t) * 1000.0))
+        frame_idx = int(round((abs_ms / 1000.0) * fps))
+        det = interpolate_detection(detection_index.get(track_id), frame_idx, fps)
+        if det is not None:
+            crop_x = interpolate_keyframes(x_keyframes, t)
+            crop_y = interpolate_keyframes(y_keyframes, t)
+            x1 = det.x_center - (det.width / 2.0)
+            y1 = det.y_center - (det.height / 2.0)
+            rel_x = ((x1 - crop_x) / max(1.0, crop_w)) * out_w
+            rel_y = ((y1 - crop_y) / max(1.0, crop_h)) * out_h
+            rel_w = (det.width / max(1.0, crop_w)) * out_w
+            rel_h = (det.height / max(1.0, crop_h)) * out_h
+            rel_w = clamp(rel_w, 12.0, out_w * 0.95)
+            rel_h = clamp(rel_h, 12.0, out_h * 0.95)
+            if rel_x + rel_w < 0.0 or rel_y + rel_h < 0.0 or rel_x > out_w or rel_y > out_h:
+                t += keyframe_step_s
+                continue
+            rel_x = clamp(rel_x, 0.0, out_w - rel_w)
+            rel_y = clamp(rel_y, 0.0, out_h - rel_h)
+            last_rel = (rel_x, rel_y, rel_w, rel_h)
+            saw_anchor = True
+
+        if saw_anchor:
+            box_x_keyframes.append((round(t, 3), float(last_rel[0])))
+            box_y_keyframes.append((round(t, 3), float(last_rel[1])))
+            box_w_keyframes.append((round(t, 3), float(last_rel[2])))
+            box_h_keyframes.append((round(t, 3), float(last_rel[3])))
+        t += keyframe_step_s
+
+    if not box_x_keyframes:
+        return None
+
+    return OverlayPath(
+        x_keyframes=x_keyframes,
+        y_keyframes=y_keyframes,
+        box_x_keyframes=box_x_keyframes,
+        box_y_keyframes=box_y_keyframes,
+        box_w_keyframes=box_w_keyframes,
+        box_h_keyframes=box_h_keyframes,
+        color=color,
+        label=label,
+        box_thickness=box_thickness,
+        text_color=text_color,
+    )
+
+
 def render_clip(
     video_path: Path,
     out_path: Path,
@@ -1067,6 +1974,7 @@ def render_clip(
     overlay_paths: list[OverlayPath],
     src_h: int,
     camera_zoom: float = CAMERA_ZOOM,
+    extra_filters: list[str] | None = None,
 ) -> None:
     crop_h = int(round(src_h / camera_zoom))
     crop_w = int(round(crop_h * (OUT_W / OUT_H)))
@@ -1076,14 +1984,9 @@ def render_clip(
         f"crop=w={crop_w}:h={crop_h}:x='{x_expr}':y='{y_expr}':exact=1",
         f"scale={OUT_W}:{OUT_H}:flags=lanczos",
     ]
-    for idx, overlay in enumerate(overlay_paths):
-        filter_chain_parts.append(
-            f"drawbox=x='{build_interp_expr(overlay.box_x_keyframes)}':"
-            f"y='{build_interp_expr(overlay.box_y_keyframes)}':"
-            f"w='{build_interp_expr(overlay.box_w_keyframes)}':"
-            f"h='{build_interp_expr(overlay.box_h_keyframes)}':"
-            f"color={overlay.color}:t={OVERLAY_BOX_THICKNESS}"
-        )
+    filter_chain_parts.extend(build_overlay_filters(overlay_paths))
+    if extra_filters:
+        filter_chain_parts.extend(extra_filters)
     filter_chain = ",".join(filter_chain_parts)
     cmd = [
         "ffmpeg",
@@ -1131,6 +2034,7 @@ def render_split_clip(
     src_w: int,
     src_h: int,
     camera_zoom: float = CAMERA_ZOOM,
+    extra_filters: list[str] | None = None,
 ) -> None:
     panel_h = SPLIT_PANEL_HEIGHT
     crop_h = int(round(src_h / camera_zoom))
@@ -1142,28 +2046,8 @@ def render_split_clip(
     x_expr_lower = build_interp_expr(lower_x_keyframes)
     y_expr_lower = build_interp_expr(lower_y_keyframes)
 
-    upper_draw_filters = [
-        (
-            f"drawbox=x='{build_interp_expr(overlay.box_x_keyframes)}':"
-            f"y='{build_interp_expr(overlay.box_y_keyframes)}':"
-            f"w='{build_interp_expr(overlay.box_w_keyframes)}':"
-            f"h='{build_interp_expr(overlay.box_h_keyframes)}':"
-            f"color={overlay.color}:t={OVERLAY_BOX_THICKNESS}"
-        )
-        for overlay in upper_overlay_paths
-        if overlay.box_x_keyframes
-    ]
-    lower_draw_filters = [
-        (
-            f"drawbox=x='{build_interp_expr(overlay.box_x_keyframes)}':"
-            f"y='{build_interp_expr(overlay.box_y_keyframes)}':"
-            f"w='{build_interp_expr(overlay.box_w_keyframes)}':"
-            f"h='{build_interp_expr(overlay.box_h_keyframes)}':"
-            f"color={overlay.color}:t={OVERLAY_BOX_THICKNESS}"
-        )
-        for overlay in lower_overlay_paths
-        if overlay.box_x_keyframes
-    ]
+    upper_draw_filters = build_overlay_filters(upper_overlay_paths)
+    lower_draw_filters = build_overlay_filters(lower_overlay_paths)
 
     filter_complex = (
         f"[0:v]split=2[upper_src][lower_src];"
@@ -1173,8 +2057,12 @@ def render_split_clip(
         f"[lower_src]crop=w={crop_w}:h={crop_h}:x='{x_expr_lower}':y='{y_expr_lower}':exact=1,"
         f"scale={OUT_W}:{panel_h}:flags=lanczos"
         f"{(',' + ','.join(lower_draw_filters)) if lower_draw_filters else ''}[lower];"
-        f"[upper][lower]vstack=inputs=2[vout]"
+        f"[upper][lower]vstack=inputs=2[stacked]"
     )
+    if extra_filters:
+        filter_complex += f";[stacked]{','.join(extra_filters)}[vout]"
+    else:
+        filter_complex += ";[stacked]null[vout]"
     cmd = [
         "ffmpeg",
         "-y",
@@ -1211,6 +2099,329 @@ def render_split_clip(
         )
 
 
+def concat_render_segments(segment_paths: list[Path], out_path: Path) -> None:
+    if len(segment_paths) == 1:
+        segment_paths[0].replace(out_path)
+        return
+
+    with tempfile.TemporaryDirectory(prefix="clypt-render-concat-") as tmpdir:
+        concat_path = Path(tmpdir) / "segments.txt"
+        concat_path.write_text(
+            "".join(f"file '{segment_path.as_posix()}'\n" for segment_path in segment_paths),
+            encoding="utf-8",
+        )
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_path),
+            "-c",
+            "copy",
+            str(out_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg concat failed for {out_path.name}:\n{result.stderr[-1200:]}"
+            )
+
+
+def write_render_debug_sidecar(out_path: Path, payload: dict) -> None:
+    sidecar_path = out_path.with_suffix(".json")
+    sidecar_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _escape_drawtext_text(text: str) -> str:
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace(":", r"\:")
+        .replace("'", r"\'")
+        .replace(",", r"\,")
+        .replace("[", r"\[")
+        .replace("]", r"\]")
+        .replace("%", r"\%")
+    )
+
+
+def _track_palette_color(track_id: str) -> str:
+    palette = [
+        "0x4FC3F7",
+        "0xCE93D8",
+        "0x81C784",
+        "0xFF8A65",
+        "0x90CAF9",
+        "0xF06292",
+        "0xAED581",
+        "0xFFD54F",
+    ]
+    if not track_id:
+        return DEBUG_DEFAULT_BOX_COLOR
+    return palette[sum(ord(ch) for ch in str(track_id)) % len(palette)]
+
+
+def build_overlay_filters(overlay_paths: list[OverlayPath]) -> list[str]:
+    filters: list[str] = []
+    for overlay in overlay_paths:
+        if not overlay.box_x_keyframes:
+            continue
+        x_expr = build_interp_expr(overlay.box_x_keyframes)
+        y_expr = build_interp_expr(overlay.box_y_keyframes)
+        filters.append(
+            f"drawbox=x='{x_expr}':"
+            f"y='{y_expr}':"
+            f"w='{build_interp_expr(overlay.box_w_keyframes)}':"
+            f"h='{build_interp_expr(overlay.box_h_keyframes)}':"
+            f"color={overlay.color}:t={int(overlay.box_thickness)}"
+        )
+        if overlay.label:
+            filters.append(
+                "drawtext="
+                f"text='{_escape_drawtext_text(overlay.label)}':"
+                "fontcolor="
+                f"{overlay.text_color}:"
+                f"fontsize={DEBUG_HUD_FONT_SIZE}:"
+                "box=1:boxcolor=black@0.55:boxborderw=6:"
+                f"x='{x_expr}':"
+                f"y='max(0,{y_expr}-34)'"
+            )
+    return filters
+
+
+def select_binding_sets(audio: dict) -> tuple[list[dict], list[dict], list[dict], str]:
+    use_local = os.getenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "").strip().lower() in {"1", "true", "yes", "on"}
+    if use_local:
+        raw_bindings = list(audio.get("speaker_bindings_local", []))
+        follow_bindings = list(audio.get("speaker_follow_bindings_local", []))
+        if follow_bindings:
+            return follow_bindings, raw_bindings, follow_bindings, "speaker_follow_bindings_local"
+        if raw_bindings:
+            return raw_bindings, raw_bindings, follow_bindings, "speaker_bindings_local"
+    raw_bindings = list(audio.get("speaker_bindings", []))
+    follow_bindings = list(audio.get("speaker_follow_bindings", []))
+    if follow_bindings:
+        return follow_bindings, raw_bindings, follow_bindings, "speaker_follow_bindings"
+    return raw_bindings, raw_bindings, follow_bindings, "speaker_bindings"
+
+
+def select_render_bindings(audio: dict) -> list[dict]:
+    selected, _, _, _ = select_binding_sets(audio)
+    return selected
+
+
+def _bindings_for_interval(bindings: list[dict], clip_start_s: float, clip_end_s: float) -> list[dict]:
+    selected: list[dict] = []
+    for binding in bindings:
+        start_s = float(binding.get("start_time_ms", 0)) / 1000.0
+        end_s = float(binding.get("end_time_ms", 0)) / 1000.0
+        if end_s <= clip_start_s or start_s >= clip_end_s:
+            continue
+        selected.append(dict(binding))
+    return selected
+
+
+def visible_track_ids_for_interval(
+    *,
+    clip_start_s: float,
+    clip_end_s: float,
+    fps: float,
+    track_index: dict[str, list[Detection]],
+) -> list[str]:
+    frame_lo = int(math.floor(float(clip_start_s) * fps))
+    frame_hi = int(math.ceil(float(clip_end_s) * fps))
+    visible: list[str] = []
+    for track_id, dets in sorted(track_index.items()):
+        if any(frame_lo <= int(det.frame_idx) <= frame_hi for det in dets):
+            visible.append(str(track_id))
+    return visible
+
+
+def build_debug_timeline_filters(
+    *,
+    clip_start_s: float,
+    clip_end_s: float,
+    raw_bindings: list[dict],
+    follow_bindings: list[dict],
+) -> list[str]:
+    width = max(120, OUT_W - DEBUG_TIMELINE_LEFT - DEBUG_TIMELINE_RIGHT_PAD)
+    duration_s = max(0.001, float(clip_end_s) - float(clip_start_s))
+
+    filters = [
+        "drawtext=text='raw':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.45:boxborderw=4:"
+        f"x=24:y={DEBUG_TIMELINE_RAW_Y - 2}",
+        "drawtext=text='follow':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.45:boxborderw=4:"
+        f"x=24:y={DEBUG_TIMELINE_FOLLOW_Y - 2}",
+    ]
+
+    for binding_set, row_y in (
+        (raw_bindings, DEBUG_TIMELINE_RAW_Y),
+        (follow_bindings, DEBUG_TIMELINE_FOLLOW_Y),
+    ):
+        for binding in binding_set:
+            start_s = max(float(clip_start_s), float(binding.get("start_time_ms", 0)) / 1000.0)
+            end_s = min(float(clip_end_s), float(binding.get("end_time_ms", 0)) / 1000.0)
+            if end_s <= start_s:
+                continue
+            rel_start = (start_s - float(clip_start_s)) / duration_s
+            rel_end = (end_s - float(clip_start_s)) / duration_s
+            x = DEBUG_TIMELINE_LEFT + int(round(rel_start * width))
+            w = max(6, int(round((rel_end - rel_start) * width)))
+            color = _track_palette_color(str(binding.get("track_id", "")))
+            filters.append(
+                f"drawbox=x={x}:y={row_y}:w={w}:h={DEBUG_TIMELINE_HEIGHT}:color={color}:t=fill"
+            )
+    return filters
+
+
+def build_debug_hud_filters(
+    *,
+    mode: str,
+    binding_source: str,
+    follow_track_ids: list[str],
+    raw_track_ids: list[str],
+    face_track_ids: list[str],
+) -> list[str]:
+    lines = [
+        f"mode={mode}",
+        f"binding={binding_source}",
+        f"follow={','.join(follow_track_ids) if follow_track_ids else 'none'}",
+        f"raw={','.join(raw_track_ids) if raw_track_ids else 'none'}",
+        f"faces={','.join(face_track_ids) if face_track_ids else 'none'}",
+    ]
+    filters: list[str] = []
+    for idx, line in enumerate(lines):
+        filters.append(
+            "drawtext="
+            f"text='{_escape_drawtext_text(line)}':"
+            "fontcolor=white:"
+            f"fontsize={DEBUG_HUD_FONT_SIZE}:"
+            "box=1:boxcolor=black@0.55:boxborderw=6:"
+            f"x=24:y={24 + idx * 38}"
+        )
+    return filters
+
+
+def build_debug_overlay_paths(
+    *,
+    clip_start_s: float,
+    clip_end_s: float,
+    fps: float,
+    src_w: int,
+    src_h: int,
+    x_keyframes: list[tuple[float, float]],
+    y_keyframes: list[tuple[float, float]],
+    person_track_index: dict[str, list[Detection]],
+    face_track_index: dict[str, list[Detection]],
+    follow_track_ids: list[str],
+    raw_track_ids: list[str],
+    out_w: int = OUT_W,
+    out_h: int = OUT_H,
+    camera_zoom: float = CAMERA_ZOOM,
+    keyframe_step_s: float = KEYFRAME_STEP_S,
+    include_faces: bool = False,
+) -> list[OverlayPath]:
+    overlays: list[OverlayPath] = []
+    follow_set = {str(tid) for tid in follow_track_ids if str(tid)}
+    raw_set = {str(tid) for tid in raw_track_ids if str(tid)}
+
+    visible_track_ids = visible_track_ids_for_interval(
+        clip_start_s=clip_start_s,
+        clip_end_s=clip_end_s,
+        fps=fps,
+        track_index=person_track_index,
+    )
+    for track_id in visible_track_ids:
+        if track_id in follow_set:
+            color = DEBUG_FOLLOW_BOX_COLOR
+            thickness = 8
+        elif track_id in raw_set:
+            color = DEBUG_RAW_ACTIVE_BOX_COLOR
+            thickness = 6
+        else:
+            color = _track_palette_color(track_id)
+            thickness = 4
+        overlay = build_projected_overlay_path(
+            track_id=track_id,
+            clip_start_s=clip_start_s,
+            clip_end_s=clip_end_s,
+            fps=fps,
+            src_w=src_w,
+            src_h=src_h,
+            x_keyframes=x_keyframes,
+            y_keyframes=y_keyframes,
+            detection_index=person_track_index,
+            out_w=out_w,
+            out_h=out_h,
+            camera_zoom=camera_zoom,
+            keyframe_step_s=keyframe_step_s,
+            color=color,
+            label=track_id,
+            box_thickness=thickness,
+        )
+        if overlay is not None:
+            overlays.append(overlay)
+
+    if include_faces:
+        visible_face_ids = visible_track_ids_for_interval(
+            clip_start_s=clip_start_s,
+            clip_end_s=clip_end_s,
+            fps=fps,
+            track_index=face_track_index,
+        )
+        for track_id in visible_face_ids:
+            overlay = build_projected_overlay_path(
+                track_id=track_id,
+                clip_start_s=clip_start_s,
+                clip_end_s=clip_end_s,
+                fps=fps,
+                src_w=src_w,
+                src_h=src_h,
+                x_keyframes=x_keyframes,
+                y_keyframes=y_keyframes,
+                detection_index=face_track_index,
+                out_w=out_w,
+                out_h=out_h,
+                camera_zoom=camera_zoom,
+                keyframe_step_s=keyframe_step_s,
+                color=DEBUG_FACE_BOX_COLOR,
+                label=None,
+                box_thickness=3,
+            )
+            if overlay is not None:
+                overlays.append(overlay)
+    return overlays
+
+
+def build_debug_filters_for_segment(
+    *,
+    clip_start_s: float,
+    clip_end_s: float,
+    segment_mode: str,
+    binding_source: str,
+    raw_bindings: list[dict],
+    follow_bindings: list[dict],
+    follow_track_ids: list[str],
+    face_track_ids: list[str],
+) -> list[str]:
+    raw_track_ids = [str(binding.get("track_id", "")) for binding in raw_bindings if str(binding.get("track_id", ""))]
+    return build_debug_hud_filters(
+        mode=segment_mode,
+        binding_source=binding_source,
+        follow_track_ids=follow_track_ids,
+        raw_track_ids=raw_track_ids,
+        face_track_ids=face_track_ids,
+    ) + build_debug_timeline_filters(
+        clip_start_s=clip_start_s,
+        clip_end_s=clip_end_s,
+        raw_bindings=raw_bindings,
+        follow_bindings=follow_bindings,
+    )
+
+
 def main() -> None:
     if not VIDEO_PATH.exists():
         raise FileNotFoundError(f"Missing source video: {VIDEO_PATH}")
@@ -1224,8 +2435,7 @@ def main() -> None:
     visual = load_json(VISUAL_PATH)
     audio = load_json(AUDIO_PATH)
     tracks = list(visual.get("tracks", []))
-    face_detections = list(visual.get("face_detections", []))
-    bindings = list(audio.get("speaker_bindings", []))
+    bindings, raw_bindings, follow_bindings, binding_source = select_binding_sets(audio)
     if not tracks or not bindings:
         raise RuntimeError("Need non-empty tracks and speaker_bindings to render clips")
 
@@ -1237,20 +2447,36 @@ def main() -> None:
     if duration_s <= 0:
         raise RuntimeError("Missing video duration in phase_1_visual.json video_metadata")
 
+    frame_detection_index = build_frame_detection_index(tracks)
     person_track_index = build_track_index(tracks)
-    face_track_index = build_face_index(face_detections, src_w=src_w, src_h=src_h, fps=fps)
+    face_track_index: dict[str, list[Detection]] = build_face_index(
+        list(visual.get("face_detections", [])),
+        src_w=src_w,
+        src_h=src_h,
+        fps=fps,
+    )
     windows = choose_windows(bindings, duration_s)
 
     print(f"Selected {len(windows)} windows from current outputs:")
     print(
         "Camera target mode: "
-        f"face-first ({len(face_track_index)} tracks with face detections), "
-        f"person-fallback ({len(person_track_index)} person tracks)"
+        f"body-only ({len(person_track_index)} person tracks)"
     )
+    if RENDER_DEBUG_MODE:
+        print(
+            "Debug overlays: "
+            f"on (binding_source={binding_source}, faces={'on' if RENDER_DEBUG_SHOW_FACES else 'off'})"
+        )
     outputs = []
     for idx, (start_s, end_s, score) in enumerate(windows, start=1):
         clip_name = f"speaker_follow_clip{idx}_{start_s}s_{CLIP_DURATION_S}s.mp4"
         out_path = OUTPUT_DIR / clip_name
+        clip_raw_bindings = _bindings_for_interval(raw_bindings, float(start_s), float(end_s))
+        clip_follow_bindings = _bindings_for_interval(
+            follow_bindings if follow_bindings else bindings,
+            float(start_s),
+            float(end_s),
+        )
         composition = choose_window_composition(
             clip_start_s=start_s,
             clip_end_s=end_s,
@@ -1263,76 +2489,242 @@ def main() -> None:
         )
         if composition.mode == "two_split" and composition.primary_track_id and composition.secondary_track_id:
             split_profile = motion_profile_for_composition("two_split", out_h=SPLIT_PANEL_HEIGHT)
-            upper_x_keyframes, upper_y_keyframes = build_single_track_path(
-                track_id=composition.primary_track_id,
+            adaptive_segments = choose_adaptive_split_segments(
+                primary_track_id=composition.primary_track_id,
+                secondary_track_id=composition.secondary_track_id,
                 clip_start_s=start_s,
                 clip_end_s=end_s,
                 fps=fps,
                 src_w=src_w,
                 src_h=src_h,
+                bindings=bindings,
                 person_track_index=person_track_index,
                 face_track_index=face_track_index,
-                out_h=SPLIT_PANEL_HEIGHT,
-                motion_profile=split_profile,
-            )
-            lower_x_keyframes, lower_y_keyframes = build_single_track_path(
-                track_id=composition.secondary_track_id,
-                clip_start_s=start_s,
-                clip_end_s=end_s,
-                fps=fps,
-                src_w=src_w,
-                src_h=src_h,
-                person_track_index=person_track_index,
-                face_track_index=face_track_index,
-                out_h=SPLIT_PANEL_HEIGHT,
-                motion_profile=split_profile,
-            )
-            upper_overlay = build_overlay_box_path(
-                track_id=composition.primary_track_id,
-                clip_start_s=start_s,
-                clip_end_s=end_s,
-                fps=fps,
-                src_w=src_w,
-                src_h=src_h,
-                person_track_index=person_track_index,
-                face_track_index=face_track_index,
-                out_h=SPLIT_PANEL_HEIGHT,
-                camera_zoom=split_profile.camera_zoom,
-                keyframe_step_s=split_profile.keyframe_step_s,
-                color=OVERLAY_BOX_COLOR,
-            )
-            lower_overlay = build_overlay_box_path(
-                track_id=composition.secondary_track_id,
-                clip_start_s=start_s,
-                clip_end_s=end_s,
-                fps=fps,
-                src_w=src_w,
-                src_h=src_h,
-                person_track_index=person_track_index,
-                face_track_index=face_track_index,
-                out_h=SPLIT_PANEL_HEIGHT,
-                camera_zoom=split_profile.camera_zoom,
-                keyframe_step_s=split_profile.keyframe_step_s,
-                color=OVERLAY_SECONDARY_BOX_COLOR,
+                frame_detection_index=frame_detection_index,
             )
             print(
                 f"  clip{idx}: {start_s}s-{end_s}s score={score:.2f} "
-                f"mode={composition.mode} -> {clip_name}"
+                f"mode={composition.mode} segments={len(adaptive_segments)} -> {clip_name}"
             )
-            render_split_clip(
-                video_path=VIDEO_PATH,
-                out_path=out_path,
-                start_s=start_s,
-                duration_s=(end_s - start_s),
-                upper_x_keyframes=upper_x_keyframes,
-                upper_y_keyframes=upper_y_keyframes,
-                upper_overlay_paths=[upper_overlay] if upper_overlay is not None else [],
-                lower_x_keyframes=lower_x_keyframes,
-                lower_y_keyframes=lower_y_keyframes,
-                lower_overlay_paths=[lower_overlay] if lower_overlay is not None else [],
-                src_w=src_w,
-                src_h=src_h,
-                camera_zoom=split_profile.camera_zoom,
+            with tempfile.TemporaryDirectory(prefix="clypt-render-split-") as tmpdir:
+                segment_paths: list[Path] = []
+                for segment_idx, segment in enumerate(adaptive_segments, start=1):
+                    segment_path = Path(tmpdir) / f"segment_{segment_idx:02d}.mp4"
+                    segment_paths.append(segment_path)
+                    if (
+                        segment.mode == "two_split"
+                        and segment.primary_track_id
+                        and segment.secondary_track_id
+                    ):
+                        upper_x_keyframes, upper_y_keyframes = build_single_track_path(
+                            track_id=segment.primary_track_id,
+                            clip_start_s=segment.start_s,
+                            clip_end_s=segment.end_s,
+                            fps=fps,
+                            src_w=src_w,
+                            src_h=src_h,
+                            person_track_index=person_track_index,
+                            face_track_index=face_track_index,
+                            frame_detection_index=frame_detection_index,
+                            out_h=SPLIT_PANEL_HEIGHT,
+                            motion_profile=split_profile,
+                        )
+                        lower_x_keyframes, lower_y_keyframes = build_single_track_path(
+                            track_id=segment.secondary_track_id,
+                            clip_start_s=segment.start_s,
+                            clip_end_s=segment.end_s,
+                            fps=fps,
+                            src_w=src_w,
+                            src_h=src_h,
+                            person_track_index=person_track_index,
+                            face_track_index=face_track_index,
+                            frame_detection_index=frame_detection_index,
+                            out_h=SPLIT_PANEL_HEIGHT,
+                            motion_profile=split_profile,
+                        )
+                        upper_overlay = build_overlay_box_path(
+                            track_id=segment.primary_track_id,
+                            clip_start_s=segment.start_s,
+                            clip_end_s=segment.end_s,
+                            fps=fps,
+                            src_w=src_w,
+                            src_h=src_h,
+                            person_track_index=person_track_index,
+                            face_track_index=face_track_index,
+                            frame_detection_index=frame_detection_index,
+                            out_h=SPLIT_PANEL_HEIGHT,
+                            camera_zoom=split_profile.camera_zoom,
+                            keyframe_step_s=split_profile.keyframe_step_s,
+                            color=OVERLAY_BOX_COLOR,
+                        )
+                        lower_overlay = build_overlay_box_path(
+                            track_id=segment.secondary_track_id,
+                            clip_start_s=segment.start_s,
+                            clip_end_s=segment.end_s,
+                            fps=fps,
+                            src_w=src_w,
+                            src_h=src_h,
+                            person_track_index=person_track_index,
+                            face_track_index=face_track_index,
+                            frame_detection_index=frame_detection_index,
+                            out_h=SPLIT_PANEL_HEIGHT,
+                            camera_zoom=split_profile.camera_zoom,
+                            keyframe_step_s=split_profile.keyframe_step_s,
+                            color=OVERLAY_SECONDARY_BOX_COLOR,
+                        )
+                        upper_overlay_paths = [upper_overlay] if upper_overlay is not None else []
+                        lower_overlay_paths = [lower_overlay] if lower_overlay is not None else []
+                        extra_filters: list[str] = []
+                        if RENDER_DEBUG_MODE:
+                            segment_raw_bindings = _bindings_for_interval(
+                                clip_raw_bindings,
+                                float(segment.start_s),
+                                float(segment.end_s),
+                            )
+                            segment_follow_track_ids = [segment.primary_track_id, segment.secondary_track_id]
+                            visible_face_ids = (
+                                visible_track_ids_for_interval(
+                                    clip_start_s=float(segment.start_s),
+                                    clip_end_s=float(segment.end_s),
+                                    fps=fps,
+                                    track_index=face_track_index,
+                                )
+                                if RENDER_DEBUG_SHOW_FACES
+                                else []
+                            )
+                            extra_filters = build_debug_filters_for_segment(
+                                clip_start_s=float(start_s),
+                                clip_end_s=float(end_s),
+                                segment_mode="two_split",
+                                binding_source=binding_source,
+                                raw_bindings=clip_raw_bindings,
+                                follow_bindings=clip_follow_bindings,
+                                follow_track_ids=[tid for tid in segment_follow_track_ids if tid],
+                                face_track_ids=visible_face_ids,
+                            )
+                            if upper_overlay is not None:
+                                upper_overlay_paths = [OverlayPath(**{**upper_overlay.__dict__, "label": segment.primary_track_id})]
+                            if lower_overlay is not None:
+                                lower_overlay_paths = [OverlayPath(**{**lower_overlay.__dict__, "label": segment.secondary_track_id})]
+                        render_split_clip(
+                            video_path=VIDEO_PATH,
+                            out_path=segment_path,
+                            start_s=segment.start_s,
+                            duration_s=(segment.end_s - segment.start_s),
+                            upper_x_keyframes=upper_x_keyframes,
+                            upper_y_keyframes=upper_y_keyframes,
+                            upper_overlay_paths=upper_overlay_paths,
+                            lower_x_keyframes=lower_x_keyframes,
+                            lower_y_keyframes=lower_y_keyframes,
+                            lower_overlay_paths=lower_overlay_paths,
+                            src_w=src_w,
+                            src_h=src_h,
+                            camera_zoom=split_profile.camera_zoom,
+                            extra_filters=extra_filters,
+                        )
+                    else:
+                        single_profile = motion_profile_for_composition("single_person")
+                        x_keyframes, y_keyframes = build_single_track_path(
+                            track_id=segment.primary_track_id,
+                            clip_start_s=segment.start_s,
+                            clip_end_s=segment.end_s,
+                            fps=fps,
+                            src_w=src_w,
+                            src_h=src_h,
+                            person_track_index=person_track_index,
+                            face_track_index=face_track_index,
+                            frame_detection_index=frame_detection_index,
+                            out_h=OUT_H,
+                            motion_profile=single_profile,
+                        )
+                        overlay_path = build_overlay_box_path(
+                            track_id=segment.primary_track_id or composition.primary_track_id,
+                            clip_start_s=segment.start_s,
+                            clip_end_s=segment.end_s,
+                            fps=fps,
+                            src_w=src_w,
+                            src_h=src_h,
+                            person_track_index=person_track_index,
+                            face_track_index=face_track_index,
+                            frame_detection_index=frame_detection_index,
+                            out_h=OUT_H,
+                            camera_zoom=single_profile.camera_zoom,
+                            keyframe_step_s=single_profile.keyframe_step_s,
+                        )
+                        overlay_paths = [overlay_path] if overlay_path is not None else []
+                        extra_filters: list[str] = []
+                        if RENDER_DEBUG_MODE:
+                            segment_raw_bindings = _bindings_for_interval(
+                                clip_raw_bindings,
+                                float(segment.start_s),
+                                float(segment.end_s),
+                            )
+                            overlay_paths = build_debug_overlay_paths(
+                                clip_start_s=float(segment.start_s),
+                                clip_end_s=float(segment.end_s),
+                                fps=fps,
+                                src_w=src_w,
+                                src_h=src_h,
+                                x_keyframes=x_keyframes,
+                                y_keyframes=y_keyframes,
+                                person_track_index=person_track_index,
+                                face_track_index=face_track_index,
+                                frame_detection_index=frame_detection_index,
+                                follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
+                                raw_track_ids=[str(b.get("track_id", "")) for b in segment_raw_bindings],
+                                out_h=OUT_H,
+                                camera_zoom=single_profile.camera_zoom,
+                                keyframe_step_s=single_profile.keyframe_step_s,
+                                include_faces=RENDER_DEBUG_SHOW_FACES,
+                            )
+                            visible_face_ids = (
+                                visible_track_ids_for_interval(
+                                    clip_start_s=float(segment.start_s),
+                                    clip_end_s=float(segment.end_s),
+                                    fps=fps,
+                                    track_index=face_track_index,
+                                )
+                                if RENDER_DEBUG_SHOW_FACES
+                                else []
+                            )
+                            extra_filters = build_debug_filters_for_segment(
+                                clip_start_s=float(start_s),
+                                clip_end_s=float(end_s),
+                                segment_mode="single_person",
+                                binding_source=binding_source,
+                                raw_bindings=clip_raw_bindings,
+                                follow_bindings=clip_follow_bindings,
+                                follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
+                                face_track_ids=visible_face_ids,
+                            )
+                        render_clip(
+                            video_path=VIDEO_PATH,
+                            out_path=segment_path,
+                            start_s=segment.start_s,
+                            duration_s=(segment.end_s - segment.start_s),
+                            x_keyframes=x_keyframes,
+                            y_keyframes=y_keyframes,
+                            overlay_paths=overlay_paths,
+                            src_h=src_h,
+                            camera_zoom=single_profile.camera_zoom,
+                            extra_filters=extra_filters,
+                        )
+                concat_render_segments(segment_paths, out_path)
+            write_render_debug_sidecar(
+                out_path,
+                build_render_debug_sidecar_payload(
+                    clip_name=clip_name,
+                    window={"start_s": start_s, "end_s": end_s, "score": score},
+                    binding_source=binding_source,
+                    debug_mode=RENDER_DEBUG_MODE,
+                    debug_show_faces=RENDER_DEBUG_SHOW_FACES,
+                    composition=composition,
+                    segments=adaptive_segments,
+                    fps=fps,
+                    src_w=src_w,
+                    src_h=src_h,
+                    frame_detection_index=frame_detection_index,
+                ),
             )
         elif composition.mode == "two_shared" and composition.primary_track_id and composition.secondary_track_id:
             shared_profile = motion_profile_for_composition("two_shared")
@@ -1346,6 +2738,7 @@ def main() -> None:
                 src_h=src_h,
                 person_track_index=person_track_index,
                 face_track_index=face_track_index,
+                frame_detection_index=frame_detection_index,
                 motion_profile=shared_profile,
             )
             overlay_paths = [
@@ -1360,6 +2753,7 @@ def main() -> None:
                         src_h=src_h,
                         person_track_index=person_track_index,
                         face_track_index=face_track_index,
+                        frame_detection_index=frame_detection_index,
                         out_h=OUT_H,
                         camera_zoom=shared_profile.camera_zoom,
                         keyframe_step_s=shared_profile.keyframe_step_s,
@@ -1374,6 +2768,7 @@ def main() -> None:
                         src_h=src_h,
                         person_track_index=person_track_index,
                         face_track_index=face_track_index,
+                        frame_detection_index=frame_detection_index,
                         out_h=OUT_H,
                         camera_zoom=shared_profile.camera_zoom,
                         keyframe_step_s=shared_profile.keyframe_step_s,
@@ -1382,6 +2777,44 @@ def main() -> None:
                 )
                 if overlay is not None
             ]
+            extra_filters: list[str] = []
+            if RENDER_DEBUG_MODE:
+                overlay_paths = build_debug_overlay_paths(
+                    clip_start_s=float(start_s),
+                    clip_end_s=float(end_s),
+                    fps=fps,
+                    src_w=src_w,
+                    src_h=src_h,
+                    x_keyframes=x_keyframes,
+                    y_keyframes=y_keyframes,
+                    person_track_index=person_track_index,
+                    face_track_index=face_track_index,
+                    follow_track_ids=[composition.primary_track_id, composition.secondary_track_id],
+                    raw_track_ids=[str(b.get("track_id", "")) for b in clip_raw_bindings],
+                    camera_zoom=shared_profile.camera_zoom,
+                    keyframe_step_s=shared_profile.keyframe_step_s,
+                    include_faces=RENDER_DEBUG_SHOW_FACES,
+                )
+                visible_face_ids = (
+                    visible_track_ids_for_interval(
+                        clip_start_s=float(start_s),
+                        clip_end_s=float(end_s),
+                        fps=fps,
+                        track_index=face_track_index,
+                    )
+                    if RENDER_DEBUG_SHOW_FACES
+                    else []
+                )
+                extra_filters = build_debug_filters_for_segment(
+                    clip_start_s=float(start_s),
+                    clip_end_s=float(end_s),
+                    segment_mode="two_shared",
+                    binding_source=binding_source,
+                    raw_bindings=clip_raw_bindings,
+                    follow_bindings=clip_follow_bindings,
+                    follow_track_ids=[composition.primary_track_id, composition.secondary_track_id],
+                    face_track_ids=visible_face_ids,
+                )
             print(
                 f"  clip{idx}: {start_s}s-{end_s}s score={score:.2f} "
                 f"mode={composition.mode} -> {clip_name}"
@@ -1396,48 +2829,149 @@ def main() -> None:
                 overlay_paths=overlay_paths,
                 src_h=src_h,
                 camera_zoom=shared_profile.camera_zoom,
+                extra_filters=extra_filters,
+            )
+            write_render_debug_sidecar(
+                out_path,
+                build_render_debug_sidecar_payload(
+                    clip_name=clip_name,
+                    window={"start_s": start_s, "end_s": end_s, "score": score},
+                    binding_source=binding_source,
+                    debug_mode=RENDER_DEBUG_MODE,
+                    debug_show_faces=RENDER_DEBUG_SHOW_FACES,
+                    composition=composition,
+                    segments=[
+                        AdaptiveSegment(
+                            mode="two_shared",
+                            start_s=float(start_s),
+                            end_s=float(end_s),
+                            primary_track_id=composition.primary_track_id,
+                            secondary_track_id=composition.secondary_track_id,
+                        )
+                    ],
+                    fps=fps,
+                    src_w=src_w,
+                    src_h=src_h,
+                    frame_detection_index=frame_detection_index,
+                ),
             )
         else:
             single_profile = motion_profile_for_composition("single_person")
-            x_keyframes, y_keyframes = build_camera_path(
-                clip_start_s=start_s,
-                clip_end_s=end_s,
-                fps=fps,
-                src_w=src_w,
-                src_h=src_h,
-                bindings=bindings,
-                person_track_index=person_track_index,
-                face_track_index=face_track_index,
-                motion_profile=single_profile,
-            )
-            overlay_path = build_overlay_box_path(
-                track_id=composition.primary_track_id,
-                clip_start_s=start_s,
-                clip_end_s=end_s,
-                fps=fps,
-                src_w=src_w,
-                src_h=src_h,
-                person_track_index=person_track_index,
-                face_track_index=face_track_index,
-                out_h=OUT_H,
-                camera_zoom=single_profile.camera_zoom,
-                keyframe_step_s=single_profile.keyframe_step_s,
-            )
-            overlay_paths = [overlay_path] if overlay_path is not None else []
             print(
                 f"  clip{idx}: {start_s}s-{end_s}s score={score:.2f} "
                 f"mode={composition.mode} -> {clip_name}"
             )
-            render_clip(
-                video_path=VIDEO_PATH,
-                out_path=out_path,
-                start_s=start_s,
-                duration_s=(end_s - start_s),
-                x_keyframes=x_keyframes,
-                y_keyframes=y_keyframes,
-                overlay_paths=overlay_paths,
-                src_h=src_h,
-                camera_zoom=single_profile.camera_zoom,
+            single_segments = choose_active_speaker_segments(
+                clip_start_s=float(start_s),
+                clip_end_s=float(end_s),
+                bindings=bindings,
+                fallback_track_id=composition.primary_track_id,
+            )
+            with tempfile.TemporaryDirectory(prefix="clypt-render-single-") as tmpdir:
+                segment_paths: list[Path] = []
+                for segment_idx, segment in enumerate(single_segments, start=1):
+                    segment_path = Path(tmpdir) / f"segment_{segment_idx:02d}.mp4"
+                    segment_paths.append(segment_path)
+                    x_keyframes, y_keyframes = build_single_track_path(
+                        track_id=segment.primary_track_id,
+                        clip_start_s=segment.start_s,
+                        clip_end_s=segment.end_s,
+                        fps=fps,
+                        src_w=src_w,
+                        src_h=src_h,
+                        person_track_index=person_track_index,
+                        face_track_index=face_track_index,
+                        frame_detection_index=frame_detection_index,
+                        out_h=OUT_H,
+                        motion_profile=single_profile,
+                    )
+                    overlay_path = build_overlay_box_path(
+                        track_id=segment.primary_track_id,
+                        clip_start_s=segment.start_s,
+                        clip_end_s=segment.end_s,
+                        fps=fps,
+                        src_w=src_w,
+                        src_h=src_h,
+                        person_track_index=person_track_index,
+                        face_track_index=face_track_index,
+                        frame_detection_index=frame_detection_index,
+                        out_h=OUT_H,
+                        camera_zoom=single_profile.camera_zoom,
+                        keyframe_step_s=single_profile.keyframe_step_s,
+                    )
+                    overlay_paths = [overlay_path] if overlay_path is not None else []
+                    extra_filters: list[str] = []
+                    if RENDER_DEBUG_MODE:
+                        segment_raw_bindings = _bindings_for_interval(
+                            clip_raw_bindings,
+                            float(segment.start_s),
+                            float(segment.end_s),
+                        )
+                        overlay_paths = build_debug_overlay_paths(
+                            clip_start_s=float(segment.start_s),
+                            clip_end_s=float(segment.end_s),
+                            fps=fps,
+                            src_w=src_w,
+                            src_h=src_h,
+                            x_keyframes=x_keyframes,
+                            y_keyframes=y_keyframes,
+                            person_track_index=person_track_index,
+                            face_track_index=face_track_index,
+                            frame_detection_index=frame_detection_index,
+                            follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
+                            raw_track_ids=[str(b.get("track_id", "")) for b in segment_raw_bindings],
+                            camera_zoom=single_profile.camera_zoom,
+                            keyframe_step_s=single_profile.keyframe_step_s,
+                            include_faces=RENDER_DEBUG_SHOW_FACES,
+                        )
+                        visible_face_ids = (
+                            visible_track_ids_for_interval(
+                                clip_start_s=float(segment.start_s),
+                                clip_end_s=float(segment.end_s),
+                                fps=fps,
+                                track_index=face_track_index,
+                            )
+                            if RENDER_DEBUG_SHOW_FACES
+                            else []
+                        )
+                        extra_filters = build_debug_filters_for_segment(
+                            clip_start_s=float(start_s),
+                            clip_end_s=float(end_s),
+                            segment_mode="single_person",
+                            binding_source=binding_source,
+                            raw_bindings=clip_raw_bindings,
+                            follow_bindings=clip_follow_bindings,
+                            follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
+                            face_track_ids=visible_face_ids,
+                        )
+                    render_clip(
+                        video_path=VIDEO_PATH,
+                        out_path=segment_path,
+                        start_s=segment.start_s,
+                        duration_s=(segment.end_s - segment.start_s),
+                        x_keyframes=x_keyframes,
+                        y_keyframes=y_keyframes,
+                        overlay_paths=overlay_paths,
+                        src_h=src_h,
+                        camera_zoom=single_profile.camera_zoom,
+                        extra_filters=extra_filters,
+                    )
+                concat_render_segments(segment_paths, out_path)
+            write_render_debug_sidecar(
+                out_path,
+                build_render_debug_sidecar_payload(
+                    clip_name=clip_name,
+                    window={"start_s": start_s, "end_s": end_s, "score": score},
+                    binding_source=binding_source,
+                    debug_mode=RENDER_DEBUG_MODE,
+                    debug_show_faces=RENDER_DEBUG_SHOW_FACES,
+                    composition=composition,
+                    segments=single_segments,
+                    fps=fps,
+                    src_w=src_w,
+                    src_h=src_h,
+                    frame_detection_index=frame_detection_index,
+                ),
             )
         outputs.append(out_path)
 

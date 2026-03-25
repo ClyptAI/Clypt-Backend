@@ -324,12 +324,32 @@ class ClyptWorker:
         return frame_to_dets, track_to_dets
 
     @staticmethod
-    def _clusters_conflict_by_visibility(
+    def _detection_iou(det_a: dict, det_b: dict) -> float:
+        ax1 = float(det_a.get("x_center", 0.0)) - 0.5 * float(det_a.get("width", 0.0))
+        ay1 = float(det_a.get("y_center", 0.0)) - 0.5 * float(det_a.get("height", 0.0))
+        ax2 = ax1 + float(det_a.get("width", 0.0))
+        ay2 = ay1 + float(det_a.get("height", 0.0))
+        bx1 = float(det_b.get("x_center", 0.0)) - 0.5 * float(det_b.get("width", 0.0))
+        by1 = float(det_b.get("y_center", 0.0)) - 0.5 * float(det_b.get("height", 0.0))
+        bx2 = bx1 + float(det_b.get("width", 0.0))
+        by2 = by1 + float(det_b.get("height", 0.0))
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        iw = max(0.0, ix2 - ix1)
+        ih = max(0.0, iy2 - iy1)
+        inter = iw * ih
+        union = max(1.0, (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter)
+        return float(inter / union)
+
+    @classmethod
+    def _visibility_conflict_stats(
+        cls,
         tracklets: dict[str, list[dict]],
         left_track_ids: list[str],
         right_track_ids: list[str],
-    ) -> bool:
-        """Return True when two candidate identities are clearly co-visible as distinct people."""
+    ) -> dict[str, float | bool | int]:
         left_by_frame: dict[int, dict] = {}
         right_by_frame: dict[int, dict] = {}
 
@@ -351,7 +371,11 @@ class ClyptWorker:
                 if prev is None or float(det.get("confidence", 0.0)) > float(prev.get("confidence", 0.0)):
                     right_by_frame[frame_idx] = det
 
-        for frame_idx in set(left_by_frame.keys()) & set(right_by_frame.keys()):
+        overlap_frames = sorted(set(left_by_frame.keys()) & set(right_by_frame.keys()))
+        conflict_frames = 0
+        severe_conflict = False
+        duplicate_like_frames = 0
+        for frame_idx in overlap_frames:
             left = left_by_frame[frame_idx]
             right = right_by_frame[frame_idx]
             avg_width = max(
@@ -364,9 +388,94 @@ class ClyptWorker:
             )
             dx = abs(float(left.get("x_center", 0.0)) - float(right.get("x_center", 0.0)))
             dy = abs(float(left.get("y_center", 0.0)) - float(right.get("y_center", 0.0)))
-            if dx > (0.65 * avg_width) or dy > (0.45 * avg_height):
-                return True
-        return False
+            iou = cls._detection_iou(left, right)
+
+            duplicate_like = (
+                iou >= 0.14
+                and dx <= (0.65 * avg_width)
+                and dy <= (0.35 * avg_height)
+            )
+            if duplicate_like:
+                duplicate_like_frames += 1
+                continue
+
+            separated = dx > (0.65 * avg_width) or dy > (0.45 * avg_height)
+            if not separated or iou > 0.2:
+                continue
+            conflict_frames += 1
+            if dx > (1.25 * avg_width) or dy > (0.9 * avg_height):
+                severe_conflict = True
+
+        duplicate_like = bool(overlap_frames) and duplicate_like_frames >= max(1, min(2, len(overlap_frames)))
+        return {
+            "overlap_frames": len(overlap_frames),
+            "conflict_frames": conflict_frames,
+            "severe_conflict": severe_conflict,
+            "duplicate_like": duplicate_like,
+        }
+
+    @classmethod
+    def _clusters_conflict_by_visibility(
+        cls,
+        tracklets: dict[str, list[dict]],
+        left_track_ids: list[str],
+        right_track_ids: list[str],
+    ) -> bool:
+        """Return True when two candidate identities are clearly co-visible as distinct people."""
+        disable_covisibility = os.getenv("CLYPT_CLUSTER_DISABLE_COVISIBILITY", "").strip().lower()
+        if disable_covisibility in {"1", "true", "yes", "on"}:
+            return False
+        stats = cls._visibility_conflict_stats(tracklets, left_track_ids, right_track_ids)
+        if bool(stats.get("duplicate_like")):
+            return False
+        return int(stats.get("conflict_frames", 0)) >= 2 or bool(stats.get("severe_conflict"))
+
+    @classmethod
+    def _same_identity_frame_collision_metrics(
+        cls,
+        tracklets: dict[str, list[dict]],
+        label_by_tid: dict[str, int],
+    ) -> dict[str, int]:
+        from collections import defaultdict
+
+        grouped: dict[int, list[str]] = defaultdict(list)
+        for tid, label in dict(label_by_tid or {}).items():
+            grouped[int(label)].append(str(tid))
+
+        collision_pairs = 0
+        collision_frames: set[int] = set()
+        labels_with_collisions = 0
+
+        for tids in grouped.values():
+            group_pair_count = 0
+            for idx, left_tid in enumerate(sorted(tids)):
+                for right_tid in sorted(tids)[idx + 1 :]:
+                    stats = cls._visibility_conflict_stats(tracklets, [left_tid], [right_tid])
+                    if bool(stats.get("duplicate_like")):
+                        continue
+                    if int(stats.get("conflict_frames", 0)) <= 0 and not bool(stats.get("severe_conflict")):
+                        continue
+                    group_pair_count += 1
+                    collision_pairs += 1
+                    left_frames = {
+                        int(det.get("frame_idx", -1))
+                        for det in tracklets.get(left_tid, [])
+                        if int(det.get("frame_idx", -1)) >= 0
+                    }
+                    right_frames = {
+                        int(det.get("frame_idx", -1))
+                        for det in tracklets.get(right_tid, [])
+                        if int(det.get("frame_idx", -1)) >= 0
+                    }
+                    collision_frames.update(left_frames & right_frames)
+            if group_pair_count:
+                labels_with_collisions += 1
+
+        return {
+            "same_identity_frame_collision_pairs": int(collision_pairs),
+            "same_identity_frame_collision_frames": int(len(collision_frames)),
+            "same_identity_labels_with_collisions": int(labels_with_collisions),
+        }
 
     @staticmethod
     def _clusters_have_compatible_seat_signature(
@@ -459,13 +568,337 @@ class ClyptWorker:
         dh = math.log(max(float(left_sig[3]), 1.0) / max(float(right_sig[3]), 1.0))
         return float(dx * dx + dy * dy + 0.25 * (dw * dw + dh * dh))
 
+    @staticmethod
+    def _eligible_associated_track_ids(associated_counts: dict[str, int]) -> set[str]:
+        import math
+
+        filtered_counts = {
+            str(tid): int(count)
+            for tid, count in dict(associated_counts or {}).items()
+            if str(tid) and int(count) > 0
+        }
+        if not filtered_counts:
+            return set()
+
+        dominant_track_id, dominant_count = max(
+            filtered_counts.items(),
+            key=lambda item: item[1],
+        )
+        total_count = max(1, sum(filtered_counts.values()))
+        min_count = max(2, int(os.getenv("CLYPT_FACE_TRACK_MIN_ASSOC_COUNT", "2")))
+        min_share = float(os.getenv("CLYPT_FACE_TRACK_MIN_ASSOC_SHARE", "0.20"))
+        dominant_ratio = float(os.getenv("CLYPT_FACE_TRACK_MIN_DOMINANT_RATIO", "0.50"))
+        min_count_from_dominant = max(1, int(math.ceil(float(dominant_count) * dominant_ratio)))
+        eligible_track_ids = {
+            tid
+            for tid, count in filtered_counts.items()
+            if count >= min_count
+            and (count / total_count) >= min_share
+            and count >= min_count_from_dominant
+        }
+        if not eligible_track_ids:
+            return set()
+        if os.getenv("CLYPT_FACE_TRACK_ALLOW_MULTI_ASSOC", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            return eligible_track_ids
+        if dominant_track_id in eligible_track_ids:
+            return {str(dominant_track_id)}
+        return {str(max(eligible_track_ids, key=lambda tid: filtered_counts.get(tid, 0)))}
+
+    @staticmethod
+    def _face_observation_signature(observations: list[dict]):
+        import numpy as np
+
+        vectors = []
+        for observation in observations or []:
+            bbox = observation.get("bounding_box", {}) or {}
+            x = float(bbox.get("x", 0.0))
+            y = float(bbox.get("y", 0.0))
+            width = max(1.0, float(bbox.get("width", 1.0)))
+            height = max(1.0, float(bbox.get("height", 1.0)))
+            vectors.append(
+                np.asarray(
+                    [x + (0.5 * width), y + (0.5 * height), width, height],
+                    dtype=np.float32,
+                )
+            )
+        if not vectors:
+            return np.zeros(4, dtype=np.float32)
+        return np.median(np.stack(vectors, axis=0), axis=0).astype(np.float32)
+
+    def _cluster_seed_track_ids_for_face_track(
+        self,
+        associated_counts: dict[str, int],
+        tracklets: dict[str, list[dict]] | None = None,
+    ) -> set[str]:
+        filtered_counts = {
+            str(tid): int(count)
+            for tid, count in dict(associated_counts or {}).items()
+            if str(tid) and int(count) > 0
+        }
+        if not filtered_counts:
+            return set()
+
+        dominant_tid, dominant_count = max(filtered_counts.items(), key=lambda item: item[1])
+        selected: set[str] = set()
+        primary_candidates = self._eligible_associated_track_ids(filtered_counts)
+        if dominant_tid in primary_candidates:
+            selected.add(str(dominant_tid))
+        elif primary_candidates:
+            selected.add(str(max(primary_candidates, key=lambda tid: filtered_counts.get(tid, 0))))
+        else:
+            return set()
+
+        if not tracklets:
+            return selected
+        if os.getenv("CLYPT_FACE_TRACK_ALLOW_MULTI_ASSOC", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            return set(primary_candidates)
+
+        secondary_min_ratio = float(os.getenv("CLYPT_FACE_TRACK_SECONDARY_MIN_RATIO", "0.60"))
+        secondary_max_sig = float(os.getenv("CLYPT_FACE_TRACK_SECONDARY_MAX_SIG", "0.18"))
+        for tid, count in sorted(filtered_counts.items(), key=lambda item: (-item[1], item[0])):
+            tid = str(tid)
+            if tid in selected:
+                continue
+            if dominant_count <= 0 or (count / float(dominant_count)) < secondary_min_ratio:
+                continue
+            if not self._clusters_have_compatible_seat_signature(
+                tracklets,
+                [tid],
+                list(selected),
+                max_signature_distance=secondary_max_sig,
+            ):
+                continue
+            selected.add(tid)
+        return selected
+
+    @staticmethod
+    def _track_boundary_gap_frames_for_tracklets(
+        tracklets: dict[str, list[dict]],
+        tid_a: str,
+        tid_b: str,
+    ) -> int:
+        dets_a = tracklets.get(str(tid_a), [])
+        dets_b = tracklets.get(str(tid_b), [])
+        if not dets_a or not dets_b:
+            return 1_000_000
+        a_start = min(int(d.get("frame_idx", -1)) for d in dets_a)
+        a_end = max(int(d.get("frame_idx", -1)) for d in dets_a)
+        b_start = min(int(d.get("frame_idx", -1)) for d in dets_b)
+        b_end = max(int(d.get("frame_idx", -1)) for d in dets_b)
+        if a_end < b_start:
+            return max(0, b_start - a_end)
+        if b_end < a_start:
+            return max(0, a_start - b_end)
+        return 0
+
+    def _choose_signature_attachment_label(
+        self,
+        *,
+        tid: str,
+        tracklets: dict[str, list[dict]],
+        face_label_by_tid: dict[str, int],
+        histogram_attach_max_sig: float,
+    ) -> int | None:
+        import os
+
+        max_gap_frames = max(0, int(os.getenv("CLYPT_CLUSTER_ATTACH_MAX_GAP_FRAMES", "180")))
+        score_gap_weight = float(os.getenv("CLYPT_CLUSTER_ATTACH_GAP_WEIGHT", "0.35"))
+        ambiguity_margin = float(os.getenv("CLYPT_CLUSTER_ATTACH_AMBIGUITY_MARGIN", "0.05"))
+        tid_sig = self._tracklet_signature(tracklets, [tid])
+
+        candidates: list[tuple[float, float, int, int]] = []
+        labels = sorted(set(int(lbl) for lbl in face_label_by_tid.values()))
+        for label in labels:
+            cluster_tids = [cluster_tid for cluster_tid, cluster_lbl in face_label_by_tid.items() if int(cluster_lbl) == label]
+            if not cluster_tids:
+                continue
+
+            best_member = None
+            for cluster_tid in cluster_tids:
+                if not self._clusters_have_compatible_seat_signature(
+                    tracklets,
+                    [tid],
+                    [cluster_tid],
+                    max_signature_distance=histogram_attach_max_sig,
+                ):
+                    continue
+                member_sig = self._tracklet_signature(tracklets, [cluster_tid])
+                sig_dist = self._tracklet_signature_distance(tid_sig, member_sig)
+                if sig_dist > histogram_attach_max_sig:
+                    continue
+                gap_frames = self._track_boundary_gap_frames_for_tracklets(tracklets, tid, cluster_tid)
+                if gap_frames > max_gap_frames:
+                    continue
+                score = sig_dist + (
+                    score_gap_weight * (gap_frames / max(1.0, float(max_gap_frames or 1)))
+                )
+                candidate = (score, sig_dist, gap_frames, int(label))
+                if best_member is None or candidate < best_member:
+                    best_member = candidate
+            if best_member is not None:
+                candidates.append(best_member)
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        best_score, _, _, best_label = candidates[0]
+        if len(candidates) > 1 and (candidates[1][0] - best_score) < ambiguity_margin:
+            return None
+        return int(best_label)
+
+    def _choose_signature_attachment_label_for_group(
+        self,
+        *,
+        tids: list[str],
+        tracklets: dict[str, list[dict]],
+        face_label_by_tid: dict[str, int],
+        histogram_attach_max_sig: float,
+    ) -> int | None:
+        import math
+        import os
+
+        if not tids:
+            return None
+
+        max_gap_frames = max(0, int(os.getenv("CLYPT_CLUSTER_ATTACH_MAX_GAP_FRAMES", "180")))
+        score_gap_weight = float(os.getenv("CLYPT_CLUSTER_ATTACH_GAP_WEIGHT", "0.35"))
+        ambiguity_margin = float(os.getenv("CLYPT_CLUSTER_ATTACH_AMBIGUITY_MARGIN", "0.05"))
+        group_relax = float(os.getenv("CLYPT_CLUSTER_GROUP_ATTACH_SIG_RELAX", "1.25"))
+        min_support_share = float(os.getenv("CLYPT_CLUSTER_GROUP_ATTACH_MIN_SUPPORT_SHARE", "0.5"))
+        min_support_count = max(1, int(os.getenv("CLYPT_CLUSTER_GROUP_ATTACH_MIN_SUPPORT_COUNT", "1")))
+        group_max_sig = histogram_attach_max_sig * max(1.0, group_relax)
+        group_sig = self._tracklet_signature(tracklets, tids)
+
+        candidates: list[tuple[float, float, int, int, int]] = []
+        labels = sorted(set(int(lbl) for lbl in face_label_by_tid.values()))
+        for label in labels:
+            cluster_tids = [
+                cluster_tid
+                for cluster_tid, cluster_lbl in face_label_by_tid.items()
+                if int(cluster_lbl) == label
+            ]
+            if not cluster_tids:
+                continue
+            if not self._clusters_have_compatible_seat_signature(
+                tracklets,
+                tids,
+                cluster_tids,
+                max_signature_distance=group_max_sig,
+            ):
+                continue
+
+            cluster_sig = self._tracklet_signature(tracklets, cluster_tids)
+            sig_dist = self._tracklet_signature_distance(group_sig, cluster_sig)
+            if sig_dist > group_max_sig:
+                continue
+
+            compatible_members = 0
+            min_gap_frames = 1_000_000
+            for tid in tids:
+                member_best_gap = None
+                for cluster_tid in cluster_tids:
+                    if not self._clusters_have_compatible_seat_signature(
+                        tracklets,
+                        [tid],
+                        [cluster_tid],
+                        max_signature_distance=group_max_sig,
+                    ):
+                        continue
+                    gap_frames = self._track_boundary_gap_frames_for_tracklets(tracklets, tid, cluster_tid)
+                    if gap_frames > max_gap_frames:
+                        continue
+                    member_best_gap = gap_frames if member_best_gap is None else min(member_best_gap, gap_frames)
+                if member_best_gap is not None:
+                    compatible_members += 1
+                    min_gap_frames = min(min_gap_frames, int(member_best_gap))
+
+            if compatible_members <= 0:
+                continue
+            required_members = max(
+                min_support_count,
+                int(math.ceil(float(len(tids)) * min_support_share)),
+            )
+            if compatible_members < required_members:
+                continue
+            if min_gap_frames > max_gap_frames:
+                continue
+
+            score = sig_dist + (
+                score_gap_weight * (min_gap_frames / max(1.0, float(max_gap_frames or 1)))
+            ) - (0.03 * compatible_members)
+            candidates.append((score, sig_dist, min_gap_frames, -compatible_members, int(label)))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
+        best_score, _, _, _, best_label = candidates[0]
+        if len(candidates) > 1 and (candidates[1][0] - best_score) < ambiguity_margin:
+            return None
+        return int(best_label)
+
+    def _cluster_signature_only_tracklets(
+        self,
+        *,
+        track_ids: list[str],
+        tracklets: dict[str, list[dict]],
+        base_max_sig: float,
+    ) -> list[list[str]]:
+        import os
+
+        long_gap_frames = max(0, int(os.getenv("CLYPT_CLUSTER_HIST_LONG_GAP_FRAMES", "180")))
+        long_gap_max_sig = float(os.getenv("CLYPT_CLUSTER_HIST_LONG_GAP_MAX_SIG", "0.12"))
+
+        ordered_track_ids = sorted(str(tid) for tid in track_ids if str(tid))
+        parent = {tid: tid for tid in ordered_track_ids}
+
+        def _find(tid: str) -> str:
+            root = parent[tid]
+            while root != parent[root]:
+                root = parent[root]
+            while tid != root:
+                nxt = parent[tid]
+                parent[tid] = root
+                tid = nxt
+            return root
+
+        def _union(left_tid: str, right_tid: str) -> None:
+            left_root = _find(left_tid)
+            right_root = _find(right_tid)
+            if left_root == right_root:
+                return
+            keep_root, drop_root = sorted([left_root, right_root])
+            parent[drop_root] = keep_root
+
+        for idx, left_tid in enumerate(ordered_track_ids):
+            left_sig = self._tracklet_signature(tracklets, [left_tid])
+            if left_sig is None:
+                continue
+            for right_tid in ordered_track_ids[idx + 1 :]:
+                right_sig = self._tracklet_signature(tracklets, [right_tid])
+                if right_sig is None:
+                    continue
+                gap_frames = self._track_boundary_gap_frames_for_tracklets(tracklets, left_tid, right_tid)
+                max_sig = base_max_sig if gap_frames <= long_gap_frames else long_gap_max_sig
+                sig_dist = self._tracklet_signature_distance(left_sig, right_sig)
+                if sig_dist > max_sig:
+                    continue
+                _union(left_tid, right_tid)
+
+        groups: dict[str, list[str]] = {}
+        for tid in ordered_track_ids:
+            groups.setdefault(_find(tid), []).append(tid)
+        return [sorted(group) for _, group in sorted(groups.items(), key=lambda item: (len(item[1]), item[0]), reverse=True)]
+
     def _repair_covisible_cluster_merges(
         self,
         tracklets: dict[str, list[dict]],
         label_by_tid: dict[str, int],
+        *,
+        anchored_tids: set[str] | None = None,
     ) -> tuple[dict[str, int], dict[str, int]]:
         from collections import defaultdict
 
+        anchored_tids = {str(tid) for tid in (anchored_tids or set()) if str(tid)}
         grouped: dict[int, list[str]] = defaultdict(list)
         for tid, label in label_by_tid.items():
             grouped[int(label)].append(str(tid))
@@ -501,25 +934,47 @@ class ClyptWorker:
             conflict_pairs: set[tuple[str, str]] = set()
             for idx, left_tid in enumerate(tids):
                 for right_tid in tids[idx + 1 :]:
-                    if self._clusters_conflict_by_visibility(tracklets, [left_tid], [right_tid]):
-                        conflict_pairs.add((left_tid, right_tid))
-                        conflict_pairs.add((right_tid, left_tid))
+                    if not self._clusters_conflict_by_visibility(tracklets, [left_tid], [right_tid]):
+                        continue
+                    if anchored_tids and left_tid not in anchored_tids and right_tid not in anchored_tids:
+                        continue
+                    conflict_pairs.add((left_tid, right_tid))
+                    conflict_pairs.add((right_tid, left_tid))
 
             if not conflict_pairs:
                 continue
 
             buckets: list[list[str]] = []
-            for tid in tids:
+
+            anchor_tids = [tid for tid in tids if tid in anchored_tids]
+            non_anchor_tids = [tid for tid in tids if tid not in anchored_tids]
+
+            def _best_bucket_for_tid(
+                tid: str,
+                bucket_candidates: list[list[str]],
+                *,
+                max_signature_distance: float,
+                anchor_signature_override: float | None = None,
+            ) -> int | None:
                 tid_sig = self._tracklet_signature(tracklets, [tid])
                 compatible_buckets: list[tuple[float, int]] = []
-                for bucket_idx, bucket in enumerate(buckets):
+                for bucket_idx, bucket in enumerate(bucket_candidates):
+                    has_anchor_member = any(other_tid in anchored_tids for other_tid in bucket)
                     if any((tid, other_tid) in conflict_pairs for other_tid in bucket):
-                        continue
+                        if not has_anchor_member or anchor_signature_override is None:
+                            continue
+                        if not self._clusters_have_compatible_seat_signature(
+                            tracklets,
+                            bucket,
+                            [tid],
+                            max_signature_distance=anchor_signature_override,
+                        ):
+                            continue
                     if not self._clusters_have_compatible_seat_signature(
                         tracklets,
                         bucket,
                         [tid],
-                        max_signature_distance=2.4,
+                        max_signature_distance=max_signature_distance,
                     ):
                         continue
                     bucket_sig = self._tracklet_signature(tracklets, bucket)
@@ -528,9 +983,43 @@ class ClyptWorker:
 
                 if compatible_buckets:
                     _, chosen_bucket_idx = min(compatible_buckets, key=lambda item: (item[0], item[1]))
-                    buckets[chosen_bucket_idx].append(tid)
-                else:
-                    buckets.append([tid])
+                    return int(chosen_bucket_idx)
+                return None
+
+            if anchor_tids:
+                for tid in anchor_tids:
+                    chosen_bucket_idx = _best_bucket_for_tid(
+                        tid,
+                        buckets,
+                        max_signature_distance=0.45,
+                        anchor_signature_override=0.30,
+                    )
+                    if chosen_bucket_idx is None:
+                        buckets.append([tid])
+                    else:
+                        buckets[chosen_bucket_idx].append(tid)
+                for tid in non_anchor_tids:
+                    chosen_bucket_idx = _best_bucket_for_tid(
+                        tid,
+                        buckets,
+                        max_signature_distance=1.8,
+                        anchor_signature_override=0.32,
+                    )
+                    if chosen_bucket_idx is None:
+                        buckets.append([tid])
+                    else:
+                        buckets[chosen_bucket_idx].append(tid)
+            else:
+                for tid in tids:
+                    chosen_bucket_idx = _best_bucket_for_tid(
+                        tid,
+                        buckets,
+                        max_signature_distance=2.4,
+                    )
+                    if chosen_bucket_idx is None:
+                        buckets.append([tid])
+                    else:
+                        buckets[chosen_bucket_idx].append(tid)
 
             if len(buckets) <= 1:
                 continue
@@ -551,6 +1040,310 @@ class ClyptWorker:
             "repaired_cluster_count": repaired_cluster_count,
             "repaired_tracklet_count": repaired_tracklet_count,
             "repaired_conflict_pair_count": repaired_conflict_pair_count,
+        }
+
+    @staticmethod
+    def _should_skip_cluster_repair(
+        *,
+        face_cluster_count: int,
+        clusters_before_repair: int,
+        visible_people_est: int,
+        anchored_track_count: int,
+    ) -> bool:
+        face_cluster_count = max(0, int(face_cluster_count))
+        clusters_before_repair = max(0, int(clusters_before_repair))
+        visible_people_est = max(0, int(visible_people_est))
+        anchored_track_count = max(0, int(anchored_track_count))
+
+        if face_cluster_count <= 0 or clusters_before_repair <= 0:
+            return False
+        if anchored_track_count < max(4, face_cluster_count):
+            return False
+
+        target_identity_count = max(face_cluster_count, visible_people_est)
+        if face_cluster_count < max(1, visible_people_est - 1):
+            return False
+        return clusters_before_repair <= (target_identity_count + 1)
+
+    def _build_stable_follow_bindings(
+        self,
+        *,
+        bindings: list[dict],
+        track_to_dets: dict[str, list[dict]] | None = None,
+        track_identity_features: dict[str, dict] | None = None,
+    ) -> list[dict]:
+        min_follow_segment_ms = int(os.getenv("CLYPT_SPEAKER_FOLLOW_MIN_SEGMENT_MS", "900"))
+
+        normalized: list[dict] = []
+        for binding in list(bindings or []):
+            track_id = str(binding.get("track_id", "") or "")
+            if not track_id:
+                continue
+            start_time_ms = int(binding.get("start_time_ms", 0) or 0)
+            end_time_ms = int(binding.get("end_time_ms", 0) or 0)
+            if end_time_ms <= start_time_ms:
+                continue
+            word_count = int(binding.get("word_count", 0) or 0)
+            if normalized and normalized[-1]["track_id"] == track_id and start_time_ms <= normalized[-1]["end_time_ms"]:
+                normalized[-1]["end_time_ms"] = max(normalized[-1]["end_time_ms"], end_time_ms)
+                normalized[-1]["word_count"] += word_count
+                continue
+            normalized.append(
+                {
+                    "track_id": track_id,
+                    "start_time_ms": start_time_ms,
+                    "end_time_ms": end_time_ms,
+                    "word_count": word_count,
+                }
+            )
+
+        if len(normalized) < 3:
+            return normalized
+
+        stabilized = list(normalized)
+        changed = True
+        while changed and len(stabilized) >= 3:
+            changed = False
+            next_segments: list[dict] = []
+            idx = 0
+            while idx < len(stabilized):
+                if idx + 2 < len(stabilized):
+                    left = stabilized[idx]
+                    middle = stabilized[idx + 1]
+                    right = stabilized[idx + 2]
+                    middle_duration_ms = int(middle["end_time_ms"]) - int(middle["start_time_ms"])
+                    if (
+                        left["track_id"] == right["track_id"]
+                        and middle_duration_ms <= min_follow_segment_ms
+                    ):
+                        next_segments.append(
+                            {
+                                "track_id": left["track_id"],
+                                "start_time_ms": int(left["start_time_ms"]),
+                                "end_time_ms": int(right["end_time_ms"]),
+                                "word_count": int(left.get("word_count", 0))
+                                + int(middle.get("word_count", 0))
+                                + int(right.get("word_count", 0)),
+                            }
+                        )
+                        idx += 3
+                        changed = True
+                        continue
+                segment = stabilized[idx]
+                if (
+                    next_segments
+                    and next_segments[-1]["track_id"] == segment["track_id"]
+                    and int(segment["start_time_ms"]) <= int(next_segments[-1]["end_time_ms"])
+                ):
+                    next_segments[-1]["end_time_ms"] = max(
+                        int(next_segments[-1]["end_time_ms"]),
+                        int(segment["end_time_ms"]),
+                    )
+                    next_segments[-1]["word_count"] += int(segment.get("word_count", 0))
+                else:
+                    next_segments.append(dict(segment))
+                idx += 1
+            stabilized = next_segments
+        return stabilized
+
+    def _build_speaker_follow_bindings(self, bindings: list[dict]) -> list[dict]:
+        return self._build_stable_follow_bindings(
+            bindings=bindings,
+            track_to_dets=None,
+            track_identity_features=None,
+        )
+
+    @staticmethod
+    def _local_clip_bindings_enabled() -> bool:
+        return os.getenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _project_bindings_to_local_track_space(
+        bindings: list[dict],
+        track_id_remap: dict[str, str] | None,
+    ) -> list[dict]:
+        if not bindings:
+            return []
+        remap = {
+            str(old_tid): str(new_tid)
+            for old_tid, new_tid in dict(track_id_remap or {}).items()
+            if str(old_tid) and str(new_tid)
+        }
+        if not remap:
+            return [dict(binding) for binding in bindings]
+
+        reverse_unique: dict[str, str] = {}
+        ambiguous_targets: set[str] = set()
+        for local_tid, global_tid in remap.items():
+            prev = reverse_unique.get(global_tid)
+            if prev is None:
+                reverse_unique[global_tid] = local_tid
+            elif prev != local_tid:
+                ambiguous_targets.add(global_tid)
+
+        for global_tid in ambiguous_targets:
+            reverse_unique.pop(global_tid, None)
+
+        projected: list[dict] = []
+        for binding in bindings:
+            global_tid = str(binding.get("track_id", "") or "")
+            local_tid = reverse_unique.get(global_tid)
+            if not local_tid:
+                continue
+            local_binding = dict(binding)
+            local_binding["track_id"] = local_tid
+            projected.append(local_binding)
+        return projected
+
+    def _build_speaker_binding_track_quality(
+        self,
+        track_to_dets: dict[str, list[dict]],
+        *,
+        frame_width: int,
+        frame_height: int,
+    ) -> dict[str, dict]:
+        import numpy as np
+
+        frame_area = max(1.0, float(max(1, frame_width) * max(1, frame_height)))
+        out: dict[str, dict] = {}
+        for tid, dets in (track_to_dets or {}).items():
+            valid = [det for det in dets if float(det.get("width", 0.0)) > 1e-6 and float(det.get("height", 0.0)) > 1e-6]
+            if not valid:
+                out[str(tid)] = {
+                    "track_quality": 0.0,
+                    "median_area_norm": 0.0,
+                    "p90_area_norm": 0.0,
+                    "duplicate_frame_ratio": 0.0,
+                    "geometry_spread": 1.0,
+                }
+                continue
+
+            areas = np.asarray(
+                [
+                    (float(det.get("width", 0.0)) * float(det.get("height", 0.0))) / frame_area
+                    for det in valid
+                ],
+                dtype=np.float32,
+            )
+            confidences = np.asarray(
+                [float(det.get("confidence", 0.0)) for det in valid],
+                dtype=np.float32,
+            )
+            by_frame: dict[int, list[dict]] = {}
+            for det in valid:
+                frame_idx = int(det.get("frame_idx", -1))
+                if frame_idx < 0:
+                    continue
+                by_frame.setdefault(frame_idx, []).append(det)
+
+            median_area = float(np.median(areas))
+            p90_area = float(np.percentile(areas, 90))
+            median_conf = float(np.median(confidences)) if len(confidences) else 0.0
+            duplicate_frames = sum(1 for frame_dets in by_frame.values() if len(frame_dets) > 1)
+            duplicate_ratio = float(duplicate_frames / max(1, len(by_frame)))
+            geometry_spread = float(p90_area / max(median_area, 1e-6))
+
+            huge_median_penalty = min(1.0, max(0.0, (median_area - 0.28) / 0.20))
+            huge_p90_penalty = min(1.0, max(0.0, (p90_area - 0.48) / 0.20))
+            duplicate_penalty = min(1.0, duplicate_ratio / 0.08)
+            spread_penalty = min(1.0, max(0.0, (geometry_spread - 2.1) / 1.4))
+
+            track_quality = 1.0
+            track_quality -= 0.42 * huge_median_penalty
+            track_quality -= 0.28 * huge_p90_penalty
+            track_quality -= 0.22 * duplicate_penalty
+            track_quality -= 0.14 * spread_penalty
+            track_quality = max(0.0, min(1.0, track_quality))
+
+            out[str(tid)] = {
+                "track_quality": float(track_quality),
+                "median_area_norm": median_area,
+                "p90_area_norm": p90_area,
+                "duplicate_frame_ratio": duplicate_ratio,
+                "geometry_spread": geometry_spread,
+                "median_confidence": median_conf,
+            }
+        return out
+
+    def _score_speaker_binding_body_candidate(
+        self,
+        *,
+        det: dict,
+        frame_dets: list[dict],
+        frame_width: int,
+        frame_height: int,
+        track_quality: float,
+        motion_rank: float,
+    ) -> dict:
+        frame_area = max(1.0, float(max(1, frame_width) * max(1, frame_height)))
+        width = max(0.0, float(det.get("width", 0.0)))
+        height = max(0.0, float(det.get("height", 0.0)))
+        area_norm = (width * height) / frame_area
+        conf = max(0.0, min(1.0, float(det.get("confidence", 0.0))))
+        x1 = float(det.get("x1", float(det.get("x_center", 0.0)) - (0.5 * width)))
+        x2 = float(det.get("x2", float(det.get("x_center", 0.0)) + (0.5 * width)))
+        y1 = float(det.get("y1", float(det.get("y_center", 0.0)) - (0.5 * height)))
+        y2 = float(det.get("y2", float(det.get("y_center", 0.0)) + (0.5 * height)))
+
+        tiny_penalty = 0.0
+        if area_norm < 0.010:
+            tiny_penalty = 1.0
+        elif area_norm < 0.025:
+            tiny_penalty = (0.025 - area_norm) / 0.015
+
+        huge_penalty = 0.0
+        if area_norm > 0.45:
+            huge_penalty = 1.0
+        elif area_norm > 0.30:
+            huge_penalty = (area_norm - 0.30) / 0.15
+
+        edge_margin_x = 0.03 * float(max(1, frame_width))
+        edge_margin_y = 0.03 * float(max(1, frame_height))
+        touches_edge = (
+            x1 <= edge_margin_x
+            or y1 <= edge_margin_y
+            or x2 >= float(frame_width) - edge_margin_x
+            or y2 >= float(frame_height) - edge_margin_y
+        )
+        edge_penalty = 0.0
+        if touches_edge and area_norm < 0.05:
+            edge_penalty = min(1.0, (0.05 - area_norm) / 0.05)
+
+        duplicate_penalty = 0.0
+        for peer in frame_dets:
+            if peer is det:
+                continue
+            peer_conf = float(peer.get("confidence", 0.0))
+            if peer_conf + 1e-6 < conf:
+                continue
+            iou = self._detection_iou(det, peer)
+            if iou >= 0.75:
+                duplicate_penalty = max(duplicate_penalty, min(1.0, (iou - 0.75) / 0.20))
+
+        det_quality = 1.0
+        det_quality -= 0.70 * tiny_penalty
+        det_quality -= 0.62 * huge_penalty
+        det_quality -= 0.28 * edge_penalty
+        det_quality -= 0.24 * duplicate_penalty
+        det_quality = max(0.0, min(1.0, det_quality))
+        hard_reject = bool(
+            area_norm < 0.012
+            or (touches_edge and area_norm < 0.020)
+        )
+
+        body_prior = (
+            0.48 * det_quality
+            + 0.26 * max(0.0, min(1.0, float(track_quality)))
+            + 0.16 * max(0.0, min(1.0, float(motion_rank)))
+            + 0.10 * conf
+        )
+        return {
+            "body_prior": float(max(0.0, min(1.0, body_prior))),
+            "detection_quality": float(det_quality),
+            "area_norm": float(area_norm),
+            "touches_edge": bool(touches_edge),
+            "duplicate_penalty": float(duplicate_penalty),
+            "hard_reject": hard_reject,
         }
 
     @staticmethod
@@ -751,6 +1544,53 @@ class ClyptWorker:
             local.face_recognizer = local_recognizer
         return local_detector, local_recognizer
 
+    def _prewarm_face_runtime_for_current_thread(self) -> bool:
+        import numpy as np
+        from insightface.app.common import Face
+
+        detector, recognizer = self._get_thread_face_runtime()
+        if detector is None or recognizer is None:
+            return False
+
+        det_size = tuple(getattr(self, "_face_detector_input_size", (640, 640)))
+        warmup_frame = np.zeros((det_size[1], det_size[0], 3), dtype=np.uint8)
+        detector.detect(
+            warmup_frame,
+            input_size=det_size,
+            max_num=1,
+        )
+
+        recognizer_input = np.zeros((112, 112, 3), dtype=np.uint8)
+        warmup_face = Face(
+            bbox=np.asarray([16.0, 16.0, 96.0, 96.0], dtype=np.float32),
+            kps=np.asarray(
+                [
+                    [34.0, 42.0],
+                    [78.0, 42.0],
+                    [56.0, 60.0],
+                    [40.0, 80.0],
+                    [72.0, 80.0],
+                ],
+                dtype=np.float32,
+            ),
+            det_score=1.0,
+        )
+        recognizer.get(recognizer_input, warmup_face)
+        return True
+
+    def _prewarm_face_runtime_in_pool(self, face_pool, worker_count: int) -> None:
+        from concurrent.futures import wait
+
+        if face_pool is None or int(worker_count) <= 0:
+            return
+        futures = [
+            face_pool.submit(self._prewarm_face_runtime_for_current_thread)
+            for _ in range(max(1, int(worker_count)))
+        ]
+        wait(futures)
+        for future in futures:
+            future.result()
+
     def _detect_faces_full_frame(self, frame_rgb, *, max_faces: int = 0) -> list[dict]:
         import cv2
         import numpy as np
@@ -879,14 +1719,22 @@ class ClyptWorker:
         face_detections: list[dict],
         person_dets: list[dict],
     ) -> list[str | None]:
-        assignments: list[str | None] = []
-        for face in face_detections:
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+
+        if not face_detections:
+            return []
+        if not person_dets:
+            return [None for _ in face_detections]
+
+        min_match_score = float(os.getenv("CLYPT_FACE_ASSOC_MIN_SCORE", "0.18"))
+        score_matrix = np.full((len(face_detections), len(person_dets)), fill_value=-1.0, dtype=np.float32)
+
+        for face_idx, face in enumerate(face_detections):
             fx1, fy1, fx2, fy2 = face.get("bbox_xyxy", (0.0, 0.0, 0.0, 0.0))
             fcx = 0.5 * (float(fx1) + float(fx2))
             fcy = 0.5 * (float(fy1) + float(fy2))
-            best_tid = None
-            best_score = None
-            for det in person_dets:
+            for det_idx, det in enumerate(person_dets):
                 tid = str(det.get("track_id", ""))
                 if not tid:
                     continue
@@ -910,10 +1758,20 @@ class ClyptWorker:
                 center_x_bonus = 1.0 - min(1.0, abs(fcx - (0.5 * (px1 + px2))) / max(1.0, 0.55 * pw))
                 center_y_bonus = 1.0 - min(1.0, abs(fcy - (py1 + 0.26 * ph)) / max(1.0, 0.32 * ph))
                 score = (0.55 * iou) + (0.25 * center_x_bonus) + (0.20 * center_y_bonus)
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_tid = tid
-            assignments.append(best_tid)
+                if score >= min_match_score:
+                    score_matrix[face_idx, det_idx] = float(score)
+
+        assignments: list[str | None] = [None for _ in face_detections]
+        if np.max(score_matrix) < 0:
+            return assignments
+
+        cost_matrix = np.where(score_matrix >= 0.0, 1.0 - score_matrix, 10.0).astype(np.float32)
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        for face_idx, det_idx in zip(row_ind, col_ind):
+            if score_matrix[face_idx, det_idx] < min_match_score:
+                continue
+            tid = str(person_dets[det_idx].get("track_id", ""))
+            assignments[face_idx] = tid or None
         return assignments
 
     def _extract_face_track_features_for_frame_segment(
@@ -1192,6 +2050,120 @@ class ClyptWorker:
                     if str(tid):
                         slot["associated_track_counts"][str(tid)] += int(count)
 
+        stitch_max_gap = max(0, int(os.getenv("CLYPT_FACE_TRACK_STITCH_MAX_GAP_FRAMES", "72")))
+        stitch_max_cos = float(os.getenv("CLYPT_FACE_TRACK_STITCH_MAX_COS", "0.24"))
+        stitch_max_sig = float(os.getenv("CLYPT_FACE_TRACK_STITCH_MAX_SIG", "0.20"))
+        stitch_same_track_bonus_gap = max(
+            stitch_max_gap,
+            int(os.getenv("CLYPT_FACE_TRACK_STITCH_SAME_TRACK_MAX_GAP_FRAMES", "144")),
+        )
+
+        metadata: dict[str, dict] = {}
+        for face_track_id, feature in merged.items():
+            observations = sorted(
+                feature["observations"],
+                key=lambda obs: (int(obs.get("frame_idx", -1)), -float(obs.get("confidence", 0.0))),
+            )
+            frames = [int(obs.get("frame_idx", -1)) for obs in observations if int(obs.get("frame_idx", -1)) >= 0]
+            if not frames:
+                continue
+            emb = None
+            if feature["embeddings"]:
+                emb = np.mean(np.stack(feature["embeddings"], axis=0), axis=0).astype(np.float32)
+            associated_counts = {
+                str(tid): int(count)
+                for tid, count in dict(feature["associated_track_counts"]).items()
+                if str(tid)
+            }
+            dominant_track_id = None
+            if associated_counts:
+                dominant_track_id = max(associated_counts.items(), key=lambda item: item[1])[0]
+            metadata[face_track_id] = {
+                "start_frame": min(frames),
+                "end_frame": max(frames),
+                "embedding": emb,
+                "signature": self._face_observation_signature(observations),
+                "dominant_track_id": dominant_track_id,
+            }
+
+        parent = {face_track_id: face_track_id for face_track_id in merged.keys()}
+
+        def _find(face_track_id: str) -> str:
+            root = parent[face_track_id]
+            while root != parent[root]:
+                root = parent[root]
+            while face_track_id != root:
+                nxt = parent[face_track_id]
+                parent[face_track_id] = root
+                face_track_id = nxt
+            return root
+
+        def _union(left_id: str, right_id: str) -> None:
+            left_root = _find(left_id)
+            right_root = _find(right_id)
+            if left_root == right_root:
+                return
+            left_meta = metadata.get(left_root, {})
+            right_meta = metadata.get(right_root, {})
+            left_start = int(left_meta.get("start_frame", 1_000_000_000))
+            right_start = int(right_meta.get("start_frame", 1_000_000_000))
+            keep_root, drop_root = (left_root, right_root) if left_start <= right_start else (right_root, left_root)
+            parent[drop_root] = keep_root
+
+        ordered_face_track_ids = sorted(
+            metadata.keys(),
+            key=lambda face_track_id: (
+                int(metadata[face_track_id]["start_frame"]),
+                int(metadata[face_track_id]["end_frame"]),
+                str(face_track_id),
+            ),
+        )
+        for idx, left_id in enumerate(ordered_face_track_ids):
+            left_meta = metadata[left_id]
+            for right_id in ordered_face_track_ids[idx + 1 :]:
+                right_meta = metadata[right_id]
+                gap_frames = int(right_meta["start_frame"]) - int(left_meta["end_frame"])
+                dominant_left = str(left_meta.get("dominant_track_id") or "")
+                dominant_right = str(right_meta.get("dominant_track_id") or "")
+                same_dominant_track = bool(dominant_left and dominant_left == dominant_right)
+                allowed_gap = stitch_same_track_bonus_gap if same_dominant_track else stitch_max_gap
+                if gap_frames < 0:
+                    continue
+                if gap_frames > allowed_gap:
+                    break
+                left_emb = left_meta.get("embedding")
+                right_emb = right_meta.get("embedding")
+                if left_emb is None or right_emb is None:
+                    continue
+                cos_dist = self._cosine_dist(left_emb, right_emb)
+                if cos_dist > stitch_max_cos:
+                    continue
+                sig_dist = self._tracklet_signature_distance(left_meta["signature"], right_meta["signature"])
+                if sig_dist > stitch_max_sig:
+                    continue
+                if dominant_left and dominant_right and dominant_left != dominant_right:
+                    continue
+                _union(left_id, right_id)
+
+        if metadata:
+            stitched: dict[str, dict] = {}
+            for face_track_id, feature in merged.items():
+                root_id = _find(face_track_id)
+                slot = stitched.setdefault(
+                    root_id,
+                    {
+                        "embeddings": [],
+                        "observations": [],
+                        "associated_track_counts": defaultdict(int),
+                    },
+                )
+                slot["embeddings"].extend(feature["embeddings"])
+                slot["observations"].extend(feature["observations"])
+                for tid, count in dict(feature["associated_track_counts"]).items():
+                    if str(tid):
+                        slot["associated_track_counts"][str(tid)] += int(count)
+            merged = stitched
+
         finalized: dict[str, dict] = {}
         for face_track_id, feature in merged.items():
             emb = None
@@ -1225,7 +2197,6 @@ class ClyptWorker:
         self,
         face_track_features: dict[str, dict],
     ) -> dict[str, dict]:
-        import math
         import numpy as np
 
         per_track: dict[str, dict] = {}
@@ -1237,24 +2208,7 @@ class ClyptWorker:
             }
             if not associated_counts:
                 continue
-            dominant_track_id, dominant_count = max(
-                associated_counts.items(),
-                key=lambda item: item[1],
-            )
-            total_count = max(1, sum(associated_counts.values()))
-            min_count = max(2, int(os.getenv("CLYPT_FACE_TRACK_MIN_ASSOC_COUNT", "2")))
-            min_share = float(os.getenv("CLYPT_FACE_TRACK_MIN_ASSOC_SHARE", "0.20"))
-            dominant_ratio = float(os.getenv("CLYPT_FACE_TRACK_MIN_DOMINANT_RATIO", "0.50"))
-            min_count_from_dominant = max(1, int(math.ceil(float(dominant_count) * dominant_ratio)))
-            eligible_track_ids = {
-                tid
-                for tid, count in associated_counts.items()
-                if count >= min_count
-                and (count / total_count) >= min_share
-                and count >= min_count_from_dominant
-            }
-            if not eligible_track_ids:
-                eligible_track_ids = {str(dominant_track_id)}
+            eligible_track_ids = self._eligible_associated_track_ids(associated_counts)
 
             embedding = feature.get("embedding")
             emb_arr = None
@@ -2894,6 +3848,8 @@ class ClyptWorker:
         tracks = []
         n_boxes = 0
         with ThreadPoolExecutor(max_workers=face_pipeline_workers) as face_pool:
+            if self._face_pipeline_uses_gpu():
+                self._prewarm_face_runtime_in_pool(face_pool, face_pipeline_workers)
             for frame_idx, r in enumerate(results, start=1):
                 frame_face_dets: list[dict] = []
                 if r.boxes is None or r.boxes.id is None:
@@ -3474,6 +4430,7 @@ class ClyptWorker:
         import numpy as np
         from sklearn.cluster import DBSCAN
 
+        self._last_cluster_id_map = None
         if not tracks:
             self._last_clustering_metrics = {
                 "cluster_visible_people_estimate": 0,
@@ -3603,9 +4560,13 @@ class ClyptWorker:
                         continue
                     cluster_centroids.setdefault(label, []).append(X_face_tracks[idx])
                     feature = face_track_features.get(face_track_id, {})
+                    eligible_track_ids = self._cluster_seed_track_ids_for_face_track(
+                        dict(feature.get("associated_track_counts", {})),
+                        tracklets=tracklets,
+                    )
                     for tid, count in dict(feature.get("associated_track_counts", {})).items():
                         tid = str(tid)
-                        if not tid:
+                        if not tid or tid not in eligible_track_ids:
                             continue
                         votes_by_tid.setdefault(tid, {})
                         votes_by_tid[tid][label] = votes_by_tid[tid].get(label, 0) + int(count)
@@ -3617,8 +4578,16 @@ class ClyptWorker:
                 for tid, vote_map in votes_by_tid.items():
                     if not vote_map:
                         continue
-                    best_label, best_votes = max(vote_map.items(), key=lambda item: item[1])
+                    sorted_votes = sorted(vote_map.items(), key=lambda item: (-item[1], item[0]))
+                    best_label, best_votes = sorted_votes[0]
                     if best_votes <= 0:
+                        continue
+                    total_votes = max(1, sum(int(votes) for _, votes in sorted_votes))
+                    min_seed_share = float(os.getenv("CLYPT_FACE_TRACK_SEED_MIN_SHARE", "0.60"))
+                    min_seed_margin = max(1, int(os.getenv("CLYPT_FACE_TRACK_SEED_MIN_MARGIN", "2")))
+                    if (best_votes / total_votes) < min_seed_share:
+                        continue
+                    if len(sorted_votes) > 1 and (best_votes - int(sorted_votes[1][1])) < min_seed_margin:
                         continue
                     seed_label_by_tid[tid] = int(best_label)
                     if best_label in centroid_by_label:
@@ -3802,12 +4771,13 @@ class ClyptWorker:
                     f"{face_track_gap_propagated_tracklets} tracklets"
                 )
 
-        # Separate face embeddings from signature-only fallbacks. We do NOT cluster both
-        # together because they live in different feature spaces.
+        # Separate face embeddings from signature-only fallbacks. Tracklets that
+        # were seeded from face tracks still need to participate in the later
+        # face-cluster cleanup pass; otherwise the raw face-track labels bypass
+        # the stronger merge / dedupe logic entirely.
         tid_order_all = sorted(set(unique_ids) | set(embeddings.keys()) | set(seed_label_by_tid.keys()))
-        seeded_tids = set(seed_label_by_tid.keys())
-        face_tids = [tid for tid in tid_order_all if tid in embeddings and tid not in fallback_ids and tid not in seeded_tids]
-        hist_tids = [tid for tid in tid_order_all if tid not in face_tids and tid not in seeded_tids]
+        face_tids = [tid for tid in tid_order_all if tid in embeddings and tid not in fallback_ids]
+        hist_tids = [tid for tid in tid_order_all if tid not in face_tids]
         print(
             "  Face quality gate: "
             f"accepted={face_accept_count}, rejected_lowq={face_reject_lowq_count}, "
@@ -3815,11 +4785,10 @@ class ClyptWorker:
         )
         print(f"  Face encodings: {len(face_tids)}, signature fallbacks: {len(hist_tids)}")
 
-        id_map: dict[str, str] = {
-            tid: f"Global_Person_{int(label)}"
-            for tid, label in seed_label_by_tid.items()
-        }
-        n_face_clusters = len(set(seed_label_by_tid.values()))
+        id_map: dict[str, str] = {}
+        n_face_clusters = 0
+        clusters_after_hist_attach = 0
+        new_globals_from_unattached_hist = 0
 
         if face_tids:
             tid_order_face = sorted(face_tids)
@@ -3984,74 +4953,141 @@ class ClyptWorker:
             final_label_map = {old: new for new, old in enumerate(unique_final_labels)}
             labels = np.array([final_label_map[int(lbl)] for lbl in labels], dtype=int)
 
-            label_offset = n_face_clusters
             for tid, label in zip(tid_order_face, labels):
-                id_map[tid] = f"Global_Person_{int(label_offset + int(label))}"
-            n_face_clusters = label_offset + len(set(labels))
+                id_map[tid] = f"Global_Person_{int(label)}"
+            n_face_clusters = len(set(labels))
+            print(f"  Face clusters after refinement: {n_face_clusters}")
 
         # Attach histogram-only tracklets to nearest face cluster by spatial signature.
         if hist_tids:
             if n_face_clusters > 0:
                 face_label_by_tid = {
                     tid: int(id_map[tid].split("_")[-1])
-                    for tid in sorted(set(face_tids) | seeded_tids)
+                    for tid in sorted(set(face_tids))
                     if tid in id_map
-                }
-                cluster_sigs: dict[int, list[np.ndarray]] = {}
-                for tid, lbl in face_label_by_tid.items():
-                    cluster_sigs.setdefault(lbl, []).append(_track_signature(tid))
-                cluster_sig_centroids = {
-                    lbl: np.median(np.stack(sigs, axis=0), axis=0)
-                    for lbl, sigs in cluster_sigs.items() if sigs
                 }
 
                 reassigned_hist = 0
+                unattached_hist_group_count = 0
                 next_hist_label = n_face_clusters
-                for tid in hist_tids:
-                    sig = _track_signature(tid)
-                    candidates = []
-                    for lbl, centroid in cluster_sig_centroids.items():
-                        cluster_tids = [cluster_tid for cluster_tid, cluster_lbl in face_label_by_tid.items() if cluster_lbl == lbl]
-                        if self._clusters_conflict_by_visibility(tracklets, [tid], cluster_tids):
-                            covisibility_conflict_rejections += 1
-                            continue
-                        sig_dist = _sig_dist(sig, centroid)
-                        if sig_dist > histogram_attach_max_sig:
-                            histogram_attach_rejections += 1
-                            continue
-                        if not self._clusters_have_compatible_seat_signature(
-                            tracklets,
-                            [tid],
-                            cluster_tids,
-                            max_signature_distance=histogram_attach_max_sig,
-                        ):
-                            histogram_attach_rejections += 1
-                            continue
-                        candidates.append((sig_dist, lbl))
-                    if not candidates:
-                        id_map[tid] = f"Global_Person_{int(next_hist_label)}"
+                hist_groups = self._cluster_signature_only_tracklets(
+                    track_ids=hist_tids,
+                    tracklets=tracklets,
+                    base_max_sig=histogram_attach_max_sig,
+                )
+                for group in hist_groups:
+                    selected_label = self._choose_signature_attachment_label_for_group(
+                        tids=group,
+                        tracklets=tracklets,
+                        face_label_by_tid=face_label_by_tid,
+                        histogram_attach_max_sig=histogram_attach_max_sig,
+                    )
+                    label_votes: dict[int, int] = {}
+                    if selected_label is None:
+                        for tid in group:
+                            best_label = self._choose_signature_attachment_label(
+                                tid=tid,
+                                tracklets=tracklets,
+                                face_label_by_tid=face_label_by_tid,
+                                histogram_attach_max_sig=histogram_attach_max_sig,
+                            )
+                            if best_label is None:
+                                continue
+                            label_votes[int(best_label)] = label_votes.get(int(best_label), 0) + 1
+                        if label_votes:
+                            ranked_votes = sorted(label_votes.items(), key=lambda item: (-item[1], item[0]))
+                            best_label, best_votes = ranked_votes[0]
+                            if len(ranked_votes) == 1 or best_votes > ranked_votes[1][1]:
+                                selected_label = int(best_label)
+                    if selected_label is None:
+                        assigned_label = int(next_hist_label)
                         next_hist_label += 1
+                        new_globals_from_unattached_hist += 1
+                        unattached_hist_group_count += 1
+                        histogram_attach_rejections += len(group)
+                        for tid in group:
+                            id_map[tid] = f"Global_Person_{assigned_label}"
                         continue
-                    _, best_label = min(candidates, key=lambda kv: kv[0])
-                    id_map[tid] = f"Global_Person_{int(best_label)}"
-                    reassigned_hist += 1
+                    for tid in group:
+                        id_map[tid] = f"Global_Person_{int(selected_label)}"
+                        reassigned_hist += 1
                 if reassigned_hist:
                     print(
                         "  Histogram tracklets attached to face clusters: "
                         f"{reassigned_hist} (max_sig={histogram_attach_max_sig:.2f})"
                     )
+                if new_globals_from_unattached_hist:
+                    print(
+                        "  Histogram tracklets left unattached: "
+                        f"{new_globals_from_unattached_hist} "
+                        f"({unattached_hist_group_count} groups)"
+                    )
+                clusters_after_hist_attach = len(set(id_map.values()))
             else:
                 # Worst-case fallback: keep them deterministic and separate.
                 for i, tid in enumerate(sorted(hist_tids)):
                     id_map[tid] = f"Global_Person_{i}"
+                clusters_after_hist_attach = len(set(id_map.values()))
+        else:
+            clusters_after_hist_attach = len(set(id_map.values()))
 
         label_by_tid = {
             tid: int(str(mapped_id).split("_")[-1])
             for tid, mapped_id in id_map.items()
             if str(mapped_id).startswith("Global_Person_")
         }
-        label_by_tid, repair_metrics = self._repair_covisible_cluster_merges(tracklets, label_by_tid)
+        clusters_before_repair = len(set(label_by_tid.values()))
+        collision_metrics_before_repair = self._same_identity_frame_collision_metrics(tracklets, label_by_tid)
+        if self._should_skip_cluster_repair(
+            face_cluster_count=n_face_clusters,
+            clusters_before_repair=clusters_before_repair,
+            visible_people_est=visible_people_est,
+            anchored_track_count=len(set(face_tids)),
+        ):
+            repair_metrics = {
+                "repaired_cluster_count": 0,
+                "repaired_tracklet_count": 0,
+                "repaired_conflict_pair_count": 0,
+                "repair_skipped": 1,
+            }
+            clusters_after_repair = clusters_before_repair
+            collision_metrics_after_repair = collision_metrics_before_repair
+            print(
+                "  Repair stage skipped: "
+                f"face_refined={n_face_clusters}, "
+                f"before_repair={clusters_before_repair}, "
+                f"visible_people_est={visible_people_est}"
+            )
+        else:
+            label_by_tid, repair_metrics = self._repair_covisible_cluster_merges(
+                tracklets,
+                label_by_tid,
+                anchored_tids=set(face_tids),
+            )
+            clusters_after_repair = len(set(label_by_tid.values()))
+            collision_metrics_after_repair = self._same_identity_frame_collision_metrics(tracklets, label_by_tid)
         id_map = {tid: f"Global_Person_{int(label)}" for tid, label in label_by_tid.items()}
+        print(
+            "  Cluster stages: "
+            f"face_refined={n_face_clusters}, "
+            f"after_hist={clusters_after_hist_attach}, "
+            f"before_repair={clusters_before_repair}, "
+            f"after_repair={clusters_after_repair}"
+        )
+        print(
+            "  Same-identity frame collisions: "
+            f"before={collision_metrics_before_repair['same_identity_frame_collision_pairs']} pairs/"
+            f"{collision_metrics_before_repair['same_identity_frame_collision_frames']} frames, "
+            f"after={collision_metrics_after_repair['same_identity_frame_collision_pairs']} pairs/"
+            f"{collision_metrics_after_repair['same_identity_frame_collision_frames']} frames"
+        )
+        if repair_metrics.get("repaired_cluster_count", 0) or repair_metrics.get("repaired_tracklet_count", 0):
+            print(
+                "  Repair splits: "
+                f"clusters={int(repair_metrics.get('repaired_cluster_count', 0))}, "
+                f"tracklets={int(repair_metrics.get('repaired_tracklet_count', 0))}, "
+                f"conflict_pairs={int(repair_metrics.get('repaired_conflict_pair_count', 0))}"
+            )
 
         # Renumber cluster IDs to contiguous Global_Person_{k}.
         renumber = {}
@@ -4080,6 +5116,12 @@ class ClyptWorker:
             "face_track_gap_propagated_tracklets": face_track_gap_propagated_tracklets,
             "cluster_cross_merge_cos_threshold": cross_cluster_merge_base_cos,
             "cluster_hist_attach_max_sig": histogram_attach_max_sig,
+            "same_identity_frame_collision_pairs_before_repair": collision_metrics_before_repair["same_identity_frame_collision_pairs"],
+            "same_identity_frame_collision_frames_before_repair": collision_metrics_before_repair["same_identity_frame_collision_frames"],
+            "same_identity_labels_with_collisions_before_repair": collision_metrics_before_repair["same_identity_labels_with_collisions"],
+            "same_identity_frame_collision_pairs_after_repair": collision_metrics_after_repair["same_identity_frame_collision_pairs"],
+            "same_identity_frame_collision_frames_after_repair": collision_metrics_after_repair["same_identity_frame_collision_frames"],
+            "same_identity_labels_with_collisions_after_repair": collision_metrics_after_repair["same_identity_labels_with_collisions"],
             **repair_metrics,
         }
         if isinstance(track_identity_features, dict):
@@ -4092,6 +5134,8 @@ class ClyptWorker:
             )
         else:
             self._last_track_identity_features_after_clustering = None
+
+        self._last_cluster_id_map = dict(id_map)
 
         # Apply mapping to all tracks
         for t in tracks:
@@ -4111,6 +5155,7 @@ class ClyptWorker:
         track_to_dets: dict[str, list[dict]] | None = None,
         track_identity_features: dict[str, dict] | None = None,
         analysis_context: dict | None = None,
+        track_id_remap: dict[str, str] | None = None,
         force_dense: bool = False,
     ) -> list[dict] | None:
         """Run LR-ASD inference and map words to visual track IDs."""
@@ -4151,6 +5196,12 @@ class ClyptWorker:
         if frame_to_dets is None or track_to_dets is None:
             frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
 
+        remap = {
+            str(old_tid): str(new_tid)
+            for old_tid, new_tid in dict(track_id_remap or {}).items()
+            if str(old_tid) and str(new_tid)
+        }
+
         canonical_face_boxes = self._build_canonical_face_bbox_lookup(
             track_identity_features=track_identity_features,
             track_to_dets=track_to_dets,
@@ -4169,9 +5220,24 @@ class ClyptWorker:
             if needed_face_boxes
             else 0.0
         )
+        lrasd_metrics = {
+            "canonical_face_stream_boxes": int(len(canonical_face_boxes)),
+            "canonical_face_stream_needed_boxes": int(needed_face_boxes),
+            "canonical_face_stream_coverage": round(float(canonical_coverage), 4),
+        }
+        existing_binding_metrics = getattr(self, "_last_speaker_binding_metrics", None)
+        if isinstance(existing_binding_metrics, dict):
+            existing_binding_metrics.update(lrasd_metrics)
+        else:
+            self._last_speaker_binding_metrics = dict(lrasd_metrics)
         print(
             "  Canonical face stream: "
             f"{len(canonical_face_boxes)}/{needed_face_boxes}={canonical_coverage:.1%} coverage"
+        )
+        track_quality_by_tid = self._build_speaker_binding_track_quality(
+            track_to_dets,
+            frame_width=int(binding_meta.get("width", 0) or 0) or 1,
+            frame_height=int(binding_meta.get("height", 0) or 0) or 1,
         )
         audio_feature_cache_path = binding_video_path.replace(".mp4", "_lrasd_features.npz")
         full_audio_features = self._load_or_build_lrasd_audio_features(
@@ -4294,6 +5360,7 @@ class ClyptWorker:
         score_lookup_max_delta = 8
         min_lrasd_prob = 0.15
         min_lrasd_assign_ratio = 0.15
+        min_body_fallback_score = 0.62
         print(
             "  LR-ASD pipeline: "
             f"batch_size={lrasd_batch_size}, overlap={'on' if enable_lrasd_overlap else 'off'}, "
@@ -4632,6 +5699,24 @@ class ClyptWorker:
                     return asd_scores[key]
             return None
 
+        motion_score: dict[tuple[str, int], float] = {}
+        for tid, dets in track_to_dets.items():
+            ordered = sorted(
+                dets,
+                key=lambda det: int(det.get("frame_idx", -1)),
+            )
+            if not ordered:
+                continue
+            for idx, cur in enumerate(ordered):
+                prev = ordered[idx - 1] if idx > 0 else cur
+                nxt = ordered[idx + 1] if idx + 1 < len(ordered) else cur
+                dx = abs(float(nxt.get("x_center", 0.0)) - float(prev.get("x_center", 0.0)))
+                dy = abs(float(nxt.get("y_center", 0.0)) - float(prev.get("y_center", 0.0)))
+                dh = abs(float(nxt.get("height", 0.0)) - float(prev.get("height", 0.0)))
+                h = max(float(cur.get("height", 1.0)), 1.0)
+                motion = (0.45 * dx + 0.8 * dy + 1.1 * dh) / h
+                motion_score[(str(tid), int(cur.get("frame_idx", -1)))] = float(motion)
+
         assigned = 0
         words_with_frame = 0
         words_with_dets = 0
@@ -4660,31 +5745,107 @@ class ClyptWorker:
                 if cur is None or float(d.get("confidence", 0.0)) > float(cur.get("confidence", 0.0)):
                     best_by_track[tid] = d
 
-            scored_candidates: list[tuple[float, float, str]] = []
+            peer_motion = {
+                tid: float(motion_score.get((tid, fi), 0.0))
+                for tid in best_by_track.keys()
+            }
+            max_motion = max(peer_motion.values()) if peer_motion else 0.0
+            scored_candidates: list[dict] = []
             has_scored_candidate = False
             for tid, d in best_by_track.items():
+                motion_rank = (
+                    float(peer_motion.get(tid, 0.0) / max_motion)
+                    if max_motion > 1e-6
+                    else 0.0
+                )
+                track_quality = float(track_quality_by_tid.get(tid, {}).get("track_quality", 0.0))
+                body_meta = self._score_speaker_binding_body_candidate(
+                    det=d,
+                    frame_dets=dets,
+                    frame_width=int(binding_meta.get("width", 0) or 0) or 1,
+                    frame_height=int(binding_meta.get("height", 0) or 0) or 1,
+                    track_quality=track_quality,
+                    motion_rank=motion_rank,
+                )
                 s = _score_near(tid, fi)
-                if s is None:
-                    continue
-                has_scored_candidate = True
-                # Keep LASER probability dominant; priors only break ties.
-                conf = float(d.get("confidence", 0.0))
-                total = (0.995 * float(s)) + (0.005 * conf)
-                scored_candidates.append((float(total), float(s), tid))
+                has_face_box = (tid, fi) in canonical_face_boxes
+                conf = max(0.0, min(1.0, float(d.get("confidence", 0.0))))
+                body_prior = float(body_meta["body_prior"])
+                face_bonus = 1.0 if has_face_box else 0.0
+                if s is not None:
+                    has_scored_candidate = True
+                    total = (
+                        0.76 * float(s)
+                        + 0.18 * body_prior
+                        + 0.04 * face_bonus
+                        + 0.02 * conf
+                    )
+                else:
+                    total = (
+                        0.72 * body_prior
+                        + 0.18 * face_bonus
+                        + 0.10 * conf
+                    )
+                mapped_tid = remap.get(tid, tid)
+                scored_candidates.append(
+                    {
+                        "total": float(total),
+                        "prob": None if s is None else float(s),
+                        "local_tid": tid,
+                        "track_id": mapped_tid,
+                        "body_prior": body_prior,
+                        "track_quality": track_quality,
+                        "detection_quality": float(body_meta["detection_quality"]),
+                        "confidence": conf,
+                        "hard_reject": bool(body_meta.get("hard_reject", False)),
+                    }
+                )
             if has_scored_candidate:
                 words_with_scored_candidate += 1
 
-            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            if any(not candidate["hard_reject"] for candidate in scored_candidates):
+                scored_candidates = [
+                    candidate for candidate in scored_candidates
+                    if not candidate["hard_reject"]
+                ]
+
+            scored_candidates.sort(
+                key=lambda item: (
+                    item["total"],
+                    item["prob"] if item["prob"] is not None else -1.0,
+                    item["body_prior"],
+                    item["confidence"],
+                ),
+                reverse=True,
+            )
             if scored_candidates:
-                best_total, best_prob, best_tid = scored_candidates[0]
-                second_total = scored_candidates[1][0] if len(scored_candidates) > 1 else -1e9
-                confident_pick = (
-                    best_prob >= min_lrasd_prob
-                    and (
-                        len(scored_candidates) == 1
-                        or (best_total - second_total) >= min_assignment_margin
+                best_candidate = scored_candidates[0]
+                best_total = float(best_candidate["total"])
+                best_prob = best_candidate["prob"]
+                best_tid = str(best_candidate["track_id"])
+                best_body = float(best_candidate["body_prior"])
+                second_total = None
+                for candidate in scored_candidates[1:]:
+                    if str(candidate["track_id"]) != best_tid:
+                        second_total = float(candidate["total"])
+                        break
+                if best_prob is not None:
+                    confident_pick = bool(
+                        float(best_prob) >= min_lrasd_prob
+                        and (
+                            second_total is None
+                            or (best_total - second_total) >= min_assignment_margin
+                            or best_body >= 0.80
+                        )
                     )
-                )
+                else:
+                    confident_pick = bool(
+                        best_body >= min_body_fallback_score
+                        and (
+                            second_total is None
+                            or (best_total - second_total) >= (0.5 * min_assignment_margin)
+                        )
+                    )
             else:
                 best_tid = None
                 confident_pick = False
@@ -4770,6 +5931,7 @@ class ClyptWorker:
         words: list[dict],
         frame_to_dets: dict[int, list[dict]] | None = None,
         track_to_dets: dict[str, list[dict]] | None = None,
+        track_id_remap: dict[str, str] | None = None,
     ) -> list[dict]:
         """Bind each word to a visual track ID using AV synchrony and lip activity cues.
 
@@ -4815,6 +5977,11 @@ class ClyptWorker:
         # Build or reuse per-track/per-frame indexes.
         if frame_to_dets is None or track_to_dets is None:
             frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
+        remap = {
+            str(old_tid): str(new_tid)
+            for old_tid, new_tid in dict(track_id_remap or {}).items()
+            if str(old_tid) and str(new_tid)
+        }
 
         # Precompute short-term motion per (track, frame) as a speech proxy.
         # Larger local movement around the face/body center tends to correlate
@@ -4976,6 +6143,8 @@ class ClyptWorker:
         for w in words:
             tid = _assign_word(w)
             if tid is not None:
+                tid = remap.get(str(tid), str(tid))
+            if tid is not None:
                 w["speaker_track_id"] = tid
                 # Compatibility for downstream phases that still read speaker_tag.
                 w["speaker_tag"] = tid
@@ -5045,6 +6214,7 @@ class ClyptWorker:
         track_to_dets: dict[str, list[dict]] | None = None,
         track_identity_features: dict[str, dict] | None = None,
         analysis_context: dict | None = None,
+        track_id_remap: dict[str, str] | None = None,
     ) -> list[dict]:
         """Bind words to track IDs using LR-ASD, with heuristic fallback."""
         mode = self._select_speaker_binding_mode(video_path, tracks, words)
@@ -5064,11 +6234,15 @@ class ClyptWorker:
                 track_to_dets=track_to_dets,
                 track_identity_features=track_identity_features,
                 analysis_context=analysis_context,
+                track_id_remap=track_id_remap,
             )
             speaker_metrics["lrasd_wallclock_s"] = round(
                 time.perf_counter() - lrasd_started_at,
                 3,
             )
+            lrasd_aux_metrics = getattr(self, "_last_speaker_binding_metrics", None)
+            if isinstance(lrasd_aux_metrics, dict):
+                speaker_metrics.update(lrasd_aux_metrics)
             if bindings is not None:
                 self._last_speaker_binding_metrics = speaker_metrics
                 return bindings
@@ -5082,6 +6256,7 @@ class ClyptWorker:
             words,
             frame_to_dets=frame_to_dets,
             track_to_dets=track_to_dets,
+            track_id_remap=track_id_remap,
         )
         self._last_speaker_binding_metrics = speaker_metrics
         return bindings
@@ -5145,7 +6320,9 @@ class ClyptWorker:
             {str(track.get("track_id", "")) for track in tracks if str(track.get("track_id", ""))}
         )
 
+        precluster_tracks = [dict(track) for track in tracks]
         _, track_to_dets = self._build_track_indexes(tracks)
+        precluster_frame_to_dets, precluster_track_to_dets = self._build_track_indexes(precluster_tracks)
 
         # Step 3: Global tracklet clustering
         print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
@@ -5166,6 +6343,7 @@ class ClyptWorker:
         clustered_track_identity_features = (
             getattr(self, "_last_track_identity_features_after_clustering", None) or track_identity_features
         )
+        cluster_id_remap = getattr(self, "_last_cluster_id_map", None)
         frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
         metrics["identity_track_count_after_clustering"] = len(
             {str(track.get("track_id", "")) for track in tracks if str(track.get("track_id", ""))}
@@ -5185,15 +6363,30 @@ class ClyptWorker:
         speaker_bindings = self._run_speaker_binding(
             video_path,
             audio_path,
-            tracks,
+            precluster_tracks,
             words,
-            frame_to_dets=frame_to_dets,
-            track_to_dets=track_to_dets,
-            track_identity_features=clustered_track_identity_features,
+            frame_to_dets=precluster_frame_to_dets,
+            track_to_dets=precluster_track_to_dets,
+            track_identity_features=track_identity_features,
             analysis_context=analysis_context,
+            track_id_remap=cluster_id_remap,
         )
+        speaker_follow_bindings = self._build_speaker_follow_bindings(speaker_bindings)
+        speaker_bindings_local: list[dict] = []
+        speaker_follow_bindings_local: list[dict] = []
+        if self._local_clip_bindings_enabled():
+            speaker_bindings_local = self._project_bindings_to_local_track_space(
+                speaker_bindings,
+                cluster_id_remap,
+            )
+            speaker_follow_bindings_local = self._build_speaker_follow_bindings(
+                speaker_bindings_local
+            )
         speaker_binding_elapsed_s = time.perf_counter() - speaker_binding_started_at
         metrics["speaker_binding_wallclock_s"] = round(speaker_binding_elapsed_s, 3)
+        metrics["speaker_follow_binding_segment_count"] = len(speaker_follow_bindings)
+        metrics["speaker_binding_local_segment_count"] = len(speaker_bindings_local)
+        metrics["speaker_follow_binding_local_segment_count"] = len(speaker_follow_bindings_local)
         last_binding_metrics = getattr(self, "_last_speaker_binding_metrics", None)
         if isinstance(last_binding_metrics, dict):
             metrics.update(last_binding_metrics)
@@ -5226,7 +6419,11 @@ class ClyptWorker:
             "source_audio": youtube_url,
             "words": words,
             "speaker_bindings": speaker_bindings,
+            "speaker_follow_bindings": speaker_follow_bindings,
         }
+        if self._local_clip_bindings_enabled():
+            phase_1_audio["speaker_bindings_local"] = speaker_bindings_local
+            phase_1_audio["speaker_follow_bindings_local"] = speaker_follow_bindings_local
 
         print(f"[Phase 1] Complete — {len(words)} words, {len(tracks)} tracks")
         return {

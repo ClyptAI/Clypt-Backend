@@ -738,6 +738,81 @@ def test_associate_faces_to_person_dets_prefers_head_aligned_match():
     assert worker._associate_faces_to_person_dets(faces, dets) == ["left", "right"]
 
 
+def test_associate_faces_to_person_dets_uses_one_to_one_assignment_for_adjacent_people():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    dets = [
+        {"track_id": "a", "x1": 100.0, "y1": 100.0, "x2": 420.0, "y2": 600.0},
+        {"track_id": "b", "x1": 280.0, "y1": 100.0, "x2": 600.0, "y2": 600.0},
+    ]
+    faces = [
+        {"bbox_xyxy": (160.0, 120.0, 240.0, 220.0)},
+        {"bbox_xyxy": (300.0, 120.0, 380.0, 220.0)},
+    ]
+
+    assert worker._associate_faces_to_person_dets(faces, dets) == ["a", "b"]
+
+
+def test_prewarm_face_runtime_in_pool_initializes_worker_thread_runtime(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker._face_runtime_main_thread_ident = threading.get_ident()
+    worker._face_runtime_local = threading.local()
+    worker._face_detector_input_size = (640, 640)
+
+    call_thread_ids = []
+    detect_calls = []
+    recognize_calls = []
+
+    class FakeDetector:
+        def detect(self, frame, input_size=None, max_num=0):
+            detect_calls.append((threading.get_ident(), tuple(frame.shape), tuple(input_size or ()), int(max_num)))
+            return np.zeros((0, 5), dtype=np.float32), None
+
+    class FakeRecognizer:
+        def get(self, frame, face):
+            recognize_calls.append((threading.get_ident(), tuple(frame.shape), tuple(np.asarray(face.bbox).tolist())))
+            return np.ones((512,), dtype=np.float32)
+
+    fake_common = types.ModuleType("insightface.app.common")
+
+    class FakeFace:
+        def __init__(self, bbox, kps, det_score):
+            self.bbox = bbox
+            self.kps = kps
+            self.det_score = det_score
+
+    fake_common.Face = FakeFace
+    monkeypatch.setitem(sys.modules, "insightface.app.common", fake_common)
+
+    def fake_get_thread_face_runtime():
+        call_thread_ids.append(threading.get_ident())
+        return FakeDetector(), FakeRecognizer()
+
+    worker._get_thread_face_runtime = fake_get_thread_face_runtime
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker._prewarm_face_runtime_in_pool(pool, 1)
+
+    assert call_thread_ids
+    assert any(thread_id != threading.get_ident() for thread_id in call_thread_ids)
+    assert detect_calls and recognize_calls
+    assert all(thread_id != threading.get_ident() for thread_id, *_ in detect_calls)
+    assert all(thread_id != threading.get_ident() for thread_id, *_ in recognize_calls)
+
+
+def test_eligible_associated_track_ids_defaults_to_single_dominant_track(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_FACE_TRACK_ALLOW_MULTI_ASSOC", raising=False)
+
+    assert worker._eligible_associated_track_ids({"host": 8, "neighbor": 6}) == {"host"}
+
+
 def test_shared_analysis_proxy_can_drive_tracking_and_lrasd_selection(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -875,6 +950,239 @@ def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path:
             }
         },
     )
+
+
+def _run_fake_lrasd_binding_case(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    track_specs: dict[str, dict],
+    score_by_track: dict[str, float],
+    words: list[dict] | None = None,
+    track_id_remap: dict[str, str] | None = None,
+):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.lrasd_model = object()
+    worker.lrasd_loss_av = object()
+    worker.gpu_device = "cpu"
+    worker.model_debug = False
+    worker.model_debug_every = 0
+    worker._last_speaker_binding_metrics = {}
+
+    video_path = tmp_path / "video.mp4"
+    audio_path = tmp_path / "audio.wav"
+    cached_features_path = tmp_path / "video_lrasd_features.npz"
+    video_path.write_bytes(b"video")
+    audio_path.write_bytes(b"audio")
+    np.savez_compressed(
+        cached_features_path,
+        audio_features=np.full((400, 13), 0.25, dtype=np.float32),
+    )
+
+    frame_h = 200
+    frame_w = 300
+    frame_count = 40
+    frames = []
+    for _ in range(frame_count):
+        frame = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
+        for spec in track_specs.values():
+            x1 = max(0, int(round(float(spec["x_center"]) - (0.5 * float(spec["width"])))))
+            y1 = max(0, int(round(float(spec["y_center"]) - (0.5 * float(spec["height"])))))
+            x2 = min(frame_w, int(round(float(spec["x_center"]) + (0.5 * float(spec["width"])))))
+            y2 = min(frame_h, int(round(float(spec["y_center"]) + (0.5 * float(spec["height"])))))
+            if x2 > x1 and y2 > y1:
+                frame[y1:y2, x1:x2] = int(spec["intensity"])
+        frames.append(frame)
+
+    class _Batch:
+        def __init__(self, batch_frames):
+            self._frames = batch_frames
+
+        def asnumpy(self):
+            return np.stack(self._frames, axis=0)
+
+    class _VideoReader:
+        def __init__(self, path, ctx=None):
+            self._frames = frames
+
+        def __len__(self):
+            return len(self._frames)
+
+        def get_avg_fps(self):
+            return 30.0
+
+        def get_batch(self, indices):
+            return _Batch([self._frames[i] for i in indices])
+
+    fake_decord = types.ModuleType("decord")
+    fake_decord.VideoReader = _VideoReader
+    fake_decord.cpu = lambda _index: object()
+    monkeypatch.setitem(sys.modules, "decord", fake_decord)
+
+    fake_psf = types.ModuleType("python_speech_features")
+    fake_psf.mfcc = lambda *args, **kwargs: np.zeros((10, 13), dtype=np.float32)
+    monkeypatch.setitem(sys.modules, "python_speech_features", fake_psf)
+
+    import scipy.io.wavfile as wavfile_module
+
+    monkeypatch.setattr(wavfile_module, "read", lambda path: (16000, np.zeros(48000, dtype=np.int16)))
+    monkeypatch.setattr(worker, "_build_canonical_face_bbox_lookup", lambda **kwargs: {})
+
+    tracks = []
+    for frame_idx in range(frame_count):
+        for tid, spec in track_specs.items():
+            width = float(spec["width"])
+            height = float(spec["height"])
+            x_center = float(spec["x_center"])
+            y_center = float(spec["y_center"])
+            tracks.append(
+                {
+                    "frame_idx": frame_idx,
+                    "track_id": tid,
+                    "class_id": 0,
+                    "label": "person",
+                    "geometry_type": "aabb",
+                    "x1": x_center - (0.5 * width),
+                    "y1": y_center - (0.5 * height),
+                    "x2": x_center + (0.5 * width),
+                    "y2": y_center + (0.5 * height),
+                    "x_center": x_center,
+                    "y_center": y_center,
+                    "width": width,
+                    "height": height,
+                    "confidence": float(spec.get("confidence", 0.9)),
+                }
+            )
+
+    intensity_to_tid = {
+        int(spec["intensity"]): tid
+        for tid, spec in track_specs.items()
+    }
+
+    monkeypatch.setattr(
+        worker,
+        "_lrasd_forward_scores",
+        lambda audio_t, visual_t: type(
+            "ScoreTensor",
+            (),
+            {
+                "detach": lambda self: self,
+                "float": lambda self: self,
+                "cpu": lambda self: self,
+                "numpy": lambda self: np.stack(
+                    [
+                        np.full(
+                            (audio_t.shape[1],),
+                            float(
+                                score_by_track[
+                                    intensity_to_tid[
+                                        min(
+                                            intensity_to_tid.keys(),
+                                            key=lambda intensity: abs(
+                                                intensity - int(round(float(row.mean())))
+                                            ),
+                                        )
+                                    ]
+                                ]
+                            ),
+                            dtype=np.float32,
+                        )
+                        for row in visual_t.detach().cpu().numpy().mean(axis=(1, 2, 3))
+                    ],
+                    axis=0,
+                ),
+            },
+        )(),
+    )
+
+    if words is None:
+        words = [
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ]
+
+    bindings = worker._run_lrasd_binding(
+        video_path=str(video_path),
+        audio_wav_path=str(audio_path),
+        tracks=tracks,
+        words=words,
+        frame_to_dets=None,
+        track_to_dets=None,
+        track_identity_features=None,
+        analysis_context={
+            "analysis_video_path": str(video_path),
+            "scale_x": 1.0,
+            "scale_y": 1.0,
+            "analysis_meta": {"width": frame_w, "height": frame_h, "fps": 30.0},
+        },
+        track_id_remap=track_id_remap,
+    )
+    return worker, words, bindings
+
+
+def test_run_lrasd_binding_prefers_clean_body_track_over_sink_like_candidate(monkeypatch, tmp_path: Path):
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "sink": {
+                "x_center": 228.0,
+                "y_center": 105.0,
+                "width": 210.0,
+                "height": 178.0,
+                "confidence": 0.98,
+                "intensity": 80,
+            },
+            "speaker": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 74.0,
+                "height": 156.0,
+                "confidence": 0.92,
+                "intensity": 210,
+            },
+        },
+        score_by_track={
+            "sink": 0.84,
+            "speaker": 0.78,
+        },
+    )
+
+    assert words[0]["speaker_track_id"] == "speaker"
+    assert bindings[0]["track_id"] == "speaker"
+    assert worker._last_speaker_binding_metrics["canonical_face_stream_coverage"] == 0.0
+
+
+def test_run_lrasd_binding_rejects_tiny_edge_fragment_candidate(monkeypatch, tmp_path: Path):
+    _, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "fragment": {
+                "x_center": 12.0,
+                "y_center": 58.0,
+                "width": 18.0,
+                "height": 28.0,
+                "confidence": 0.97,
+                "intensity": 60,
+            },
+            "speaker": {
+                "x_center": 156.0,
+                "y_center": 100.0,
+                "width": 76.0,
+                "height": 150.0,
+                "confidence": 0.88,
+                "intensity": 200,
+            },
+        },
+        score_by_track={
+            "fragment": 0.88,
+            "speaker": 0.76,
+        },
+    )
+
+    assert words[0]["speaker_track_id"] == "speaker"
+    assert bindings[0]["track_id"] == "speaker"
 
 
 def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
@@ -1045,6 +1353,259 @@ def test_finalize_passes_track_identity_features_to_clustering_and_ledgers(monke
     assert passed["face_tracks"] is None
 
 
+def test_build_speaker_follow_bindings_absorbs_brief_midstream_blip():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    bindings = [
+        {"track_id": "A", "start_time_ms": 0, "end_time_ms": 3200, "word_count": 10},
+        {"track_id": "B", "start_time_ms": 3200, "end_time_ms": 3550, "word_count": 1},
+        {"track_id": "A", "start_time_ms": 3550, "end_time_ms": 7200, "word_count": 11},
+    ]
+
+    follow = worker._build_speaker_follow_bindings(bindings)
+
+    assert follow == [
+        {"track_id": "A", "start_time_ms": 0, "end_time_ms": 7200, "word_count": 22}
+    ]
+
+
+def test_build_speaker_follow_bindings_keeps_sustained_turn_change():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    bindings = [
+        {"track_id": "A", "start_time_ms": 0, "end_time_ms": 3000, "word_count": 10},
+        {"track_id": "B", "start_time_ms": 3000, "end_time_ms": 5200, "word_count": 8},
+        {"track_id": "A", "start_time_ms": 5200, "end_time_ms": 8400, "word_count": 9},
+    ]
+
+    follow = worker._build_speaker_follow_bindings(bindings)
+
+    assert [segment["track_id"] for segment in follow] == ["A", "B", "A"]
+    assert follow[1]["start_time_ms"] == 3000
+    assert follow[1]["end_time_ms"] == 5200
+
+
+def test_finalize_emits_speaker_follow_bindings(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "track-1",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        }
+    ]
+    words = [{"text": "hello", "start_time_ms": 0, "end_time_ms": 100}]
+
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(
+        worker,
+        "_build_track_indexes",
+        lambda tracks: ({0: tracks}, {"track-1": tracks}),
+    )
+    monkeypatch.setattr(worker, "_cluster_tracklets", lambda *args, **kwargs: tracks)
+    monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding",
+        lambda *args, **kwargs: [
+            {"track_id": "track-1", "start_time_ms": 0, "end_time_ms": 3000, "word_count": 10},
+            {"track_id": "track-2", "start_time_ms": 3000, "end_time_ms": 3300, "word_count": 1},
+            {"track_id": "track-1", "start_time_ms": 3300, "end_time_ms": 6000, "word_count": 11},
+        ],
+    )
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    assert result["phase_1_audio"]["speaker_bindings"][1]["track_id"] == "track-2"
+    assert result["phase_1_audio"]["speaker_follow_bindings"] == [
+        {"track_id": "track-1", "start_time_ms": 0, "end_time_ms": 6000, "word_count": 22}
+    ]
+
+
+def test_finalize_runs_speaker_binding_on_precluster_tracks_and_maps_to_globals(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "local-1",
+            "class_id": 0,
+            "label": "person",
+            "geometry_type": "aabb",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        }
+    ]
+    words = [{"text": "hello", "start_time_ms": 0, "end_time_ms": 100}]
+
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
+
+    def _fake_cluster(video_path, tracks, **kwargs):
+        worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
+        worker._last_track_identity_features_after_clustering = None
+        for track in tracks:
+            track["track_id"] = "Global_Person_0"
+        return tracks
+
+    monkeypatch.setattr(worker, "_cluster_tracklets", _fake_cluster)
+
+    def _fake_run_speaker_binding(
+        video_path,
+        audio_path,
+        tracks,
+        words,
+        frame_to_dets=None,
+        track_to_dets=None,
+        track_identity_features=None,
+        analysis_context=None,
+        track_id_remap=None,
+    ):
+        assert {track["track_id"] for track in tracks} == {"local-1"}
+        assert track_id_remap == {"local-1": "Global_Person_0"}
+        for word in words:
+            word["speaker_track_id"] = "Global_Person_0"
+            word["speaker_tag"] = "Global_Person_0"
+        return [
+            {
+                "track_id": "Global_Person_0",
+                "start_time_ms": 0,
+                "end_time_ms": 100,
+                "word_count": 1,
+            }
+        ]
+
+    monkeypatch.setattr(worker, "_run_speaker_binding", _fake_run_speaker_binding)
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    assert result["phase_1_audio"]["speaker_bindings"] == [
+        {"track_id": "Global_Person_0", "start_time_ms": 0, "end_time_ms": 100, "word_count": 1}
+    ]
+    assert result["phase_1_audio"]["words"][0]["speaker_track_id"] == "Global_Person_0"
+
+
+def test_finalize_emits_local_speaker_bindings_when_experiment_enabled(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "local-1",
+            "class_id": 0,
+            "label": "person",
+            "geometry_type": "aabb",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        }
+    ]
+    words = [{"text": "hello", "start_time_ms": 0, "end_time_ms": 100}]
+
+    monkeypatch.setenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "1")
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
+
+    def _fake_cluster(video_path, tracks, **kwargs):
+        worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
+        worker._last_track_identity_features_after_clustering = None
+        for track in tracks:
+            track["track_id"] = "Global_Person_0"
+        return tracks
+
+    monkeypatch.setattr(worker, "_cluster_tracklets", _fake_cluster)
+
+    def _fake_run_speaker_binding(
+        video_path,
+        audio_path,
+        tracks,
+        words,
+        frame_to_dets=None,
+        track_to_dets=None,
+        track_identity_features=None,
+        analysis_context=None,
+        track_id_remap=None,
+    ):
+        assert {track["track_id"] for track in tracks} == {"local-1"}
+        assert track_id_remap == {"local-1": "Global_Person_0"}
+        for word in words:
+            word["speaker_track_id"] = "Global_Person_0"
+            word["speaker_tag"] = "Global_Person_0"
+        return [
+            {
+                "track_id": "Global_Person_0",
+                "start_time_ms": 0,
+                "end_time_ms": 100,
+                "word_count": 1,
+            }
+        ]
+
+    monkeypatch.setattr(worker, "_run_speaker_binding", _fake_run_speaker_binding)
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    assert result["phase_1_audio"]["speaker_bindings_local"] == [
+        {"track_id": "local-1", "start_time_ms": 0, "end_time_ms": 100, "word_count": 1}
+    ]
+    assert result["phase_1_audio"]["speaker_follow_bindings_local"] == [
+        {"track_id": "local-1", "start_time_ms": 0, "end_time_ms": 100, "word_count": 1}
+    ]
+
+
 def test_clusters_conflict_by_visibility_detects_far_apart_covisible_people():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -1073,6 +1634,74 @@ def test_clusters_conflict_by_visibility_detects_far_apart_covisible_people():
     }
 
     assert worker._clusters_conflict_by_visibility(tracklets, ["left"], ["right"]) is True
+
+
+def test_clusters_conflict_by_visibility_ignores_single_frame_overlapping_duplicate():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "dup_a": [
+            {
+                "frame_idx": 10,
+                "x_center": 500.0,
+                "y_center": 300.0,
+                "width": 120.0,
+                "height": 240.0,
+                "confidence": 0.95,
+            }
+        ],
+        "dup_b": [
+            {
+                "frame_idx": 10,
+                "x_center": 590.0,
+                "y_center": 302.0,
+                "width": 120.0,
+                "height": 238.0,
+                "confidence": 0.92,
+            }
+        ],
+    }
+
+    assert worker._clusters_conflict_by_visibility(tracklets, ["dup_a"], ["dup_b"]) is False
+
+
+def test_clusters_conflict_by_visibility_ignores_repeated_overlapping_duplicates():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "dup_a": [
+            {"frame_idx": 10, "x_center": 500.0, "y_center": 300.0, "width": 120.0, "height": 240.0, "confidence": 0.95},
+            {"frame_idx": 11, "x_center": 504.0, "y_center": 302.0, "width": 121.0, "height": 241.0, "confidence": 0.94},
+        ],
+        "dup_b": [
+            {"frame_idx": 10, "x_center": 560.0, "y_center": 302.0, "width": 119.0, "height": 239.0, "confidence": 0.92},
+            {"frame_idx": 11, "x_center": 566.0, "y_center": 303.0, "width": 120.0, "height": 240.0, "confidence": 0.91},
+        ],
+    }
+
+    assert worker._clusters_conflict_by_visibility(tracklets, ["dup_a"], ["dup_b"]) is False
+
+
+def test_clusters_conflict_by_visibility_can_be_disabled(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_CLUSTER_DISABLE_COVISIBILITY", "1")
+
+    tracklets = {
+        "left": [
+            {"frame_idx": 10, "x_center": 120.0, "y_center": 300.0, "width": 90.0, "height": 220.0, "confidence": 0.94},
+            {"frame_idx": 11, "x_center": 122.0, "y_center": 302.0, "width": 92.0, "height": 222.0, "confidence": 0.93},
+        ],
+        "right": [
+            {"frame_idx": 10, "x_center": 1620.0, "y_center": 300.0, "width": 92.0, "height": 222.0, "confidence": 0.95},
+            {"frame_idx": 11, "x_center": 1622.0, "y_center": 302.0, "width": 94.0, "height": 224.0, "confidence": 0.94},
+        ],
+    }
+
+    assert worker._clusters_conflict_by_visibility(tracklets, ["left"], ["right"]) is False
 
 
 def test_clusters_reject_incompatible_seat_signatures():
@@ -1124,6 +1753,121 @@ def test_repair_covisible_cluster_merges_splits_invalid_global_identity():
     assert metrics["repaired_cluster_count"] == 1
     assert metrics["repaired_tracklet_count"] == 3
     assert metrics["repaired_conflict_pair_count"] >= 1
+
+
+def test_repair_covisible_cluster_merges_keeps_single_frame_duplicate_together():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "same_person_a": [
+            {"frame_idx": 10, "x_center": 500.0, "y_center": 300.0, "width": 120.0, "height": 240.0, "confidence": 0.95},
+            {"frame_idx": 11, "x_center": 506.0, "y_center": 302.0, "width": 122.0, "height": 242.0, "confidence": 0.94},
+        ],
+        "same_person_b": [
+            {"frame_idx": 10, "x_center": 590.0, "y_center": 302.0, "width": 120.0, "height": 238.0, "confidence": 0.92},
+        ],
+    }
+    label_by_tid = {"same_person_a": 0, "same_person_b": 0}
+
+    repaired, metrics = worker._repair_covisible_cluster_merges(tracklets, label_by_tid)
+
+    assert repaired["same_person_a"] == repaired["same_person_b"]
+    assert metrics["repaired_cluster_count"] == 0
+
+
+def test_repair_covisible_cluster_merges_preserves_face_anchor_core_and_ejects_conflicting_tail():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "host_face_a": [
+            {"frame_idx": 0, "x_center": 220.0, "y_center": 320.0, "width": 180.0, "height": 280.0, "confidence": 0.95},
+            {"frame_idx": 1, "x_center": 224.0, "y_center": 322.0, "width": 182.0, "height": 282.0, "confidence": 0.94},
+        ],
+        "host_face_b": [
+            {"frame_idx": 12, "x_center": 226.0, "y_center": 321.0, "width": 181.0, "height": 281.0, "confidence": 0.93},
+            {"frame_idx": 13, "x_center": 230.0, "y_center": 323.0, "width": 183.0, "height": 283.0, "confidence": 0.92},
+        ],
+        "tail_bad": [
+            {"frame_idx": 1, "x_center": 1620.0, "y_center": 330.0, "width": 176.0, "height": 278.0, "confidence": 0.91},
+            {"frame_idx": 2, "x_center": 1624.0, "y_center": 332.0, "width": 178.0, "height": 280.0, "confidence": 0.90},
+        ],
+    }
+    label_by_tid = {"host_face_a": 0, "host_face_b": 0, "tail_bad": 0}
+
+    repaired, metrics = worker._repair_covisible_cluster_merges(
+        tracklets,
+        label_by_tid,
+        anchored_tids={"host_face_a", "host_face_b"},
+    )
+
+    assert repaired["host_face_a"] == repaired["host_face_b"]
+    assert repaired["tail_bad"] != repaired["host_face_a"]
+    assert metrics["repaired_cluster_count"] == 1
+
+
+def test_should_skip_cluster_repair_when_face_core_is_already_near_target():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    assert worker._should_skip_cluster_repair(
+        face_cluster_count=6,
+        clusters_before_repair=7,
+        visible_people_est=6,
+        anchored_track_count=12,
+    ) is True
+
+    assert worker._should_skip_cluster_repair(
+        face_cluster_count=6,
+        clusters_before_repair=12,
+        visible_people_est=6,
+        anchored_track_count=12,
+    ) is False
+
+
+def test_same_identity_frame_collision_metrics_detect_distinct_covisible_instances():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "left_a": [
+            {"frame_idx": 10, "x_center": 220.0, "y_center": 320.0, "width": 180.0, "height": 280.0, "confidence": 0.95},
+            {"frame_idx": 11, "x_center": 224.0, "y_center": 322.0, "width": 182.0, "height": 282.0, "confidence": 0.94},
+        ],
+        "right_b": [
+            {"frame_idx": 10, "x_center": 1620.0, "y_center": 330.0, "width": 176.0, "height": 278.0, "confidence": 0.91},
+            {"frame_idx": 11, "x_center": 1624.0, "y_center": 332.0, "width": 178.0, "height": 280.0, "confidence": 0.90},
+        ],
+    }
+    label_by_tid = {"left_a": 0, "right_b": 0}
+
+    metrics = worker._same_identity_frame_collision_metrics(tracklets, label_by_tid)
+
+    assert metrics["same_identity_frame_collision_pairs"] >= 1
+    assert metrics["same_identity_frame_collision_frames"] >= 2
+
+
+def test_same_identity_frame_collision_metrics_ignore_duplicate_like_overlap():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "dup_a": [
+            {"frame_idx": 10, "x_center": 500.0, "y_center": 300.0, "width": 120.0, "height": 240.0, "confidence": 0.95},
+            {"frame_idx": 11, "x_center": 504.0, "y_center": 302.0, "width": 121.0, "height": 241.0, "confidence": 0.94},
+        ],
+        "dup_b": [
+            {"frame_idx": 10, "x_center": 560.0, "y_center": 302.0, "width": 119.0, "height": 239.0, "confidence": 0.92},
+            {"frame_idx": 11, "x_center": 566.0, "y_center": 303.0, "width": 120.0, "height": 240.0, "confidence": 0.91},
+        ],
+    }
+    label_by_tid = {"dup_a": 0, "dup_b": 0}
+
+    metrics = worker._same_identity_frame_collision_metrics(tracklets, label_by_tid)
+
+    assert metrics["same_identity_frame_collision_pairs"] == 0
+    assert metrics["same_identity_frame_collision_frames"] == 0
 
 
 
@@ -1352,6 +2096,399 @@ def test_cluster_tracklets_keeps_histogram_fragment_separate_when_attachment_is_
     assert metrics["histogram_attach_rejections"] >= 1
 
 
+def test_cluster_tracklets_refines_seeded_face_clusters_with_later_face_merge(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    class _FakeDBSCAN:
+        def __init__(self, eps, min_samples, metric):
+            self.labels_ = None
+
+        def fit(self, X):
+            self.labels_ = np.arange(len(X), dtype=int)
+            return self
+
+    sklearn_cluster = types.ModuleType("sklearn.cluster")
+    sklearn_cluster.DBSCAN = _FakeDBSCAN
+    sklearn_pkg = types.ModuleType("sklearn")
+    sklearn_pkg.cluster = sklearn_cluster
+    monkeypatch.setitem(sys.modules, "sklearn", sklearn_pkg)
+    monkeypatch.setitem(sys.modules, "sklearn.cluster", sklearn_cluster)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "host_frag_a",
+            "x_center": 240.0,
+            "y_center": 320.0,
+            "width": 180.0,
+            "height": 280.0,
+            "confidence": 0.95,
+        },
+        {
+            "frame_idx": 1,
+            "track_id": "host_frag_a",
+            "x_center": 244.0,
+            "y_center": 322.0,
+            "width": 182.0,
+            "height": 282.0,
+            "confidence": 0.94,
+        },
+        {
+            "frame_idx": 12,
+            "track_id": "host_frag_b",
+            "x_center": 248.0,
+            "y_center": 324.0,
+            "width": 181.0,
+            "height": 281.0,
+            "confidence": 0.93,
+        },
+        {
+            "frame_idx": 13,
+            "track_id": "host_frag_b",
+            "x_center": 252.0,
+            "y_center": 326.0,
+            "width": 183.0,
+            "height": 283.0,
+            "confidence": 0.92,
+        },
+    ]
+    tracklets = {
+        "host_frag_a": [tracks[0], tracks[1]],
+        "host_frag_b": [tracks[2], tracks[3]],
+    }
+    face_track_features = {
+        "face_0_0": {
+            "face_track_id": "face_0_0",
+            "embedding": [1.0, 0.0, 0.0],
+            "embedding_source": "face",
+            "embedding_count": 2,
+            "face_observations": [],
+            "associated_track_counts": {"host_frag_a": 2},
+            "dominant_track_id": "host_frag_a",
+        },
+        "face_12_1": {
+            "face_track_id": "face_12_1",
+            "embedding": [0.999, 0.001, 0.0],
+            "embedding_source": "face",
+            "embedding_count": 2,
+            "face_observations": [],
+            "associated_track_counts": {"host_frag_b": 2},
+            "dominant_track_id": "host_frag_b",
+        },
+    }
+
+    clustered = worker._cluster_tracklets(
+        video_path="video.mp4",
+        tracks=[dict(track) for track in tracks],
+        track_to_dets=tracklets,
+        face_track_features=face_track_features,
+    )
+
+    mapped = {}
+    for det in clustered:
+        mapped.setdefault(det["track_id"], set()).add(det["frame_idx"])
+
+    assert len(mapped) == 1
+    assert mapped[next(iter(mapped.keys()))] == {0, 1, 12, 13}
+
+
+def test_cluster_tracklets_face_track_seeding_requires_strong_association(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    class _FakeDBSCAN:
+        def __init__(self, eps, min_samples, metric):
+            self.labels_ = None
+
+        def fit(self, X):
+            self.labels_ = np.zeros(len(X), dtype=int)
+            return self
+
+    sklearn_cluster = types.ModuleType("sklearn.cluster")
+    sklearn_cluster.DBSCAN = _FakeDBSCAN
+    sklearn_pkg = types.ModuleType("sklearn")
+    sklearn_pkg.cluster = sklearn_cluster
+    monkeypatch.setitem(sys.modules, "sklearn", sklearn_pkg)
+    monkeypatch.setitem(sys.modules, "sklearn.cluster", sklearn_cluster)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "host_strong",
+            "x_center": 240.0,
+            "y_center": 320.0,
+            "width": 180.0,
+            "height": 280.0,
+            "confidence": 0.95,
+        },
+        {
+            "frame_idx": 1,
+            "track_id": "host_strong",
+            "x_center": 244.0,
+            "y_center": 322.0,
+            "width": 182.0,
+            "height": 282.0,
+            "confidence": 0.94,
+        },
+        {
+            "frame_idx": 120,
+            "track_id": "neighbor_weak",
+            "x_center": 880.0,
+            "y_center": 318.0,
+            "width": 176.0,
+            "height": 278.0,
+            "confidence": 0.91,
+        },
+    ]
+    tracklets = {
+        "host_strong": [tracks[0], tracks[1]],
+        "neighbor_weak": [tracks[2]],
+    }
+    face_track_features = {
+        "face_host": {
+            "face_track_id": "face_host",
+            "embedding": [1.0, 0.0, 0.0],
+            "embedding_source": "face",
+            "embedding_count": 4,
+            "face_observations": [],
+            "associated_track_counts": {"host_strong": 10, "neighbor_weak": 1},
+            "dominant_track_id": "host_strong",
+        },
+    }
+
+    worker._cluster_tracklets(
+        video_path="video.mp4",
+        tracks=[dict(track) for track in tracks],
+        track_to_dets=tracklets,
+        face_track_features=face_track_features,
+    )
+
+    metrics = worker._last_clustering_metrics
+    assert metrics["face_track_seeded_tracklets"] == 1
+
+
+def test_cluster_seed_track_ids_for_face_track_allows_safe_non_covisible_secondary_track():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "host_frag_a": [
+            {"frame_idx": 0, "x_center": 240.0, "y_center": 320.0, "width": 180.0, "height": 280.0, "confidence": 0.95},
+            {"frame_idx": 1, "x_center": 244.0, "y_center": 322.0, "width": 182.0, "height": 282.0, "confidence": 0.94},
+        ],
+        "host_frag_b": [
+            {"frame_idx": 80, "x_center": 242.0, "y_center": 321.0, "width": 181.0, "height": 281.0, "confidence": 0.93},
+            {"frame_idx": 81, "x_center": 246.0, "y_center": 323.0, "width": 183.0, "height": 283.0, "confidence": 0.92},
+        ],
+    }
+
+    selected = worker._cluster_seed_track_ids_for_face_track(
+        {"host_frag_a": 8, "host_frag_b": 6},
+        tracklets=tracklets,
+    )
+
+    assert selected == {"host_frag_a", "host_frag_b"}
+
+
+def test_choose_signature_attachment_label_prefers_temporally_adjacent_cluster():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "hist_frag": [
+            {"frame_idx": 42, "x_center": 242.0, "y_center": 322.0, "width": 182.0, "height": 282.0, "confidence": 0.91},
+        ],
+        "cluster_a_tid": [
+            {"frame_idx": 40, "x_center": 240.0, "y_center": 320.0, "width": 180.0, "height": 280.0, "confidence": 0.95},
+        ],
+        "cluster_b_tid": [
+            {"frame_idx": 400, "x_center": 244.0, "y_center": 323.0, "width": 181.0, "height": 281.0, "confidence": 0.94},
+        ],
+    }
+
+    label = worker._choose_signature_attachment_label(
+        tid="hist_frag",
+        tracklets=tracklets,
+        face_label_by_tid={"cluster_a_tid": 0, "cluster_b_tid": 1},
+        histogram_attach_max_sig=1.15,
+    )
+
+    assert label == 0
+
+
+def test_choose_signature_attachment_label_abstains_on_ambiguous_candidates(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_CLUSTER_ATTACH_MAX_GAP_FRAMES", "180")
+    monkeypatch.setenv("CLYPT_CLUSTER_ATTACH_AMBIGUITY_MARGIN", "0.10")
+
+    tracklets = {
+        "hist_frag": [
+            {"frame_idx": 100, "x_center": 242.0, "y_center": 322.0, "width": 182.0, "height": 282.0, "confidence": 0.91},
+        ],
+        "cluster_a_tid": [
+            {"frame_idx": 92, "x_center": 240.0, "y_center": 320.0, "width": 180.0, "height": 280.0, "confidence": 0.95},
+        ],
+        "cluster_b_tid": [
+            {"frame_idx": 94, "x_center": 244.0, "y_center": 321.0, "width": 180.0, "height": 280.0, "confidence": 0.94},
+        ],
+    }
+
+    label = worker._choose_signature_attachment_label(
+        tid="hist_frag",
+        tracklets=tracklets,
+        face_label_by_tid={"cluster_a_tid": 0, "cluster_b_tid": 1},
+        histogram_attach_max_sig=1.15,
+    )
+
+    assert label is None
+
+
+def test_cluster_signature_only_tracklets_groups_same_seat_fragments():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "a1": [
+            {"frame_idx": 0, "x_center": 100.0, "y_center": 100.0, "width": 80.0, "height": 160.0},
+            {"frame_idx": 10, "x_center": 101.0, "y_center": 101.0, "width": 80.0, "height": 160.0},
+        ],
+        "a2": [
+            {"frame_idx": 200, "x_center": 102.0, "y_center": 100.0, "width": 82.0, "height": 161.0},
+            {"frame_idx": 210, "x_center": 103.0, "y_center": 101.0, "width": 82.0, "height": 161.0},
+        ],
+        "b1": [
+            {"frame_idx": 0, "x_center": 240.0, "y_center": 100.0, "width": 84.0, "height": 160.0},
+            {"frame_idx": 10, "x_center": 241.0, "y_center": 100.0, "width": 84.0, "height": 160.0},
+        ],
+    }
+
+    groups = worker._cluster_signature_only_tracklets(
+        track_ids=["a1", "a2", "b1"],
+        tracklets=tracklets,
+        base_max_sig=0.18,
+    )
+
+    normalized = {frozenset(group) for group in groups}
+    assert frozenset({"a1", "a2"}) in normalized
+    assert frozenset({"b1"}) in normalized
+
+
+def test_choose_signature_attachment_label_for_group_prefers_matching_face_anchor():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracklets = {
+        "hist_a": [
+            {"frame_idx": 42, "x_center": 242.0, "y_center": 322.0, "width": 182.0, "height": 282.0, "confidence": 0.91},
+        ],
+        "hist_b": [
+            {"frame_idx": 60, "x_center": 244.0, "y_center": 321.0, "width": 181.0, "height": 281.0, "confidence": 0.90},
+        ],
+        "cluster_a_tid": [
+            {"frame_idx": 40, "x_center": 240.0, "y_center": 320.0, "width": 180.0, "height": 280.0, "confidence": 0.95},
+        ],
+        "cluster_b_tid": [
+            {"frame_idx": 400, "x_center": 1440.0, "y_center": 330.0, "width": 178.0, "height": 280.0, "confidence": 0.94},
+        ],
+    }
+
+    label = worker._choose_signature_attachment_label_for_group(
+        tids=["hist_a", "hist_b"],
+        tracklets=tracklets,
+        face_label_by_tid={"cluster_a_tid": 0, "cluster_b_tid": 1},
+        histogram_attach_max_sig=1.15,
+    )
+
+    assert label == 0
+
+
+def test_choose_signature_attachment_label_for_group_requires_majority_support(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_CLUSTER_GROUP_ATTACH_MIN_SUPPORT_SHARE", "0.6")
+
+    tracklets = {
+        "hist_a": [
+            {"frame_idx": 42, "x_center": 242.0, "y_center": 322.0, "width": 182.0, "height": 282.0, "confidence": 0.91},
+        ],
+        "hist_b": [
+            {"frame_idx": 60, "x_center": 1442.0, "y_center": 330.0, "width": 181.0, "height": 281.0, "confidence": 0.90},
+        ],
+        "cluster_a_tid": [
+            {"frame_idx": 40, "x_center": 240.0, "y_center": 320.0, "width": 180.0, "height": 280.0, "confidence": 0.95},
+        ],
+    }
+
+    label = worker._choose_signature_attachment_label_for_group(
+        tids=["hist_a", "hist_b"],
+        tracklets=tracklets,
+        face_label_by_tid={"cluster_a_tid": 0},
+        histogram_attach_max_sig=1.15,
+    )
+
+    assert label is None
+
+
+def test_merge_face_track_feature_sets_stitches_adjacent_segments_for_same_person():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    feature_maps = [
+        {
+            "face_0_0": {
+                "face_track_id": "face_0_0",
+                "embedding": [1.0, 0.0, 0.0],
+                "embedding_count": 2,
+                "face_observations": [
+                    {
+                        "frame_idx": 10,
+                        "confidence": 0.9,
+                        "bounding_box": {"x": 100.0, "y": 80.0, "width": 60.0, "height": 70.0},
+                    },
+                    {
+                        "frame_idx": 20,
+                        "confidence": 0.9,
+                        "bounding_box": {"x": 102.0, "y": 80.0, "width": 60.0, "height": 70.0},
+                    },
+                ],
+                "associated_track_counts": {"host_a": 6},
+            }
+        },
+        {
+            "face_240_3": {
+                "face_track_id": "face_240_3",
+                "embedding": [0.999, 0.001, 0.0],
+                "embedding_count": 2,
+                "face_observations": [
+                    {
+                        "frame_idx": 55,
+                        "confidence": 0.88,
+                        "bounding_box": {"x": 104.0, "y": 82.0, "width": 60.0, "height": 70.0},
+                    },
+                    {
+                        "frame_idx": 68,
+                        "confidence": 0.88,
+                        "bounding_box": {"x": 105.0, "y": 82.0, "width": 60.0, "height": 70.0},
+                    },
+                ],
+                "associated_track_counts": {"host_a": 5},
+            }
+        },
+    ]
+
+    merged = worker._merge_face_track_feature_sets(feature_maps)
+
+    assert len(merged) == 1
+    feature = next(iter(merged.values()))
+    assert feature["embedding_count"] == 4
+    assert feature["associated_track_counts"] == {"host_a": 11}
+    assert feature["face_observation_count"] == 4
+
+
 def test_face_pipeline_workers_cap_for_gpu_runtime(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -1482,9 +2619,11 @@ def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
 
 
 
-def test_derive_track_identity_features_from_face_tracks_propagates_multi_track_associations():
+def test_derive_track_identity_features_from_face_tracks_defaults_to_single_dominant_association(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_FACE_TRACK_ALLOW_MULTI_ASSOC", raising=False)
 
     features = worker._derive_track_identity_features_from_face_tracks(
         {
@@ -1508,12 +2647,41 @@ def test_derive_track_identity_features_from_face_tracks_propagates_multi_track_
         }
     )
 
-    assert set(features.keys()) == {"track_a", "track_b"}
+    assert set(features.keys()) == {"track_a"}
     assert features["track_a"]["embedding_source"] == "face"
-    assert features["track_b"]["embedding_source"] == "face"
+    assert np.allclose(features["track_a"]["embedding"], [0.1, 0.2, 0.3])
+    assert [obs["frame_idx"] for obs in features["track_a"]["face_observations"]] == [0, 1]
+
+
+def test_derive_track_identity_features_from_face_tracks_can_opt_into_multi_associations(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_FACE_TRACK_ALLOW_MULTI_ASSOC", "1")
+
+    features = worker._derive_track_identity_features_from_face_tracks(
+        {
+            "face_0_0": {
+                "face_track_id": "face_0_0",
+                "embedding": [0.1, 0.2, 0.3],
+                "embedding_count": 2,
+                "face_observations": [
+                    {"frame_idx": 0, "confidence": 0.95, "associated_track_id": "track_a"},
+                    {"frame_idx": 1, "confidence": 0.94, "associated_track_id": "track_a"},
+                    {"frame_idx": 2, "confidence": 0.93, "associated_track_id": "track_b"},
+                    {"frame_idx": 3, "confidence": 0.92, "associated_track_id": "track_b"},
+                ],
+                "associated_track_counts": {
+                    "track_a": 2,
+                    "track_b": 2,
+                },
+            }
+        }
+    )
+
+    assert set(features.keys()) == {"track_a", "track_b"}
     assert np.allclose(features["track_a"]["embedding"], [0.1, 0.2, 0.3])
     assert np.allclose(features["track_b"]["embedding"], [0.1, 0.2, 0.3])
-    assert [obs["frame_idx"] for obs in features["track_a"]["face_observations"]] == [0, 1]
     assert [obs["frame_idx"] for obs in features["track_b"]["face_observations"]] == [2, 3]
 
 def test_run_tracking_direct_emits_track_identity_features(monkeypatch):
@@ -1903,3 +3071,43 @@ def test_extract_serializes_asr_before_gpu_tracking(monkeypatch, tmp_path: Path)
     assert observed["active_asr_during_tracking"] == 0
     assert result["phase_1_audio"]["words"] == [{"word": "hello"}]
     assert result["phase_1_visual"]["tracks"] == [{"track_id": "t1"}]
+
+
+def test_build_stable_follow_bindings_absorbs_brief_mid_clip_turn():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    bindings = [
+        {"track_id": "A", "start_time_ms": 0, "end_time_ms": 3000, "word_count": 30},
+        {"track_id": "B", "start_time_ms": 3000, "end_time_ms": 3500, "word_count": 4},
+        {"track_id": "A", "start_time_ms": 3500, "end_time_ms": 7000, "word_count": 32},
+    ]
+
+    stabilized = worker._build_stable_follow_bindings(
+        bindings=bindings,
+        track_to_dets={},
+        track_identity_features=None,
+    )
+
+    assert stabilized == [
+        {"track_id": "A", "start_time_ms": 0, "end_time_ms": 7000, "word_count": 66}
+    ]
+
+
+def test_build_stable_follow_bindings_preserves_sustained_turn_change():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    bindings = [
+        {"track_id": "A", "start_time_ms": 0, "end_time_ms": 3000, "word_count": 30},
+        {"track_id": "B", "start_time_ms": 3000, "end_time_ms": 6200, "word_count": 28},
+        {"track_id": "A", "start_time_ms": 6200, "end_time_ms": 9000, "word_count": 24},
+    ]
+
+    stabilized = worker._build_stable_follow_bindings(
+        bindings=bindings,
+        track_to_dets={},
+        track_identity_features=None,
+    )
+
+    assert [segment["track_id"] for segment in stabilized] == ["A", "B", "A"]
