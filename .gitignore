@@ -27,3 +27,5 @@ backend/.parallel_runs/
 
 # Logs
 *.log
+
+.worktrees/
