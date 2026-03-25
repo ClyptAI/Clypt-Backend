@@ -1225,6 +1225,26 @@ class ClyptWorker:
             bindings.append(cur)
         return bindings
 
+    @staticmethod
+    def _speaker_remap_collision_metrics(words: list[dict]) -> dict[str, int]:
+        from collections import defaultdict
+
+        global_to_locals: dict[str, set[str]] = defaultdict(set)
+        for word in words or []:
+            global_tid = str(word.get("speaker_track_id", "") or "")
+            local_tid = str(word.get("speaker_local_track_id", "") or "")
+            if not global_tid or not local_tid:
+                continue
+            global_to_locals[global_tid].add(local_tid)
+
+        local_counts = [len(local_ids) for local_ids in global_to_locals.values() if local_ids]
+        return {
+            "speaker_binding_globals_with_multiple_local_ids": int(
+                sum(1 for count in local_counts if count > 1)
+            ),
+            "speaker_binding_max_local_ids_per_global": int(max(local_counts) if local_counts else 0),
+        }
+
     def _build_speaker_binding_track_quality(
         self,
         track_to_dets: dict[str, list[dict]],
@@ -6467,6 +6487,7 @@ class ClyptWorker:
             float(assigned_words / max(1, len(words))),
             3,
         )
+        metrics.update(self._speaker_remap_collision_metrics(words))
         print(f"[Phase 1] Step 4/4 complete in {speaker_binding_elapsed_s:.2f}s")
         geometry_type = (
             "mixed"

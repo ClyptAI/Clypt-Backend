@@ -1223,6 +1223,23 @@ def test_run_lrasd_binding_preserves_local_track_id_when_global_remap_applies(mo
     assert bindings[0]["track_id"] == "Global_Person_0"
 
 
+def test_speaker_remap_collision_metrics_counts_multiple_locals_per_global():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    metrics = worker._speaker_remap_collision_metrics(
+        [
+            {"speaker_track_id": "Global_Person_0", "speaker_local_track_id": "local-lawyer"},
+            {"speaker_track_id": "Global_Person_0", "speaker_local_track_id": "local-andrew"},
+            {"speaker_track_id": "Global_Person_0", "speaker_local_track_id": "local-lawyer"},
+            {"speaker_track_id": "Global_Person_1", "speaker_local_track_id": "local-akaash"},
+        ]
+    )
+
+    assert metrics["speaker_binding_globals_with_multiple_local_ids"] == 1
+    assert metrics["speaker_binding_max_local_ids_per_global"] == 2
+
+
 def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
