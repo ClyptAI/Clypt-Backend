@@ -1411,6 +1411,8 @@ class ClyptWorker:
         min_support_segments: int = 2,
         min_support_ms: int = 1500,
         min_speaker_dominance: float = 0.7,
+        min_local_track_owner_support_ratio: float = 1.25,
+        min_local_track_owner_confidence_margin: float = 0.05,
     ) -> list[dict]:
         """Build a soft audio-speaker -> local-track map from strong turn support only."""
         from collections import defaultdict
@@ -1530,7 +1532,40 @@ class ClyptWorker:
                 }
             )
 
-        mappings.sort(
+        resolved_mappings: list[dict] = []
+        local_track_claims: dict[str, list[dict]] = defaultdict(list)
+        for mapping in mappings:
+            local_track_claims[str(mapping["local_track_id"])].append(mapping)
+
+        for claims in local_track_claims.values():
+            if len(claims) == 1:
+                resolved_mappings.append(claims[0])
+                continue
+
+            ranked_claims = sorted(
+                claims,
+                key=lambda item: (
+                    int(item["support_ms"]),
+                    float(item["confidence"]),
+                    int(item["support_segments"]),
+                    str(item["speaker_id"]),
+                ),
+                reverse=True,
+            )
+            best_claim = ranked_claims[0]
+            runner_up_claim = ranked_claims[1]
+            support_ratio = float(
+                int(best_claim["support_ms"]) / max(1, int(runner_up_claim["support_ms"]))
+            )
+            confidence_margin = float(best_claim["confidence"]) - float(runner_up_claim["confidence"])
+            if (
+                support_ratio >= min_local_track_owner_support_ratio
+                and confidence_margin >= min_local_track_owner_confidence_margin
+            ):
+                resolved_mappings.append(best_claim)
+                continue
+
+        resolved_mappings.sort(
             key=lambda item: (
                 item["speaker_id"],
                 -int(item["support_ms"]),
@@ -1538,7 +1573,7 @@ class ClyptWorker:
                 item["local_track_id"],
             )
         )
-        return mappings
+        return resolved_mappings
 
     @staticmethod
     def _speaker_remap_collision_metrics(words: list[dict]) -> dict[str, int]:

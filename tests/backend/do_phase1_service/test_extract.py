@@ -743,6 +743,58 @@ def test_audio_speaker_local_track_map_keeps_only_clear_stable_support():
     ]
 
 
+def test_audio_speaker_local_track_map_drops_unclear_shared_local_track_ownership():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    mapping = worker._build_audio_speaker_local_track_map(
+        [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 900,
+                "local_track_id": "track_shared",
+                "ambiguous": False,
+                "winning_score": 0.92,
+                "winning_margin": 0.27,
+                "support_ratio": 0.95,
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 1100,
+                "end_time_ms": 2100,
+                "local_track_id": "track_shared",
+                "ambiguous": False,
+                "winning_score": 0.88,
+                "winning_margin": 0.23,
+                "support_ratio": 0.90,
+            },
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 2500,
+                "end_time_ms": 3400,
+                "local_track_id": "track_shared",
+                "ambiguous": False,
+                "winning_score": 0.91,
+                "winning_margin": 0.26,
+                "support_ratio": 0.94,
+            },
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 3600,
+                "end_time_ms": 4550,
+                "local_track_id": "track_shared",
+                "ambiguous": False,
+                "winning_score": 0.87,
+                "winning_margin": 0.22,
+                "support_ratio": 0.89,
+            },
+        ]
+    )
+
+    assert mapping == []
+
+
 def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
 
