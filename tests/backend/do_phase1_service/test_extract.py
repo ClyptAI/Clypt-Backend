@@ -1800,6 +1800,127 @@ def test_run_lrasd_binding_keeps_unknown_for_off_screen_audio_turn(monkeypatch, 
     assert bindings == []
 
 
+def test_run_lrasd_binding_preserves_off_screen_abstention_through_smoothing(monkeypatch, tmp_path: Path):
+    _, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker_local": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 76.0,
+                "height": 152.0,
+                "confidence": 0.90,
+                "intensity": 210,
+            },
+            "listener_local": {
+                "x_center": 222.0,
+                "y_center": 104.0,
+                "width": 72.0,
+                "height": 148.0,
+                "confidence": 0.88,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "speaker_local": 0.180,
+            "listener_local": 0.172,
+        },
+        words=[
+            {"text": "one", "start_time_ms": 0, "end_time_ms": 120},
+            {"text": "two", "start_time_ms": 180, "end_time_ms": 300},
+            {"text": "three", "start_time_ms": 360, "end_time_ms": 480},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_10",
+                "start_time_ms": 180,
+                "end_time_ms": 300,
+                "exclusive": True,
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_10",
+                "start_time_ms": 180,
+                "end_time_ms": 300,
+                "local_track_id": "offscreen_local",
+                "ambiguous": False,
+                "winning_score": 0.95,
+                "winning_margin": 0.40,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_local_track_id"] == "speaker_local"
+    assert words[1]["speaker_track_id"] is None
+    assert words[1]["speaker_local_track_id"] is None
+    assert words[2]["speaker_local_track_id"] == "speaker_local"
+    assert all("_speaker_binding_protected_unknown" not in word for word in words)
+    assert bindings == [
+        {
+            "track_id": "speaker_local",
+            "start_time_ms": 0,
+            "end_time_ms": 480,
+            "word_count": 2,
+        }
+    ]
+
+
+def test_run_speaker_binding_fallback_preserves_off_screen_abstention_in_mixed_segment(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    words = [
+        {"text": "visible", "start_time_ms": 0, "end_time_ms": 100},
+        {"text": "offscreen", "start_time_ms": 200, "end_time_ms": 300},
+    ]
+
+    monkeypatch.setattr(worker, "_select_speaker_binding_mode", lambda *args, **kwargs: "lrasd")
+
+    def fake_lrasd_binding(**kwargs):
+        kwargs["words"][0]["speaker_track_id"] = "track-1"
+        kwargs["words"][0]["speaker_tag"] = "track-1"
+        kwargs["words"][0]["speaker_local_track_id"] = "track-1-local"
+        kwargs["words"][0]["speaker_local_tag"] = "track-1-local"
+        kwargs["words"][1]["speaker_track_id"] = None
+        kwargs["words"][1]["speaker_tag"] = "unknown"
+        kwargs["words"][1]["speaker_local_track_id"] = None
+        kwargs["words"][1]["speaker_local_tag"] = "unknown"
+        kwargs["words"][1]["_speaker_binding_protected_unknown"] = True
+        return None
+
+    def fake_heuristic_binding(*args, **kwargs):
+        for word in words:
+            word["speaker_track_id"] = "track-1"
+            word["speaker_tag"] = "track-1"
+            word["speaker_local_track_id"] = "track-1-local"
+            word["speaker_local_tag"] = "track-1-local"
+        return [
+            {"track_id": "track-1", "start_time_ms": 0, "end_time_ms": 300, "word_count": 2}
+        ]
+
+    monkeypatch.setattr(worker, "_run_lrasd_binding", fake_lrasd_binding)
+    monkeypatch.setattr(worker, "_run_speaker_binding_heuristic", fake_heuristic_binding)
+
+    bindings = worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "track-1"}],
+        words=words,
+        analysis_context={},
+    )
+
+    assert words[0]["speaker_track_id"] == "track-1"
+    assert words[1]["speaker_track_id"] is None
+    assert words[1]["speaker_local_track_id"] is None
+    assert all("_speaker_binding_protected_unknown" not in word for word in words)
+    assert bindings == [
+        {"track_id": "track-1", "start_time_ms": 0, "end_time_ms": 100, "word_count": 1}
+    ]
+
+
 def test_speaker_remap_collision_metrics_counts_multiple_locals_per_global():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)

@@ -5631,6 +5631,8 @@ class ClyptWorker:
         from bisect import bisect_left
         from collections import Counter
 
+        protected_unknown_key = "_speaker_binding_protected_unknown"
+
         if self.lrasd_model is None or self.lrasd_loss_av is None:
             print("  LR-ASD unavailable; falling back to heuristic binder.")
             return None
@@ -6195,6 +6197,15 @@ class ClyptWorker:
             word["speaker_tag"] = "unknown"
             word["speaker_local_track_id"] = None
             word["speaker_local_tag"] = "unknown"
+            word.pop(protected_unknown_key, None)
+
+        def _mark_protected_unknown(word: dict):
+            _clear_word_assignment(word)
+            word[protected_unknown_key] = True
+
+        def _clear_protected_unknown_markers(existing_words: list[dict]):
+            for word in existing_words:
+                word.pop(protected_unknown_key, None)
 
         assigned = 0
         audio_prior_abstentions = 0
@@ -6394,7 +6405,7 @@ class ClyptWorker:
                 )
                 if prior_candidate is None:
                     audio_prior_abstentions += 1
-                    _clear_word_assignment(w)
+                    _mark_protected_unknown(w)
                     continue
                 if second_total is not None and visual_margin <= audio_prior_margin_threshold:
                     prior_strength = max(
@@ -6464,6 +6475,10 @@ class ClyptWorker:
         local_smoothed = local_seq[:]
         win = 2
         for i in range(len(seq)):
+            if bool(words[i].get(protected_unknown_key, False)):
+                smoothed[i] = None
+                local_smoothed[i] = None
+                continue
             lo = max(0, i - win)
             hi = min(len(seq), i + win + 1)
             neigh = [t for t in seq[lo:hi] if t]
@@ -6483,6 +6498,12 @@ class ClyptWorker:
                 if local_cnt >= 2:
                     local_smoothed[i] = local_major
         for w, tid, local_tid in zip(words, smoothed, local_smoothed):
+            if bool(w.get(protected_unknown_key, False)):
+                w["speaker_track_id"] = None
+                w["speaker_tag"] = "unknown"
+                w["speaker_local_track_id"] = None
+                w["speaker_local_tag"] = "unknown"
+                continue
             w["speaker_track_id"] = tid
             w["speaker_tag"] = tid or "unknown"
             w["speaker_local_track_id"] = local_tid
@@ -6525,6 +6546,7 @@ class ClyptWorker:
                     "  LR-ASD preserved unknown assignments for off-screen audio turns; "
                     "skipping heuristic fallback."
                 )
+                _clear_protected_unknown_markers(words)
                 return []
             print(
                 "  LR-ASD confidence too low for final binding "
@@ -6538,6 +6560,7 @@ class ClyptWorker:
             f"{assigned}/{len(words)} words assigned, "
             f"{len(scored_track_ids)} scored tracks, {len(bindings)} segments"
         )
+        _clear_protected_unknown_markers(words)
         return bindings
 
     # ──────────────────────────────────────────
@@ -6855,6 +6878,24 @@ class ClyptWorker:
         track_id_remap: dict[str, str] | None = None,
     ) -> list[dict]:
         """Bind words to track IDs using LR-ASD, with heuristic fallback."""
+        protected_unknown_key = "_speaker_binding_protected_unknown"
+
+        def _restore_protected_unknowns(existing_words: list[dict]) -> bool:
+            restored_any = False
+            for word in existing_words:
+                if not bool(word.get(protected_unknown_key, False)):
+                    continue
+                word["speaker_track_id"] = None
+                word["speaker_tag"] = "unknown"
+                word["speaker_local_track_id"] = None
+                word["speaker_local_tag"] = "unknown"
+                restored_any = True
+            return restored_any
+
+        def _clear_protected_unknown_markers(existing_words: list[dict]):
+            for word in existing_words:
+                word.pop(protected_unknown_key, None)
+
         mode = self._select_speaker_binding_mode(video_path, tracks, words)
         speaker_metrics = {
             "speaker_binding_selected_mode": mode,
@@ -6882,6 +6923,12 @@ class ClyptWorker:
             if isinstance(lrasd_aux_metrics, dict):
                 speaker_metrics.update(lrasd_aux_metrics)
             if bindings is not None:
+                if _restore_protected_unknowns(words):
+                    bindings = self._build_bindings_from_word_track_field(
+                        words,
+                        field_name="speaker_track_id",
+                    )
+                _clear_protected_unknown_markers(words)
                 self._last_speaker_binding_metrics = speaker_metrics
                 return bindings
 
@@ -6896,6 +6943,12 @@ class ClyptWorker:
             track_to_dets=track_to_dets,
             track_id_remap=track_id_remap,
         )
+        if _restore_protected_unknowns(words):
+            bindings = self._build_bindings_from_word_track_field(
+                words,
+                field_name="speaker_track_id",
+            )
+        _clear_protected_unknown_markers(words)
         self._last_speaker_binding_metrics = speaker_metrics
         return bindings
 
