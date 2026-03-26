@@ -311,6 +311,88 @@ def test_pyannote_config_defaults_and_env_overrides(monkeypatch):
     assert overrides["min_segment_s"] == 0.9
 
 
+def test_audio_diarization_serializes_raw_turn_fields(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_AUDIO_DIARIZATION_ENABLE", "1")
+
+    class FakeSegment:
+        def __init__(self, start: float, end: float):
+            self.start = start
+            self.end = end
+
+    class FakeDiarization:
+        def itertracks(self, yield_label: bool = False):
+            assert yield_label is True
+            return iter(
+                [
+                    (FakeSegment(0.0, 1.5), None, "SPEAKER_00"),
+                    (FakeSegment(1.5, 3.0), None, "SPEAKER_01"),
+                ]
+            )
+
+    turns = worker._serialize_audio_speaker_turns(FakeDiarization())
+
+    assert turns == [
+        {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 1500},
+        {"speaker_id": "SPEAKER_01", "start_time_ms": 1500, "end_time_ms": 3000},
+    ]
+
+
+def test_audio_diarization_serializes_optional_turn_metadata(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_AUDIO_DIARIZATION_ENABLE", "1")
+
+    class FakeSegment:
+        def __init__(self, start: float, end: float):
+            self.start = start
+            self.end = end
+
+    class FakeTurn:
+        def __init__(self):
+            self.speaker_id = "SPEAKER_09"
+            self.segment = FakeSegment(4.0, 6.25)
+            self.exclusive = "true"
+            self.overlap = "0"
+            self.score = "0.82"
+
+    turns = worker._serialize_audio_speaker_turns([FakeTurn()])
+
+    assert turns == [
+        {
+            "speaker_id": "SPEAKER_09",
+            "start_time_ms": 4000,
+            "end_time_ms": 6250,
+            "exclusive": True,
+            "overlap": False,
+            "confidence": 0.82,
+        }
+    ]
+
+
+def test_audio_diarization_disabled_returns_no_turns(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_AUDIO_DIARIZATION_ENABLE", raising=False)
+    loaded = False
+
+    def fake_load_audio_diarization_pipeline():
+        nonlocal loaded
+        loaded = True
+        return object()
+
+    monkeypatch.setattr(worker, "_load_audio_diarization_pipeline", fake_load_audio_diarization_pipeline)
+
+    turns = worker._run_audio_diarization("audio.wav")
+
+    assert turns == []
+    assert loaded is False
+
+
 def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
 

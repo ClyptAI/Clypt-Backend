@@ -1493,6 +1493,207 @@ class ClyptWorker:
             "token_env_vars": ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN"),
         }
 
+    def _load_audio_diarization_pipeline(self):
+        config = self._audio_diarization_config()
+        if not config["enabled"]:
+            return None
+
+        cached_pipeline = getattr(self, "_audio_diarization_pipeline", None)
+        if cached_pipeline is not None:
+            return cached_pipeline
+
+        try:
+            from pyannote.audio import Pipeline
+        except Exception as exc:
+            print(f"[Phase 1] Audio diarization unavailable: {type(exc).__name__}: {exc}")
+            return None
+
+        token = None
+        for env_var in config["token_env_vars"]:
+            token = os.getenv(env_var, "").strip()
+            if token:
+                break
+
+        try:
+            if token:
+                pipeline = Pipeline.from_pretrained(config["model_name"], use_auth_token=token)
+            else:
+                pipeline = Pipeline.from_pretrained(config["model_name"])
+        except Exception as exc:
+            print(f"[Phase 1] Audio diarization model load failed: {type(exc).__name__}: {exc}")
+            return None
+
+        self._audio_diarization_pipeline = pipeline
+        return pipeline
+
+    @staticmethod
+    def _coerce_optional_bool(value):
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return None
+
+    @staticmethod
+    def _turn_value(source, key: str, default=None):
+        if source is None:
+            return default
+        if isinstance(source, dict):
+            return source.get(key, default)
+        return getattr(source, key, default)
+
+    def _serialize_audio_speaker_turn(self, turn) -> dict | None:
+        speaker_id = None
+        start_time_ms = None
+        end_time_ms = None
+        exclusive = None
+        overlap = None
+        confidence = None
+        segment = None
+        metadata_sources = [turn]
+
+        if isinstance(turn, dict):
+            turn = dict(turn)
+            speaker_id = turn.pop("speaker_id", None) or turn.pop("speaker", None) or turn.pop("label", None)
+            start_time_ms = turn.pop("start_time_ms", turn.pop("start_ms", None))
+            end_time_ms = turn.pop("end_time_ms", turn.pop("end_ms", None))
+            exclusive = turn.pop("exclusive", None)
+            overlap = turn.pop("overlap", None)
+            confidence = turn.pop("confidence", turn.pop("score", None))
+            segment = turn.pop("segment", None)
+            metadata_sources = [turn, segment]
+        elif isinstance(turn, (tuple, list)):
+            if len(turn) >= 3:
+                segment = turn[0]
+                speaker_id = turn[2]
+            elif len(turn) == 2:
+                segment = turn[0]
+                speaker_id = turn[1]
+            elif len(turn) == 1:
+                segment = turn[0]
+            if len(turn) >= 4:
+                metadata_sources.append(turn[3])
+        else:
+            speaker_id = self._turn_value(turn, "speaker_id")
+            if speaker_id is None:
+                speaker_id = self._turn_value(turn, "speaker") or self._turn_value(turn, "label")
+            start_time_ms = self._turn_value(turn, "start_time_ms", self._turn_value(turn, "start_ms"))
+            end_time_ms = self._turn_value(turn, "end_time_ms", self._turn_value(turn, "end_ms"))
+            exclusive = self._turn_value(turn, "exclusive")
+            overlap = self._turn_value(turn, "overlap")
+            confidence = self._turn_value(turn, "confidence", self._turn_value(turn, "score"))
+            segment = self._turn_value(turn, "segment")
+            metadata_sources = [turn, segment]
+
+        if segment is not None and (start_time_ms is None or end_time_ms is None):
+            start = getattr(segment, "start", None)
+            end = getattr(segment, "end", None)
+            if start is not None and end is not None:
+                start_time_ms = int(round(float(start) * 1000.0))
+                end_time_ms = int(round(float(end) * 1000.0))
+
+        if exclusive is None:
+            for source in metadata_sources:
+                exclusive = self._turn_value(source, "exclusive")
+                if exclusive is not None:
+                    break
+
+        if overlap is None:
+            for source in metadata_sources:
+                overlap = self._turn_value(source, "overlap")
+                if overlap is not None:
+                    break
+
+        if confidence is None:
+            for source in metadata_sources:
+                confidence = self._turn_value(source, "confidence", self._turn_value(source, "score"))
+                if confidence is not None:
+                    break
+
+        if speaker_id is None or start_time_ms is None or end_time_ms is None:
+            return None
+
+        try:
+            start_time_ms = max(0, int(round(float(start_time_ms))))
+            end_time_ms = max(start_time_ms, max(0, int(round(float(end_time_ms)))))
+        except Exception:
+            return None
+
+        serialized = {
+            "speaker_id": str(speaker_id),
+            "start_time_ms": start_time_ms,
+            "end_time_ms": end_time_ms,
+        }
+
+        maybe_bool = self._coerce_optional_bool(exclusive)
+        if maybe_bool is not None:
+            serialized["exclusive"] = maybe_bool
+
+        maybe_bool = self._coerce_optional_bool(overlap)
+        if maybe_bool is not None:
+            serialized["overlap"] = maybe_bool
+
+        if confidence is not None:
+            try:
+                serialized["confidence"] = float(confidence)
+            except Exception:
+                pass
+
+        return serialized
+
+    def _serialize_audio_speaker_turns(self, diarization) -> list[dict]:
+        if diarization is None:
+            return []
+
+        if isinstance(diarization, dict) and "audio_speaker_turns" in diarization:
+            raw_turns = list(diarization.get("audio_speaker_turns") or [])
+        elif isinstance(diarization, list):
+            raw_turns = list(diarization)
+        else:
+            itertracks = getattr(diarization, "itertracks", None)
+            if callable(itertracks):
+                try:
+                    raw_turns = list(itertracks(yield_label=True))
+                except TypeError:
+                    raw_turns = list(itertracks())
+            else:
+                try:
+                    raw_turns = list(diarization)
+                except TypeError:
+                    return []
+
+        serialized = []
+        for turn in raw_turns:
+            normalized = self._serialize_audio_speaker_turn(turn)
+            if normalized is not None:
+                serialized.append(normalized)
+
+        serialized.sort(key=lambda item: (item["start_time_ms"], item["end_time_ms"], item["speaker_id"]))
+        return serialized
+
+    def _run_audio_diarization(self, audio_path: str) -> list[dict]:
+        config = self._audio_diarization_config()
+        if not config["enabled"]:
+            return []
+
+        pipeline = self._load_audio_diarization_pipeline()
+        if pipeline is None:
+            return []
+
+        try:
+            diarization = pipeline(audio_path)
+        except Exception as exc:
+            print(f"[Phase 1] Audio diarization execution failed: {type(exc).__name__}: {exc}")
+            return []
+
+        return self._serialize_audio_speaker_turns(diarization)
+
     @staticmethod
     def _face_detector_input_size() -> tuple[int, int]:
         raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", "").strip()
@@ -6530,6 +6731,7 @@ class ClyptWorker:
             if any(str(t.get("geometry_type", "")) == "obb" for t in tracks)
             else PHASE1_GEOMETRY_TYPE
         )
+        audio_speaker_turns = self._run_audio_diarization(audio_path)
 
         phase_1_visual = {
             "source_video": youtube_url,
@@ -6550,6 +6752,7 @@ class ClyptWorker:
             "source_audio": youtube_url,
             "words": words,
             "speaker_bindings": speaker_bindings,
+            "audio_speaker_turns": audio_speaker_turns,
             "speaker_follow_bindings": speaker_follow_bindings,
         }
         if self._local_clip_bindings_enabled():

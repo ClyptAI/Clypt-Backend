@@ -50,6 +50,8 @@ class Phase1Word(BaseModel):
     end_time_ms: NonNegativeInt
     speaker_track_id: str | None
     speaker_tag: str
+    speaker_local_track_id: str | None = None
+    speaker_local_tag: str | None = None
 
     @model_validator(mode="after")
     def _check_time_order(self):
@@ -178,6 +180,23 @@ class Phase1VideoMetadata(BaseModel):
     duration_ms: NonNegativeInt
 
 
+class Phase1AudioSpeakerTurn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    speaker_id: str
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+    exclusive: bool | None = None
+    overlap: bool | None = None
+    confidence: Confidence01 | None = None
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("audio speaker turn start_time_ms must be <= end_time_ms")
+        return self
+
+
 class Phase1TranscriptArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -186,6 +205,9 @@ class Phase1TranscriptArtifact(BaseModel):
     video_gcs_uri: GcsUriStr
     words: list[Phase1Word]
     speaker_bindings: list[Phase1SpeakerBinding]
+    audio_speaker_turns: list[Phase1AudioSpeakerTurn] = Field(default_factory=list)
+    speaker_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
+    speaker_follow_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
 
 
 class Phase1VisualArtifact(BaseModel):
@@ -201,6 +223,7 @@ class Phase1VisualArtifact(BaseModel):
     class_taxonomy: dict[str, str]
     tracking_metrics: dict[str, object]
     tracks: list[Phase1Track]
+    tracks_local: list[Phase1Track] = Field(default_factory=list)
     face_detections: list[Phase1DetectionSegment]
     person_detections: list[Phase1DetectionSegment]
     label_detections: list[Phase1DetectionSegment]

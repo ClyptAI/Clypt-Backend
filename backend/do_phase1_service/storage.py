@@ -80,6 +80,9 @@ def persist_phase1_outputs(
                 "video_gcs_uri": canonical_video_uri,
                 "words": phase_1_audio["words"],
                 "speaker_bindings": phase_1_audio["speaker_bindings"],
+                "audio_speaker_turns": phase_1_audio.get("audio_speaker_turns") or [],
+                "speaker_bindings_local": phase_1_audio.get("speaker_bindings_local") or [],
+                "speaker_follow_bindings_local": phase_1_audio.get("speaker_follow_bindings_local") or [],
             },
             "visual_tracking": {
                 "uri": visual_uri,
@@ -92,6 +95,7 @@ def persist_phase1_outputs(
                 "class_taxonomy": phase_1_visual["class_taxonomy"],
                 "tracking_metrics": phase_1_visual["tracking_metrics"],
                 "tracks": phase_1_visual["tracks"],
+                "tracks_local": phase_1_visual.get("tracks_local") or [],
                 "face_detections": phase_1_visual["face_detections"],
                 "person_detections": phase_1_visual["person_detections"],
                 "label_detections": phase_1_visual["label_detections"],

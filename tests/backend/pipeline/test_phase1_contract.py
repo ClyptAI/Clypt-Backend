@@ -186,6 +186,69 @@ def test_manifest_accepts_realistic_legacy_payload_shape():
     )
 
 
+def test_manifest_accepts_local_clip_experiment_fields():
+    payload = deepcopy(_legacy_manifest_payload())
+    payload["artifacts"]["transcript"]["words"][0]["speaker_local_track_id"] = "track_1"
+    payload["artifacts"]["transcript"]["words"][0]["speaker_local_tag"] = "track_1"
+    payload["artifacts"]["transcript"]["audio_speaker_turns"] = [
+        {
+            "speaker_id": "SPEAKER_00",
+            "start_time_ms": 0,
+            "end_time_ms": 1500,
+            "exclusive": True,
+            "overlap": False,
+            "confidence": 0.91,
+        }
+    ]
+    payload["artifacts"]["transcript"]["speaker_bindings_local"] = [
+        {
+            "track_id": "track_1",
+            "start_time_ms": 400,
+            "end_time_ms": 2160,
+            "word_count": 3,
+        }
+    ]
+    payload["artifacts"]["transcript"]["speaker_follow_bindings_local"] = [
+        {
+            "track_id": "track_1",
+            "start_time_ms": 400,
+            "end_time_ms": 2160,
+            "word_count": 3,
+        }
+    ]
+    payload["artifacts"]["visual_tracking"]["tracks_local"] = [
+        {
+            **payload["artifacts"]["visual_tracking"]["tracks"][0],
+            "track_id": "track_1",
+        }
+    ]
+
+    manifest = Phase1Manifest.model_validate(payload)
+
+    assert manifest.artifacts.transcript.words[0].speaker_local_track_id == "track_1"
+    assert manifest.artifacts.transcript.audio_speaker_turns[0].speaker_id == "SPEAKER_00"
+    assert manifest.artifacts.transcript.audio_speaker_turns[0].exclusive is True
+    assert manifest.artifacts.transcript.speaker_bindings_local[0].track_id == "track_1"
+    assert manifest.artifacts.transcript.speaker_follow_bindings_local[0].track_id == "track_1"
+    assert manifest.artifacts.visual_tracking.tracks_local[0].track_id == "track_1"
+
+
+def test_manifest_rejects_unknown_audio_speaker_turn_fields():
+    payload = deepcopy(_legacy_manifest_payload())
+    payload["artifacts"]["transcript"]["audio_speaker_turns"] = [
+        {
+            "speaker_id": "SPEAKER_00",
+            "start_time_ms": 0,
+            "end_time_ms": 1500,
+            "exclusive": True,
+            "unexpected_field": "not-allowed",
+        }
+    ]
+
+    with pytest.raises(ValidationError, match="unexpected_field"):
+        Phase1Manifest.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     "mutator, expected_match",
     [
