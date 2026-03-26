@@ -1402,6 +1402,145 @@ class ClyptWorker:
         return bindings
 
     @staticmethod
+    def _build_audio_speaker_local_track_map(
+        turn_bindings: list[dict],
+        *,
+        min_turn_score: float = 0.75,
+        min_turn_margin: float = 0.16,
+        min_turn_support_ratio: float = 0.75,
+        min_support_segments: int = 2,
+        min_support_ms: int = 1500,
+        min_speaker_dominance: float = 0.7,
+    ) -> list[dict]:
+        """Build a soft audio-speaker -> local-track map from strong turn support only."""
+        from collections import defaultdict
+
+        def _as_int(value, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return int(default)
+
+        def _as_float(value) -> float | None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _turn_confidence(score: float, support_ratio: float, margin: float) -> float:
+            normalized_margin = max(0.0, min(1.0, margin / 0.35))
+            confidence = (
+                (0.45 * score)
+                + (0.35 * support_ratio)
+                + (0.20 * normalized_margin)
+            )
+            return max(0.0, min(1.0, confidence))
+
+        speaker_track_support: dict[str, dict[str, dict[str, float | int]]] = defaultdict(dict)
+        speaker_total_support_ms: dict[str, int] = defaultdict(int)
+
+        for binding in turn_bindings or []:
+            speaker_id = str(binding.get("speaker_id", "") or "")
+            local_track_id = str(binding.get("local_track_id", "") or "")
+            if not speaker_id or not local_track_id or bool(binding.get("ambiguous", False)):
+                continue
+
+            start_time_ms = _as_int(binding.get("start_time_ms"), default=0)
+            end_time_ms = _as_int(binding.get("end_time_ms"), default=start_time_ms)
+            if end_time_ms < start_time_ms:
+                start_time_ms, end_time_ms = end_time_ms, start_time_ms
+            duration_ms = end_time_ms - start_time_ms
+            if duration_ms <= 0:
+                continue
+
+            winning_score = _as_float(binding.get("winning_score"))
+            winning_margin = _as_float(binding.get("winning_margin"))
+            support_ratio = _as_float(binding.get("support_ratio"))
+            if (
+                winning_score is None
+                or winning_margin is None
+                or support_ratio is None
+                or winning_score < min_turn_score
+                or winning_margin < min_turn_margin
+                or support_ratio < min_turn_support_ratio
+            ):
+                continue
+
+            confidence = _turn_confidence(winning_score, support_ratio, winning_margin)
+            if confidence < min_turn_score:
+                continue
+
+            aggregate = speaker_track_support.setdefault(speaker_id, {}).setdefault(
+                local_track_id,
+                {
+                    "support_segments": 0,
+                    "support_ms": 0,
+                    "confidence_ms": 0.0,
+                },
+            )
+            aggregate["support_segments"] = int(aggregate["support_segments"]) + 1
+            aggregate["support_ms"] = int(aggregate["support_ms"]) + duration_ms
+            aggregate["confidence_ms"] = float(aggregate["confidence_ms"]) + (confidence * duration_ms)
+            speaker_total_support_ms[speaker_id] += duration_ms
+
+        mappings: list[dict] = []
+        for speaker_id, track_support in speaker_track_support.items():
+            if not track_support:
+                continue
+            total_support_ms = int(speaker_total_support_ms.get(speaker_id, 0))
+            if total_support_ms <= 0:
+                continue
+
+            ranked = sorted(
+                (
+                    (
+                        int(stats["support_ms"]),
+                        int(stats["support_segments"]),
+                        float(stats["confidence_ms"]),
+                        local_track_id,
+                    )
+                    for local_track_id, stats in track_support.items()
+                ),
+                key=lambda item: (item[0], item[1], item[2], item[3]),
+                reverse=True,
+            )
+            best_support_ms, best_support_segments, best_confidence_ms, best_local_track_id = ranked[0]
+            dominance = float(best_support_ms / total_support_ms)
+            runner_up_support_ms = ranked[1][0] if len(ranked) > 1 else 0
+            if (
+                best_support_segments < min_support_segments
+                or best_support_ms < min_support_ms
+                or dominance < min_speaker_dominance
+                or runner_up_support_ms >= best_support_ms
+            ):
+                continue
+
+            average_confidence = float(best_confidence_ms / max(best_support_ms, 1))
+            mapping_confidence = max(
+                0.0,
+                min(1.0, average_confidence * (0.65 + (0.35 * dominance))),
+            )
+            mappings.append(
+                {
+                    "speaker_id": speaker_id,
+                    "local_track_id": best_local_track_id,
+                    "support_segments": int(best_support_segments),
+                    "support_ms": int(best_support_ms),
+                    "confidence": round(mapping_confidence, 3),
+                }
+            )
+
+        mappings.sort(
+            key=lambda item: (
+                item["speaker_id"],
+                -int(item["support_ms"]),
+                -int(item["support_segments"]),
+                item["local_track_id"],
+            )
+        )
+        return mappings
+
+    @staticmethod
     def _speaker_remap_collision_metrics(words: list[dict]) -> dict[str, int]:
         from collections import defaultdict
 
@@ -6328,6 +6467,7 @@ class ClyptWorker:
                 audio_speaker_turns,
                 local_candidate_evidence,
             )
+        self._last_audio_turn_bindings = [dict(binding) for binding in audio_turn_bindings]
 
         def _active_audio_turn_binding(word: dict) -> dict | None:
             if not audio_turn_bindings:
@@ -6886,6 +7026,7 @@ class ClyptWorker:
     ) -> list[dict]:
         """Bind words to track IDs using LR-ASD, with heuristic fallback."""
         protected_unknown_key = "_speaker_binding_protected_unknown"
+        self._last_audio_turn_bindings = []
 
         def _restore_protected_unknowns(existing_words: list[dict]) -> bool:
             restored_any = False
@@ -7075,6 +7216,7 @@ class ClyptWorker:
         speaker_follow_bindings = self._build_speaker_follow_bindings(speaker_bindings)
         speaker_bindings_local: list[dict] = []
         speaker_follow_bindings_local: list[dict] = []
+        audio_speaker_local_track_map: list[dict] = []
         if self._local_clip_bindings_enabled():
             speaker_bindings_local = self._build_bindings_from_word_track_field(
                 words,
@@ -7087,6 +7229,9 @@ class ClyptWorker:
                 )
             speaker_follow_bindings_local = self._build_speaker_follow_bindings(
                 speaker_bindings_local
+            )
+            audio_speaker_local_track_map = self._build_audio_speaker_local_track_map(
+                getattr(self, "_last_audio_turn_bindings", []),
             )
         speaker_binding_elapsed_s = time.perf_counter() - speaker_binding_started_at
         metrics["speaker_binding_wallclock_s"] = round(speaker_binding_elapsed_s, 3)
@@ -7133,6 +7278,7 @@ class ClyptWorker:
         if self._local_clip_bindings_enabled():
             phase_1_audio["speaker_bindings_local"] = speaker_bindings_local
             phase_1_audio["speaker_follow_bindings_local"] = speaker_follow_bindings_local
+            phase_1_audio["audio_speaker_local_track_map"] = audio_speaker_local_track_map
 
         print(f"[Phase 1] Complete — {len(words)} words, {len(tracks)} tracks")
         return {

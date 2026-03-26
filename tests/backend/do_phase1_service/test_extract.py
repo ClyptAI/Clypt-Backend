@@ -683,6 +683,66 @@ def test_audio_turn_overlapping_evidence_does_not_exceed_turn_bounds():
     ]
 
 
+def test_audio_speaker_local_track_map_keeps_only_clear_stable_support():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    mapping = worker._build_audio_speaker_local_track_map(
+        [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 900,
+                "local_track_id": "track_3",
+                "ambiguous": False,
+                "winning_score": 0.93,
+                "winning_margin": 0.28,
+                "support_ratio": 0.96,
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 1100,
+                "end_time_ms": 2100,
+                "local_track_id": "track_3",
+                "ambiguous": False,
+                "winning_score": 0.89,
+                "winning_margin": 0.24,
+                "support_ratio": 0.91,
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 2200,
+                "end_time_ms": 3000,
+                "local_track_id": "track_9",
+                "ambiguous": True,
+                "winning_score": 0.84,
+                "winning_margin": 0.02,
+                "support_ratio": 0.74,
+            },
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 0,
+                "end_time_ms": 700,
+                "local_track_id": "track_4",
+                "ambiguous": False,
+                "winning_score": 0.66,
+                "winning_margin": 0.09,
+                "support_ratio": 0.58,
+            },
+        ]
+    )
+
+    assert mapping == [
+        {
+            "speaker_id": "SPEAKER_00",
+            "local_track_id": "track_3",
+            "support_segments": 2,
+            "support_ms": 1900,
+            "confidence": pytest.approx(0.87, abs=0.05),
+        }
+    ]
+
+
 def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
 
@@ -2423,6 +2483,118 @@ def test_finalize_emits_local_speaker_bindings_when_experiment_enabled(monkeypat
         {"track_id": "local-1", "start_time_ms": 0, "end_time_ms": 100, "word_count": 1}
     ]
     assert result["phase_1_visual"]["tracks_local"][0]["track_id"] == "local-1"
+
+
+def test_finalize_persists_audio_speaker_local_track_map_when_experiment_enabled(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "local-1",
+            "class_id": 0,
+            "label": "person",
+            "geometry_type": "aabb",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        }
+    ]
+    words = [
+        {
+            "text": "hello",
+            "start_time_ms": 0,
+            "end_time_ms": 100,
+            "speaker_track_id": "Global_Person_0",
+            "speaker_tag": "Global_Person_0",
+            "speaker_local_track_id": "local-1",
+            "speaker_local_tag": "local-1",
+        }
+    ]
+
+    monkeypatch.setenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "1")
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(
+        worker,
+        "_build_track_indexes",
+        lambda tracks: ({0: tracks}, {"local-1": tracks}),
+    )
+    monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
+
+    def _fake_cluster(video_path, tracks, **kwargs):
+        worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
+        worker._last_track_identity_features_after_clustering = None
+        return [
+            {
+                **track,
+                "track_id": "Global_Person_0",
+            }
+            for track in tracks
+        ]
+
+    def _fake_run_speaker_binding(*args, **kwargs):
+        worker._last_audio_turn_bindings = [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 900,
+                "local_track_id": "local-1",
+                "ambiguous": False,
+                "winning_score": 0.93,
+                "winning_margin": 0.28,
+                "support_ratio": 0.96,
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 1100,
+                "end_time_ms": 2100,
+                "local_track_id": "local-1",
+                "ambiguous": False,
+                "winning_score": 0.89,
+                "winning_margin": 0.24,
+                "support_ratio": 0.91,
+            },
+        ]
+        return [
+            {
+                "track_id": "Global_Person_0",
+                "start_time_ms": 0,
+                "end_time_ms": 100,
+                "word_count": 1,
+            }
+        ]
+
+    monkeypatch.setattr(worker, "_cluster_tracklets", _fake_cluster)
+    monkeypatch.setattr(worker, "_run_speaker_binding", _fake_run_speaker_binding)
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    assert result["phase_1_audio"]["audio_speaker_local_track_map"] == [
+        {
+            "speaker_id": "SPEAKER_00",
+            "local_track_id": "local-1",
+            "support_segments": 2,
+            "support_ms": 1900,
+            "confidence": pytest.approx(0.87, abs=0.05),
+        }
+    ]
 
 
 def test_clusters_conflict_by_visibility_detects_far_apart_covisible_people():

@@ -83,6 +83,7 @@ def persist_phase1_outputs(
                 "audio_speaker_turns": phase_1_audio.get("audio_speaker_turns") or [],
                 "speaker_bindings_local": phase_1_audio.get("speaker_bindings_local") or [],
                 "speaker_follow_bindings_local": phase_1_audio.get("speaker_follow_bindings_local") or [],
+                "audio_speaker_local_track_map": phase_1_audio.get("audio_speaker_local_track_map") or [],
             },
             "visual_tracking": {
                 "uri": visual_uri,

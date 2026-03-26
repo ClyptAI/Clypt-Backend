@@ -89,6 +89,15 @@ def test_manifest_persists_local_clip_experiment_fields(tmp_path: Path):
             "speaker_follow_bindings_local": [
                 {"track_id": "track_1", "start_time_ms": 0, "end_time_ms": 100, "word_count": 1}
             ],
+            "audio_speaker_local_track_map": [
+                {
+                    "speaker_id": "SPEAKER_00",
+                    "local_track_id": "track_1",
+                    "support_segments": 2,
+                    "support_ms": 1800,
+                    "confidence": 0.86,
+                }
+            ],
         },
         phase_1_visual={
             "source_video": "https://youtube.com/watch?v=local",
@@ -141,6 +150,9 @@ def test_manifest_persists_local_clip_experiment_fields(tmp_path: Path):
     assert manifest.artifacts.transcript.audio_speaker_turns[0].confidence == 0.91
     assert manifest.artifacts.transcript.speaker_bindings_local[0].track_id == "track_1"
     assert manifest.artifacts.transcript.speaker_follow_bindings_local[0].track_id == "track_1"
+    assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].speaker_id == "SPEAKER_00"
+    assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].local_track_id == "track_1"
+    assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].support_ms == 1800
     assert manifest.artifacts.visual_tracking.tracks_local[0].track_id == "track_1"
 
 

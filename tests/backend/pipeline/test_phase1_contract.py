@@ -216,6 +216,15 @@ def test_manifest_accepts_local_clip_experiment_fields():
             "word_count": 3,
         }
     ]
+    payload["artifacts"]["transcript"]["audio_speaker_local_track_map"] = [
+        {
+            "speaker_id": "SPEAKER_00",
+            "local_track_id": "track_1",
+            "support_segments": 2,
+            "support_ms": 1800,
+            "confidence": 0.86,
+        }
+    ]
     payload["artifacts"]["visual_tracking"]["tracks_local"] = [
         {
             **payload["artifacts"]["visual_tracking"]["tracks"][0],
@@ -230,6 +239,9 @@ def test_manifest_accepts_local_clip_experiment_fields():
     assert manifest.artifacts.transcript.audio_speaker_turns[0].exclusive is True
     assert manifest.artifacts.transcript.speaker_bindings_local[0].track_id == "track_1"
     assert manifest.artifacts.transcript.speaker_follow_bindings_local[0].track_id == "track_1"
+    assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].speaker_id == "SPEAKER_00"
+    assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].local_track_id == "track_1"
+    assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].support_segments == 2
     assert manifest.artifacts.visual_tracking.tracks_local[0].track_id == "track_1"
 
 

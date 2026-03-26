@@ -197,6 +197,16 @@ class Phase1AudioSpeakerTurn(BaseModel):
         return self
 
 
+class Phase1AudioSpeakerLocalTrackMapEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    speaker_id: str
+    local_track_id: str
+    support_segments: PositiveInt
+    support_ms: PositiveInt
+    confidence: Confidence01
+
+
 class Phase1TranscriptArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -208,6 +218,7 @@ class Phase1TranscriptArtifact(BaseModel):
     audio_speaker_turns: list[Phase1AudioSpeakerTurn] = Field(default_factory=list)
     speaker_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
     speaker_follow_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
+    audio_speaker_local_track_map: list[Phase1AudioSpeakerLocalTrackMapEntry] = Field(default_factory=list)
 
 
 class Phase1VisualArtifact(BaseModel):
