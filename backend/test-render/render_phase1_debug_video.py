@@ -91,6 +91,8 @@ def select_binding_sets(audio: dict) -> tuple[list[dict], list[dict], str]:
     if _use_local_clip_bindings_experiment():
         raw_local = list(audio.get("speaker_bindings_local", []))
         follow_local = list(audio.get("speaker_follow_bindings_local", []))
+        if follow_local:
+            return raw_local, follow_local, "local"
         if raw_local:
             return raw_local, (follow_local or raw_local), "local"
     raw_global = list(audio.get("speaker_bindings", []))

@@ -1570,3 +1570,32 @@ def test_phase1_debug_selection_uses_local_sources_when_experiment_enabled(monke
     assert follow_bindings[0]["track_id"] == "local_follow_A"
     assert source == "local"
     assert track_source == "tracks_local"
+
+
+def test_phase1_debug_selection_matches_clip_renderer_when_only_local_follow_exists(monkeypatch):
+    clip_mod = load_module()
+    debug_mod = load_phase1_debug_module()
+    audio = {
+        "speaker_bindings": [
+            {"track_id": "raw_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_follow_bindings": [
+            {"track_id": "follow_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_follow_bindings_local": [
+            {"track_id": "local_follow_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+    }
+
+    monkeypatch.setenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "1")
+
+    clip_selected, clip_raw, clip_follow, clip_source = clip_mod.select_binding_sets(audio)
+    debug_raw, debug_follow, debug_source = debug_mod.select_binding_sets(audio)
+
+    assert clip_selected[0]["track_id"] == "local_follow_A"
+    assert clip_raw == []
+    assert clip_follow[0]["track_id"] == "local_follow_A"
+    assert clip_source == "speaker_follow_bindings_local"
+    assert debug_raw == []
+    assert debug_follow[0]["track_id"] == "local_follow_A"
+    assert debug_source == "local"
