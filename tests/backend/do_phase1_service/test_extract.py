@@ -901,6 +901,77 @@ def test_audio_speaker_local_track_map_keeps_mostly_clean_turn_with_brief_crowde
     ]
 
 
+def test_audio_speaker_local_track_map_uses_clean_winner_when_full_turn_winner_differs():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    turns = [
+        {
+            "speaker_id": "SPEAKER_00",
+            "start_time_ms": 0,
+            "end_time_ms": 2200,
+            "exclusive": True,
+        },
+        {
+            "speaker_id": "SPEAKER_00",
+            "start_time_ms": 2600,
+            "end_time_ms": 3600,
+            "exclusive": True,
+        },
+    ]
+    local_candidate_evidence = [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 800,
+            "candidates": [
+                {"local_track_id": "track_3", "score": 0.92},
+                {"local_track_id": "track_8", "score": 0.18},
+            ],
+        },
+        {
+            "start_time_ms": 800,
+            "end_time_ms": 1200,
+            "candidates": [
+                {"local_track_id": "track_8", "score": 4.9},
+                {"local_track_id": "track_3", "score": 0.40},
+                {"local_track_id": "track_9", "score": 0.39},
+            ],
+        },
+        {
+            "start_time_ms": 1200,
+            "end_time_ms": 2200,
+            "candidates": [
+                {"local_track_id": "track_3", "score": 0.90},
+                {"local_track_id": "track_8", "score": 0.20},
+            ],
+        },
+        {
+            "start_time_ms": 2600,
+            "end_time_ms": 3600,
+            "candidates": [
+                {"local_track_id": "track_3", "score": 0.89},
+                {"local_track_id": "track_8", "score": 0.22},
+            ],
+        },
+    ]
+
+    bindings = worker._bind_audio_turns_to_local_tracks(turns, local_candidate_evidence)
+    mapping = worker._build_audio_speaker_local_track_map(bindings)
+
+    assert bindings[0]["local_track_id"] == "track_8"
+    assert bindings[0]["clean_local_track_id"] == "track_3"
+    assert bindings[0]["clean_support_ms"] == 1800
+    assert mapping == [
+        {
+            "speaker_id": "SPEAKER_00",
+            "local_track_id": "track_3",
+            "support_segments": 2,
+            "support_ms": 2800,
+            "confidence": pytest.approx(0.88, abs=0.06),
+        }
+    ]
+
+
 def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
 

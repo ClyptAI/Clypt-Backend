@@ -1397,8 +1397,7 @@ class ClyptWorker:
             binding["winning_margin"] = float(winning_margin)
             binding["support_ratio"] = float(best_support_ratio)
             crowded_turn = max_visible_candidates > 2
-            clean_support_ms = int(clean_support_ms_by_track.get(best_local_track_id, 0))
-            if crowded_turn and clean_support_ms > 0:
+            if crowded_turn:
                 clean_ranked = sorted(
                     (
                         (
@@ -1412,25 +1411,13 @@ class ClyptWorker:
                     key=lambda item: (item[0], item[1], item[2]),
                     reverse=True,
                 )
-                clean_best_score = next(
-                    (
-                        score
-                        for score, _clean_support_ratio, local_track_id in clean_ranked
-                        if local_track_id == best_local_track_id
-                    ),
-                    None,
-                )
-                clean_second_score = next(
-                    (
-                        score
-                        for score, _clean_support_ratio, local_track_id in clean_ranked
-                        if local_track_id != best_local_track_id
-                    ),
-                    None,
-                )
-                if clean_best_score is not None:
-                    binding["clean_support_ms"] = clean_support_ms
-                    binding["clean_support_ratio"] = float(clean_support_ms / turn_duration_ms)
+                if clean_ranked:
+                    clean_best_score, clean_best_support_ratio, clean_best_local_track_id = clean_ranked[0]
+                    clean_best_support_ms = int(clean_support_ms_by_track.get(clean_best_local_track_id, 0))
+                    clean_second_score = clean_ranked[1][0] if len(clean_ranked) > 1 else None
+                    binding["clean_local_track_id"] = str(clean_best_local_track_id)
+                    binding["clean_support_ms"] = clean_best_support_ms
+                    binding["clean_support_ratio"] = float(clean_best_support_ratio)
                     binding["clean_winning_score"] = float(clean_best_score)
                     binding["clean_winning_margin"] = (
                         float(clean_best_score)
@@ -1493,7 +1480,10 @@ class ClyptWorker:
 
         for binding in turn_bindings or []:
             speaker_id = str(binding.get("speaker_id", "") or "")
-            local_track_id = str(binding.get("local_track_id", "") or "")
+            crowded_turn = _as_int(binding.get("max_visible_candidates"), default=0) > 2
+            local_track_id = str(
+                binding.get("clean_local_track_id") if crowded_turn else binding.get("local_track_id")
+            ) or ""
             if not speaker_id or not local_track_id or bool(binding.get("ambiguous", False)):
                 continue
 
@@ -1505,7 +1495,6 @@ class ClyptWorker:
             if full_duration_ms <= 0:
                 continue
 
-            crowded_turn = _as_int(binding.get("max_visible_candidates"), default=0) > 2
             duration_ms = (
                 _as_int(binding.get("clean_support_ms"), default=0)
                 if crowded_turn
