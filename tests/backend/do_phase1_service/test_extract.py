@@ -1210,6 +1210,28 @@ def test_speaker_binding_mode_forces_heuristic(monkeypatch):
     assert calls == ["heuristic"]
 
 
+def test_speaker_binding_mode_forces_heuristic_clears_stale_candidate_debug(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker._last_speaker_candidate_debug = [{"word": "stale"}]
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "heuristic")
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding_heuristic",
+        lambda *args, **kwargs: [{"track_id": "t1"}],
+    )
+
+    worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "t1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    )
+
+    assert worker._last_speaker_candidate_debug == []
+
+
 def test_speaker_binding_mode_auto_prefers_heuristic_for_large_long_video(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -1328,6 +1350,24 @@ def test_speaker_binding_mode_lrasd_still_falls_back_when_primary_returns_none(m
 
     assert result == [{"track_id": "fallback"}]
     assert calls == ["lrasd", "heuristic"]
+
+
+def test_run_lrasd_binding_clears_stale_candidate_debug_on_early_return(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker._last_speaker_candidate_debug = [{"word": "stale"}]
+    worker.lrasd_model = None
+    worker.lrasd_loss_av = None
+
+    result = worker._run_lrasd_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "t1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    )
+
+    assert result is None
+    assert worker._last_speaker_candidate_debug == []
 
 
 def test_build_visual_detection_ledgers_uses_canonical_face_tracks(monkeypatch):
@@ -2197,6 +2237,163 @@ def test_run_lrasd_binding_persists_speaker_candidate_debug(monkeypatch, tmp_pat
                     "track_id": "speaker_local",
                     "blended_score": pytest.approx(0.0, abs=1.0),
                     "asd_probability": pytest.approx(0.18, abs=0.001),
+                    "body_prior": pytest.approx(0.0, abs=1.0),
+                    "detection_confidence": pytest.approx(0.88, abs=0.001),
+                },
+            ],
+        }
+    ]
+
+
+def test_run_lrasd_binding_persists_candidate_debug_for_off_screen_audio_abstention(monkeypatch, tmp_path: Path):
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "listener_local": {
+                "x_center": 220.0,
+                "y_center": 104.0,
+                "width": 68.0,
+                "height": 142.0,
+                "confidence": 0.84,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "listener_local": 0.19,
+        },
+        words=[
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_02",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_02",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "offscreen_local",
+                "ambiguous": False,
+                "winning_score": 0.91,
+                "winning_margin": 0.35,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_track_id"] is None
+    assert bindings == []
+    assert worker._last_speaker_candidate_debug == [
+        {
+            "word": "hello",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "active_audio_speaker_id": "SPEAKER_02",
+            "active_audio_local_track_id": "offscreen_local",
+            "chosen_track_id": None,
+            "chosen_local_track_id": None,
+            "decision_source": "unknown",
+            "ambiguous": False,
+            "top_1_top_2_margin": pytest.approx(0.0, abs=1.0),
+            "candidates": [
+                {
+                    "local_track_id": "listener_local",
+                    "track_id": "listener_local",
+                    "blended_score": pytest.approx(0.0, abs=1.0),
+                    "asd_probability": pytest.approx(0.19, abs=0.001),
+                    "body_prior": pytest.approx(0.0, abs=1.0),
+                    "detection_confidence": pytest.approx(0.84, abs=0.001),
+                }
+            ],
+        }
+    ]
+
+
+def test_run_lrasd_binding_persists_ambiguous_audio_turn_context_in_debug(monkeypatch, tmp_path: Path):
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker_local": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 76.0,
+                "height": 152.0,
+                "confidence": 0.90,
+                "intensity": 210,
+            },
+            "listener_local": {
+                "x_center": 222.0,
+                "y_center": 104.0,
+                "width": 72.0,
+                "height": 148.0,
+                "confidence": 0.88,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "speaker_local": 0.82,
+            "listener_local": 0.26,
+        },
+        words=[
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "listener_local",
+                "ambiguous": True,
+                "winning_score": 0.52,
+                "winning_margin": 0.01,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_local_track_id"] == "speaker_local"
+    assert bindings == [{"track_id": "speaker_local", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 1}]
+    assert worker._last_speaker_candidate_debug == [
+        {
+            "word": "hello",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "active_audio_speaker_id": "SPEAKER_01",
+            "active_audio_local_track_id": "listener_local",
+            "chosen_track_id": "speaker_local",
+            "chosen_local_track_id": "speaker_local",
+            "decision_source": "visual",
+            "ambiguous": True,
+            "top_1_top_2_margin": pytest.approx(0.0, abs=1.0),
+            "candidates": [
+                {
+                    "local_track_id": "speaker_local",
+                    "track_id": "speaker_local",
+                    "blended_score": pytest.approx(0.0, abs=1.0),
+                    "asd_probability": pytest.approx(0.82, abs=0.001),
+                    "body_prior": pytest.approx(0.0, abs=1.0),
+                    "detection_confidence": pytest.approx(0.90, abs=0.001),
+                },
+                {
+                    "local_track_id": "listener_local",
+                    "track_id": "listener_local",
+                    "blended_score": pytest.approx(0.0, abs=1.0),
+                    "asd_probability": pytest.approx(0.26, abs=0.001),
                     "body_prior": pytest.approx(0.0, abs=1.0),
                     "detection_confidence": pytest.approx(0.88, abs=0.001),
                 },
