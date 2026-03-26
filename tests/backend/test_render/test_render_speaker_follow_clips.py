@@ -1004,6 +1004,145 @@ def test_choose_window_composition_prefers_shared_for_ambiguous_hybrid_turn():
     assert {plan.primary_track_id, plan.secondary_track_id} == {'A', 'B'}
 
 
+def test_choose_window_composition_prefers_shared_for_ambiguous_local_track_turn():
+    mod = load_module()
+    fps = 24.0
+    duration_s = 20
+    person_track_index = {
+        'track_A': [
+            mod.Detection(frame_idx=int(second * fps), x_center=1240 + second, y_center=920, width=420, height=820)
+            for second in range(duration_s + 1)
+        ],
+        'track_B': [
+            mod.Detection(frame_idx=int(second * fps), x_center=1620 + second, y_center=920, width=410, height=810)
+            for second in range(duration_s + 1)
+        ],
+    }
+    face_track_index = {}
+    bindings = [
+        {'track_id': 'track_A', 'start_time_ms': 0, 'end_time_ms': 13_500, 'word_count': 120},
+        {'track_id': 'track_B', 'start_time_ms': 13_500, 'end_time_ms': 16_500, 'word_count': 24},
+    ]
+
+    plan = mod.choose_window_composition(
+        clip_start_s=0,
+        clip_end_s=20,
+        fps=fps,
+        src_w=3840,
+        src_h=2160,
+        bindings=bindings,
+        person_track_index=person_track_index,
+        face_track_index=face_track_index,
+        speaker_candidate_debug=[
+            make_hybrid_debug_entry(
+                start_time_ms=4_000,
+                end_time_ms=5_000,
+                chosen_track_id="Global_Person_0",
+                chosen_local_track_id="track_A",
+                decision_source="audio_boosted_visual",
+                ambiguous=True,
+                top_1_top_2_margin=0.016,
+                candidates=[
+                    {
+                        "local_track_id": "track_A",
+                        "track_id": "Global_Person_0",
+                        "blended_score": 0.31,
+                        "asd_probability": 0.19,
+                        "body_prior": 0.57,
+                        "detection_confidence": 0.94,
+                    },
+                    {
+                        "local_track_id": "track_B",
+                        "track_id": "Global_Person_1",
+                        "blended_score": 0.29,
+                        "asd_probability": 0.17,
+                        "body_prior": 0.52,
+                        "detection_confidence": 0.90,
+                    },
+                ],
+            ),
+        ],
+    )
+
+    assert plan.mode == 'two_shared'
+    assert {plan.primary_track_id, plan.secondary_track_id} == {'track_A', 'track_B'}
+
+
+def test_choose_window_composition_does_not_widen_from_unrelated_ambiguous_entries():
+    mod = load_module()
+    fps = 24.0
+    duration_s = 20
+    person_track_index = {
+        'A': [
+            mod.Detection(frame_idx=int(second * fps), x_center=1240 + second, y_center=920, width=420, height=820)
+            for second in range(duration_s + 1)
+        ],
+        'B': [
+            mod.Detection(frame_idx=int(second * fps), x_center=1620 + second, y_center=920, width=410, height=810)
+            for second in range(duration_s + 1)
+        ],
+    }
+    face_track_index = {}
+    bindings = [
+        {'track_id': 'A', 'start_time_ms': 0, 'end_time_ms': 13_500, 'word_count': 120},
+        {'track_id': 'B', 'start_time_ms': 13_500, 'end_time_ms': 16_500, 'word_count': 24},
+    ]
+
+    plan = mod.choose_window_composition(
+        clip_start_s=0,
+        clip_end_s=20,
+        fps=fps,
+        src_w=3840,
+        src_h=2160,
+        bindings=bindings,
+        person_track_index=person_track_index,
+        face_track_index=face_track_index,
+        speaker_candidate_debug=[
+            make_hybrid_debug_entry(
+                start_time_ms=3_000,
+                end_time_ms=4_000,
+                chosen_track_id="A",
+                chosen_local_track_id="track_A",
+                decision_source="unknown",
+                ambiguous=True,
+                top_1_top_2_margin=0.011,
+                candidates=[
+                    {
+                        "local_track_id": "track_A",
+                        "track_id": "A",
+                        "blended_score": 0.31,
+                        "asd_probability": 0.19,
+                        "body_prior": 0.57,
+                        "detection_confidence": 0.94,
+                    },
+                ],
+                ),
+                make_hybrid_debug_entry(
+                    start_time_ms=4_000,
+                    end_time_ms=5_000,
+                    chosen_track_id="B",
+                    chosen_local_track_id="track_B",
+                    decision_source="audio_boosted_visual",
+                    ambiguous=True,
+                    top_1_top_2_margin=0.016,
+                candidates=[
+                    {
+                        "local_track_id": "track_B",
+                        "track_id": "B",
+                        "blended_score": 0.29,
+                        "asd_probability": 0.17,
+                        "body_prior": 0.52,
+                        "detection_confidence": 0.90,
+                    },
+                ],
+            ),
+        ],
+    )
+
+    assert plan.mode == 'single_person'
+    assert plan.primary_track_id == 'A'
+
+
 def test_choose_window_composition_prefers_single_person_when_one_track_dominates():
     mod = load_module()
     person_track_index = {
@@ -1359,3 +1498,75 @@ def test_phase1_debug_hud_lines_include_hybrid_state():
     assert "audio local: track_audio_2" in lines
     assert "chosen local: track_A" in lines
     assert "margin: 0.018" in lines
+
+
+def test_phase1_debug_selection_uses_global_sources_by_default():
+    mod = load_phase1_debug_module()
+    audio = {
+        "speaker_bindings": [
+            {"track_id": "raw_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_follow_bindings": [
+            {"track_id": "follow_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_bindings_local": [
+            {"track_id": "local_raw_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_follow_bindings_local": [
+            {"track_id": "local_follow_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+    }
+    visual = {
+        "tracks": [{"track_id": "global_track", "frame_idx": 0, "x1": 0, "y1": 0, "x2": 10, "y2": 10}],
+        "tracks_local": [{"track_id": "local_track", "frame_idx": 0, "x1": 0, "y1": 0, "x2": 10, "y2": 10}],
+    }
+
+    raw_bindings, follow_bindings, source = mod.select_binding_sets(audio)
+    _, track_source = mod.select_track_frame_index(
+        visual,
+        fps=24.0,
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    assert raw_bindings[0]["track_id"] == "raw_A"
+    assert follow_bindings[0]["track_id"] == "follow_A"
+    assert source == "global"
+    assert track_source == "tracks"
+
+
+def test_phase1_debug_selection_uses_local_sources_when_experiment_enabled(monkeypatch):
+    mod = load_phase1_debug_module()
+    audio = {
+        "speaker_bindings": [
+            {"track_id": "raw_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_follow_bindings": [
+            {"track_id": "follow_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_bindings_local": [
+            {"track_id": "local_raw_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_follow_bindings_local": [
+            {"track_id": "local_follow_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+    }
+    visual = {
+        "tracks": [{"track_id": "global_track", "frame_idx": 0, "x1": 0, "y1": 0, "x2": 10, "y2": 10}],
+        "tracks_local": [{"track_id": "local_track", "frame_idx": 0, "x1": 0, "y1": 0, "x2": 10, "y2": 10}],
+    }
+
+    monkeypatch.setenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "1")
+
+    raw_bindings, follow_bindings, source = mod.select_binding_sets(audio)
+    _, track_source = mod.select_track_frame_index(
+        visual,
+        fps=24.0,
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    assert raw_bindings[0]["track_id"] == "local_raw_A"
+    assert follow_bindings[0]["track_id"] == "local_follow_A"
+    assert source == "local"
+    assert track_source == "tracks_local"

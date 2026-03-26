@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -14,6 +15,15 @@ DEFAULT_VISUAL = ROOT / "outputs" / "phase_1_visual.json"
 DEFAULT_AUDIO = ROOT / "outputs" / "phase_1_audio.json"
 DEFAULT_VIDEO = ROOT / "downloads" / "video.mp4"
 DEFAULT_OUTPUT = ROOT / "outputs" / "debug" / "phase1_debug_overlay.mp4"
+
+
+def _use_local_clip_bindings_experiment() -> bool:
+    return str(os.getenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def flatten_segmented_detections(
@@ -78,19 +88,24 @@ def flatten_tracks(
 
 
 def select_binding_sets(audio: dict) -> tuple[list[dict], list[dict], str]:
-    raw_local = list(audio.get("speaker_bindings_local", []))
-    follow_local = list(audio.get("speaker_follow_bindings_local", []))
-    if raw_local:
-        return raw_local, (follow_local or raw_local), "local"
+    if _use_local_clip_bindings_experiment():
+        raw_local = list(audio.get("speaker_bindings_local", []))
+        follow_local = list(audio.get("speaker_follow_bindings_local", []))
+        if raw_local:
+            return raw_local, (follow_local or raw_local), "local"
     raw_global = list(audio.get("speaker_bindings", []))
     follow_global = list(audio.get("speaker_follow_bindings", []))
     return raw_global, (follow_global or raw_global), "global"
 
 
 def select_track_frame_index(visual: dict, *, fps: float, frame_width: int, frame_height: int) -> tuple[dict[int, list[dict]], str]:
-    tracks_local = list(visual.get("tracks_local", []))
-    if tracks_local:
-        return flatten_tracks(tracks_local, kind="person"), "tracks_local"
+    if _use_local_clip_bindings_experiment():
+        tracks_local = list(visual.get("tracks_local", []))
+        if tracks_local:
+            return flatten_tracks(tracks_local, kind="person"), "tracks_local"
+    tracks = list(visual.get("tracks", []))
+    if tracks:
+        return flatten_tracks(tracks, kind="person"), "tracks"
     person_detections = list(visual.get("person_detections", []))
     if person_detections:
         return flatten_segmented_detections(
@@ -100,7 +115,7 @@ def select_track_frame_index(visual: dict, *, fps: float, frame_width: int, fram
             frame_height=frame_height,
             kind="person",
         ), "person_detections"
-    return flatten_tracks(list(visual.get("tracks", [])), kind="person"), "tracks"
+    return {}, "none"
 
 
 def active_binding_at_ms(bindings: list[dict], timestamp_ms: int) -> str | None:

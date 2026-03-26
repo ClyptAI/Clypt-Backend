@@ -2351,20 +2351,27 @@ def interval_prefers_wider_hybrid_behavior(
     if not interval_entries:
         return False
 
-    ambiguous_track_ids: set[str] = set()
+    top_two_ids = {ordered_stats[0].track_id, ordered_stats[1].track_id}
     for entry in interval_entries:
         if not bool(entry.get("ambiguous", False)):
             continue
+        entry_track_ids: set[str] = set()
+        for key in (
+            "chosen_track_id",
+            "chosen_local_track_id",
+            "active_audio_local_track_id",
+        ):
+            value = str(entry.get(key, "") or "")
+            if value:
+                entry_track_ids.add(value)
         for candidate in entry.get("candidates", []) or []:
-            track_id = str(candidate.get("track_id", "") or "")
-            if track_id:
-                ambiguous_track_ids.add(track_id)
-
-    if len(ambiguous_track_ids) < 2:
-        return False
-
-    top_two_ids = {ordered_stats[0].track_id, ordered_stats[1].track_id}
-    return top_two_ids.issubset(ambiguous_track_ids)
+            for key in ("track_id", "local_track_id"):
+                value = str(candidate.get(key, "") or "")
+                if value:
+                    entry_track_ids.add(value)
+        if top_two_ids.issubset(entry_track_ids):
+            return True
+    return False
 
 
 def visible_track_ids_for_interval(
