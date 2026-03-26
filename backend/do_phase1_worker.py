@@ -1303,6 +1303,12 @@ class ClyptWorker:
             if end_time_ms < start_time_ms:
                 start_time_ms, end_time_ms = end_time_ms, start_time_ms
             turn_duration_ms = max(1, end_time_ms - start_time_ms)
+            overlap_present = bool(turn.get("overlap", False))
+            explicit_exclusive = turn.get("exclusive")
+            high_ambiguity_turn = bool(
+                overlap_present
+                or explicit_exclusive is False
+            )
 
             weighted_score_ms_by_track: dict[str, float] = defaultdict(float)
             support_ms_by_track: dict[str, int] = defaultdict(int)
@@ -1393,6 +1399,10 @@ class ClyptWorker:
                 else float(best_support_ratio - second_support_ratio)
             )
 
+            if high_ambiguity_turn:
+                best_score *= 0.5
+                winning_margin *= 0.5
+
             binding["winning_score"] = float(best_score)
             binding["winning_margin"] = float(winning_margin)
             binding["support_ratio"] = float(best_support_ratio)
@@ -1425,7 +1435,9 @@ class ClyptWorker:
                         else float(clean_best_score - clean_second_score)
                     )
 
-            if (
+            if high_ambiguity_turn:
+                binding["ambiguous"] = True
+            elif (
                 second_score is not None
                 and winning_margin < float(ambiguity_margin)
                 and support_margin < float(support_tiebreak_margin)
@@ -1934,6 +1946,20 @@ class ClyptWorker:
         self._audio_diarization_pipeline = pipeline
         return pipeline
 
+    def _record_audio_diarization_metrics(
+        self,
+        *,
+        enabled: bool,
+        status: str,
+        turn_count: int = 0,
+    ) -> None:
+        self._last_audio_diarization_metrics = {
+            "audio_diarization_enabled": bool(enabled),
+            "audio_diarization_fallback": bool(status != "ok"),
+            "audio_diarization_status": str(status),
+            "audio_diarization_turn_count": max(0, int(turn_count)),
+        }
+
     @staticmethod
     def _coerce_optional_bool(value):
         if value is None or isinstance(value, bool):
@@ -2088,19 +2114,40 @@ class ClyptWorker:
     def _run_audio_diarization(self, audio_path: str) -> list[dict]:
         config = self._audio_diarization_config()
         if not config["enabled"]:
+            self._record_audio_diarization_metrics(
+                enabled=False,
+                status="disabled",
+                turn_count=0,
+            )
             return []
 
         pipeline = self._load_audio_diarization_pipeline()
         if pipeline is None:
+            self._record_audio_diarization_metrics(
+                enabled=True,
+                status="unavailable",
+                turn_count=0,
+            )
             return []
 
         try:
             diarization = pipeline(audio_path)
         except Exception as exc:
             print(f"[Phase 1] Audio diarization execution failed: {type(exc).__name__}: {exc}")
+            self._record_audio_diarization_metrics(
+                enabled=True,
+                status="error",
+                turn_count=0,
+            )
             return []
 
-        return self._serialize_audio_speaker_turns(diarization)
+        turns = self._serialize_audio_speaker_turns(diarization)
+        self._record_audio_diarization_metrics(
+            enabled=True,
+            status="ok",
+            turn_count=len(turns),
+        )
+        return turns
 
     @staticmethod
     def _face_detector_input_size() -> tuple[int, int]:
@@ -6707,6 +6754,14 @@ class ClyptWorker:
                 require_local_track=False,
             )
             active_turn_binding = _active_audio_turn_binding(w)
+            debug_audio_local_track_id = None
+            if isinstance(debug_turn_binding, dict):
+                raw_debug_local_track_id = (
+                    debug_turn_binding.get("local_track_id")
+                    or debug_turn_binding.get("clean_local_track_id")
+                )
+                if raw_debug_local_track_id not in (None, ""):
+                    debug_audio_local_track_id = str(raw_debug_local_track_id)
             if not scored_candidates:
                 _append_speaker_candidate_debug(
                     word=w,
@@ -6720,6 +6775,21 @@ class ClyptWorker:
                     top_margin=None,
                 )
                 _clear_word_assignment(w)
+                continue
+            if active_turn is not None and debug_turn_binding is not None and debug_audio_local_track_id is None:
+                audio_prior_abstentions += 1
+                _append_speaker_candidate_debug(
+                    word=w,
+                    scored_candidates=scored_candidates,
+                    active_turn=active_turn,
+                    debug_turn_binding=debug_turn_binding,
+                    chosen_track_id=None,
+                    chosen_local_track_id=None,
+                    decision_source="unknown",
+                    ambiguous=bool(debug_turn_binding.get("ambiguous", False)),
+                    top_margin=None,
+                )
+                _mark_protected_unknown(w)
                 continue
 
             best_candidate = scored_candidates[0]
@@ -7463,6 +7533,9 @@ class ClyptWorker:
         # Step 4: Speaker binding
         print("[Phase 1] Step 4/4: Running speaker binding...")
         audio_speaker_turns = self._run_audio_diarization(audio_path)
+        last_audio_diarization_metrics = getattr(self, "_last_audio_diarization_metrics", None)
+        if isinstance(last_audio_diarization_metrics, dict):
+            metrics.update(last_audio_diarization_metrics)
         speaker_binding_started_at = time.perf_counter()
         binding_analysis_context = dict(analysis_context) if isinstance(analysis_context, dict) else {}
         binding_analysis_context["audio_speaker_turns"] = audio_speaker_turns

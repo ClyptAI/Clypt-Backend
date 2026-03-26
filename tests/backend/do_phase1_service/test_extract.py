@@ -480,6 +480,23 @@ def test_audio_diarization_disabled_returns_no_turns(monkeypatch):
     assert loaded is False
 
 
+def test_audio_diarization_disabled_records_fallback_status(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_AUDIO_DIARIZATION_ENABLE", raising=False)
+
+    turns = worker._run_audio_diarization("audio.wav")
+
+    assert turns == []
+    assert worker._last_audio_diarization_metrics == {
+        "audio_diarization_enabled": False,
+        "audio_diarization_fallback": True,
+        "audio_diarization_status": "disabled",
+        "audio_diarization_turn_count": 0,
+    }
+
+
 def test_audio_turn_binds_to_best_visible_local_track():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -626,6 +643,45 @@ def test_audio_turn_breaks_score_tie_with_stronger_support():
             "ambiguous": False,
             "winning_score": pytest.approx(0.80, abs=1e-6),
             "winning_margin": pytest.approx(0.0, abs=1e-6),
+            "support_ratio": pytest.approx(1.0, abs=1e-6),
+        }
+    ]
+
+
+def test_audio_turn_overlap_stays_ambiguous_instead_of_committing():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    turns = [
+        {
+            "speaker_id": "SPEAKER_02",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "exclusive": False,
+            "overlap": True,
+        }
+    ]
+    local_candidate_evidence = [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "candidates": [
+                {"local_track_id": "track_full", "score": 0.90},
+            ],
+        },
+    ]
+
+    bindings = worker._bind_audio_turns_to_local_tracks(turns, local_candidate_evidence)
+
+    assert bindings == [
+        {
+            "speaker_id": "SPEAKER_02",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "local_track_id": None,
+            "ambiguous": True,
+            "winning_score": pytest.approx(0.45, abs=1e-6),
+            "winning_margin": pytest.approx(0.45, abs=1e-6),
             "support_ratio": pytest.approx(1.0, abs=1e-6),
         }
     ]
@@ -2566,6 +2622,55 @@ def test_run_lrasd_binding_keeps_unknown_for_off_screen_audio_turn(monkeypatch, 
     assert bindings == []
 
 
+def test_run_lrasd_binding_keeps_unknown_when_audio_turn_has_no_visible_match(monkeypatch, tmp_path: Path):
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "listener_local": {
+                "x_center": 220.0,
+                "y_center": 104.0,
+                "width": 68.0,
+                "height": 142.0,
+                "confidence": 0.84,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "listener_local": 0.82,
+        },
+        words=[
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_02",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_02",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": None,
+                "ambiguous": False,
+                "winning_score": 0.91,
+                "winning_margin": 0.35,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_track_id"] is None
+    assert words[0]["speaker_local_track_id"] is None
+    assert bindings == []
+    assert worker._last_speaker_candidate_debug[0]["active_audio_local_track_id"] is None
+    assert worker._last_speaker_candidate_debug[0]["decision_source"] == "unknown"
+
+
 def test_run_lrasd_binding_preserves_off_screen_abstention_through_smoothing(monkeypatch, tmp_path: Path):
     _, words, bindings = _run_fake_lrasd_binding_case(
         monkeypatch,
@@ -2793,6 +2898,63 @@ def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
     assert metrics["identity_track_count_after_clustering"] == 1
     assert metrics["cluster_visible_people_estimate"] == 2
     assert metrics["overfragmentation_proxy"] == 0.5
+
+
+def test_finalize_records_audio_diarization_fallback_metrics_when_pyannote_unavailable(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "track-1",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        }
+    ]
+    words = [
+        {"text": "hello", "start_time_ms": 0, "end_time_ms": 100, "speaker_track_id": "track-1"},
+    ]
+
+    monkeypatch.setenv("CLYPT_AUDIO_DIARIZATION_ENABLE", "1")
+    monkeypatch.setattr(worker, "_load_audio_diarization_pipeline", lambda: None)
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(
+        worker,
+        "_build_track_indexes",
+        lambda tracks: ({0: tracks}, {"track-1": tracks}),
+    )
+    monkeypatch.setattr(worker, "_cluster_tracklets", lambda *args, **kwargs: tracks)
+    monkeypatch.setattr(
+        worker,
+        "_build_visual_detection_ledgers",
+        lambda **kwargs: ([], [], {}),
+    )
+    monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [{"track_id": "track-1"}])
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    assert result["phase_1_audio"]["audio_speaker_turns"] == []
+    assert result["phase_1_visual"]["tracking_metrics"]["audio_diarization_enabled"] is True
+    assert result["phase_1_visual"]["tracking_metrics"]["audio_diarization_fallback"] is True
+    assert result["phase_1_visual"]["tracking_metrics"]["audio_diarization_status"] == "unavailable"
+    assert result["phase_1_visual"]["tracking_metrics"]["audio_diarization_turn_count"] == 0
 
 
 def test_finalize_passes_track_identity_features_to_clustering_and_ledgers(monkeypatch):
