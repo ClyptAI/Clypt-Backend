@@ -1226,6 +1226,145 @@ class ClyptWorker:
         return bindings
 
     @staticmethod
+    def _bind_audio_turns_to_local_tracks(
+        turns: list[dict],
+        local_candidate_evidence: list[dict],
+        *,
+        ambiguity_margin: float = 0.05,
+    ) -> list[dict]:
+        """Aggregate local-track candidate evidence across each diarized turn."""
+        from collections import defaultdict
+
+        def _as_int_ms(value, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return int(default)
+
+        def _as_score(candidate: dict) -> float | None:
+            for field_name in ("score", "total", "prob", "body_prior", "confidence"):
+                value = candidate.get(field_name)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        normalized_evidence: list[dict] = []
+        for evidence in local_candidate_evidence or []:
+            start_time_ms = _as_int_ms(evidence.get("start_time_ms"), default=0)
+            end_time_ms = _as_int_ms(evidence.get("end_time_ms"), default=start_time_ms)
+            if end_time_ms < start_time_ms:
+                start_time_ms, end_time_ms = end_time_ms, start_time_ms
+            if end_time_ms <= start_time_ms:
+                continue
+
+            candidates = evidence.get("candidates")
+            if not isinstance(candidates, list):
+                candidates = [evidence]
+
+            normalized_candidates: list[dict] = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict) or bool(candidate.get("hard_reject", False)):
+                    continue
+                local_track_id = (
+                    candidate.get("local_track_id")
+                    or candidate.get("local_tid")
+                    or candidate.get("track_id")
+                )
+                if local_track_id in (None, ""):
+                    continue
+                score = _as_score(candidate)
+                if score is None:
+                    continue
+                normalized_candidates.append(
+                    {
+                        "local_track_id": str(local_track_id),
+                        "score": float(score),
+                    }
+                )
+
+            if normalized_candidates:
+                normalized_evidence.append(
+                    {
+                        "start_time_ms": start_time_ms,
+                        "end_time_ms": end_time_ms,
+                        "candidates": normalized_candidates,
+                    }
+                )
+
+        bindings: list[dict] = []
+        for turn in turns or []:
+            start_time_ms = _as_int_ms(turn.get("start_time_ms"), default=0)
+            end_time_ms = _as_int_ms(turn.get("end_time_ms"), default=start_time_ms)
+            if end_time_ms < start_time_ms:
+                start_time_ms, end_time_ms = end_time_ms, start_time_ms
+            turn_duration_ms = max(1, end_time_ms - start_time_ms)
+
+            weighted_score_ms_by_track: dict[str, float] = defaultdict(float)
+            support_ms_by_track: dict[str, int] = defaultdict(int)
+
+            for evidence in normalized_evidence:
+                overlap_start_ms = max(start_time_ms, int(evidence["start_time_ms"]))
+                overlap_end_ms = min(end_time_ms, int(evidence["end_time_ms"]))
+                overlap_ms = overlap_end_ms - overlap_start_ms
+                if overlap_ms <= 0:
+                    continue
+                for candidate in evidence["candidates"]:
+                    local_track_id = str(candidate["local_track_id"])
+                    weighted_score_ms_by_track[local_track_id] += float(candidate["score"]) * overlap_ms
+                    support_ms_by_track[local_track_id] += overlap_ms
+
+            binding = {
+                "speaker_id": str(turn.get("speaker_id", "") or ""),
+                "start_time_ms": start_time_ms,
+                "end_time_ms": end_time_ms,
+                "local_track_id": None,
+                "ambiguous": False,
+                "winning_score": None,
+                "winning_margin": None,
+                "support_ratio": 0.0,
+            }
+            if not weighted_score_ms_by_track:
+                bindings.append(binding)
+                continue
+
+            ranked = sorted(
+                (
+                    (
+                        float(weighted_score_ms / turn_duration_ms),
+                        float(support_ms_by_track[local_track_id] / turn_duration_ms),
+                        str(local_track_id),
+                    )
+                    for local_track_id, weighted_score_ms in weighted_score_ms_by_track.items()
+                ),
+                key=lambda item: (item[0], item[1], item[2]),
+                reverse=True,
+            )
+            best_score, best_support_ratio, best_local_track_id = ranked[0]
+            second_score = ranked[1][0] if len(ranked) > 1 else None
+            winning_margin = (
+                float(best_score)
+                if second_score is None
+                else float(best_score - second_score)
+            )
+
+            binding["winning_score"] = float(best_score)
+            binding["winning_margin"] = float(winning_margin)
+            binding["support_ratio"] = float(best_support_ratio)
+
+            if second_score is not None and winning_margin < float(ambiguity_margin):
+                binding["ambiguous"] = True
+            elif best_score > 0.0 and best_support_ratio > 0.0:
+                binding["local_track_id"] = str(best_local_track_id)
+
+            bindings.append(binding)
+
+        return bindings
+
+    @staticmethod
     def _speaker_remap_collision_metrics(words: list[dict]) -> dict[str, int]:
         from collections import defaultdict
 

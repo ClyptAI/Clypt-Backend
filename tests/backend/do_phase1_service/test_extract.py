@@ -480,6 +480,112 @@ def test_audio_diarization_disabled_returns_no_turns(monkeypatch):
     assert loaded is False
 
 
+def test_audio_turn_binds_to_best_visible_local_track():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    turns = [
+        {
+            "speaker_id": "SPEAKER_00",
+            "start_time_ms": 1000,
+            "end_time_ms": 2400,
+            "exclusive": True,
+        }
+    ]
+    local_candidate_evidence = [
+        {
+            "start_time_ms": 1000,
+            "end_time_ms": 1200,
+            "candidates": [
+                {"local_track_id": "track_8", "score": 0.92},
+                {"local_track_id": "track_3", "score": 0.20},
+            ],
+        },
+        {
+            "start_time_ms": 1200,
+            "end_time_ms": 1800,
+            "candidates": [
+                {"local_track_id": "track_3", "score": 0.85},
+                {"local_track_id": "track_8", "score": 0.30},
+            ],
+        },
+        {
+            "start_time_ms": 1800,
+            "end_time_ms": 2400,
+            "candidates": [
+                {"local_track_id": "track_3", "score": 0.80},
+                {"local_track_id": "track_8", "score": 0.25},
+            ],
+        },
+    ]
+
+    bindings = worker._bind_audio_turns_to_local_tracks(turns, local_candidate_evidence)
+
+    assert bindings == [
+        {
+            "speaker_id": "SPEAKER_00",
+            "start_time_ms": 1000,
+            "end_time_ms": 2400,
+            "local_track_id": "track_3",
+            "ambiguous": False,
+            "winning_score": pytest.approx(1030.0 / 1400.0, abs=1e-6),
+            "winning_margin": pytest.approx((1030.0 - 514.0) / 1400.0, abs=1e-6),
+            "support_ratio": pytest.approx(1.0, abs=1e-6),
+        }
+    ]
+
+
+def test_audio_turn_stays_unknown_when_candidates_are_near_tied():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    turns = [
+        {
+            "speaker_id": "SPEAKER_01",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "exclusive": True,
+        }
+    ]
+    local_candidate_evidence = [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 500,
+            "candidates": [
+                {"local_track_id": "track_1", "score": 0.82},
+                {"local_track_id": "track_2", "score": 0.79},
+            ],
+        },
+        {
+            "start_time_ms": 500,
+            "end_time_ms": 1000,
+            "candidates": [
+                {"local_track_id": "track_1", "score": 0.80},
+                {"local_track_id": "track_2", "score": 0.81},
+            ],
+        },
+    ]
+
+    bindings = worker._bind_audio_turns_to_local_tracks(
+        turns,
+        local_candidate_evidence,
+        ambiguity_margin=0.02,
+    )
+
+    assert bindings == [
+        {
+            "speaker_id": "SPEAKER_01",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "local_track_id": None,
+            "ambiguous": True,
+            "winning_score": pytest.approx(0.81, abs=1e-6),
+            "winning_margin": pytest.approx(0.01, abs=1e-6),
+            "support_ratio": pytest.approx(1.0, abs=1e-6),
+        }
+    ]
+
+
 def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
 
