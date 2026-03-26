@@ -111,10 +111,8 @@ Recommended starting values:
 - `CLYPT_SPEAKER_BINDING_MODE=auto`
 - `CLYPT_TRACKING_MODE=auto`
 - `CLYPT_TRACK_CHUNK_WORKERS=1`
-- `CLYPT_ANALYSIS_PROXY_ENABLE=1`
-- `CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE=1920`
 - `CLYPT_SPEAKER_BINDING_PROXY_ENABLE=1`
-- `CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE=1920`
+- `CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE=1280`
 - `CLYPT_ASD_PRECOMPUTED_FACE=1`
 - `CLYPT_ASD_FACE_FPS=1.0`
 - `CLYPT_ASD_PRECOMPUTED_MIN_COVERAGE=0.80`
@@ -139,7 +137,6 @@ Why these defaults:
 - `DO_PHASE1_GPU_SLOTS=1` keeps the GPU-heavy extraction section serialized until higher overlap is validated.
 - `CLYPT_TRACKING_MODE=auto` lets the worker choose between direct and chunked tracking.
 - `CLYPT_SPEAKER_BINDING_MODE=auto` keeps LR-ASD for manageable clips while allowing fallback behavior on larger jobs.
-- `CLYPT_ANALYSIS_PROXY_ENABLE=1` and `CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE=1920` keep tracking, face analysis, and LR-ASD on the same shared 1080p proxy instead of the full-resolution source.
 
 ## Deploy the Service
 

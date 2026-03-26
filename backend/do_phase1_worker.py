@@ -1494,18 +1494,6 @@ class ClyptWorker:
         }
 
     @staticmethod
-    def _face_detector_input_size() -> tuple[int, int]:
-        raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", "").strip()
-        if not raw:
-            raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", "960").strip()
-        try:
-            requested = int(raw)
-        except Exception:
-            requested = 960
-        requested = max(256, requested)
-        return (requested, requested)
-
-    @staticmethod
     def _split_frame_items_into_segments(
         frame_to_dets: dict[int, list[dict]],
         segment_frames: int,

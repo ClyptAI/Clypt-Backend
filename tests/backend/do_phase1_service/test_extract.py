@@ -858,21 +858,6 @@ def test_shared_analysis_proxy_can_drive_tracking_and_lrasd_selection(monkeypatc
     ) == "shared_analysis_proxy"
 
 
-def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
-    worker_cls = ClyptWorker._get_user_cls()
-
-    monkeypatch.delenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", raising=False)
-    monkeypatch.delenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", raising=False)
-    assert worker_cls._face_detector_input_size() == (960, 960)
-
-    monkeypatch.setenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", "960")
-    assert worker_cls._face_detector_input_size() == (960, 960)
-
-    monkeypatch.delenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", raising=False)
-    monkeypatch.setenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", "768")
-    assert worker_cls._face_detector_input_size() == (768, 768)
-
-
 def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path: Path):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
