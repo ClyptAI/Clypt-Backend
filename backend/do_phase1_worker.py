@@ -1470,6 +1470,42 @@ class ClyptWorker:
         return max(0, requested)
 
     @staticmethod
+    def _audio_diarization_config() -> dict:
+        """Return the env-driven pyannote diarization config surface."""
+        enabled_raw = os.getenv("CLYPT_AUDIO_DIARIZATION_ENABLE", "0").strip().lower()
+        model_name = os.getenv(
+            "CLYPT_AUDIO_DIARIZATION_MODEL",
+            "pyannote/speaker-diarization-community-1",
+        ).strip()
+        if not model_name:
+            model_name = "pyannote/speaker-diarization-community-1"
+        raw_min_segment_ms = os.getenv("CLYPT_AUDIO_DIARIZATION_MIN_SEGMENT_MS", "400").strip()
+        try:
+            min_segment_ms = int(raw_min_segment_ms)
+        except Exception:
+            min_segment_ms = 400
+        min_segment_ms = max(0, min_segment_ms)
+        return {
+            "enabled": enabled_raw in {"1", "true", "yes", "on"},
+            "model_name": model_name,
+            "min_segment_ms": min_segment_ms,
+            "min_segment_s": min_segment_ms / 1000.0,
+            "token_env_vars": ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN"),
+        }
+
+    @staticmethod
+    def _face_detector_input_size() -> tuple[int, int]:
+        raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", "").strip()
+        if not raw:
+            raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", "960").strip()
+        try:
+            requested = int(raw)
+        except Exception:
+            requested = 960
+        requested = max(256, requested)
+        return (requested, requested)
+
+    @staticmethod
     def _split_frame_items_into_segments(
         frame_to_dets: dict[int, list[dict]],
         segment_frames: int,
@@ -1894,7 +1930,9 @@ class ClyptWorker:
             frame_rgb = frame_map.get(frame_idx)
             if frame_rgb is None:
                 continue
-            detections = self._detect_faces_full_frame(frame_rgb)
+            detections = list(self._detect_faces_full_frame(frame_rgb))
+            assignments = self._associate_faces_to_person_dets(detections, dets)
+
             if not detections:
                 # retire stale tracks even on empty frames
                 stale_ids = [
@@ -1905,8 +1943,6 @@ class ClyptWorker:
                 for local_id in stale_ids:
                     active_tracks.pop(local_id, None)
                 continue
-
-            assignments = self._associate_faces_to_person_dets(detections, dets)
 
             active_candidates = [
                 (local_id, state)
@@ -2069,8 +2105,8 @@ class ClyptWorker:
             "bounding_box": bbox,
             "confidence": float(detection.get("det_score", 0.0)),
             "quality": float(detection.get("det_score", 0.0)),
-            "source": "face_detector",
-            "provenance": "scrfd_fullframe",
+            "source": str(detection.get("source", "face_detector")),
+            "provenance": str(detection.get("provenance", "scrfd_fullframe")),
             "associated_track_id": associated_track_id,
         }
 
@@ -2889,9 +2925,9 @@ class ClyptWorker:
         self._face_runtime_name = "buffalo_l"
         self._face_runtime_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
         self._face_runtime_ctx_id = 0 if torch.cuda.is_available() else -1
-        self._face_runtime_det_size = (640, 640)
+        self._face_runtime_det_size = self.__class__._face_detector_input_size()
         self._face_runtime_det_thresh = 0.15
-        self._face_detector_input_size = (640, 640)
+        self._face_detector_input_size = self.__class__._face_detector_input_size()
         self._face_model_root = os.path.expanduser("~/.insightface/models/buffalo_l")
         self._face_detector_model_file = os.path.join(self._face_model_root, "det_10g.onnx")
         self._face_recognizer_model_file = os.path.join(self._face_model_root, "w600k_r50.onnx")

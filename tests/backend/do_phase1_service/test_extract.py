@@ -287,6 +287,30 @@ def test_extract_job_applies_runtime_controls_to_local_extraction_env(tmp_path: 
     }
 
 
+def test_pyannote_config_defaults_and_env_overrides(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+
+    monkeypatch.delenv("CLYPT_AUDIO_DIARIZATION_ENABLE", raising=False)
+    monkeypatch.delenv("CLYPT_AUDIO_DIARIZATION_MODEL", raising=False)
+    monkeypatch.delenv("CLYPT_AUDIO_DIARIZATION_MIN_SEGMENT_MS", raising=False)
+
+    defaults = worker_cls._audio_diarization_config()
+    assert defaults["enabled"] is False
+    assert defaults["model_name"] == "pyannote/speaker-diarization-community-1"
+    assert defaults["min_segment_ms"] == 400
+    assert defaults["min_segment_s"] == 0.4
+
+    monkeypatch.setenv("CLYPT_AUDIO_DIARIZATION_ENABLE", "1")
+    monkeypatch.setenv("CLYPT_AUDIO_DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1")
+    monkeypatch.setenv("CLYPT_AUDIO_DIARIZATION_MIN_SEGMENT_MS", "900")
+
+    overrides = worker_cls._audio_diarization_config()
+    assert overrides["enabled"] is True
+    assert overrides["model_name"] == "pyannote/speaker-diarization-community-1"
+    assert overrides["min_segment_ms"] == 900
+    assert overrides["min_segment_s"] == 0.9
+
+
 def test_extract_job_isolates_phase1_pipeline_workspace_per_job(tmp_path: Path, monkeypatch):
     original_download_dir = phase1_pipeline.DOWNLOAD_DIR
     original_output_dir = phase1_pipeline.OUTPUT_DIR
@@ -832,6 +856,21 @@ def test_shared_analysis_proxy_can_drive_tracking_and_lrasd_selection(monkeypatc
         tracks=[{"track_id": "track-1"}],
         words=[{"start_time_ms": 0, "end_time_ms": 100}],
     ) == "shared_analysis_proxy"
+
+
+def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+
+    monkeypatch.delenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", raising=False)
+    monkeypatch.delenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", raising=False)
+    assert worker_cls._face_detector_input_size() == (960, 960)
+
+    monkeypatch.setenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", "960")
+    assert worker_cls._face_detector_input_size() == (960, 960)
+
+    monkeypatch.delenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", raising=False)
+    monkeypatch.setenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", "768")
+    assert worker_cls._face_detector_input_size() == (768, 768)
 
 
 def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path: Path):

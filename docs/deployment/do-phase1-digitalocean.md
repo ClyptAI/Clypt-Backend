@@ -111,8 +111,10 @@ Recommended starting values:
 - `CLYPT_SPEAKER_BINDING_MODE=auto`
 - `CLYPT_TRACKING_MODE=auto`
 - `CLYPT_TRACK_CHUNK_WORKERS=1`
+- `CLYPT_ANALYSIS_PROXY_ENABLE=1`
+- `CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE=1920`
 - `CLYPT_SPEAKER_BINDING_PROXY_ENABLE=1`
-- `CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE=1280`
+- `CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE=1920`
 - `CLYPT_ASD_PRECOMPUTED_FACE=1`
 - `CLYPT_ASD_FACE_FPS=1.0`
 - `CLYPT_ASD_PRECOMPUTED_MIN_COVERAGE=0.80`
@@ -120,11 +122,24 @@ Recommended starting values:
 - `CLYPT_LRASD_PIPELINE_OVERLAP=1`
 - `CLYPT_LRASD_MAX_INFLIGHT=4`
 
+Pyannote diarization is available but stays off until we turn it on explicitly:
+- `CLYPT_AUDIO_DIARIZATION_ENABLE=0`
+- `CLYPT_AUDIO_DIARIZATION_MODEL=pyannote/speaker-diarization-community-1`
+- `CLYPT_AUDIO_DIARIZATION_MIN_SEGMENT_MS=400`
+
+When you enable diarization, set a Hugging Face token in the droplet environment:
+- `HF_TOKEN` is the preferred variable
+- `HUGGINGFACE_HUB_TOKEN` is also commonly accepted by Hugging Face tooling
+- The token needs access to the pyannote model and will be used when the worker first downloads the diarization pipeline
+
+The first diarization-enabled boot will cache the model on the droplet, so plan for the extra download time and disk usage.
+
 Why these defaults:
 - `DO_PHASE1_WORKER_CONCURRENCY=3` allows multiple jobs to be claimed and managed concurrently.
 - `DO_PHASE1_GPU_SLOTS=1` keeps the GPU-heavy extraction section serialized until higher overlap is validated.
 - `CLYPT_TRACKING_MODE=auto` lets the worker choose between direct and chunked tracking.
 - `CLYPT_SPEAKER_BINDING_MODE=auto` keeps LR-ASD for manageable clips while allowing fallback behavior on larger jobs.
+- `CLYPT_ANALYSIS_PROXY_ENABLE=1` and `CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE=1920` keep tracking, face analysis, and LR-ASD on the same shared 1080p proxy instead of the full-resolution source.
 
 ## Deploy the Service
 
