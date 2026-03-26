@@ -6360,6 +6360,15 @@ class ClyptWorker:
         strong_visual_margin_threshold = max(0.08, min(0.18, 10.0 * min_assignment_margin))
         strong_visual_prob_threshold = max(0.32, min_lrasd_prob + 0.12)
 
+        def _second_best_total_for_local_track(
+            candidates: list[dict],
+            winning_local_tid: str,
+        ) -> float | None:
+            for candidate in candidates[1:]:
+                if str(candidate.get("local_tid", "")) != winning_local_tid:
+                    return float(candidate["total"])
+            return None
+
         for row in word_candidate_rows:
             w = row["word"]
             scored_candidates = [dict(candidate) for candidate in row["scored_candidates"]]
@@ -6371,11 +6380,10 @@ class ClyptWorker:
             best_total = float(best_candidate["total"])
             best_prob = best_candidate["prob"]
             best_body = float(best_candidate["body_prior"])
-            second_total = None
-            for candidate in scored_candidates[1:]:
-                if str(candidate["track_id"]) != str(best_candidate["track_id"]):
-                    second_total = float(candidate["total"])
-                    break
+            second_total = _second_best_total_for_local_track(
+                scored_candidates,
+                str(best_candidate.get("local_tid", "")),
+            )
             visual_margin = (
                 float(best_total)
                 if second_total is None
@@ -6435,11 +6443,10 @@ class ClyptWorker:
             best_prob = best_candidate["prob"]
             best_tid = str(best_candidate["track_id"])
             best_body = float(best_candidate["body_prior"])
-            second_total = None
-            for candidate in scored_candidates[1:]:
-                if str(candidate["track_id"]) != best_tid:
-                    second_total = float(candidate["total"])
-                    break
+            second_total = _second_best_total_for_local_track(
+                scored_candidates,
+                str(best_candidate.get("local_tid", "")),
+            )
             if best_prob is not None:
                 confident_pick = bool(
                     float(best_prob) >= min_lrasd_prob

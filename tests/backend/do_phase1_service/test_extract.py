@@ -1698,6 +1698,66 @@ def test_run_lrasd_binding_uses_audio_speaker_prior_when_visual_margin_is_small(
     assert bindings[0]["track_id"] == "listener_local"
 
 
+def test_run_lrasd_binding_uses_audio_prior_when_local_tracks_share_global_id(monkeypatch, tmp_path: Path):
+    _, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker_local_a": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 72.0,
+                "height": 148.0,
+                "confidence": 0.88,
+                "intensity": 210,
+            },
+            "speaker_local_b": {
+                "x_center": 222.0,
+                "y_center": 104.0,
+                "width": 70.0,
+                "height": 146.0,
+                "confidence": 0.87,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "speaker_local_a": 0.180,
+            "speaker_local_b": 0.172,
+        },
+        words=[
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+        track_id_remap={
+            "speaker_local_a": "Global_Person_0",
+            "speaker_local_b": "Global_Person_0",
+        },
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "speaker_local_b",
+                "ambiguous": False,
+                "winning_score": 0.92,
+                "winning_margin": 0.32,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_track_id"] == "Global_Person_0"
+    assert words[0]["speaker_local_track_id"] == "speaker_local_b"
+    assert bindings[0]["track_id"] == "Global_Person_0"
+
+
 def test_run_lrasd_binding_does_not_override_clear_visual_winner_with_audio_prior(monkeypatch, tmp_path: Path):
     _, words, bindings = _run_fake_lrasd_binding_case(
         monkeypatch,
@@ -2005,6 +2065,7 @@ def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
         ),
     )
     monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [{"track_id": "track-1"}])
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
 
     result = worker._finalize_from_words_tracks(
         video_path="video.mp4",
@@ -2078,6 +2139,7 @@ def test_finalize_passes_track_identity_features_to_clustering_and_ledgers(monke
     monkeypatch.setattr(worker, "_cluster_tracklets", fake_cluster_tracklets)
     monkeypatch.setattr(worker, "_build_visual_detection_ledgers", fake_build_visual_detection_ledgers)
     monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [])
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
 
     identity_features = {
         "track-1": {
@@ -2180,6 +2242,7 @@ def test_finalize_emits_speaker_follow_bindings(monkeypatch):
             {"track_id": "track-1", "start_time_ms": 3300, "end_time_ms": 6000, "word_count": 11},
         ],
     )
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
 
     result = worker._finalize_from_words_tracks(
         video_path="video.mp4",
@@ -2233,6 +2296,7 @@ def test_finalize_runs_speaker_binding_on_precluster_tracks_and_maps_to_globals(
         return tracks
 
     monkeypatch.setattr(worker, "_cluster_tracklets", _fake_cluster)
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
 
     def _fake_run_speaker_binding(
         video_path,
@@ -2314,6 +2378,7 @@ def test_finalize_emits_local_speaker_bindings_when_experiment_enabled(monkeypat
         return tracks
 
     monkeypatch.setattr(worker, "_cluster_tracklets", _fake_cluster)
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
 
     def _fake_run_speaker_binding(
         video_path,
