@@ -1306,6 +1306,8 @@ class ClyptWorker:
 
             weighted_score_ms_by_track: dict[str, float] = defaultdict(float)
             support_ms_by_track: dict[str, int] = defaultdict(int)
+            clean_weighted_score_ms_by_track: dict[str, float] = defaultdict(float)
+            clean_support_ms_by_track: dict[str, int] = defaultdict(int)
             overlapping_evidence: list[dict] = []
             slice_boundaries_ms = {start_time_ms, end_time_ms}
             max_visible_candidates = 0
@@ -1336,15 +1338,18 @@ class ClyptWorker:
                         continue
                     for candidate in evidence["candidates"]:
                         active_by_track[str(candidate["local_track_id"])].append(float(candidate["score"]))
-                max_visible_candidates = max(max_visible_candidates, len(active_by_track))
+                visible_candidate_count = len(active_by_track)
+                max_visible_candidates = max(max_visible_candidates, visible_candidate_count)
 
                 for local_track_id, active_scores in active_by_track.items():
                     if not active_scores:
                         continue
-                    weighted_score_ms_by_track[local_track_id] += (
-                        (sum(active_scores) / len(active_scores)) * slice_duration_ms
-                    )
+                    avg_score = (sum(active_scores) / len(active_scores))
+                    weighted_score_ms_by_track[local_track_id] += (avg_score * slice_duration_ms)
                     support_ms_by_track[local_track_id] += slice_duration_ms
+                    if visible_candidate_count <= 2:
+                        clean_weighted_score_ms_by_track[local_track_id] += (avg_score * slice_duration_ms)
+                        clean_support_ms_by_track[local_track_id] += slice_duration_ms
 
             binding = {
                 "speaker_id": str(turn.get("speaker_id", "") or ""),
@@ -1391,6 +1396,47 @@ class ClyptWorker:
             binding["winning_score"] = float(best_score)
             binding["winning_margin"] = float(winning_margin)
             binding["support_ratio"] = float(best_support_ratio)
+            crowded_turn = max_visible_candidates > 2
+            clean_support_ms = int(clean_support_ms_by_track.get(best_local_track_id, 0))
+            if crowded_turn and clean_support_ms > 0:
+                clean_ranked = sorted(
+                    (
+                        (
+                            float(clean_weighted_score_ms_by_track[local_track_id] / clean_support_ms_by_track[local_track_id]),
+                            float(clean_support_ms_by_track[local_track_id] / turn_duration_ms),
+                            str(local_track_id),
+                        )
+                        for local_track_id in clean_support_ms_by_track.keys()
+                        if int(clean_support_ms_by_track[local_track_id]) > 0
+                    ),
+                    key=lambda item: (item[0], item[1], item[2]),
+                    reverse=True,
+                )
+                clean_best_score = next(
+                    (
+                        score
+                        for score, _clean_support_ratio, local_track_id in clean_ranked
+                        if local_track_id == best_local_track_id
+                    ),
+                    None,
+                )
+                clean_second_score = next(
+                    (
+                        score
+                        for score, _clean_support_ratio, local_track_id in clean_ranked
+                        if local_track_id != best_local_track_id
+                    ),
+                    None,
+                )
+                if clean_best_score is not None:
+                    binding["clean_support_ms"] = clean_support_ms
+                    binding["clean_support_ratio"] = float(clean_support_ms / turn_duration_ms)
+                    binding["clean_winning_score"] = float(clean_best_score)
+                    binding["clean_winning_margin"] = (
+                        float(clean_best_score)
+                        if clean_second_score is None
+                        else float(clean_best_score - clean_second_score)
+                    )
 
             if (
                 second_score is not None
@@ -1450,20 +1496,33 @@ class ClyptWorker:
             local_track_id = str(binding.get("local_track_id", "") or "")
             if not speaker_id or not local_track_id or bool(binding.get("ambiguous", False)):
                 continue
-            if _as_int(binding.get("max_visible_candidates"), default=0) > 2:
-                continue
 
             start_time_ms = _as_int(binding.get("start_time_ms"), default=0)
             end_time_ms = _as_int(binding.get("end_time_ms"), default=start_time_ms)
             if end_time_ms < start_time_ms:
                 start_time_ms, end_time_ms = end_time_ms, start_time_ms
-            duration_ms = end_time_ms - start_time_ms
+            full_duration_ms = end_time_ms - start_time_ms
+            if full_duration_ms <= 0:
+                continue
+
+            crowded_turn = _as_int(binding.get("max_visible_candidates"), default=0) > 2
+            duration_ms = (
+                _as_int(binding.get("clean_support_ms"), default=0)
+                if crowded_turn
+                else full_duration_ms
+            )
             if duration_ms <= 0:
                 continue
 
-            winning_score = _as_float(binding.get("winning_score"))
-            winning_margin = _as_float(binding.get("winning_margin"))
-            support_ratio = _as_float(binding.get("support_ratio"))
+            winning_score = _as_float(
+                binding.get("clean_winning_score") if crowded_turn else binding.get("winning_score")
+            )
+            winning_margin = _as_float(
+                binding.get("clean_winning_margin") if crowded_turn else binding.get("winning_margin")
+            )
+            support_ratio = _as_float(
+                binding.get("clean_support_ratio") if crowded_turn else binding.get("support_ratio")
+            )
             if (
                 winning_score is None
                 or winning_margin is None
