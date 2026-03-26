@@ -21,7 +21,7 @@ omegaconf>=2.3.0
 insightface>=0.7.3
 onnxruntime-gpu==1.23.2
 nemo-toolkit[asr]>=2.4.0
-pyannote.audio==4.0.4  # conservative explicit pin matching community-1-era pyannote 4.0
+pyannote.audio==3.3.2  # conservative 3.x pin compatible with speaker-diarization-3.1 on the current torch stack
 scipy>=1.15.0
 scikit-learn>=1.7.0
 python-speech-features>=0.6

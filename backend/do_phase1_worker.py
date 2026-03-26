@@ -1475,10 +1475,10 @@ class ClyptWorker:
         enabled_raw = os.getenv("CLYPT_AUDIO_DIARIZATION_ENABLE", "0").strip().lower()
         model_name = os.getenv(
             "CLYPT_AUDIO_DIARIZATION_MODEL",
-            "pyannote/speaker-diarization-community-1",
+            "pyannote/speaker-diarization-3.1",
         ).strip()
         if not model_name:
-            model_name = "pyannote/speaker-diarization-community-1"
+            model_name = "pyannote/speaker-diarization-3.1"
         raw_min_segment_ms = os.getenv("CLYPT_AUDIO_DIARIZATION_MIN_SEGMENT_MS", "400").strip()
         try:
             min_segment_ms = int(raw_min_segment_ms)
@@ -1492,6 +1492,18 @@ class ClyptWorker:
             "min_segment_s": min_segment_ms / 1000.0,
             "token_env_vars": ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN"),
         }
+
+    @staticmethod
+    def _face_detector_input_size() -> tuple[int, int]:
+        raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", "").strip()
+        if not raw:
+            raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", "960").strip()
+        try:
+            requested = int(raw)
+        except Exception:
+            requested = 960
+        requested = max(256, requested)
+        return (requested, requested)
 
     @staticmethod
     def _split_frame_items_into_segments(

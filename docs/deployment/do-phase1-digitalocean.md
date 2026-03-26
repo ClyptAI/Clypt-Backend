@@ -122,13 +122,14 @@ Recommended starting values:
 
 Pyannote diarization is available but stays off until we turn it on explicitly:
 - `CLYPT_AUDIO_DIARIZATION_ENABLE=0`
-- `CLYPT_AUDIO_DIARIZATION_MODEL=pyannote/speaker-diarization-community-1`
+- `CLYPT_AUDIO_DIARIZATION_MODEL=pyannote/speaker-diarization-3.1`
 - `CLYPT_AUDIO_DIARIZATION_MIN_SEGMENT_MS=400`
 
 When you enable diarization, set a Hugging Face token in the droplet environment:
 - `HF_TOKEN` is the preferred variable
 - `HUGGINGFACE_HUB_TOKEN` is also commonly accepted by Hugging Face tooling
 - The token needs access to the pyannote model and will be used when the worker first downloads the diarization pipeline
+- `community-1` is deferred until we move to the later pyannote 4.x / newer torch stack
 
 The first diarization-enabled boot will cache the model on the droplet, so plan for the extra download time and disk usage.
 
