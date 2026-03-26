@@ -1308,6 +1308,7 @@ class ClyptWorker:
             support_ms_by_track: dict[str, int] = defaultdict(int)
             overlapping_evidence: list[dict] = []
             slice_boundaries_ms = {start_time_ms, end_time_ms}
+            max_visible_candidates = 0
 
             for evidence in normalized_evidence:
                 overlap_start_ms = max(start_time_ms, int(evidence["start_time_ms"]))
@@ -1335,6 +1336,7 @@ class ClyptWorker:
                         continue
                     for candidate in evidence["candidates"]:
                         active_by_track[str(candidate["local_track_id"])].append(float(candidate["score"]))
+                max_visible_candidates = max(max_visible_candidates, len(active_by_track))
 
                 for local_track_id, active_scores in active_by_track.items():
                     if not active_scores:
@@ -1354,6 +1356,8 @@ class ClyptWorker:
                 "winning_margin": None,
                 "support_ratio": 0.0,
             }
+            if max_visible_candidates > 2:
+                binding["max_visible_candidates"] = int(max_visible_candidates)
             if not weighted_score_ms_by_track:
                 bindings.append(binding)
                 continue
@@ -1445,6 +1449,8 @@ class ClyptWorker:
             speaker_id = str(binding.get("speaker_id", "") or "")
             local_track_id = str(binding.get("local_track_id", "") or "")
             if not speaker_id or not local_track_id or bool(binding.get("ambiguous", False)):
+                continue
+            if _as_int(binding.get("max_visible_candidates"), default=0) > 2:
                 continue
 
             start_time_ms = _as_int(binding.get("start_time_ms"), default=0)

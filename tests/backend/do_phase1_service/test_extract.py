@@ -795,6 +795,40 @@ def test_audio_speaker_local_track_map_drops_unclear_shared_local_track_ownershi
     assert mapping == []
 
 
+def test_audio_speaker_local_track_map_ignores_crowded_three_candidate_windows():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    mapping = worker._build_audio_speaker_local_track_map(
+        [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 900,
+                "local_track_id": "track_3",
+                "ambiguous": False,
+                "winning_score": 0.93,
+                "winning_margin": 0.28,
+                "support_ratio": 0.96,
+                "max_visible_candidates": 3,
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 1100,
+                "end_time_ms": 2100,
+                "local_track_id": "track_3",
+                "ambiguous": False,
+                "winning_score": 0.89,
+                "winning_margin": 0.24,
+                "support_ratio": 0.91,
+                "max_visible_candidates": 3,
+            },
+        ]
+    )
+
+    assert mapping == []
+
+
 def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
 
