@@ -6180,24 +6180,41 @@ class ClyptWorker:
                 motion = (0.45 * dx + 0.8 * dy + 1.1 * dh) / h
                 motion_score[(str(tid), int(cur.get("frame_idx", -1)))] = float(motion)
 
+        audio_turn_bindings: list[dict] = []
+        raw_audio_turns = self._serialize_audio_speaker_turns(
+            (analysis_context or {}).get("audio_speaker_turns")
+        )
+        audio_speaker_turns = [
+            turn
+            for turn in raw_audio_turns
+            if bool(turn.get("exclusive", not bool(turn.get("overlap", False))))
+        ]
+
+        def _clear_word_assignment(word: dict):
+            word["speaker_track_id"] = None
+            word["speaker_tag"] = "unknown"
+            word["speaker_local_track_id"] = None
+            word["speaker_local_tag"] = "unknown"
+
         assigned = 0
+        audio_prior_abstentions = 0
         words_with_frame = 0
         words_with_dets = 0
         words_with_scored_candidate = 0
+        local_candidate_evidence: list[dict] = []
+        word_candidate_rows: list[dict] = []
         for w in words:
             mid_ms = (int(w["start_time_ms"]) + int(w["end_time_ms"])) // 2
             target_fi = int(round((mid_ms / 1000.0) * fps))
             fi = _nearest_frame_idx(target_fi, max_gap=word_match_max_gap)
             if fi is None:
-                w["speaker_track_id"] = None
-                w["speaker_tag"] = "unknown"
+                _clear_word_assignment(w)
                 continue
             words_with_frame += 1
 
             dets = frame_to_dets.get(fi, [])
             if not dets:
-                w["speaker_track_id"] = None
-                w["speaker_tag"] = "unknown"
+                _clear_word_assignment(w)
                 continue
             words_with_dets += 1
 
@@ -6281,37 +6298,155 @@ class ClyptWorker:
                 ),
                 reverse=True,
             )
-            if scored_candidates:
-                best_candidate = scored_candidates[0]
-                best_total = float(best_candidate["total"])
-                best_prob = best_candidate["prob"]
-                best_tid = str(best_candidate["track_id"])
-                best_body = float(best_candidate["body_prior"])
-                second_total = None
-                for candidate in scored_candidates[1:]:
-                    if str(candidate["track_id"]) != best_tid:
-                        second_total = float(candidate["total"])
-                        break
-                if best_prob is not None:
-                    confident_pick = bool(
-                        float(best_prob) >= min_lrasd_prob
-                        and (
-                            second_total is None
-                            or (best_total - second_total) >= min_assignment_margin
-                            or best_body >= 0.80
-                        )
+            local_candidate_evidence.append(
+                {
+                    "start_time_ms": int(w["start_time_ms"]),
+                    "end_time_ms": int(w["end_time_ms"]),
+                    "candidates": [dict(candidate) for candidate in scored_candidates],
+                }
+            )
+            word_candidate_rows.append(
+                {
+                    "word": w,
+                    "scored_candidates": [dict(candidate) for candidate in scored_candidates],
+                }
+            )
+
+        if audio_speaker_turns and local_candidate_evidence:
+            audio_turn_bindings = self._bind_audio_turns_to_local_tracks(
+                audio_speaker_turns,
+                local_candidate_evidence,
+            )
+
+        def _active_audio_turn_binding(word: dict) -> dict | None:
+            if not audio_turn_bindings:
+                return None
+            word_start_ms = int(word.get("start_time_ms", 0) or 0)
+            word_end_ms = int(word.get("end_time_ms", word_start_ms) or word_start_ms)
+            if word_end_ms < word_start_ms:
+                word_start_ms, word_end_ms = word_end_ms, word_start_ms
+            word_mid_ms = (word_start_ms + word_end_ms) // 2
+            best_binding = None
+            best_overlap_ms = 0
+            for binding in audio_turn_bindings:
+                local_track_id = binding.get("local_track_id")
+                if local_track_id in (None, "") or bool(binding.get("ambiguous", False)):
+                    continue
+                binding_start_ms = int(binding.get("start_time_ms", 0) or 0)
+                binding_end_ms = int(binding.get("end_time_ms", binding_start_ms) or binding_start_ms)
+                if binding_end_ms < binding_start_ms:
+                    binding_start_ms, binding_end_ms = binding_end_ms, binding_start_ms
+                if binding_start_ms <= word_mid_ms <= binding_end_ms:
+                    return binding
+                overlap_ms = min(word_end_ms, binding_end_ms) - max(word_start_ms, binding_start_ms)
+                if overlap_ms > best_overlap_ms:
+                    best_overlap_ms = overlap_ms
+                    best_binding = binding
+            return best_binding if best_overlap_ms > 0 else None
+
+        audio_prior_bonus = max(0.02, min(0.06, 4.0 * min_assignment_margin))
+        audio_prior_margin_threshold = max(0.02, min(0.08, 6.0 * min_assignment_margin))
+        strong_visual_margin_threshold = max(0.08, min(0.18, 10.0 * min_assignment_margin))
+        strong_visual_prob_threshold = max(0.32, min_lrasd_prob + 0.12)
+
+        for row in word_candidate_rows:
+            w = row["word"]
+            scored_candidates = [dict(candidate) for candidate in row["scored_candidates"]]
+            if not scored_candidates:
+                _clear_word_assignment(w)
+                continue
+
+            best_candidate = scored_candidates[0]
+            best_total = float(best_candidate["total"])
+            best_prob = best_candidate["prob"]
+            best_body = float(best_candidate["body_prior"])
+            second_total = None
+            for candidate in scored_candidates[1:]:
+                if str(candidate["track_id"]) != str(best_candidate["track_id"]):
+                    second_total = float(candidate["total"])
+                    break
+            visual_margin = (
+                float(best_total)
+                if second_total is None
+                else float(best_total - second_total)
+            )
+            strong_visual_winner = bool(
+                best_prob is not None
+                and float(best_prob) >= strong_visual_prob_threshold
+                and (
+                    second_total is None
+                    or visual_margin >= strong_visual_margin_threshold
+                    or best_body >= 0.80
+                )
+            )
+
+            active_turn_binding = _active_audio_turn_binding(w)
+            audio_prior_applied = False
+            if active_turn_binding is not None and not strong_visual_winner:
+                prior_local_tid = str(active_turn_binding.get("local_track_id", "") or "")
+                prior_candidate = next(
+                    (
+                        candidate
+                        for candidate in scored_candidates
+                        if str(candidate.get("local_tid", "")) == prior_local_tid
+                    ),
+                    None,
+                )
+                if prior_candidate is None:
+                    audio_prior_abstentions += 1
+                    _clear_word_assignment(w)
+                    continue
+                if second_total is not None and visual_margin <= audio_prior_margin_threshold:
+                    prior_strength = max(
+                        0.0,
+                        min(
+                            1.0,
+                            float(active_turn_binding.get("support_ratio", 0.0) or 0.0)
+                            + float(active_turn_binding.get("winning_margin", 0.0) or 0.0),
+                        ),
                     )
-                else:
-                    confident_pick = bool(
-                        best_body >= min_body_fallback_score
-                        and (
-                            second_total is None
-                            or (best_total - second_total) >= (0.5 * min_assignment_margin)
-                        )
+                    prior_candidate["total"] = float(prior_candidate["total"]) + (
+                        audio_prior_bonus * prior_strength
                     )
+                    audio_prior_applied = True
+                    scored_candidates.sort(
+                        key=lambda item: (
+                            item["total"],
+                            item["prob"] if item["prob"] is not None else -1.0,
+                            item["body_prior"],
+                            item["confidence"],
+                        ),
+                        reverse=True,
+                    )
+
+            best_candidate = scored_candidates[0]
+            best_total = float(best_candidate["total"])
+            best_prob = best_candidate["prob"]
+            best_tid = str(best_candidate["track_id"])
+            best_body = float(best_candidate["body_prior"])
+            second_total = None
+            for candidate in scored_candidates[1:]:
+                if str(candidate["track_id"]) != best_tid:
+                    second_total = float(candidate["total"])
+                    break
+            if best_prob is not None:
+                confident_pick = bool(
+                    float(best_prob) >= min_lrasd_prob
+                    and (
+                        second_total is None
+                        or (best_total - second_total) >= min_assignment_margin
+                        or best_body >= 0.80
+                        or audio_prior_applied
+                    )
+                )
             else:
-                best_tid = None
-                confident_pick = False
+                confident_pick = bool(
+                    best_body >= min_body_fallback_score
+                    and (
+                        second_total is None
+                        or (best_total - second_total) >= (0.5 * min_assignment_margin)
+                    )
+                )
 
             if best_tid is not None and confident_pick:
                 w["speaker_track_id"] = best_tid
@@ -6320,10 +6455,7 @@ class ClyptWorker:
                 w["speaker_local_tag"] = str(best_candidate["local_tid"])
                 assigned += 1
             else:
-                w["speaker_track_id"] = None
-                w["speaker_tag"] = "unknown"
-                w["speaker_local_track_id"] = None
-                w["speaker_local_tag"] = "unknown"
+                _clear_word_assignment(w)
 
         # Smooth local flicker.
         seq = [w.get("speaker_track_id") for w in words]
@@ -6388,6 +6520,12 @@ class ClyptWorker:
         assigned_ratio = assigned / max(1, len(words))
         print(f"  LR-ASD assignment ratio: {assigned}/{len(words)}={assigned_ratio:.1%}")
         if assigned_ratio < min_lrasd_assign_ratio or len(scored_track_ids) < 2:
+            if audio_prior_abstentions > 0 and assigned == 0:
+                print(
+                    "  LR-ASD preserved unknown assignments for off-screen audio turns; "
+                    "skipping heuristic fallback."
+                )
+                return []
             print(
                 "  LR-ASD confidence too low for final binding "
                 f"(assigned_ratio={assigned_ratio:.1%}, scored_tracks={len(scored_track_ids)}); "
@@ -6859,7 +6997,10 @@ class ClyptWorker:
 
         # Step 4: Speaker binding
         print("[Phase 1] Step 4/4: Running speaker binding...")
+        audio_speaker_turns = self._run_audio_diarization(audio_path)
         speaker_binding_started_at = time.perf_counter()
+        binding_analysis_context = dict(analysis_context) if isinstance(analysis_context, dict) else {}
+        binding_analysis_context["audio_speaker_turns"] = audio_speaker_turns
         speaker_bindings = self._run_speaker_binding(
             video_path,
             audio_path,
@@ -6868,7 +7009,7 @@ class ClyptWorker:
             frame_to_dets=precluster_frame_to_dets,
             track_to_dets=precluster_track_to_dets,
             track_identity_features=track_identity_features,
-            analysis_context=analysis_context,
+            analysis_context=binding_analysis_context,
             track_id_remap=cluster_id_remap,
         )
         speaker_follow_bindings = self._build_speaker_follow_bindings(speaker_bindings)
@@ -6907,8 +7048,6 @@ class ClyptWorker:
             if any(str(t.get("geometry_type", "")) == "obb" for t in tracks)
             else PHASE1_GEOMETRY_TYPE
         )
-        audio_speaker_turns = self._run_audio_diarization(audio_path)
-
         phase_1_visual = {
             "source_video": youtube_url,
             "schema_version": PHASE1_SCHEMA_VERSION,

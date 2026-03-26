@@ -1371,6 +1371,8 @@ def _run_fake_lrasd_binding_case(
     score_by_track: dict[str, float],
     words: list[dict] | None = None,
     track_id_remap: dict[str, str] | None = None,
+    audio_speaker_turns: list[dict] | None = None,
+    audio_turn_bindings: list[dict] | None = None,
 ):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -1439,6 +1441,12 @@ def _run_fake_lrasd_binding_case(
 
     monkeypatch.setattr(wavfile_module, "read", lambda path: (16000, np.zeros(48000, dtype=np.int16)))
     monkeypatch.setattr(worker, "_build_canonical_face_bbox_lookup", lambda **kwargs: {})
+    if audio_turn_bindings is not None:
+        monkeypatch.setattr(
+            worker,
+            "_bind_audio_turns_to_local_tracks",
+            lambda turns, local_candidate_evidence, **kwargs: audio_turn_bindings,
+        )
 
     tracks = []
     for frame_idx in range(frame_count):
@@ -1525,6 +1533,7 @@ def _run_fake_lrasd_binding_case(
             "scale_x": 1.0,
             "scale_y": 1.0,
             "analysis_meta": {"width": frame_w, "height": frame_h, "fps": 30.0},
+            "audio_speaker_turns": audio_speaker_turns or [],
         },
         track_id_remap=track_id_remap,
     )
@@ -1632,6 +1641,163 @@ def test_run_lrasd_binding_preserves_local_track_id_when_global_remap_applies(mo
     assert words[0]["speaker_local_track_id"] == "lawyer_local"
     assert words[0]["speaker_local_tag"] == "lawyer_local"
     assert bindings[0]["track_id"] == "Global_Person_0"
+
+
+def test_run_lrasd_binding_uses_audio_speaker_prior_when_visual_margin_is_small(monkeypatch, tmp_path: Path):
+    _, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker_local": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 72.0,
+                "height": 148.0,
+                "confidence": 0.88,
+                "intensity": 210,
+            },
+            "listener_local": {
+                "x_center": 222.0,
+                "y_center": 104.0,
+                "width": 70.0,
+                "height": 146.0,
+                "confidence": 0.87,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "speaker_local": 0.180,
+            "listener_local": 0.172,
+        },
+        words=[
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "listener_local",
+                "ambiguous": False,
+                "winning_score": 0.92,
+                "winning_margin": 0.32,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_local_track_id"] == "listener_local"
+    assert bindings[0]["track_id"] == "listener_local"
+
+
+def test_run_lrasd_binding_does_not_override_clear_visual_winner_with_audio_prior(monkeypatch, tmp_path: Path):
+    _, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker_local": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 76.0,
+                "height": 152.0,
+                "confidence": 0.90,
+                "intensity": 210,
+            },
+            "listener_local": {
+                "x_center": 222.0,
+                "y_center": 104.0,
+                "width": 72.0,
+                "height": 148.0,
+                "confidence": 0.88,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "speaker_local": 0.82,
+            "listener_local": 0.26,
+        },
+        words=[
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "listener_local",
+                "ambiguous": False,
+                "winning_score": 0.94,
+                "winning_margin": 0.41,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_local_track_id"] == "speaker_local"
+    assert bindings[0]["track_id"] == "speaker_local"
+
+
+def test_run_lrasd_binding_keeps_unknown_for_off_screen_audio_turn(monkeypatch, tmp_path: Path):
+    _, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "listener_local": {
+                "x_center": 220.0,
+                "y_center": 104.0,
+                "width": 68.0,
+                "height": 142.0,
+                "confidence": 0.84,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "listener_local": 0.19,
+        },
+        words=[
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_02",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_02",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "offscreen_local",
+                "ambiguous": False,
+                "winning_score": 0.91,
+                "winning_margin": 0.35,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_track_id"] is None
+    assert words[0]["speaker_local_track_id"] is None
+    assert bindings == []
 
 
 def test_speaker_remap_collision_metrics_counts_multiple_locals_per_global():
