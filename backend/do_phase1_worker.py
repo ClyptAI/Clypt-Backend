@@ -1484,7 +1484,11 @@ class ClyptWorker:
             local_track_id = str(
                 binding.get("clean_local_track_id") if crowded_turn else binding.get("local_track_id")
             ) or ""
-            if not speaker_id or not local_track_id or bool(binding.get("ambiguous", False)):
+            if not speaker_id or not local_track_id:
+                continue
+            if bool(binding.get("ambiguous", False)) and not crowded_turn:
+                continue
+            if bool(binding.get("ambiguous", False)) and crowded_turn and not str(binding.get("clean_local_track_id") or ""):
                 continue
 
             start_time_ms = _as_int(binding.get("start_time_ms"), default=0)
