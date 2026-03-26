@@ -225,6 +225,38 @@ def test_manifest_accepts_local_clip_experiment_fields():
             "confidence": 0.86,
         }
     ]
+    payload["artifacts"]["transcript"]["speaker_candidate_debug"] = [
+        {
+            "word": "foundational",
+            "start_time_ms": 1040,
+            "end_time_ms": 1600,
+            "active_audio_speaker_id": "SPEAKER_00",
+            "active_audio_local_track_id": "track_1",
+            "chosen_track_id": "Global_Person_0",
+            "chosen_local_track_id": "track_1",
+            "decision_source": "audio_boosted_visual",
+            "ambiguous": False,
+            "top_1_top_2_margin": 0.081,
+            "candidates": [
+                {
+                    "local_track_id": "track_1",
+                    "track_id": "Global_Person_0",
+                    "blended_score": 0.301,
+                    "asd_probability": 0.18,
+                    "body_prior": 0.56,
+                    "detection_confidence": 0.99,
+                },
+                {
+                    "local_track_id": "track_8",
+                    "track_id": "Global_Person_1",
+                    "blended_score": 0.22,
+                    "asd_probability": 0.16,
+                    "body_prior": 0.44,
+                    "detection_confidence": 0.88,
+                },
+            ],
+        }
+    ]
     payload["artifacts"]["visual_tracking"]["tracks_local"] = [
         {
             **payload["artifacts"]["visual_tracking"]["tracks"][0],
@@ -242,6 +274,9 @@ def test_manifest_accepts_local_clip_experiment_fields():
     assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].speaker_id == "SPEAKER_00"
     assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].local_track_id == "track_1"
     assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].support_segments == 2
+    assert manifest.artifacts.transcript.speaker_candidate_debug[0].active_audio_speaker_id == "SPEAKER_00"
+    assert manifest.artifacts.transcript.speaker_candidate_debug[0].decision_source == "audio_boosted_visual"
+    assert manifest.artifacts.transcript.speaker_candidate_debug[0].candidates[0].local_track_id == "track_1"
     assert manifest.artifacts.visual_tracking.tracks_local[0].track_id == "track_1"
 
 
@@ -253,6 +288,24 @@ def test_manifest_rejects_unknown_audio_speaker_turn_fields():
             "start_time_ms": 0,
             "end_time_ms": 1500,
             "exclusive": True,
+            "unexpected_field": "not-allowed",
+        }
+    ]
+
+    with pytest.raises(ValidationError, match="unexpected_field"):
+        Phase1Manifest.model_validate(payload)
+
+
+def test_manifest_rejects_unknown_speaker_candidate_debug_fields():
+    payload = deepcopy(_legacy_manifest_payload())
+    payload["artifacts"]["transcript"]["speaker_candidate_debug"] = [
+        {
+            "word": "foundational",
+            "start_time_ms": 1040,
+            "end_time_ms": 1600,
+            "decision_source": "visual",
+            "ambiguous": False,
+            "candidates": [],
             "unexpected_field": "not-allowed",
         }
     ]

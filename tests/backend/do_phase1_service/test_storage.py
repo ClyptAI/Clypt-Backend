@@ -98,6 +98,38 @@ def test_manifest_persists_local_clip_experiment_fields(tmp_path: Path):
                     "confidence": 0.86,
                 }
             ],
+            "speaker_candidate_debug": [
+                {
+                    "word": "hello",
+                    "start_time_ms": 0,
+                    "end_time_ms": 100,
+                    "active_audio_speaker_id": "SPEAKER_00",
+                    "active_audio_local_track_id": "track_1",
+                    "chosen_track_id": "Global_Person_0",
+                    "chosen_local_track_id": "track_1",
+                    "decision_source": "audio_boosted_visual",
+                    "ambiguous": False,
+                    "top_1_top_2_margin": 0.081,
+                    "candidates": [
+                        {
+                            "local_track_id": "track_1",
+                            "track_id": "Global_Person_0",
+                            "blended_score": 0.301,
+                            "asd_probability": 0.18,
+                            "body_prior": 0.56,
+                            "detection_confidence": 0.99,
+                        },
+                        {
+                            "local_track_id": "track_9",
+                            "track_id": "Global_Person_1",
+                            "blended_score": 0.22,
+                            "asd_probability": 0.16,
+                            "body_prior": 0.44,
+                            "detection_confidence": 0.88,
+                        },
+                    ],
+                }
+            ],
         },
         phase_1_visual={
             "source_video": "https://youtube.com/watch?v=local",
@@ -153,6 +185,8 @@ def test_manifest_persists_local_clip_experiment_fields(tmp_path: Path):
     assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].speaker_id == "SPEAKER_00"
     assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].local_track_id == "track_1"
     assert manifest.artifacts.transcript.audio_speaker_local_track_map[0].support_ms == 1800
+    assert manifest.artifacts.transcript.speaker_candidate_debug[0].decision_source == "audio_boosted_visual"
+    assert manifest.artifacts.transcript.speaker_candidate_debug[0].candidates[0].local_track_id == "track_1"
     assert manifest.artifacts.visual_tracking.tracks_local[0].track_id == "track_1"
 
 
@@ -182,6 +216,52 @@ def test_manifest_persistence_rejects_unknown_audio_turn_fields(tmp_path: Path):
             },
             phase_1_visual={
                 "source_video": "https://youtube.com/watch?v=bad",
+                "schema_version": "2.0.0",
+                "task_type": "person_tracking",
+                "coordinate_space": "absolute_original_frame_xyxy",
+                "geometry_type": "aabb",
+                "class_taxonomy": {"0": "person"},
+                "tracking_metrics": {"schema_pass_rate": 1.0},
+                "tracks": [],
+                "face_detections": [],
+                "person_detections": [],
+                "label_detections": [],
+                "object_tracking": [],
+                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+                "video_metadata": {"width": 1920, "height": 1080, "fps": 30.0, "duration_ms": 1000},
+            },
+        )
+
+
+def test_manifest_persistence_rejects_unknown_speaker_candidate_debug_fields(tmp_path: Path):
+    storage = LocalGCSStorage(bucket="test-bucket", root_dir=tmp_path / "gcs")
+    canonical_video_uri = storage.upload_bytes(b"video", object_name="phase_1/jobs/job_790/source_video.mp4")
+
+    with pytest.raises(ValidationError, match="unexpected_field"):
+        persist_phase1_outputs(
+            storage=storage,
+            output_dir=tmp_path,
+            job_id="job_790",
+            source_url="https://youtube.com/watch?v=bad-debug",
+            canonical_video_uri=canonical_video_uri,
+            phase_1_audio={
+                "source_audio": "https://youtube.com/watch?v=bad-debug",
+                "words": [],
+                "speaker_bindings": [],
+                "speaker_candidate_debug": [
+                    {
+                        "word": "hello",
+                        "start_time_ms": 0,
+                        "end_time_ms": 100,
+                        "decision_source": "visual",
+                        "ambiguous": False,
+                        "candidates": [],
+                        "unexpected_field": True,
+                    }
+                ],
+            },
+            phase_1_visual={
+                "source_video": "https://youtube.com/watch?v=bad-debug",
                 "schema_version": "2.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",

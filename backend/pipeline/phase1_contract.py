@@ -207,6 +207,39 @@ class Phase1AudioSpeakerLocalTrackMapEntry(BaseModel):
     confidence: Confidence01
 
 
+class Phase1SpeakerCandidateDebugCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    local_track_id: str
+    track_id: str
+    blended_score: float
+    asd_probability: Confidence01 | None = None
+    body_prior: Confidence01 | None = None
+    detection_confidence: Confidence01 | None = None
+
+
+class Phase1SpeakerCandidateDebugEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    word: str | None = None
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+    active_audio_speaker_id: str | None = None
+    active_audio_local_track_id: str | None = None
+    chosen_track_id: str | None = None
+    chosen_local_track_id: str | None = None
+    decision_source: Literal["visual", "audio_boosted_visual", "unknown"]
+    ambiguous: bool
+    top_1_top_2_margin: float | None = None
+    candidates: list[Phase1SpeakerCandidateDebugCandidate] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("speaker candidate debug start_time_ms must be <= end_time_ms")
+        return self
+
+
 class Phase1TranscriptArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -219,6 +252,7 @@ class Phase1TranscriptArtifact(BaseModel):
     speaker_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
     speaker_follow_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
     audio_speaker_local_track_map: list[Phase1AudioSpeakerLocalTrackMapEntry] = Field(default_factory=list)
+    speaker_candidate_debug: list[Phase1SpeakerCandidateDebugEntry] = Field(default_factory=list)
 
 
 class Phase1VisualArtifact(BaseModel):

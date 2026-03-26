@@ -2119,6 +2119,92 @@ def test_run_lrasd_binding_uses_audio_prior_when_local_tracks_share_global_id(mo
     assert bindings[0]["track_id"] == "Global_Person_0"
 
 
+def test_run_lrasd_binding_persists_speaker_candidate_debug(monkeypatch, tmp_path: Path):
+    worker, words, _bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker_local": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 72.0,
+                "height": 148.0,
+                "confidence": 0.88,
+                "intensity": 210,
+            },
+            "listener_local": {
+                "x_center": 222.0,
+                "y_center": 104.0,
+                "width": 70.0,
+                "height": 146.0,
+                "confidence": 0.87,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "speaker_local": 0.180,
+            "listener_local": 0.172,
+        },
+        words=[
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "listener_local",
+                "ambiguous": False,
+                "winning_score": 0.92,
+                "winning_margin": 0.32,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_local_track_id"] == "listener_local"
+    assert worker._last_speaker_candidate_debug == [
+        {
+            "word": "hello",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "active_audio_speaker_id": "SPEAKER_00",
+            "active_audio_local_track_id": "listener_local",
+            "chosen_track_id": "listener_local",
+            "chosen_local_track_id": "listener_local",
+            "decision_source": "audio_boosted_visual",
+            "ambiguous": False,
+            "top_1_top_2_margin": pytest.approx(0.0, abs=0.1),
+            "candidates": [
+                {
+                    "local_track_id": "listener_local",
+                    "track_id": "listener_local",
+                    "blended_score": pytest.approx(0.0, abs=1.0),
+                    "asd_probability": pytest.approx(0.172, abs=0.001),
+                    "body_prior": pytest.approx(0.0, abs=1.0),
+                    "detection_confidence": pytest.approx(0.87, abs=0.001),
+                },
+                {
+                    "local_track_id": "speaker_local",
+                    "track_id": "speaker_local",
+                    "blended_score": pytest.approx(0.0, abs=1.0),
+                    "asd_probability": pytest.approx(0.18, abs=0.001),
+                    "body_prior": pytest.approx(0.0, abs=1.0),
+                    "detection_confidence": pytest.approx(0.88, abs=0.001),
+                },
+            ],
+        }
+    ]
+
+
 def test_run_lrasd_binding_does_not_override_clear_visual_winner_with_audio_prior(monkeypatch, tmp_path: Path):
     _, words, bindings = _run_fake_lrasd_binding_case(
         monkeypatch,

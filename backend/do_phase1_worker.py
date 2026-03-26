@@ -6423,6 +6423,7 @@ class ClyptWorker:
             for turn in raw_audio_turns
             if bool(turn.get("exclusive", not bool(turn.get("overlap", False))))
         ]
+        self._last_speaker_candidate_debug = []
 
         def _clear_word_assignment(word: dict):
             word["speaker_track_id"] = None
@@ -6562,6 +6563,29 @@ class ClyptWorker:
             )
         self._last_audio_turn_bindings = [dict(binding) for binding in audio_turn_bindings]
 
+        def _active_audio_turn(word: dict) -> dict | None:
+            if not audio_speaker_turns:
+                return None
+            word_start_ms = int(word.get("start_time_ms", 0) or 0)
+            word_end_ms = int(word.get("end_time_ms", word_start_ms) or word_start_ms)
+            if word_end_ms < word_start_ms:
+                word_start_ms, word_end_ms = word_end_ms, word_start_ms
+            word_mid_ms = (word_start_ms + word_end_ms) // 2
+            best_turn = None
+            best_overlap_ms = 0
+            for turn in audio_speaker_turns:
+                turn_start_ms = int(turn.get("start_time_ms", 0) or 0)
+                turn_end_ms = int(turn.get("end_time_ms", turn_start_ms) or turn_start_ms)
+                if turn_end_ms < turn_start_ms:
+                    turn_start_ms, turn_end_ms = turn_end_ms, turn_start_ms
+                if turn_start_ms <= word_mid_ms <= turn_end_ms:
+                    return turn
+                overlap_ms = min(word_end_ms, turn_end_ms) - max(word_start_ms, turn_start_ms)
+                if overlap_ms > best_overlap_ms:
+                    best_overlap_ms = overlap_ms
+                    best_turn = turn
+            return best_turn if best_overlap_ms > 0 else None
+
         def _active_audio_turn_binding(word: dict) -> dict | None:
             if not audio_turn_bindings:
                 return None
@@ -6602,10 +6626,41 @@ class ClyptWorker:
                     return float(candidate["total"])
             return None
 
+        speaker_candidate_debug: list[dict] = []
+
         for row in word_candidate_rows:
             w = row["word"]
             scored_candidates = [dict(candidate) for candidate in row["scored_candidates"]]
+            active_turn = _active_audio_turn(w)
+            active_turn_binding = _active_audio_turn_binding(w)
             if not scored_candidates:
+                speaker_candidate_debug.append(
+                    {
+                        "word": str(w.get("text") or w.get("word") or ""),
+                        "start_time_ms": int(w.get("start_time_ms", 0) or 0),
+                        "end_time_ms": int(w.get("end_time_ms", 0) or 0),
+                        "active_audio_speaker_id": (
+                            str(active_turn.get("speaker_id"))
+                            if isinstance(active_turn, dict) and active_turn.get("speaker_id") not in (None, "")
+                            else None
+                        ),
+                        "active_audio_local_track_id": (
+                            str(active_turn_binding.get("local_track_id"))
+                            if isinstance(active_turn_binding, dict)
+                            and active_turn_binding.get("local_track_id") not in (None, "")
+                            else None
+                        ),
+                        "chosen_track_id": None,
+                        "chosen_local_track_id": None,
+                        "decision_source": "unknown",
+                        "ambiguous": bool(
+                            isinstance(active_turn_binding, dict)
+                            and active_turn_binding.get("ambiguous", False)
+                        ),
+                        "top_1_top_2_margin": None,
+                        "candidates": [],
+                    }
+                )
                 _clear_word_assignment(w)
                 continue
 
@@ -6632,7 +6687,6 @@ class ClyptWorker:
                 )
             )
 
-            active_turn_binding = _active_audio_turn_binding(w)
             audio_prior_applied = False
             if active_turn_binding is not None and not strong_visual_winner:
                 prior_local_tid = str(active_turn_binding.get("local_track_id", "") or "")
@@ -6699,6 +6753,25 @@ class ClyptWorker:
                     )
                 )
 
+            top_margin = (
+                None
+                if second_total is None
+                else float(best_total - second_total)
+            )
+            decision_source = (
+                "audio_boosted_visual"
+                if audio_prior_applied and confident_pick
+                else "visual"
+                if confident_pick
+                else "unknown"
+            )
+            decision_ambiguous = bool(
+                isinstance(active_turn_binding, dict)
+                and active_turn_binding.get("ambiguous", False)
+            )
+            if not decision_ambiguous and not confident_pick and top_margin is not None:
+                decision_ambiguous = bool(top_margin < min_assignment_margin)
+
             if best_tid is not None and confident_pick:
                 w["speaker_track_id"] = best_tid
                 w["speaker_tag"] = best_tid
@@ -6707,6 +6780,61 @@ class ClyptWorker:
                 assigned += 1
             else:
                 _clear_word_assignment(w)
+
+            speaker_candidate_debug.append(
+                {
+                    "word": str(w.get("text") or w.get("word") or ""),
+                    "start_time_ms": int(w.get("start_time_ms", 0) or 0),
+                    "end_time_ms": int(w.get("end_time_ms", 0) or 0),
+                    "active_audio_speaker_id": (
+                        str(active_turn.get("speaker_id"))
+                        if isinstance(active_turn, dict) and active_turn.get("speaker_id") not in (None, "")
+                        else None
+                    ),
+                    "active_audio_local_track_id": (
+                        str(active_turn_binding.get("local_track_id"))
+                        if isinstance(active_turn_binding, dict)
+                        and active_turn_binding.get("local_track_id") not in (None, "")
+                        else None
+                    ),
+                    "chosen_track_id": str(best_tid) if confident_pick and best_tid not in (None, "") else None,
+                    "chosen_local_track_id": (
+                        str(best_candidate["local_tid"])
+                        if confident_pick and best_candidate.get("local_tid") not in (None, "")
+                        else None
+                    ),
+                    "decision_source": decision_source,
+                    "ambiguous": decision_ambiguous,
+                    "top_1_top_2_margin": top_margin,
+                    "candidates": [
+                        {
+                            "local_track_id": str(candidate.get("local_tid", "")),
+                            "track_id": str(candidate.get("track_id", "")),
+                            "blended_score": float(candidate["total"]),
+                            "asd_probability": (
+                                None
+                                if candidate.get("prob") is None
+                                else float(candidate["prob"])
+                            ),
+                            "body_prior": float(candidate["body_prior"]),
+                            "detection_confidence": float(candidate["confidence"]),
+                        }
+                        for candidate in scored_candidates[:3]
+                    ],
+                }
+            )
+
+        self._last_speaker_candidate_debug = [
+            {
+                **{
+                    key: value
+                    for key, value in entry.items()
+                    if key != "candidates"
+                },
+                "candidates": [dict(candidate) for candidate in entry.get("candidates", [])],
+            }
+            for entry in speaker_candidate_debug
+        ]
 
         # Smooth local flicker.
         seq = [w.get("speaker_track_id") for w in words]
@@ -7366,6 +7494,7 @@ class ClyptWorker:
             "words": words,
             "speaker_bindings": speaker_bindings,
             "audio_speaker_turns": audio_speaker_turns,
+            "speaker_candidate_debug": getattr(self, "_last_speaker_candidate_debug", []),
             "speaker_follow_bindings": speaker_follow_bindings,
         }
         if self._local_clip_bindings_enabled():
