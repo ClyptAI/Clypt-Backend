@@ -6649,6 +6649,14 @@ class ClyptWorker:
             ambiguous: bool,
             top_margin: float | None,
         ) -> None:
+            active_audio_local_track_id = None
+            if isinstance(debug_turn_binding, dict):
+                raw_debug_local_track_id = (
+                    debug_turn_binding.get("local_track_id")
+                    or debug_turn_binding.get("clean_local_track_id")
+                )
+                if raw_debug_local_track_id not in (None, ""):
+                    active_audio_local_track_id = str(raw_debug_local_track_id)
             speaker_candidate_debug.append(
                 {
                     "word": str(word.get("text") or word.get("word") or ""),
@@ -6659,12 +6667,7 @@ class ClyptWorker:
                         if isinstance(active_turn, dict) and active_turn.get("speaker_id") not in (None, "")
                         else None
                     ),
-                    "active_audio_local_track_id": (
-                        str(debug_turn_binding.get("local_track_id"))
-                        if isinstance(debug_turn_binding, dict)
-                        and debug_turn_binding.get("local_track_id") not in (None, "")
-                        else None
-                    ),
+                    "active_audio_local_track_id": active_audio_local_track_id,
                     "chosen_track_id": chosen_track_id,
                     "chosen_local_track_id": chosen_local_track_id,
                     "decision_source": decision_source,
