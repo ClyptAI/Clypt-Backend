@@ -373,6 +373,93 @@ def test_audio_diarization_serializes_optional_turn_metadata(monkeypatch):
     ]
 
 
+def test_finalize_from_words_tracks_persists_audio_speaker_turns(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    words = [
+        {
+            "word": "hello",
+            "start_time_ms": 0,
+            "end_time_ms": 900,
+            "speaker_track_id": None,
+            "speaker_tag": "unknown",
+            "speaker_local_track_id": None,
+            "speaker_local_tag": "unknown",
+        }
+    ]
+    tracks = [
+        {
+            "frame_idx": 0,
+            "local_frame_idx": 0,
+            "chunk_idx": 0,
+            "track_id": "track_1",
+            "local_track_id": 1,
+            "class_id": 0,
+            "label": "person",
+            "confidence": 0.99,
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 30.0,
+            "y2": 40.0,
+            "x_center": 20.0,
+            "y_center": 30.0,
+            "width": 20.0,
+            "height": 20.0,
+            "source": "test",
+            "geometry_type": "aabb",
+            "bbox_norm_xywh": {
+                "x_center": 0.1,
+                "y_center": 0.2,
+                "width": 0.3,
+                "height": 0.4,
+            },
+        }
+    ]
+    diarization_turns = [
+        {
+            "speaker_id": "SPEAKER_00",
+            "start_time_ms": 0,
+            "end_time_ms": 900,
+            "exclusive": True,
+            "confidence": 0.91,
+        }
+    ]
+
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda tracking_metrics: None)
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_cluster_tracklets", lambda *args, **kwargs: tracks)
+    monkeypatch.setattr(
+        worker,
+        "_build_visual_detection_ledgers",
+        lambda **kwargs: ([], [], {"schema_pass_rate": 1.0}),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding",
+        lambda *args, **kwargs: [
+            {"track_id": "track_1", "start_time_ms": 0, "end_time_ms": 900, "word_count": 1}
+        ],
+    )
+    monkeypatch.setattr(worker, "_build_speaker_follow_bindings", lambda bindings: list(bindings))
+    monkeypatch.setattr(worker, "_speaker_remap_collision_metrics", lambda words: {})
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: diarization_turns)
+    monkeypatch.setattr(worker, "_local_clip_bindings_enabled", lambda: False)
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=finalize",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={"schema_pass_rate": 1.0},
+    )
+
+    assert result["phase_1_audio"]["audio_speaker_turns"] == diarization_turns
+    assert result["phase_1a_audio"]["audio_speaker_turns"] == diarization_turns
+
+
 def test_audio_diarization_disabled_returns_no_turns(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
