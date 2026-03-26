@@ -994,6 +994,7 @@ def build_render_segment_debug_payload(
     src_w: int,
     src_h: int,
     frame_detection_index: dict[int, list[dict]] | None,
+    speaker_candidate_debug: list[dict] | None = None,
 ) -> dict:
     decision_frame_idx = int(round(float(segment.start_s) * float(fps)))
     frame_detections = frame_detection_index.get(decision_frame_idx, []) if frame_detection_index else []
@@ -1011,6 +1012,11 @@ def build_render_segment_debug_payload(
     payload = dict(segment.__dict__)
     payload["decision_frame_idx"] = decision_frame_idx
     payload["target_debug"] = targets
+    payload["hybrid_debug"] = summarize_hybrid_debug_for_interval(
+        clip_start_s=float(segment.start_s),
+        clip_end_s=float(segment.end_s),
+        speaker_candidate_debug=speaker_candidate_debug,
+    )
     return payload
 
 
@@ -1027,6 +1033,7 @@ def build_render_debug_sidecar_payload(
     src_w: int,
     src_h: int,
     frame_detection_index: dict[int, list[dict]] | None,
+    speaker_candidate_debug: list[dict] | None = None,
 ) -> dict:
     return {
         "clip_name": clip_name,
@@ -1042,6 +1049,7 @@ def build_render_debug_sidecar_payload(
                 src_w=src_w,
                 src_h=src_h,
                 frame_detection_index=frame_detection_index,
+                speaker_candidate_debug=speaker_candidate_debug,
             )
             for segment in segments
         ],
@@ -1386,6 +1394,7 @@ def choose_window_composition(
     bindings: list[dict],
     person_track_index: dict[str, list[Detection]],
     face_track_index: dict[str, list[Detection]],
+    speaker_candidate_debug: list[dict] | None = None,
 ) -> CompositionPlan:
     stats = _sample_window_track_stats(
         clip_start_s=clip_start_s,
@@ -1415,13 +1424,26 @@ def choose_window_composition(
     primary_share = primary.speech_ms / total_speech
     secondary_share = secondary.speech_ms / total_speech
     top2_share = primary_share + secondary_share
+    prefer_wider_hybrid = interval_prefers_wider_hybrid_behavior(
+        clip_start_s=float(clip_start_s),
+        clip_end_s=float(clip_end_s),
+        ordered_stats=ordered,
+        speaker_candidate_debug=speaker_candidate_debug,
+    )
+    primary_dominance_threshold = 0.90 if prefer_wider_hybrid else SINGLE_PERSON_MIN_DOMINANCE
+    secondary_share_threshold = 0.12 if prefer_wider_hybrid else TWO_SPEAKER_MIN_SECONDARY_SHARE
+    top2_share_threshold = 0.70 if prefer_wider_hybrid else TWO_SPEAKER_MIN_COMBINED_SHARE
 
-    if primary_share >= SINGLE_PERSON_MIN_DOMINANCE or secondary_share < TWO_SPEAKER_MIN_SECONDARY_SHARE or top2_share < TWO_SPEAKER_MIN_COMBINED_SHARE:
+    if (
+        primary_share >= primary_dominance_threshold
+        or secondary_share < secondary_share_threshold
+        or top2_share < top2_share_threshold
+    ):
         return CompositionPlan(mode="single_person", primary_track_id=primary.track_id, secondary_track_id=None)
 
     visible_enough = (
-        primary.visible_fraction >= TWO_SPEAKER_MIN_BOTH_VISIBLE_FRACTION
-        and secondary.visible_fraction >= TWO_SPEAKER_MIN_BOTH_VISIBLE_FRACTION
+        primary.visible_fraction >= (0.40 if prefer_wider_hybrid else TWO_SPEAKER_MIN_BOTH_VISIBLE_FRACTION)
+        and secondary.visible_fraction >= (0.40 if prefer_wider_hybrid else TWO_SPEAKER_MIN_BOTH_VISIBLE_FRACTION)
     )
     if not visible_enough:
         return CompositionPlan(mode="single_person", primary_track_id=primary.track_id, secondary_track_id=None)
@@ -2233,6 +2255,118 @@ def _bindings_for_interval(bindings: list[dict], clip_start_s: float, clip_end_s
     return selected
 
 
+def _speaker_candidate_debug_for_interval(
+    speaker_candidate_debug: list[dict] | None,
+    clip_start_s: float,
+    clip_end_s: float,
+) -> list[dict]:
+    selected: list[dict] = []
+    clip_start_ms = int(round(float(clip_start_s) * 1000.0))
+    clip_end_ms = int(round(float(clip_end_s) * 1000.0))
+    for entry in speaker_candidate_debug or []:
+        start_ms = int(entry.get("start_time_ms", 0) or 0)
+        end_ms = int(entry.get("end_time_ms", start_ms) or start_ms)
+        if end_ms <= clip_start_ms or start_ms >= clip_end_ms:
+            continue
+        selected.append(dict(entry))
+    return selected
+
+
+def summarize_hybrid_debug_for_interval(
+    *,
+    clip_start_s: float,
+    clip_end_s: float,
+    speaker_candidate_debug: list[dict] | None,
+) -> dict | None:
+    interval_entries = _speaker_candidate_debug_for_interval(
+        speaker_candidate_debug,
+        clip_start_s,
+        clip_end_s,
+    )
+    if not interval_entries:
+        return None
+
+    clip_start_ms = int(round(float(clip_start_s) * 1000.0))
+    clip_end_ms = int(round(float(clip_end_s) * 1000.0))
+
+    def _selection_key(entry: dict) -> tuple[int, int, int, int]:
+        start_ms = int(entry.get("start_time_ms", 0) or 0)
+        end_ms = int(entry.get("end_time_ms", start_ms) or start_ms)
+        overlap_ms = max(0, min(clip_end_ms, end_ms) - max(clip_start_ms, start_ms))
+        decision_source = str(entry.get("decision_source", "") or "")
+        return (
+            1 if bool(entry.get("ambiguous", False)) else 0,
+            1 if decision_source and decision_source != "unknown" else 0,
+            overlap_ms,
+            -start_ms,
+        )
+
+    representative = max(interval_entries, key=_selection_key)
+    candidate_track_ids: list[str] = []
+    candidate_local_track_ids: list[str] = []
+    for candidate in representative.get("candidates", []) or []:
+        track_id = str(candidate.get("track_id", "") or "")
+        local_track_id = str(candidate.get("local_track_id", "") or "")
+        if track_id and track_id not in candidate_track_ids:
+            candidate_track_ids.append(track_id)
+        if local_track_id and local_track_id not in candidate_local_track_ids:
+            candidate_local_track_ids.append(local_track_id)
+
+    decision_sources_seen: list[str] = []
+    for entry in interval_entries:
+        source = str(entry.get("decision_source", "unknown") or "unknown")
+        if source not in decision_sources_seen:
+            decision_sources_seen.append(source)
+
+    return {
+        "active_audio_speaker_id": representative.get("active_audio_speaker_id"),
+        "active_audio_local_track_id": representative.get("active_audio_local_track_id"),
+        "chosen_track_id": representative.get("chosen_track_id"),
+        "chosen_local_track_id": representative.get("chosen_local_track_id"),
+        "decision_source": str(representative.get("decision_source", "unknown") or "unknown"),
+        "ambiguous": any(bool(entry.get("ambiguous", False)) for entry in interval_entries),
+        "top_1_top_2_margin": representative.get("top_1_top_2_margin"),
+        "candidate_track_ids": candidate_track_ids,
+        "candidate_local_track_ids": candidate_local_track_ids,
+        "decision_sources_seen": decision_sources_seen,
+        "entry_count": len(interval_entries),
+    }
+
+
+def interval_prefers_wider_hybrid_behavior(
+    *,
+    clip_start_s: float,
+    clip_end_s: float,
+    ordered_stats: list[TrackWindowStats],
+    speaker_candidate_debug: list[dict] | None,
+) -> bool:
+    if len(ordered_stats) < 2:
+        return False
+
+    interval_entries = _speaker_candidate_debug_for_interval(
+        speaker_candidate_debug,
+        clip_start_s,
+        clip_end_s,
+    )
+    if not interval_entries:
+        return False
+
+    ambiguous_track_ids: set[str] = set()
+    for entry in interval_entries:
+        if not bool(entry.get("ambiguous", False)):
+            continue
+        for candidate in entry.get("candidates", []) or []:
+            track_id = str(candidate.get("track_id", "") or "")
+            if track_id:
+                ambiguous_track_ids.add(track_id)
+
+    if len(ambiguous_track_ids) < 2:
+        return False
+
+    top_two_ids = {ordered_stats[0].track_id, ordered_stats[1].track_id}
+    return top_two_ids.issubset(ambiguous_track_ids)
+
+
 def visible_track_ids_for_interval(
     *,
     clip_start_s: float,
@@ -2293,6 +2427,7 @@ def build_debug_hud_filters(
     follow_track_ids: list[str],
     raw_track_ids: list[str],
     face_track_ids: list[str],
+    hybrid_debug: dict | None = None,
 ) -> list[str]:
     lines = [
         f"mode={mode}",
@@ -2301,6 +2436,22 @@ def build_debug_hud_filters(
         f"raw={','.join(raw_track_ids) if raw_track_ids else 'none'}",
         f"faces={','.join(face_track_ids) if face_track_ids else 'none'}",
     ]
+    if hybrid_debug:
+        lines.extend(
+            [
+                f"audio_speaker={hybrid_debug.get('active_audio_speaker_id') or 'unknown'}",
+                f"decision={hybrid_debug.get('decision_source') or 'unknown'}",
+                f"ambiguous={'yes' if hybrid_debug.get('ambiguous') else 'no'}",
+                f"audio_local={hybrid_debug.get('active_audio_local_track_id') or 'unknown'}",
+                f"chosen_local={hybrid_debug.get('chosen_local_track_id') or 'unknown'}",
+                (
+                    "margin="
+                    f"{float(hybrid_debug.get('top_1_top_2_margin')):.3f}"
+                    if hybrid_debug.get("top_1_top_2_margin") not in (None, "")
+                    else "margin=unknown"
+                ),
+            ]
+        )
     filters: list[str] = []
     for idx, line in enumerate(lines):
         filters.append(
@@ -2415,14 +2566,21 @@ def build_debug_filters_for_segment(
     follow_bindings: list[dict],
     follow_track_ids: list[str],
     face_track_ids: list[str],
+    speaker_candidate_debug: list[dict] | None = None,
 ) -> list[str]:
     raw_track_ids = [str(binding.get("track_id", "")) for binding in raw_bindings if str(binding.get("track_id", ""))]
+    hybrid_debug = summarize_hybrid_debug_for_interval(
+        clip_start_s=clip_start_s,
+        clip_end_s=clip_end_s,
+        speaker_candidate_debug=speaker_candidate_debug,
+    )
     return build_debug_hud_filters(
         mode=segment_mode,
         binding_source=binding_source,
         follow_track_ids=follow_track_ids,
         raw_track_ids=raw_track_ids,
         face_track_ids=face_track_ids,
+        hybrid_debug=hybrid_debug,
     ) + build_debug_timeline_filters(
         clip_start_s=clip_start_s,
         clip_end_s=clip_end_s,
@@ -2443,6 +2601,7 @@ def main() -> None:
 
     visual = load_json(VISUAL_PATH)
     audio = load_json(AUDIO_PATH)
+    speaker_candidate_debug = list(audio.get("speaker_candidate_debug", []))
     tracks = list(visual.get("tracks", []))
     bindings, raw_bindings, follow_bindings, binding_source = select_binding_sets(audio)
     tracks, track_source = select_render_tracks(visual)
@@ -2496,6 +2655,7 @@ def main() -> None:
             bindings=bindings,
             person_track_index=person_track_index,
             face_track_index=face_track_index,
+            speaker_candidate_debug=speaker_candidate_debug,
         )
         if composition.mode == "two_split" and composition.primary_track_id and composition.secondary_track_id:
             split_profile = motion_profile_for_composition("two_split", out_h=SPLIT_PANEL_HEIGHT)
@@ -2611,6 +2771,7 @@ def main() -> None:
                                 follow_bindings=clip_follow_bindings,
                                 follow_track_ids=[tid for tid in segment_follow_track_ids if tid],
                                 face_track_ids=visible_face_ids,
+                                speaker_candidate_debug=speaker_candidate_debug,
                             )
                             if upper_overlay is not None:
                                 upper_overlay_paths = [OverlayPath(**{**upper_overlay.__dict__, "label": segment.primary_track_id})]
@@ -2706,6 +2867,7 @@ def main() -> None:
                                 follow_bindings=clip_follow_bindings,
                                 follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
                                 face_track_ids=visible_face_ids,
+                                speaker_candidate_debug=speaker_candidate_debug,
                             )
                         render_clip(
                             video_path=VIDEO_PATH,
@@ -2734,6 +2896,7 @@ def main() -> None:
                     src_w=src_w,
                     src_h=src_h,
                     frame_detection_index=frame_detection_index,
+                    speaker_candidate_debug=speaker_candidate_debug,
                 ),
             )
         elif composition.mode == "two_shared" and composition.primary_track_id and composition.secondary_track_id:
@@ -2824,6 +2987,7 @@ def main() -> None:
                     follow_bindings=clip_follow_bindings,
                     follow_track_ids=[composition.primary_track_id, composition.secondary_track_id],
                     face_track_ids=visible_face_ids,
+                    speaker_candidate_debug=speaker_candidate_debug,
                 )
             print(
                 f"  clip{idx}: {start_s}s-{end_s}s score={score:.2f} "
@@ -2863,6 +3027,7 @@ def main() -> None:
                     src_w=src_w,
                     src_h=src_h,
                     frame_detection_index=frame_detection_index,
+                    speaker_candidate_debug=speaker_candidate_debug,
                 ),
             )
         else:
@@ -2953,6 +3118,7 @@ def main() -> None:
                             follow_bindings=clip_follow_bindings,
                             follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
                             face_track_ids=visible_face_ids,
+                            speaker_candidate_debug=speaker_candidate_debug,
                         )
                     render_clip(
                         video_path=VIDEO_PATH,
@@ -2981,6 +3147,7 @@ def main() -> None:
                     src_w=src_w,
                     src_h=src_h,
                     frame_detection_index=frame_detection_index,
+                    speaker_candidate_debug=speaker_candidate_debug,
                 ),
             )
         outputs.append(out_path)

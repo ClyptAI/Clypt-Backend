@@ -13,6 +13,16 @@ def load_module():
     return mod
 
 
+def load_phase1_debug_module():
+    path = Path(__file__).resolve().parents[3] / 'backend' / 'test-render' / 'render_phase1_debug_video.py'
+    name = 'render_phase1_debug_video_test'
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def make_bad_partial_body_detection(track_id="Global_Person_0"):
     return {
         "track_id": track_id,
@@ -90,6 +100,52 @@ def make_raw_render_duplicate_detection(track_id="Global_Person_0"):
         "height": 890.0,
         "score": 0.90,
         "bbox": [2160.0, 460.0, 2660.0, 1350.0],
+    }
+
+
+def make_hybrid_debug_entry(
+    *,
+    start_time_ms=0,
+    end_time_ms=800,
+    active_audio_speaker_id="SPEAKER_00",
+    active_audio_local_track_id="track_audio_A",
+    chosen_track_id="A",
+    chosen_local_track_id="track_A",
+    decision_source="audio_boosted_visual",
+    ambiguous=False,
+    top_1_top_2_margin=0.041,
+    candidates=None,
+):
+    return {
+        "word": "hello",
+        "start_time_ms": start_time_ms,
+        "end_time_ms": end_time_ms,
+        "active_audio_speaker_id": active_audio_speaker_id,
+        "active_audio_local_track_id": active_audio_local_track_id,
+        "chosen_track_id": chosen_track_id,
+        "chosen_local_track_id": chosen_local_track_id,
+        "decision_source": decision_source,
+        "ambiguous": ambiguous,
+        "top_1_top_2_margin": top_1_top_2_margin,
+        "candidates": candidates
+        or [
+            {
+                "local_track_id": "track_A",
+                "track_id": "A",
+                "blended_score": 0.31,
+                "asd_probability": 0.19,
+                "body_prior": 0.57,
+                "detection_confidence": 0.94,
+            },
+            {
+                "local_track_id": "track_B",
+                "track_id": "B",
+                "blended_score": 0.29,
+                "asd_probability": 0.17,
+                "body_prior": 0.52,
+                "detection_confidence": 0.90,
+            },
+        ],
     }
 
 
@@ -817,6 +873,137 @@ def test_build_render_debug_sidecar_payload_context_fallback_quality_ignores_unr
     assert high_debug["target_quality"] == high_debug["fallback_quality"]
 
 
+def test_build_render_debug_sidecar_payload_includes_hybrid_decision_state():
+    mod = load_module()
+    segment = mod.AdaptiveSegment(
+        mode="single_person",
+        start_s=0.0,
+        end_s=1.0,
+        primary_track_id="A",
+        secondary_track_id=None,
+    )
+
+    payload = mod.build_render_debug_sidecar_payload(
+        clip_name="speaker_follow_clip1_0s_40s.mp4",
+        window={"start_s": 0, "end_s": 1, "score": 0.9},
+        binding_source="speaker_follow_bindings_local",
+        debug_mode=True,
+        debug_show_faces=False,
+        composition=mod.CompositionPlan(mode="single_person", primary_track_id="A"),
+        segments=[segment],
+        fps=24.0,
+        src_w=1280,
+        src_h=720,
+        frame_detection_index=None,
+        speaker_candidate_debug=[
+            make_hybrid_debug_entry(
+                start_time_ms=50,
+                end_time_ms=650,
+                active_audio_speaker_id="SPEAKER_02",
+                active_audio_local_track_id="track_audio_2",
+                chosen_track_id="A",
+                chosen_local_track_id="track_A",
+                decision_source="audio_boosted_visual",
+                ambiguous=True,
+                top_1_top_2_margin=0.018,
+            )
+        ],
+    )
+
+    hybrid_debug = payload["segments"][0]["hybrid_debug"]
+
+    assert hybrid_debug["active_audio_speaker_id"] == "SPEAKER_02"
+    assert hybrid_debug["active_audio_local_track_id"] == "track_audio_2"
+    assert hybrid_debug["chosen_track_id"] == "A"
+    assert hybrid_debug["chosen_local_track_id"] == "track_A"
+    assert hybrid_debug["decision_source"] == "audio_boosted_visual"
+    assert hybrid_debug["ambiguous"] is True
+    assert hybrid_debug["top_1_top_2_margin"] == 0.018
+    assert hybrid_debug["candidate_track_ids"] == ["A", "B"]
+
+
+def test_build_debug_hud_filters_include_hybrid_decision_state():
+    mod = load_module()
+
+    filters = mod.build_debug_hud_filters(
+        mode="single_person",
+        binding_source="speaker_follow_bindings_local",
+        follow_track_ids=["A"],
+        raw_track_ids=["A"],
+        face_track_ids=["face_A"],
+        hybrid_debug={
+            "active_audio_speaker_id": "SPEAKER_02",
+            "active_audio_local_track_id": "track_audio_2",
+            "chosen_track_id": "A",
+            "chosen_local_track_id": "track_A",
+            "decision_source": "audio_boosted_visual",
+            "ambiguous": True,
+            "top_1_top_2_margin": 0.018,
+        },
+    )
+    joined = "\n".join(filters)
+
+    assert "audio_speaker=SPEAKER_02" in joined
+    assert "decision=audio_boosted_visual" in joined
+    assert "ambiguous=yes" in joined
+    assert "audio_local=track_audio_2" in joined
+    assert "chosen_local=track_A" in joined
+    assert "margin=0.018" in joined
+
+
+def test_choose_window_composition_prefers_shared_for_ambiguous_hybrid_turn():
+    mod = load_module()
+    fps = 24.0
+    duration_s = 20
+    person_track_index = {
+        'A': [
+            mod.Detection(frame_idx=int(second * fps), x_center=1240 + second, y_center=920, width=420, height=820)
+            for second in range(duration_s + 1)
+        ],
+        'B': [
+            mod.Detection(frame_idx=int(second * fps), x_center=1620 + second, y_center=920, width=410, height=810)
+            for second in range(duration_s + 1)
+        ],
+    }
+    face_track_index = {}
+    bindings = [
+        {'track_id': 'A', 'start_time_ms': 0, 'end_time_ms': 13_500, 'word_count': 120},
+        {'track_id': 'B', 'start_time_ms': 13_500, 'end_time_ms': 16_500, 'word_count': 24},
+    ]
+
+    plan = mod.choose_window_composition(
+        clip_start_s=0,
+        clip_end_s=20,
+        fps=fps,
+        src_w=3840,
+        src_h=2160,
+        bindings=bindings,
+        person_track_index=person_track_index,
+        face_track_index=face_track_index,
+        speaker_candidate_debug=[
+            make_hybrid_debug_entry(
+                start_time_ms=3_000,
+                end_time_ms=4_000,
+                chosen_track_id="A",
+                decision_source="unknown",
+                ambiguous=True,
+                top_1_top_2_margin=0.011,
+            ),
+            make_hybrid_debug_entry(
+                start_time_ms=4_000,
+                end_time_ms=5_000,
+                chosen_track_id="A",
+                decision_source="audio_boosted_visual",
+                ambiguous=True,
+                top_1_top_2_margin=0.016,
+            ),
+        ],
+    )
+
+    assert plan.mode == 'two_shared'
+    assert {plan.primary_track_id, plan.secondary_track_id} == {'A', 'B'}
+
+
 def test_choose_window_composition_prefers_single_person_when_one_track_dominates():
     mod = load_module()
     person_track_index = {
@@ -1143,3 +1330,32 @@ def test_single_person_camera_and_overlay_tracks_follow_same_active_segments():
 
     assert len(segments) == 2
     assert [segment.primary_track_id for segment in segments] == ['A', 'B']
+
+
+def test_phase1_debug_hud_lines_include_hybrid_state():
+    mod = load_phase1_debug_module()
+
+    lines = mod.build_hud_lines(
+        timestamp_ms=1250,
+        raw_track_id="A",
+        follow_track_id="A",
+        current_word="hello",
+        binding_source="speaker_follow_bindings_local",
+        track_source="tracks_local",
+        hybrid_debug={
+            "active_audio_speaker_id": "SPEAKER_02",
+            "active_audio_local_track_id": "track_audio_2",
+            "chosen_track_id": "A",
+            "chosen_local_track_id": "track_A",
+            "decision_source": "audio_boosted_visual",
+            "ambiguous": True,
+            "top_1_top_2_margin": 0.018,
+        },
+    )
+
+    assert "audio speaker: SPEAKER_02" in lines
+    assert "decision: audio_boosted_visual" in lines
+    assert "ambiguous: yes" in lines
+    assert "audio local: track_audio_2" in lines
+    assert "chosen local: track_A" in lines
+    assert "margin: 0.018" in lines
