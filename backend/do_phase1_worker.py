@@ -1231,6 +1231,7 @@ class ClyptWorker:
         local_candidate_evidence: list[dict],
         *,
         ambiguity_margin: float = 0.05,
+        support_tiebreak_margin: float = 0.1,
     ) -> list[dict]:
         """Aggregate local-track candidate evidence across each diarized turn."""
         from collections import defaultdict
@@ -1305,17 +1306,43 @@ class ClyptWorker:
 
             weighted_score_ms_by_track: dict[str, float] = defaultdict(float)
             support_ms_by_track: dict[str, int] = defaultdict(int)
+            overlapping_evidence: list[dict] = []
+            slice_boundaries_ms = {start_time_ms, end_time_ms}
 
             for evidence in normalized_evidence:
                 overlap_start_ms = max(start_time_ms, int(evidence["start_time_ms"]))
                 overlap_end_ms = min(end_time_ms, int(evidence["end_time_ms"]))
-                overlap_ms = overlap_end_ms - overlap_start_ms
-                if overlap_ms <= 0:
+                if overlap_end_ms <= overlap_start_ms:
                     continue
-                for candidate in evidence["candidates"]:
-                    local_track_id = str(candidate["local_track_id"])
-                    weighted_score_ms_by_track[local_track_id] += float(candidate["score"]) * overlap_ms
-                    support_ms_by_track[local_track_id] += overlap_ms
+                overlapping_evidence.append(
+                    {
+                        "start_time_ms": overlap_start_ms,
+                        "end_time_ms": overlap_end_ms,
+                        "candidates": evidence["candidates"],
+                    }
+                )
+                slice_boundaries_ms.add(overlap_start_ms)
+                slice_boundaries_ms.add(overlap_end_ms)
+
+            ordered_boundaries_ms = sorted(slice_boundaries_ms)
+            for slice_start_ms, slice_end_ms in zip(ordered_boundaries_ms, ordered_boundaries_ms[1:]):
+                slice_duration_ms = slice_end_ms - slice_start_ms
+                if slice_duration_ms <= 0:
+                    continue
+                active_by_track: dict[str, list[float]] = defaultdict(list)
+                for evidence in overlapping_evidence:
+                    if int(evidence["end_time_ms"]) <= slice_start_ms or int(evidence["start_time_ms"]) >= slice_end_ms:
+                        continue
+                    for candidate in evidence["candidates"]:
+                        active_by_track[str(candidate["local_track_id"])].append(float(candidate["score"]))
+
+                for local_track_id, active_scores in active_by_track.items():
+                    if not active_scores:
+                        continue
+                    weighted_score_ms_by_track[local_track_id] += (
+                        (sum(active_scores) / len(active_scores)) * slice_duration_ms
+                    )
+                    support_ms_by_track[local_track_id] += slice_duration_ms
 
             binding = {
                 "speaker_id": str(turn.get("speaker_id", "") or ""),
@@ -1345,17 +1372,27 @@ class ClyptWorker:
             )
             best_score, best_support_ratio, best_local_track_id = ranked[0]
             second_score = ranked[1][0] if len(ranked) > 1 else None
+            second_support_ratio = ranked[1][1] if len(ranked) > 1 else None
             winning_margin = (
                 float(best_score)
                 if second_score is None
                 else float(best_score - second_score)
+            )
+            support_margin = (
+                float(best_support_ratio)
+                if second_support_ratio is None
+                else float(best_support_ratio - second_support_ratio)
             )
 
             binding["winning_score"] = float(best_score)
             binding["winning_margin"] = float(winning_margin)
             binding["support_ratio"] = float(best_support_ratio)
 
-            if second_score is not None and winning_margin < float(ambiguity_margin):
+            if (
+                second_score is not None
+                and winning_margin < float(ambiguity_margin)
+                and support_margin < float(support_tiebreak_margin)
+            ):
                 binding["ambiguous"] = True
             elif best_score > 0.0 and best_support_ratio > 0.0:
                 binding["local_track_id"] = str(best_local_track_id)
