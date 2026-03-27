@@ -241,15 +241,25 @@ def _normalize_decision(span: dict, payload: dict[str, Any], *, model_name: str)
 def _load_gemini_client(client=None):
     if client is not None:
         return client
+    vertex_ai_raw = str(os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "")).strip().lower()
+    vertex_ai_enabled = vertex_ai_raw in {"1", "true", "yes", "on"}
+    vertex_project = str(os.getenv("GOOGLE_CLOUD_PROJECT", "")).strip()
+    vertex_location = str(os.getenv("GOOGLE_CLOUD_LOCATION", "")).strip() or "global"
     api_key = (
         str(os.getenv("GEMINI_API_KEY", "")).strip()
         or str(os.getenv("GOOGLE_API_KEY", "")).strip()
     )
-    if not api_key:
-        return None
     try:
         from google import genai
     except Exception:
+        return None
+    if vertex_ai_enabled and vertex_project:
+        return genai.Client(
+            vertexai=True,
+            project=vertex_project,
+            location=vertex_location,
+        )
+    if not api_key:
         return None
     return genai.Client(api_key=api_key)
 

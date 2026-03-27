@@ -186,3 +186,32 @@ def test_maybe_adjudicate_overlap_follow_decisions_passes_structured_config_and_
     assert '"SPEAKER_01"' in captured["contents"]
     assert captured["config"] is not None
     assert captured["config"]["response_mime_type"] == "application/json"
+
+
+def test_load_gemini_client_uses_vertex_ai_when_configured(monkeypatch):
+    import sys
+    import types
+
+    from backend.overlap_follow import _load_gemini_client
+
+    calls = []
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs)
+
+    fake_google = types.ModuleType("google")
+    fake_genai = types.SimpleNamespace(Client=_FakeClient)
+    fake_google.genai = fake_genai
+
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v2")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+
+    client = _load_gemini_client()
+
+    assert client is not None
+    assert calls == [{"vertexai": True, "project": "clypt-v2", "location": "global"}]
