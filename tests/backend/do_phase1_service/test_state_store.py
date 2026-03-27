@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+import sqlite3
 
 UTC = timezone.utc
 
@@ -126,3 +127,49 @@ def test_stale_worker_cannot_complete_after_reclaim(tmp_path: Path):
     )
     assert fresh_complete is not None
     assert fresh_complete.manifest_uri == "gs://bucket/new.json"
+
+
+def test_list_recent_jobs_tolerates_malformed_legacy_json(tmp_path: Path):
+    db_path = tmp_path / "jobs.db"
+    store = SQLiteJobStore(db_path)
+    store.save_job(job_id="job_ok", source_url="https://youtube.com/watch?v=ok", status="queued")
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                job_id, source_url, runtime_controls_json, status, retries, claim_token, manifest_json,
+                manifest_uri, failure_json, current_step, progress_message, progress_pct, log_path,
+                created_at, updated_at, started_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "job_bad",
+                "https://youtube.com/watch?v=bad",
+                None,
+                "failed",
+                0,
+                None,
+                None,
+                None,
+                "Internal Server Error",
+                "speaker_binding",
+                "failed",
+                0.9,
+                None,
+                datetime.now(UTC).isoformat(),
+                datetime.now(UTC).isoformat(),
+                None,
+                None,
+            ),
+        )
+
+    jobs = store.list_recent_jobs(limit=10)
+
+    jobs_by_id = {job.job_id: job for job in jobs}
+    assert set(jobs_by_id) == {"job_ok", "job_bad"}
+    assert jobs_by_id["job_bad"].failure == {
+        "_parse_error": "invalid_json",
+        "_field": "failure_json",
+        "_raw": "Internal Server Error",
+    }

@@ -344,13 +344,13 @@ class SQLiteJobStore:
         return JobRecord(
             job_id=row["job_id"],
             source_url=row["source_url"],
-            runtime_controls=json.loads(row["runtime_controls_json"]) if row["runtime_controls_json"] else None,
+            runtime_controls=_load_json_object(row["runtime_controls_json"], field_name="runtime_controls_json"),
             status=row["status"],
             retries=int(row["retries"]),
             claim_token=row["claim_token"],
-            manifest=json.loads(row["manifest_json"]) if row["manifest_json"] else None,
+            manifest=_load_json_object(row["manifest_json"], field_name="manifest_json"),
             manifest_uri=row["manifest_uri"],
-            failure=json.loads(row["failure_json"]) if row["failure_json"] else None,
+            failure=_load_json_object(row["failure_json"], field_name="failure_json"),
             current_step=row["current_step"],
             progress_message=row["progress_message"],
             progress_pct=float(row["progress_pct"]) if row["progress_pct"] is not None else None,
@@ -367,3 +367,23 @@ def _parse_db_datetime(value: str) -> datetime:
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value)
+
+
+def _load_json_object(value: str | None, *, field_name: str) -> dict | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {
+            "_parse_error": "invalid_json",
+            "_field": field_name,
+            "_raw": value,
+        }
+    if isinstance(parsed, dict):
+        return parsed
+    return {
+        "_parse_error": "non_object_json",
+        "_field": field_name,
+        "_value": parsed,
+    }

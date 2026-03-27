@@ -1,10 +1,14 @@
 from pathlib import Path
+import sqlite3
 
 from fastapi.testclient import TestClient
 
 from backend.do_phase1_service.app import create_app
 from backend.do_phase1_service.jobs import enqueue_job
 from backend.do_phase1_service.state_store import SQLiteJobStore
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 
 
 def test_post_jobs_returns_202(tmp_path: Path):
@@ -176,6 +180,52 @@ def test_dashboard_jobs_lists_recent_jobs(tmp_path: Path):
     assert response.status_code == 200
     body = response.json()
     assert [job["job_id"] for job in body["jobs"]] == ["job_2", "job_1"]
+
+
+def test_dashboard_jobs_tolerates_malformed_legacy_failure_json(tmp_path: Path):
+    db_path = tmp_path / "jobs.db"
+    store = SQLiteJobStore(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                job_id, source_url, runtime_controls_json, status, retries, claim_token, manifest_json,
+                manifest_uri, failure_json, current_step, progress_message, progress_pct, log_path,
+                created_at, updated_at, started_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "job_bad",
+                "https://youtube.com/watch?v=bad",
+                None,
+                "failed",
+                0,
+                None,
+                None,
+                None,
+                "Internal Server Error",
+                "speaker_binding",
+                "failed",
+                0.9,
+                None,
+                datetime.now(UTC).isoformat(),
+                datetime.now(UTC).isoformat(),
+                None,
+                None,
+            ),
+        )
+    client = TestClient(create_app(store=store, output_root=tmp_path))
+
+    response = client.get("/dashboard/api/jobs?limit=5")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["jobs"][0]["job_id"] == "job_bad"
+    assert body["jobs"][0]["failure"] == {
+        "_parse_error": "invalid_json",
+        "_field": "failure_json",
+        "_raw": "Internal Server Error",
+    }
 
 
 def test_dashboard_proxy_jobs_uses_remote_base(tmp_path: Path, monkeypatch):
