@@ -8,6 +8,7 @@ fastapi>=0.116.0
 uvicorn>=0.35.0
 httpx>=0.28.0
 pydantic>=2.11.0
+google-genai>=1.66.0
 
 # Keep the pyannote + NeMo stack on a pre-Torch-2.6 load path until
 # pyannote/speaker-diarization-3.1 is compatible with the weights_only default.

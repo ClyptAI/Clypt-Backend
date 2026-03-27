@@ -1648,6 +1648,171 @@ class ClyptWorker:
         return resolved_mappings
 
     @staticmethod
+    def _build_active_speakers_local(
+        *,
+        audio_speaker_turns: list[dict],
+        audio_turn_bindings: list[dict],
+        local_to_global_track_id: dict[str, str] | None = None,
+    ) -> list[dict]:
+        def _as_int(value, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return int(default)
+
+        def _as_float(value) -> float | None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        local_to_global_track_id = {
+            str(local_track_id): str(global_track_id)
+            for local_track_id, global_track_id in dict(local_to_global_track_id or {}).items()
+            if str(local_track_id) and str(global_track_id)
+        }
+
+        normalized_turns: list[dict] = []
+        boundaries: set[int] = set()
+        for turn in audio_speaker_turns or []:
+            start_time_ms = _as_int(turn.get("start_time_ms"), default=0)
+            end_time_ms = _as_int(turn.get("end_time_ms"), default=start_time_ms)
+            if end_time_ms < start_time_ms:
+                start_time_ms, end_time_ms = end_time_ms, start_time_ms
+            if end_time_ms <= start_time_ms:
+                continue
+            normalized_turn = {
+                **dict(turn),
+                "speaker_id": str(turn.get("speaker_id", "") or ""),
+                "start_time_ms": start_time_ms,
+                "end_time_ms": end_time_ms,
+            }
+            normalized_turns.append(normalized_turn)
+            boundaries.add(start_time_ms)
+            boundaries.add(end_time_ms)
+
+        if not normalized_turns:
+            return []
+
+        normalized_bindings: list[dict] = []
+        for binding in audio_turn_bindings or []:
+            start_time_ms = _as_int(binding.get("start_time_ms"), default=0)
+            end_time_ms = _as_int(binding.get("end_time_ms"), default=start_time_ms)
+            if end_time_ms < start_time_ms:
+                start_time_ms, end_time_ms = end_time_ms, start_time_ms
+            if end_time_ms <= start_time_ms:
+                continue
+            normalized_bindings.append(
+                {
+                    **dict(binding),
+                    "speaker_id": str(binding.get("speaker_id", "") or ""),
+                    "start_time_ms": start_time_ms,
+                    "end_time_ms": end_time_ms,
+                }
+            )
+
+        def _best_binding_for_interval(*, speaker_id: str, start_time_ms: int, end_time_ms: int) -> dict | None:
+            best_binding = None
+            best_overlap_ms = 0
+            for binding in normalized_bindings:
+                if str(binding.get("speaker_id", "") or "") != speaker_id:
+                    continue
+                overlap_ms = min(end_time_ms, int(binding["end_time_ms"])) - max(start_time_ms, int(binding["start_time_ms"]))
+                if overlap_ms <= 0:
+                    continue
+                if overlap_ms > best_overlap_ms:
+                    best_overlap_ms = overlap_ms
+                    best_binding = binding
+            return best_binding
+
+        spans: list[dict] = []
+        ordered_boundaries = sorted(boundaries)
+        for start_time_ms, end_time_ms in zip(ordered_boundaries, ordered_boundaries[1:]):
+            if end_time_ms <= start_time_ms:
+                continue
+            active_turns = [
+                turn
+                for turn in normalized_turns
+                if int(turn["start_time_ms"]) < end_time_ms and int(turn["end_time_ms"]) > start_time_ms
+            ]
+            if not active_turns:
+                continue
+
+            audio_speaker_ids: list[str] = []
+            visible_local_track_ids: list[str] = []
+            visible_track_ids: list[str] = []
+            offscreen_audio_speaker_ids: list[str] = []
+            confidences: list[float] = []
+            overlap = (
+                len(active_turns) > 1
+                or any(bool(turn.get("overlap", False)) for turn in active_turns)
+                or any(turn.get("exclusive") is False for turn in active_turns)
+            )
+
+            for turn in active_turns:
+                speaker_id = str(turn.get("speaker_id", "") or "")
+                if speaker_id and speaker_id not in audio_speaker_ids:
+                    audio_speaker_ids.append(speaker_id)
+                binding = _best_binding_for_interval(
+                    speaker_id=speaker_id,
+                    start_time_ms=start_time_ms,
+                    end_time_ms=end_time_ms,
+                )
+                local_track_id = None
+                if isinstance(binding, dict):
+                    raw_local_track_id = binding.get("local_track_id") or binding.get("clean_local_track_id")
+                    if raw_local_track_id not in (None, ""):
+                        local_track_id = str(raw_local_track_id)
+                    binding_confidence = _as_float(
+                        binding.get("clean_winning_score")
+                        if binding.get("clean_local_track_id") not in (None, "")
+                        else binding.get("winning_score")
+                    )
+                    if binding_confidence is not None:
+                        confidences.append(binding_confidence)
+                if local_track_id:
+                    if local_track_id not in visible_local_track_ids:
+                        visible_local_track_ids.append(local_track_id)
+                    global_track_id = local_to_global_track_id.get(local_track_id)
+                    if global_track_id and global_track_id not in visible_track_ids:
+                        visible_track_ids.append(global_track_id)
+                elif speaker_id and speaker_id not in offscreen_audio_speaker_ids:
+                    offscreen_audio_speaker_ids.append(speaker_id)
+                    turn_confidence = _as_float(turn.get("confidence"))
+                    if turn_confidence is not None:
+                        confidences.append(turn_confidence)
+
+            span = {
+                "start_time_ms": int(start_time_ms),
+                "end_time_ms": int(end_time_ms),
+                "audio_speaker_ids": audio_speaker_ids,
+                "visible_local_track_ids": visible_local_track_ids,
+                "visible_track_ids": visible_track_ids,
+                "offscreen_audio_speaker_ids": offscreen_audio_speaker_ids,
+                "overlap": bool(overlap),
+                "confidence": None if not confidences else float(sum(confidences) / len(confidences)),
+                "decision_source": "turn_binding" if visible_local_track_ids else "audio_only",
+            }
+            spans.append(span)
+
+        return spans
+
+    def _run_overlap_follow_postpass(
+        self,
+        *,
+        active_speakers_local: list[dict],
+        words: list[dict],
+        speaker_candidate_debug: list[dict],
+    ) -> list[dict]:
+        from backend.overlap_follow import maybe_adjudicate_overlap_follow_decisions
+
+        return maybe_adjudicate_overlap_follow_decisions(
+            active_speakers_local=active_speakers_local,
+            words=words,
+            speaker_candidate_debug=speaker_candidate_debug,
+        )
+
+    @staticmethod
     def _speaker_remap_collision_metrics(words: list[dict]) -> dict[str, int]:
         from collections import defaultdict
 
@@ -6118,6 +6283,79 @@ class ClyptWorker:
 
         return eligible_track_ids, debug_meta
 
+    @staticmethod
+    def _make_lrasd_frame_provider(vr):
+        frame_cache: dict[int, object] = {}
+        total_frames = len(vr)
+
+        def _get_frame(frame_idx: int):
+            if frame_idx in frame_cache:
+                return frame_cache[frame_idx]
+            if frame_idx < 0 or frame_idx >= total_frames:
+                return None
+
+            fetch_end = min(frame_idx + 16, total_frames)
+            fetch_indices = list(range(frame_idx, fetch_end))
+            missing_indices = [fi for fi in fetch_indices if fi not in frame_cache]
+            if missing_indices:
+                try:
+                    batch = vr.get_batch(missing_indices).asnumpy()
+                    for idx, frame_data in zip(missing_indices, batch):
+                        frame_cache[idx] = frame_data
+                except Exception:
+                    frame_cache[frame_idx] = None
+
+            if len(frame_cache) > 192:
+                stale_keys = [k for k in frame_cache.keys() if k < frame_idx - 32]
+                for k in stale_keys:
+                    frame_cache.pop(k, None)
+                if len(frame_cache) > 192:
+                    for k in sorted(frame_cache.keys())[: max(0, len(frame_cache) - 192)]:
+                        frame_cache.pop(k, None)
+
+            return frame_cache.get(frame_idx)
+
+        return _get_frame
+
+    def _prepare_lrasd_visual_crop(
+        self,
+        frame,
+        *,
+        x1,
+        y1,
+        x2,
+        y2,
+        output_size=(112, 112),
+    ):
+        import cv2
+
+        if frame is None:
+            return None
+        try:
+            fh, fw = frame.shape[:2]
+        except Exception:
+            return None
+        if fh <= 0 or fw <= 0:
+            return None
+
+        left = max(0, min(fw - 1, int(x1)))
+        top = max(0, min(fh - 1, int(y1)))
+        right = max(left + 1, min(fw, int(x2)))
+        bottom = max(top + 1, min(fh, int(y2)))
+        if right <= left or bottom <= top:
+            return None
+
+        crop = frame[top:bottom, left:right]
+        if crop is None or crop.size == 0:
+            return None
+
+        resized = cv2.resize(crop, tuple(output_size), interpolation=cv2.INTER_LINEAR)
+        if resized.ndim == 2:
+            grayscale = resized
+        else:
+            grayscale = cv2.cvtColor(resized, cv2.COLOR_RGB2GRAY)
+        return grayscale.astype("uint8", copy=False)
+
     def _run_lrasd_binding(
         self,
         video_path: str,
@@ -6142,7 +6380,6 @@ class ClyptWorker:
             return []
 
         import concurrent.futures as cf
-        import cv2
         import os
         import numpy as np
         import torch
@@ -6250,38 +6487,7 @@ class ClyptWorker:
             fps=fps,
         )
 
-        frame_cache: dict[int, object] = {}
-        total_frames = len(vr)
-
-        def _get_frame(frame_idx: int):
-            if frame_idx in frame_cache:
-                return frame_cache[frame_idx]
-            if frame_idx < 0 or frame_idx >= total_frames:
-                return None
-
-            # Pre-fetch a short forward window in one batched decord read.
-            fetch_end = min(frame_idx + 16, total_frames)
-            fetch_indices = list(range(frame_idx, fetch_end))
-            missing_indices = [fi for fi in fetch_indices if fi not in frame_cache]
-            if missing_indices:
-                try:
-                    batch = vr.get_batch(missing_indices).asnumpy()  # RGB
-                    for idx, frame_data in zip(missing_indices, batch):
-                        frame_cache[idx] = frame_data
-                except Exception:
-                    frame_cache[frame_idx] = None
-
-            # Evict old frames to keep memory bounded.
-            if len(frame_cache) > 192:
-                stale_keys = [k for k in frame_cache.keys() if k < frame_idx - 32]
-                for k in stale_keys:
-                    frame_cache.pop(k, None)
-                # Fallback trim if stale-eviction was insufficient.
-                if len(frame_cache) > 192:
-                    for k in sorted(frame_cache.keys())[: max(0, len(frame_cache) - 192)]:
-                        frame_cache.pop(k, None)
-
-            return frame_cache.get(frame_idx)
+        get_frame = self._make_lrasd_frame_provider(vr)
 
         face_cache: dict[tuple[str, int], tuple[object, object]] = {}
 
@@ -6289,7 +6495,7 @@ class ClyptWorker:
             key = (tid, fi)
             if key in face_cache:
                 return face_cache[key]
-            frame = _get_frame(fi)
+            frame = get_frame(fi)
             if frame is None:
                 face_cache[key] = (None, None)
                 return face_cache[key]
@@ -6311,13 +6517,14 @@ class ClyptWorker:
             pb = canonical_face_boxes.get((tid, fi))
             if pb is not None:
                 x1, y1, x2, y2, _, _ = pb
-                x1 = max(0, min(fw - 1, int(x1)))
-                y1 = max(0, min(fh - 1, int(y1)))
-                x2 = max(x1 + 1, min(fw, int(x2)))
-                y2 = max(y1 + 1, min(fh, int(y2)))
-                face_crop = frame[y1:y2, x1:x2]
-                if face_crop is not None and face_crop.size > 0:
-                    crop = cv2.resize(face_crop, (112, 112), interpolation=cv2.INTER_LINEAR)
+                crop = self._prepare_lrasd_visual_crop(
+                    frame,
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                )
+                if crop is not None:
                     if bw > 1e-6 and bh > 1e-6:
                         anchor = {
                             "x_offset": (float(x1) - cx) / bw,
@@ -6332,13 +6539,14 @@ class ClyptWorker:
                     head_x2 = int(round(cx + (0.28 * bw)))
                     head_y1 = int(round(cy - (0.48 * bh)))
                     head_y2 = int(round(cy - (0.02 * bh)))
-                    head_x1 = max(0, min(fw - 1, head_x1))
-                    head_y1 = max(0, min(fh - 1, head_y1))
-                    head_x2 = max(head_x1 + 1, min(fw, head_x2))
-                    head_y2 = max(head_y1 + 1, min(fh, head_y2))
-                    face_crop = frame[head_y1:head_y2, head_x1:head_x2]
-                    if face_crop is not None and face_crop.size > 0:
-                        crop = cv2.resize(face_crop, (112, 112), interpolation=cv2.INTER_LINEAR)
+                    crop = self._prepare_lrasd_visual_crop(
+                        frame,
+                        x1=head_x1,
+                        y1=head_y1,
+                        x2=head_x2,
+                        y2=head_y2,
+                    )
+                    if crop is not None:
                         anchor = {
                             "x_offset": (float(head_x1) - cx) / bw,
                             "y_offset": (float(head_y1) - cy) / bh,
@@ -6508,7 +6716,7 @@ class ClyptWorker:
             if t < min_chunk_frames:
                 return
 
-            visual_np = np.stack([cv2.cvtColor(c, cv2.COLOR_RGB2GRAY) for c in crops], axis=0)
+            visual_np = np.stack(crops, axis=0)
             target_audio_frames = int(round(t * 4))
             start_audio_frame = max(0, int(round(frames[0] * 4)))
             end_audio_frame = start_audio_frame + target_audio_frames
@@ -6567,7 +6775,7 @@ class ClyptWorker:
                                     scale_x=binding_scale_x,
                                     scale_y=binding_scale_y,
                                 )
-                                frame = _get_frame(fi)
+                                frame = get_frame(fi)
                                 crop, anchor = _face_crop(tid, fi, det)
 
                                 # If detector misses, project last known face anchor onto current person box.
@@ -6585,19 +6793,13 @@ class ClyptWorker:
                                         fy1 = int(round(cy + float(last_known_anchor["y_offset"]) * bh))
                                         fw_face = int(round(max(2.0, float(last_known_anchor["w_ratio"]) * bw)))
                                         fh_face = int(round(max(2.0, float(last_known_anchor["h_ratio"]) * bh)))
-                                        fh_img, fw_img = frame.shape[:2]
-                                        gx1 = max(0, min(fw_img - 1, fx1))
-                                        gy1 = max(0, min(fh_img - 1, fy1))
-                                        gx2 = max(0, min(fw_img, gx1 + fw_face))
-                                        gy2 = max(0, min(fh_img, gy1 + fh_face))
-                                        if gx2 > gx1 and gy2 > gy1:
-                                            fallback_crop = frame[gy1:gy2, gx1:gx2]
-                                            if fallback_crop.size > 0:
-                                                crop = cv2.resize(
-                                                    fallback_crop,
-                                                    (112, 112),
-                                                    interpolation=cv2.INTER_LINEAR,
-                                                )
+                                        crop = self._prepare_lrasd_visual_crop(
+                                            frame,
+                                            x1=fx1,
+                                            y1=fy1,
+                                            x2=fx1 + fw_face,
+                                            y2=fy1 + fh_face,
+                                        )
 
                             if crop is not None:
                                 face_hits += 1
@@ -6928,6 +7130,7 @@ class ClyptWorker:
 
         audio_prior_bonus = max(0.02, min(0.06, 4.0 * min_assignment_margin))
         audio_prior_margin_threshold = max(0.02, min(0.08, 6.0 * min_assignment_margin))
+        turn_reuse_margin_threshold = max(0.08, min(0.16, 12.0 * min_assignment_margin))
         strong_visual_margin_threshold = max(0.08, min(0.18, 10.0 * min_assignment_margin))
         strong_visual_prob_threshold = max(0.32, min_lrasd_prob + 0.12)
 
@@ -7111,6 +7314,30 @@ class ClyptWorker:
                     )
                     _mark_protected_unknown(w)
                     continue
+                strong_turn_owner = bool(
+                    not bool(active_turn_binding.get("ambiguous", False))
+                    and float(active_turn_binding.get("winning_score", 0.0) or 0.0) >= 0.85
+                    and float(active_turn_binding.get("winning_margin", 0.0) or 0.0) >= 0.18
+                    and float(active_turn_binding.get("support_ratio", 0.0) or 0.0) >= 0.75
+                )
+                prior_total = float(prior_candidate["total"])
+                if (
+                    strong_turn_owner
+                    and str(best_candidate.get("local_tid", "")) != prior_local_tid
+                    and second_total is not None
+                    and visual_margin <= turn_reuse_margin_threshold
+                ):
+                    prior_candidate["total"] = max(float(best_total) + 1e-6, prior_total + audio_prior_bonus)
+                    audio_prior_applied = True
+                    scored_candidates.sort(
+                        key=lambda item: (
+                            item["total"],
+                            item["prob"] if item["prob"] is not None else -1.0,
+                            item["body_prior"],
+                            item["confidence"],
+                        ),
+                        reverse=True,
+                    )
                 if second_total is not None and visual_margin <= audio_prior_margin_threshold:
                     prior_strength = max(
                         0.0,
@@ -7830,6 +8057,16 @@ class ClyptWorker:
         speaker_bindings_local: list[dict] = []
         speaker_follow_bindings_local: list[dict] = []
         audio_speaker_local_track_map: list[dict] = []
+        active_speakers_local: list[dict] = self._build_active_speakers_local(
+            audio_speaker_turns=audio_speaker_turns,
+            audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
+            local_to_global_track_id=cluster_id_remap,
+        )
+        overlap_follow_decisions: list[dict] = self._run_overlap_follow_postpass(
+            active_speakers_local=active_speakers_local,
+            words=words,
+            speaker_candidate_debug=getattr(self, "_last_speaker_candidate_debug", []),
+        )
         if self._local_clip_bindings_enabled():
             speaker_bindings_local = self._build_bindings_from_word_track_field(
                 words,
@@ -7888,6 +8125,8 @@ class ClyptWorker:
             "audio_speaker_turns": audio_speaker_turns,
             "speaker_candidate_debug": getattr(self, "_last_speaker_candidate_debug", []),
             "speaker_follow_bindings": speaker_follow_bindings,
+            "active_speakers_local": active_speakers_local,
+            "overlap_follow_decisions": overlap_follow_decisions,
         }
         if self._local_clip_bindings_enabled():
             phase_1_audio["speaker_bindings_local"] = speaker_bindings_local

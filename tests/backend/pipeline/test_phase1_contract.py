@@ -280,6 +280,49 @@ def test_manifest_accepts_local_clip_experiment_fields():
     assert manifest.artifacts.visual_tracking.tracks_local[0].track_id == "track_1"
 
 
+def test_manifest_accepts_overlap_artifacts():
+    payload = deepcopy(_legacy_manifest_payload())
+    payload["artifacts"]["transcript"]["active_speakers_local"] = [
+        {
+            "start_time_ms": 400,
+            "end_time_ms": 1100,
+            "audio_speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
+            "visible_local_track_ids": ["track_1"],
+            "visible_track_ids": ["Global_Person_0"],
+            "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+            "overlap": True,
+            "confidence": 0.73,
+            "decision_source": "turn_binding",
+        }
+    ]
+    payload["artifacts"]["transcript"]["overlap_follow_decisions"] = [
+        {
+            "start_time_ms": 400,
+            "end_time_ms": 1100,
+            "camera_target_local_track_id": "track_1",
+            "camera_target_track_id": "Global_Person_0",
+            "stay_wide": False,
+            "visible_local_track_ids": ["track_1"],
+            "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+            "decision_model": "gemini-3-flash-preview",
+            "decision_source": "gemini",
+            "confidence": 0.81,
+        }
+    ]
+
+    manifest = Phase1Manifest.model_validate(payload)
+
+    assert manifest.artifacts.transcript.active_speakers_local[0].audio_speaker_ids == [
+        "SPEAKER_00",
+        "SPEAKER_01",
+    ]
+    assert manifest.artifacts.transcript.active_speakers_local[0].offscreen_audio_speaker_ids == [
+        "SPEAKER_01"
+    ]
+    assert manifest.artifacts.transcript.overlap_follow_decisions[0].camera_target_local_track_id == "track_1"
+    assert manifest.artifacts.transcript.overlap_follow_decisions[0].decision_model == "gemini-3-flash-preview"
+
+
 def test_manifest_rejects_unknown_audio_speaker_turn_fields():
     payload = deepcopy(_legacy_manifest_payload())
     payload["artifacts"]["transcript"]["audio_speaker_turns"] = [
@@ -307,6 +350,28 @@ def test_manifest_rejects_unknown_speaker_candidate_debug_fields():
             "ambiguous": False,
             "candidates": [],
             "unexpected_field": "not-allowed",
+        }
+    ]
+
+    with pytest.raises(ValidationError, match="unexpected_field"):
+        Phase1Manifest.model_validate(payload)
+
+
+def test_manifest_rejects_unknown_overlap_follow_decision_fields():
+    payload = deepcopy(_legacy_manifest_payload())
+    payload["artifacts"]["transcript"]["overlap_follow_decisions"] = [
+        {
+            "start_time_ms": 400,
+            "end_time_ms": 1100,
+            "camera_target_local_track_id": "track_1",
+            "camera_target_track_id": "Global_Person_0",
+            "stay_wide": False,
+            "visible_local_track_ids": ["track_1"],
+            "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+            "decision_model": "gemini-3-flash-preview",
+            "decision_source": "gemini",
+            "confidence": 0.81,
+            "unexpected_field": True,
         }
     ]
 

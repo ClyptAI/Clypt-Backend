@@ -240,6 +240,47 @@ class Phase1SpeakerCandidateDebugEntry(BaseModel):
         return self
 
 
+class Phase1ActiveSpeakerLocalSpan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+    audio_speaker_ids: list[str] = Field(default_factory=list)
+    visible_local_track_ids: list[str] = Field(default_factory=list)
+    visible_track_ids: list[str] = Field(default_factory=list)
+    offscreen_audio_speaker_ids: list[str] = Field(default_factory=list)
+    overlap: bool
+    confidence: Confidence01 | None = None
+    decision_source: str
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("active speaker span start_time_ms must be <= end_time_ms")
+        return self
+
+
+class Phase1OverlapFollowDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+    camera_target_local_track_id: str | None = None
+    camera_target_track_id: str | None = None
+    stay_wide: bool
+    visible_local_track_ids: list[str] = Field(default_factory=list)
+    offscreen_audio_speaker_ids: list[str] = Field(default_factory=list)
+    decision_model: str | None = None
+    decision_source: str
+    confidence: Confidence01 | None = None
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("overlap follow decision start_time_ms must be <= end_time_ms")
+        return self
+
+
 class Phase1TranscriptArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -253,6 +294,8 @@ class Phase1TranscriptArtifact(BaseModel):
     speaker_follow_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
     audio_speaker_local_track_map: list[Phase1AudioSpeakerLocalTrackMapEntry] = Field(default_factory=list)
     speaker_candidate_debug: list[Phase1SpeakerCandidateDebugEntry] = Field(default_factory=list)
+    active_speakers_local: list[Phase1ActiveSpeakerLocalSpan] = Field(default_factory=list)
+    overlap_follow_decisions: list[Phase1OverlapFollowDecision] = Field(default_factory=list)
 
 
 class Phase1VisualArtifact(BaseModel):
