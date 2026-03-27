@@ -1741,6 +1741,29 @@ def test_eligible_associated_track_ids_defaults_to_single_dominant_track(monkeyp
     assert worker._eligible_associated_track_ids({"host": 8, "neighbor": 6}) == {"host"}
 
 
+def test_shared_analysis_proxy_defaults_to_enabled_with_1920_long_edge(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_SHARED_ANALYSIS_PROXY", raising=False)
+    monkeypatch.delenv("CLYPT_ANALYSIS_PROXY_ENABLE", raising=False)
+    monkeypatch.delenv("CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE", raising=False)
+    monkeypatch.delenv("CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE", raising=False)
+
+    assert worker._shared_analysis_proxy_enabled() is True
+    assert worker._analysis_proxy_max_long_edge() == 1920
+
+
+def test_shared_analysis_proxy_explicit_disable_overrides_default(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
+    monkeypatch.delenv("CLYPT_ANALYSIS_PROXY_ENABLE", raising=False)
+
+    assert worker._shared_analysis_proxy_enabled() is False
+
+
 def test_shared_analysis_proxy_can_drive_tracking_and_lrasd_selection(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -1995,6 +2018,7 @@ def _run_fake_lrasd_binding_case(
         int(spec["intensity"]): tid
         for tid, spec in track_specs.items()
     }
+    scored_local_track_ids = []
 
     monkeypatch.setattr(
         worker,
@@ -2024,7 +2048,11 @@ def _run_fake_lrasd_binding_case(
                             ),
                             dtype=np.float32,
                         )
-                        for row in visual_t.detach().cpu().numpy().mean(axis=(1, 2, 3))
+                        for row in _record_scored_rows(
+                            visual_t.detach().cpu().numpy().mean(axis=(1, 2, 3)),
+                            intensity_to_tid,
+                            scored_local_track_ids,
+                        )
                     ],
                     axis=0,
                 ),
@@ -2054,7 +2082,23 @@ def _run_fake_lrasd_binding_case(
         },
         track_id_remap=track_id_remap,
     )
+    worker._test_lrasd_scored_local_track_ids = scored_local_track_ids
     return worker, words, bindings
+
+
+def _record_scored_rows(rows, intensity_to_tid, scored_local_track_ids: list[str]):
+    for row in rows:
+        scored_local_track_ids.append(
+            intensity_to_tid[
+                min(
+                    intensity_to_tid.keys(),
+                    key=lambda intensity: abs(
+                        intensity - int(round(float(row.mean())))
+                    ),
+                )
+            ]
+        )
+        yield row
 
 
 def test_run_lrasd_binding_prefers_clean_body_track_over_sink_like_candidate(monkeypatch, tmp_path: Path):
@@ -2120,6 +2164,72 @@ def test_run_lrasd_binding_rejects_tiny_edge_fragment_candidate(monkeypatch, tmp
 
     assert words[0]["speaker_track_id"] == "speaker"
     assert bindings[0]["track_id"] == "speaker"
+
+
+def test_run_lrasd_binding_prunes_sink_like_track_before_chunk_generation(monkeypatch, tmp_path: Path):
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "sink": {
+                "x_center": 228.0,
+                "y_center": 105.0,
+                "width": 210.0,
+                "height": 178.0,
+                "confidence": 0.98,
+                "intensity": 80,
+            },
+            "speaker": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 74.0,
+                "height": 156.0,
+                "confidence": 0.92,
+                "intensity": 210,
+            },
+        },
+        score_by_track={
+            "sink": 0.84,
+            "speaker": 0.78,
+        },
+    )
+
+    assert words[0]["speaker_track_id"] == "speaker"
+    assert bindings[0]["track_id"] == "speaker"
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
+
+
+def test_run_lrasd_binding_prunes_tiny_fragment_before_chunk_generation(monkeypatch, tmp_path: Path):
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "fragment": {
+                "x_center": 12.0,
+                "y_center": 58.0,
+                "width": 18.0,
+                "height": 28.0,
+                "confidence": 0.97,
+                "intensity": 60,
+            },
+            "speaker": {
+                "x_center": 156.0,
+                "y_center": 100.0,
+                "width": 76.0,
+                "height": 150.0,
+                "confidence": 0.88,
+                "intensity": 200,
+            },
+        },
+        score_by_track={
+            "fragment": 0.88,
+            "speaker": 0.76,
+        },
+    )
+
+    assert words[0]["speaker_track_id"] == "speaker"
+    assert bindings[0]["track_id"] == "speaker"
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
 
 
 def test_run_lrasd_binding_preserves_local_track_id_when_global_remap_applies(monkeypatch, tmp_path: Path):

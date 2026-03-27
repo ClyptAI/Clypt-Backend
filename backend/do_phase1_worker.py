@@ -1878,18 +1878,68 @@ class ClyptWorker:
             return True
         if raw in {"0", "false", "no", "off"}:
             return False
-        return os.getenv("CLYPT_ANALYSIS_PROXY_ENABLE", "0") == "1"
+        legacy_raw = os.getenv("CLYPT_ANALYSIS_PROXY_ENABLE", "").strip().lower()
+        if legacy_raw in {"1", "true", "yes", "on"}:
+            return True
+        if legacy_raw in {"0", "false", "no", "off"}:
+            return False
+        return True
 
     @staticmethod
     def _analysis_proxy_max_long_edge() -> int:
         raw = os.getenv("CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE", "").strip()
         if not raw:
-            raw = os.getenv("CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE", "1280").strip()
+            raw = os.getenv("CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE", "1920").strip()
         try:
             requested = int(raw)
         except Exception:
-            requested = 1280
+            requested = 1920
         return max(0, requested)
+
+    @staticmethod
+    def _lrasd_min_candidate_visible_frames() -> int:
+        raw = os.getenv("CLYPT_LRASD_MIN_CANDIDATE_VISIBLE_FRAMES", "20").strip()
+        try:
+            requested = int(raw)
+        except Exception:
+            requested = 20
+        return max(1, requested)
+
+    @staticmethod
+    def _lrasd_min_candidate_overlap_frames() -> int:
+        raw = os.getenv("CLYPT_LRASD_MIN_CANDIDATE_OVERLAP_FRAMES", "4").strip()
+        try:
+            requested = int(raw)
+        except Exception:
+            requested = 4
+        return max(1, requested)
+
+    @staticmethod
+    def _lrasd_min_candidate_median_area_norm() -> float:
+        raw = os.getenv("CLYPT_LRASD_MIN_CANDIDATE_MEDIAN_AREA_NORM", "0.015").strip()
+        try:
+            requested = float(raw)
+        except Exception:
+            requested = 0.015
+        return max(0.0, requested)
+
+    @staticmethod
+    def _lrasd_min_candidate_track_quality() -> float:
+        raw = os.getenv("CLYPT_LRASD_MIN_CANDIDATE_TRACK_QUALITY", "0.45").strip()
+        try:
+            requested = float(raw)
+        except Exception:
+            requested = 0.45
+        return max(0.0, min(1.0, requested))
+
+    @staticmethod
+    def _lrasd_max_candidate_hard_reject_ratio() -> float:
+        raw = os.getenv("CLYPT_LRASD_MAX_CANDIDATE_HARD_REJECT_RATIO", "0.85").strip()
+        try:
+            requested = float(raw)
+        except Exception:
+            requested = 0.85
+        return max(0.0, min(1.0, requested))
 
     @staticmethod
     def _audio_diarization_config() -> dict:
@@ -5967,6 +6017,107 @@ class ClyptWorker:
 
         return tracks
 
+    def _select_lrasd_eligible_track_ids(
+        self,
+        *,
+        track_to_dets: dict[str, list[dict]],
+        frame_to_dets: dict[int, list[dict]],
+        track_quality_by_tid: dict[str, dict],
+        words: list[dict],
+        audio_speaker_turns: list[dict],
+        frame_width: int,
+        frame_height: int,
+        fps: float,
+    ) -> tuple[set[str], dict[str, dict]]:
+        min_visible_frames = self._lrasd_min_candidate_visible_frames()
+        min_overlap_frames = self._lrasd_min_candidate_overlap_frames()
+        min_median_area_norm = self._lrasd_min_candidate_median_area_norm()
+        min_track_quality = self._lrasd_min_candidate_track_quality()
+        max_hard_reject_ratio = self._lrasd_max_candidate_hard_reject_ratio()
+
+        speech_ranges: list[tuple[int, int]] = []
+        for source in list(words or []) + list(audio_speaker_turns or []):
+            start_time_ms = int(source.get("start_time_ms", 0) or 0)
+            end_time_ms = int(source.get("end_time_ms", start_time_ms) or start_time_ms)
+            if end_time_ms < start_time_ms:
+                start_time_ms, end_time_ms = end_time_ms, start_time_ms
+            start_fi = int(round((start_time_ms / 1000.0) * fps))
+            end_fi = int(round((end_time_ms / 1000.0) * fps))
+            if end_fi < start_fi:
+                start_fi, end_fi = end_fi, start_fi
+            speech_ranges.append((start_fi, end_fi))
+        speech_ranges.sort(key=lambda item: item[0])
+
+        def _frame_overlaps_speech(frame_idx: int) -> bool:
+            for start_fi, end_fi in speech_ranges:
+                if start_fi > frame_idx:
+                    return False
+                if end_fi >= frame_idx:
+                    return True
+            return False
+
+        eligible_track_ids: set[str] = set()
+        debug_meta: dict[str, dict] = {}
+        for tid, dets in (track_to_dets or {}).items():
+            valid_dets = [
+                det for det in dets
+                if float(det.get("width", 0.0)) > 1e-6
+                and float(det.get("height", 0.0)) > 1e-6
+                and int(det.get("frame_idx", -1)) >= 0
+            ]
+            visible_frames = sorted({int(det["frame_idx"]) for det in valid_dets})
+            overlap_dets = [
+                det for det in valid_dets
+                if _frame_overlaps_speech(int(det["frame_idx"]))
+            ]
+            overlap_frames = sorted({int(det["frame_idx"]) for det in overlap_dets})
+            track_quality_meta = dict(track_quality_by_tid.get(str(tid), {}) or {})
+            median_area_norm = float(track_quality_meta.get("median_area_norm", 0.0) or 0.0)
+            track_quality = float(track_quality_meta.get("track_quality", 0.0) or 0.0)
+            body_probe_dets = overlap_dets or valid_dets
+            hard_reject_count = 0
+            for det in body_probe_dets:
+                body_meta = self._score_speaker_binding_body_candidate(
+                    det=det,
+                    frame_dets=frame_to_dets.get(int(det.get("frame_idx", -1)), [det]),
+                    frame_width=frame_width,
+                    frame_height=frame_height,
+                    track_quality=track_quality,
+                    motion_rank=0.0,
+                )
+                if bool(body_meta.get("hard_reject", False)):
+                    hard_reject_count += 1
+            hard_reject_ratio = (
+                float(hard_reject_count / max(1, len(body_probe_dets)))
+                if body_probe_dets else 1.0
+            )
+
+            reject_reason = None
+            if len(visible_frames) < min_visible_frames:
+                reject_reason = "visible_frames"
+            elif len(overlap_frames) < min_overlap_frames:
+                reject_reason = "speech_overlap"
+            elif median_area_norm < min_median_area_norm:
+                reject_reason = "median_area"
+            elif track_quality < min_track_quality:
+                reject_reason = "track_quality"
+            elif hard_reject_ratio >= max_hard_reject_ratio:
+                reject_reason = "body_hard_reject"
+            else:
+                eligible_track_ids.add(str(tid))
+
+            debug_meta[str(tid)] = {
+                "visible_frames": int(len(visible_frames)),
+                "overlap_frames": int(len(overlap_frames)),
+                "median_area_norm": float(median_area_norm),
+                "track_quality": float(track_quality),
+                "hard_reject_ratio": float(hard_reject_ratio),
+                "eligible": reject_reason is None,
+                "reject_reason": reject_reason,
+            }
+
+        return eligible_track_ids, debug_meta
+
     def _run_lrasd_binding(
         self,
         video_path: str,
@@ -6061,10 +6212,36 @@ class ClyptWorker:
             "  Canonical face stream: "
             f"{len(canonical_face_boxes)}/{needed_face_boxes}={canonical_coverage:.1%} coverage"
         )
+        raw_audio_turns = self._serialize_audio_speaker_turns(
+            (analysis_context or {}).get("audio_speaker_turns")
+        )
+        audio_speaker_turns = [dict(turn) for turn in raw_audio_turns]
         track_quality_by_tid = self._build_speaker_binding_track_quality(
             track_to_dets,
             frame_width=int(binding_meta.get("width", 0) or 0) or 1,
             frame_height=int(binding_meta.get("height", 0) or 0) or 1,
+        )
+        eligible_lrasd_track_ids, lrasd_candidate_debug = self._select_lrasd_eligible_track_ids(
+            track_to_dets=track_to_dets,
+            frame_to_dets=frame_to_dets,
+            track_quality_by_tid=track_quality_by_tid,
+            words=words,
+            audio_speaker_turns=audio_speaker_turns,
+            frame_width=int(binding_meta.get("width", 0) or 0) or 1,
+            frame_height=int(binding_meta.get("height", 0) or 0) or 1,
+            fps=fps,
+        )
+        self._last_speaker_binding_metrics.update(
+            {
+                "lrasd_candidate_track_count": int(len(track_to_dets)),
+                "lrasd_eligible_track_count": int(len(eligible_lrasd_track_ids)),
+                "lrasd_pruned_track_count": int(max(0, len(track_to_dets) - len(eligible_lrasd_track_ids))),
+            }
+        )
+        self._last_lrasd_candidate_debug = dict(lrasd_candidate_debug)
+        print(
+            "  LR-ASD candidate pruning: "
+            f"eligible={len(eligible_lrasd_track_ids)}/{len(track_to_dets)}"
         )
         audio_feature_cache_path = binding_video_path.replace(".mp4", "_lrasd_features.npz")
         full_audio_features = self._load_or_build_lrasd_audio_features(
@@ -6229,7 +6406,8 @@ class ClyptWorker:
             return runs
 
         total_chunks = 0
-        for tid, dets in track_to_dets.items():
+        for tid in sorted(eligible_lrasd_track_ids):
+            dets = track_to_dets.get(tid, [])
             best_by_frame = self._interpolate_track_detections(
                 dets, max_gap=interpolation_gap
             )
@@ -6349,7 +6527,8 @@ class ClyptWorker:
                 _flush_pending(t)
 
         try:
-            for tid, dets in track_to_dets.items():
+            for tid in sorted(eligible_lrasd_track_ids):
+                dets = track_to_dets.get(tid, [])
                 best_by_frame = self._interpolate_track_detections(
                     dets, max_gap=interpolation_gap
                 )
@@ -6545,10 +6724,6 @@ class ClyptWorker:
                 motion_score[(str(tid), int(cur.get("frame_idx", -1)))] = float(motion)
 
         audio_turn_bindings: list[dict] = []
-        raw_audio_turns = self._serialize_audio_speaker_turns(
-            (analysis_context or {}).get("audio_speaker_turns")
-        )
-        audio_speaker_turns = [dict(turn) for turn in raw_audio_turns]
 
         def _clear_word_assignment(word: dict):
             word["speaker_track_id"] = None
@@ -7115,7 +7290,11 @@ class ClyptWorker:
         )
         assigned_ratio = assigned / max(1, len(words))
         print(f"  LR-ASD assignment ratio: {assigned}/{len(words)}={assigned_ratio:.1%}")
-        if assigned_ratio < min_lrasd_assign_ratio or len(scored_track_ids) < 2:
+        insufficient_track_support = (
+            len(scored_track_ids) < 2
+            and len(eligible_lrasd_track_ids) >= 2
+        )
+        if assigned_ratio < min_lrasd_assign_ratio or insufficient_track_support:
             if audio_prior_abstentions > 0 and assigned == 0:
                 print(
                     "  LR-ASD preserved unknown assignments for off-screen audio turns; "
@@ -7125,7 +7304,8 @@ class ClyptWorker:
                 return []
             print(
                 "  LR-ASD confidence too low for final binding "
-                f"(assigned_ratio={assigned_ratio:.1%}, scored_tracks={len(scored_track_ids)}); "
+                f"(assigned_ratio={assigned_ratio:.1%}, scored_tracks={len(scored_track_ids)}, "
+                f"eligible_tracks={len(eligible_lrasd_track_ids)}); "
                 "falling back to heuristic binder."
             )
             return None
