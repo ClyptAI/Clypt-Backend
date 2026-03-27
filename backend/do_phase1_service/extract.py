@@ -281,6 +281,10 @@ def _forward_progress_line(line: str, callback: ProgressCallback) -> None:
     normalized = line.strip()
     if not normalized:
         return
+    dynamic_progress = _parse_dynamic_progress_line(normalized)
+    if dynamic_progress is not None:
+        callback(*dynamic_progress)
+        return
     for pattern, step, message, pct in _PHASE1_PROGRESS_PATTERNS:
         if pattern.search(normalized):
             callback(step, message or normalized, pct)
@@ -350,6 +354,69 @@ class _LineTee:
         if self._buffer and self._on_line is not None:
             self._on_line(self._buffer)
             self._buffer = ""
+
+
+def _lerp_progress(start: float, end: float, fraction: float) -> float:
+    bounded = max(0.0, min(1.0, float(fraction)))
+    return round(float(start + ((end - start) * bounded)), 2)
+
+
+def _parse_dynamic_progress_line(line: str) -> tuple[str, str, float] | None:
+    yolo_match = re.search(
+        r"YOLO progress:\s*(?P<done>\d+)/(?P<total>\d+)\s+frames\s+\((?P<pct>[0-9.]+)%\)",
+        line,
+    )
+    if yolo_match:
+        pct = float(yolo_match.group("pct"))
+        tracking_pct = _lerp_progress(0.30, 0.65, pct / 100.0)
+        return (
+            "tracking",
+            f"YOLO progress: {yolo_match.group('done')}/{yolo_match.group('total')} frames ({pct:.1f}%)",
+            tracking_pct,
+        )
+
+    face_queue_match = re.search(r"Face pipeline queued:\s*(?P<segments>\d+)\s+segments", line)
+    if face_queue_match:
+        return (
+            "tracking",
+            f"Face pipeline queued: {face_queue_match.group('segments')} segments",
+            0.55,
+        )
+
+    face_complete_match = re.search(r"Face pipeline complete:\s*(?P<done>\d+)/(?P<total>\d+)\s+segments", line)
+    if face_complete_match:
+        return (
+            "tracking_complete",
+            f"Face pipeline complete: {face_complete_match.group('done')}/{face_complete_match.group('total')} segments",
+            0.64,
+        )
+
+    lrasd_match = re.search(
+        r"LR-ASD progress:\s*prepared=(?P<prepared>\d+),\s*inferred=(?P<inferred>\d+),\s*track_windows=(?P<done>\d+)/(?P<total>\d+)",
+        line,
+    )
+    if lrasd_match:
+        total = max(1, int(lrasd_match.group("total")))
+        done = min(total, int(lrasd_match.group("done")))
+        binding_pct = _lerp_progress(0.82, 0.92, done / float(total))
+        return (
+            "speaker_binding",
+            f"LR-ASD progress: inferred={lrasd_match.group('inferred')}, windows={done}/{total}",
+            binding_pct,
+        )
+
+    diarization_fail_match = re.search(r"Audio diarization model load failed:\s*(?P<detail>.+)", line)
+    if diarization_fail_match:
+        detail = diarization_fail_match.group("detail").strip()
+        if len(detail) > 120:
+            detail = detail[:117] + "..."
+        return (
+            "speaker_binding",
+            f"Audio diarization fallback: {detail}",
+            0.83,
+        )
+
+    return None
 
 
 _PHASE1_PROGRESS_PATTERNS: tuple[tuple[re.Pattern[str], str, str | None, float], ...] = (

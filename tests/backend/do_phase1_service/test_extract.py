@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from backend.do_phase1_service.extract import host_extraction_lock, run_extraction_job
+from backend.do_phase1_service.extract import _forward_progress_line
 from backend.pipeline import phase_1_do_pipeline as phase1_pipeline
 from backend.do_phase1_worker import ClyptWorker
 
@@ -288,6 +289,32 @@ def test_extract_job_applies_runtime_controls_to_local_extraction_env(tmp_path: 
         "tracker_backend": "bytetrack",
         "eval_profile": "podcast_eval",
     }
+
+
+def test_forward_progress_line_parses_live_tracking_and_binding_updates():
+    events = []
+
+    def record(step, message=None, pct=None):
+        events.append((step, message, pct))
+
+    _forward_progress_line(
+        "  YOLO progress: 5400/9419 frames (57.3%), 18594 boxes, 14.8 fps",
+        record,
+    )
+    _forward_progress_line(
+        "  Face pipeline queued: 24 segments, workers=1",
+        record,
+    )
+    _forward_progress_line(
+        "  LR-ASD progress: prepared=96, inferred=64, track_windows=120/322, scored_tracks=11",
+        record,
+    )
+
+    assert events == [
+        ("tracking", "YOLO progress: 5400/9419 frames (57.3%)", 0.5),
+        ("tracking", "Face pipeline queued: 24 segments", 0.55),
+        ("speaker_binding", "LR-ASD progress: inferred=64, windows=120/322", 0.86),
+    ]
 
 
 def test_pyannote_config_defaults_and_env_overrides(monkeypatch):
