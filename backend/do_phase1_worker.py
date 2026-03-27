@@ -6328,6 +6328,7 @@ class ClyptWorker:
         output_size=(112, 112),
     ):
         import cv2
+        import numpy as np
 
         if frame is None:
             return None
@@ -6348,6 +6349,44 @@ class ClyptWorker:
         crop = frame[top:bottom, left:right]
         if crop is None or crop.size == 0:
             return None
+
+        if str(os.getenv("CLYPT_LRASD_GPU_PREPROCESS", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                import torch
+                import torch.nn.functional as F
+
+                target_w, target_h = int(output_size[0]), int(output_size[1])
+                device = str(getattr(self, "gpu_device", "cpu") or "cpu")
+                crop_np = np.ascontiguousarray(crop)
+                crop_t = torch.from_numpy(crop_np).to(device=device, dtype=torch.float32)
+                if crop_t.ndim == 2:
+                    crop_t = crop_t.unsqueeze(0).unsqueeze(0)
+                else:
+                    crop_t = crop_t.permute(2, 0, 1).unsqueeze(0)
+                resized_t = F.interpolate(
+                    crop_t,
+                    size=(target_h, target_w),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                if resized_t.shape[1] >= 3:
+                    rgb = resized_t[:, :3, :, :]
+                    grayscale_t = (
+                        (0.2989 * rgb[:, 0:1, :, :])
+                        + (0.5870 * rgb[:, 1:2, :, :])
+                        + (0.1140 * rgb[:, 2:3, :, :])
+                    )
+                else:
+                    grayscale_t = resized_t[:, :1, :, :]
+                return (
+                    grayscale_t.squeeze(0)
+                    .squeeze(0)
+                    .clamp(0, 255)
+                    .to(device="cpu", dtype=torch.uint8)
+                    .numpy()
+                )
+            except Exception:
+                pass
 
         resized = cv2.resize(crop, tuple(output_size), interpolation=cv2.INTER_LINEAR)
         if resized.ndim == 2:

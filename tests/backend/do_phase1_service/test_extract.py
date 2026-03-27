@@ -1845,6 +1845,41 @@ def test_prepare_lrasd_visual_crop_cpu_fallback_outputs_grayscale_112(monkeypatc
     assert float(crop.mean()) > 0.0
 
 
+def test_prepare_lrasd_visual_crop_uses_torch_path_when_enabled(monkeypatch):
+    import cv2
+
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.gpu_device = "cpu"
+
+    monkeypatch.setenv("CLYPT_LRASD_GPU_PREPROCESS", "1")
+    monkeypatch.setattr(
+        cv2,
+        "resize",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cv2.resize should not run")),
+    )
+    monkeypatch.setattr(
+        cv2,
+        "cvtColor",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cv2.cvtColor should not run")),
+    )
+
+    frame = np.zeros((40, 40, 3), dtype=np.uint8)
+    frame[10:30, 10:30, 1] = 255
+    crop = worker._prepare_lrasd_visual_crop(
+        frame,
+        x1=10,
+        y1=10,
+        x2=30,
+        y2=30,
+    )
+
+    assert crop is not None
+    assert crop.shape == (112, 112)
+    assert crop.dtype == np.uint8
+    assert float(crop.mean()) > 0.0
+
+
 def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path: Path):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
