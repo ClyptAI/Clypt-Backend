@@ -542,8 +542,145 @@ def active_track_at(bindings: list[dict], target_ms: int) -> str | None:
         return str(nearest["track_id"])
     return None
 
+def _normalized_id_list(values: list[object] | None) -> list[str]:
+    normalized: list[str] = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
 
-def resolve_follow_identity(bindings: list[dict], abs_ms: int) -> str | None:
+
+def overlap_follow_decision_at_ms(overlap_follow_decisions: list[dict] | None, abs_ms: int) -> dict | None:
+    for decision in overlap_follow_decisions or []:
+        start_ms = int(decision.get("start_time_ms", 0) or 0)
+        end_ms = int(decision.get("end_time_ms", start_ms) or start_ms)
+        if start_ms <= abs_ms < end_ms:
+            return dict(decision)
+    return None
+
+
+def overlap_follow_decisions_for_interval(
+    overlap_follow_decisions: list[dict] | None,
+    clip_start_s: float,
+    clip_end_s: float,
+) -> list[dict]:
+    clip_start_ms = int(round(float(clip_start_s) * 1000.0))
+    clip_end_ms = int(round(float(clip_end_s) * 1000.0))
+    selected: list[dict] = []
+    for decision in overlap_follow_decisions or []:
+        start_ms = int(decision.get("start_time_ms", 0) or 0)
+        end_ms = int(decision.get("end_time_ms", start_ms) or start_ms)
+        if end_ms <= clip_start_ms or start_ms >= clip_end_ms:
+            continue
+        selected.append(dict(decision))
+    return selected
+
+
+def _decision_camera_target_track_id(decision: dict, *, prefer_local_track_ids: bool) -> str | None:
+    ordered_candidates = (
+        [
+            str(decision.get("camera_target_local_track_id") or "").strip(),
+            str(decision.get("camera_target_track_id") or "").strip(),
+        ]
+        if prefer_local_track_ids
+        else [
+            str(decision.get("camera_target_track_id") or "").strip(),
+            str(decision.get("camera_target_local_track_id") or "").strip(),
+        ]
+    )
+    for track_id in ordered_candidates:
+        if track_id:
+            return track_id
+    return None
+
+
+def _select_visible_track_ids_for_span(
+    span: dict,
+    *,
+    prefer_local_track_ids: bool,
+    available_track_ids: set[str] | None = None,
+) -> list[str]:
+    candidate_lists = (
+        [
+            _normalized_id_list(span.get("visible_local_track_ids")),
+            _normalized_id_list(span.get("visible_track_ids")),
+        ]
+        if prefer_local_track_ids
+        else [
+            _normalized_id_list(span.get("visible_track_ids")),
+            _normalized_id_list(span.get("visible_local_track_ids")),
+        ]
+    )
+    available = {track_id for track_id in (available_track_ids or set()) if track_id}
+    for candidate_ids in candidate_lists:
+        if not candidate_ids:
+            continue
+        if not available:
+            return candidate_ids
+        matched = [track_id for track_id in candidate_ids if track_id in available]
+        if matched:
+            return matched
+    return []
+
+
+def active_speaker_state_for_interval(
+    *,
+    clip_start_s: float,
+    clip_end_s: float,
+    active_speakers_local: list[dict] | None,
+    prefer_local_track_ids: bool,
+    available_track_ids: set[str] | None = None,
+) -> dict:
+    clip_start_ms = int(round(float(clip_start_s) * 1000.0))
+    clip_end_ms = int(round(float(clip_end_s) * 1000.0))
+    visible_track_ids: list[str] = []
+    offscreen_audio_speaker_ids: list[str] = []
+    overlap_active = False
+
+    for span in active_speakers_local or []:
+        start_ms = int(span.get("start_time_ms", 0) or 0)
+        end_ms = int(span.get("end_time_ms", start_ms) or start_ms)
+        if end_ms <= clip_start_ms or start_ms >= clip_end_ms:
+            continue
+        overlap_active = overlap_active or bool(span.get("overlap"))
+        for track_id in _select_visible_track_ids_for_span(
+            span,
+            prefer_local_track_ids=prefer_local_track_ids,
+            available_track_ids=available_track_ids,
+        ):
+            if track_id not in visible_track_ids:
+                visible_track_ids.append(track_id)
+        for speaker_id in _normalized_id_list(span.get("offscreen_audio_speaker_ids")):
+            if speaker_id not in offscreen_audio_speaker_ids:
+                offscreen_audio_speaker_ids.append(speaker_id)
+
+    overlap_active = overlap_active or len(visible_track_ids) > 1 or bool(offscreen_audio_speaker_ids)
+    return {
+        "visible_track_ids": visible_track_ids,
+        "offscreen_audio_speaker_ids": offscreen_audio_speaker_ids,
+        "overlap": overlap_active,
+    }
+
+
+def resolve_follow_identity(
+    bindings: list[dict],
+    abs_ms: int,
+    *,
+    overlap_follow_decisions: list[dict] | None = None,
+    prefer_local_track_ids: bool = False,
+) -> str | None:
+    active_decision = overlap_follow_decision_at_ms(overlap_follow_decisions, abs_ms)
+    if active_decision is not None:
+        if bool(active_decision.get("stay_wide")):
+            return None
+        decision_target = _decision_camera_target_track_id(
+            active_decision,
+            prefer_local_track_ids=prefer_local_track_ids,
+        )
+        if decision_target:
+            return decision_target
+
     for binding in reversed(bindings):
         if int(binding["start_time_ms"]) == abs_ms:
             return str(binding["track_id"])
@@ -1509,6 +1646,8 @@ def build_camera_path(
     face_track_index: dict[str, list[Detection]],
     frame_detection_index: dict[int, list[dict]] | None = None,
     motion_profile: MotionProfile | None = None,
+    overlap_follow_decisions: list[dict] | None = None,
+    prefer_local_track_ids: bool = False,
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     motion_profile = motion_profile or motion_profile_for_composition("single_person")
     crop_w, crop_h = crop_dimensions(src_w, src_h, camera_zoom=motion_profile.camera_zoom)
@@ -1549,7 +1688,12 @@ def build_camera_path(
     while t <= (clip_end_s - clip_start_s + 1e-6):
         abs_ms = int(round((clip_start_s + t) * 1000.0))
         frame_idx = int(round((abs_ms / 1000.0) * fps))
-        tid = resolve_follow_identity(bindings, abs_ms)
+        tid = resolve_follow_identity(
+            bindings,
+            abs_ms,
+            overlap_follow_decisions=overlap_follow_decisions,
+            prefer_local_track_ids=prefer_local_track_ids,
+        )
         person_det = interpolate_detection(person_track_index.get(tid), frame_idx, fps) if tid else None
         det = _track_anchor_candidate(
             tid,
@@ -2435,6 +2579,9 @@ def build_debug_hud_filters(
     raw_track_ids: list[str],
     face_track_ids: list[str],
     hybrid_debug: dict | None = None,
+    active_track_ids: list[str] | None = None,
+    offscreen_audio_speaker_ids: list[str] | None = None,
+    overlap_active: bool = False,
 ) -> list[str]:
     lines = [
         f"mode={mode}",
@@ -2443,6 +2590,12 @@ def build_debug_hud_filters(
         f"raw={','.join(raw_track_ids) if raw_track_ids else 'none'}",
         f"faces={','.join(face_track_ids) if face_track_ids else 'none'}",
     ]
+    if overlap_active or active_track_ids or offscreen_audio_speaker_ids:
+        lines.append(f"overlap={'yes' if overlap_active else 'no'}")
+    if active_track_ids:
+        lines.append(f"active={','.join(_normalized_id_list(active_track_ids))}")
+    if offscreen_audio_speaker_ids:
+        lines.append(f"offscreen_audio={','.join(_normalized_id_list(offscreen_audio_speaker_ids))}")
     if hybrid_debug:
         lines.extend(
             [
@@ -2485,6 +2638,7 @@ def build_debug_overlay_paths(
     face_track_index: dict[str, list[Detection]],
     follow_track_ids: list[str],
     raw_track_ids: list[str],
+    active_track_ids: list[str] | None = None,
     out_w: int = OUT_W,
     out_h: int = OUT_H,
     camera_zoom: float = CAMERA_ZOOM,
@@ -2494,6 +2648,7 @@ def build_debug_overlay_paths(
     overlays: list[OverlayPath] = []
     follow_set = {str(tid) for tid in follow_track_ids if str(tid)}
     raw_set = {str(tid) for tid in raw_track_ids if str(tid)}
+    active_set = {str(tid) for tid in (active_track_ids or []) if str(tid)}
 
     visible_track_ids = visible_track_ids_for_interval(
         clip_start_s=clip_start_s,
@@ -2505,6 +2660,9 @@ def build_debug_overlay_paths(
         if track_id in follow_set:
             color = DEBUG_FOLLOW_BOX_COLOR
             thickness = 8
+        elif track_id in active_set:
+            color = OVERLAY_SECONDARY_BOX_COLOR
+            thickness = 6
         elif track_id in raw_set:
             color = DEBUG_RAW_ACTIVE_BOX_COLOR
             thickness = 6
@@ -2574,6 +2732,9 @@ def build_debug_filters_for_segment(
     follow_track_ids: list[str],
     face_track_ids: list[str],
     speaker_candidate_debug: list[dict] | None = None,
+    active_track_ids: list[str] | None = None,
+    offscreen_audio_speaker_ids: list[str] | None = None,
+    overlap_active: bool = False,
 ) -> list[str]:
     raw_track_ids = [str(binding.get("track_id", "")) for binding in raw_bindings if str(binding.get("track_id", ""))]
     hybrid_debug = summarize_hybrid_debug_for_interval(
@@ -2588,6 +2749,9 @@ def build_debug_filters_for_segment(
         raw_track_ids=raw_track_ids,
         face_track_ids=face_track_ids,
         hybrid_debug=hybrid_debug,
+        active_track_ids=active_track_ids,
+        offscreen_audio_speaker_ids=offscreen_audio_speaker_ids,
+        overlap_active=overlap_active,
     ) + build_debug_timeline_filters(
         clip_start_s=clip_start_s,
         clip_end_s=clip_end_s,
@@ -2609,6 +2773,8 @@ def main() -> None:
     visual = load_json(VISUAL_PATH)
     audio = load_json(AUDIO_PATH)
     speaker_candidate_debug = list(audio.get("speaker_candidate_debug", []))
+    active_speakers_local = list(audio.get("active_speakers_local", []))
+    overlap_follow_decisions = list(audio.get("overlap_follow_decisions", []))
     tracks = list(visual.get("tracks", []))
     bindings, raw_bindings, follow_bindings, binding_source = select_binding_sets(audio)
     tracks, track_source = select_render_tracks(visual)
@@ -2625,6 +2791,8 @@ def main() -> None:
 
     frame_detection_index = build_frame_detection_index(tracks)
     person_track_index = build_track_index(tracks)
+    available_track_ids = {str(track_id) for track_id in person_track_index.keys() if str(track_id)}
+    prefer_local_track_ids = binding_source.endswith("_local")
     face_track_index: dict[str, list[Detection]] = build_face_index(
         list(visual.get("face_detections", [])),
         src_w=src_w,
@@ -2688,6 +2856,18 @@ def main() -> None:
                 for segment_idx, segment in enumerate(adaptive_segments, start=1):
                     segment_path = Path(tmpdir) / f"segment_{segment_idx:02d}.mp4"
                     segment_paths.append(segment_path)
+                    segment_overlap_state = active_speaker_state_for_interval(
+                        clip_start_s=float(segment.start_s),
+                        clip_end_s=float(segment.end_s),
+                        active_speakers_local=active_speakers_local,
+                        prefer_local_track_ids=prefer_local_track_ids,
+                        available_track_ids=available_track_ids,
+                    )
+                    segment_overlap_decisions = overlap_follow_decisions_for_interval(
+                        overlap_follow_decisions,
+                        float(segment.start_s),
+                        float(segment.end_s),
+                    )
                     if (
                         segment.mode == "two_split"
                         and segment.primary_track_id
@@ -2779,6 +2959,9 @@ def main() -> None:
                                 follow_track_ids=[tid for tid in segment_follow_track_ids if tid],
                                 face_track_ids=visible_face_ids,
                                 speaker_candidate_debug=speaker_candidate_debug,
+                                active_track_ids=segment_overlap_state["visible_track_ids"],
+                                offscreen_audio_speaker_ids=segment_overlap_state["offscreen_audio_speaker_ids"],
+                                overlap_active=bool(segment_overlap_state["overlap"]),
                             )
                             if upper_overlay is not None:
                                 upper_overlay_paths = [OverlayPath(**{**upper_overlay.__dict__, "label": segment.primary_track_id})]
@@ -2802,19 +2985,35 @@ def main() -> None:
                         )
                     else:
                         single_profile = motion_profile_for_composition("single_person")
-                        x_keyframes, y_keyframes = build_single_track_path(
-                            track_id=segment.primary_track_id,
-                            clip_start_s=segment.start_s,
-                            clip_end_s=segment.end_s,
-                            fps=fps,
-                            src_w=src_w,
-                            src_h=src_h,
-                            person_track_index=person_track_index,
-                            face_track_index=face_track_index,
-                            frame_detection_index=frame_detection_index,
-                            out_h=OUT_H,
-                            motion_profile=single_profile,
-                        )
+                        if segment_overlap_decisions:
+                            x_keyframes, y_keyframes = build_camera_path(
+                                clip_start_s=segment.start_s,
+                                clip_end_s=segment.end_s,
+                                fps=fps,
+                                src_w=src_w,
+                                src_h=src_h,
+                                bindings=clip_follow_bindings if clip_follow_bindings else bindings,
+                                person_track_index=person_track_index,
+                                face_track_index=face_track_index,
+                                frame_detection_index=frame_detection_index,
+                                motion_profile=single_profile,
+                                overlap_follow_decisions=segment_overlap_decisions,
+                                prefer_local_track_ids=prefer_local_track_ids,
+                            )
+                        else:
+                            x_keyframes, y_keyframes = build_single_track_path(
+                                track_id=segment.primary_track_id,
+                                clip_start_s=segment.start_s,
+                                clip_end_s=segment.end_s,
+                                fps=fps,
+                                src_w=src_w,
+                                src_h=src_h,
+                                person_track_index=person_track_index,
+                                face_track_index=face_track_index,
+                                frame_detection_index=frame_detection_index,
+                                out_h=OUT_H,
+                                motion_profile=single_profile,
+                            )
                         overlay_path = build_overlay_box_path(
                             track_id=segment.primary_track_id or composition.primary_track_id,
                             clip_start_s=segment.start_s,
@@ -2850,6 +3049,7 @@ def main() -> None:
                                 frame_detection_index=frame_detection_index,
                                 follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
                                 raw_track_ids=[str(b.get("track_id", "")) for b in segment_raw_bindings],
+                                active_track_ids=segment_overlap_state["visible_track_ids"],
                                 out_h=OUT_H,
                                 camera_zoom=single_profile.camera_zoom,
                                 keyframe_step_s=single_profile.keyframe_step_s,
@@ -2875,6 +3075,9 @@ def main() -> None:
                                 follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
                                 face_track_ids=visible_face_ids,
                                 speaker_candidate_debug=speaker_candidate_debug,
+                                active_track_ids=segment_overlap_state["visible_track_ids"],
+                                offscreen_audio_speaker_ids=segment_overlap_state["offscreen_audio_speaker_ids"],
+                                overlap_active=bool(segment_overlap_state["overlap"]),
                             )
                         render_clip(
                             video_path=VIDEO_PATH,
@@ -2959,6 +3162,13 @@ def main() -> None:
             ]
             extra_filters: list[str] = []
             if RENDER_DEBUG_MODE:
+                clip_overlap_state = active_speaker_state_for_interval(
+                    clip_start_s=float(start_s),
+                    clip_end_s=float(end_s),
+                    active_speakers_local=active_speakers_local,
+                    prefer_local_track_ids=prefer_local_track_ids,
+                    available_track_ids=available_track_ids,
+                )
                 overlay_paths = build_debug_overlay_paths(
                     clip_start_s=float(start_s),
                     clip_end_s=float(end_s),
@@ -2971,6 +3181,7 @@ def main() -> None:
                     face_track_index=face_track_index,
                     follow_track_ids=[composition.primary_track_id, composition.secondary_track_id],
                     raw_track_ids=[str(b.get("track_id", "")) for b in clip_raw_bindings],
+                    active_track_ids=clip_overlap_state["visible_track_ids"],
                     camera_zoom=shared_profile.camera_zoom,
                     keyframe_step_s=shared_profile.keyframe_step_s,
                     include_faces=RENDER_DEBUG_SHOW_FACES,
@@ -2995,6 +3206,9 @@ def main() -> None:
                     follow_track_ids=[composition.primary_track_id, composition.secondary_track_id],
                     face_track_ids=visible_face_ids,
                     speaker_candidate_debug=speaker_candidate_debug,
+                    active_track_ids=clip_overlap_state["visible_track_ids"],
+                    offscreen_audio_speaker_ids=clip_overlap_state["offscreen_audio_speaker_ids"],
+                    overlap_active=bool(clip_overlap_state["overlap"]),
                 )
             print(
                 f"  clip{idx}: {start_s}s-{end_s}s score={score:.2f} "
@@ -3054,19 +3268,47 @@ def main() -> None:
                 for segment_idx, segment in enumerate(single_segments, start=1):
                     segment_path = Path(tmpdir) / f"segment_{segment_idx:02d}.mp4"
                     segment_paths.append(segment_path)
-                    x_keyframes, y_keyframes = build_single_track_path(
-                        track_id=segment.primary_track_id,
-                        clip_start_s=segment.start_s,
-                        clip_end_s=segment.end_s,
-                        fps=fps,
-                        src_w=src_w,
-                        src_h=src_h,
-                        person_track_index=person_track_index,
-                        face_track_index=face_track_index,
-                        frame_detection_index=frame_detection_index,
-                        out_h=OUT_H,
-                        motion_profile=single_profile,
+                    segment_overlap_state = active_speaker_state_for_interval(
+                        clip_start_s=float(segment.start_s),
+                        clip_end_s=float(segment.end_s),
+                        active_speakers_local=active_speakers_local,
+                        prefer_local_track_ids=prefer_local_track_ids,
+                        available_track_ids=available_track_ids,
                     )
+                    segment_overlap_decisions = overlap_follow_decisions_for_interval(
+                        overlap_follow_decisions,
+                        float(segment.start_s),
+                        float(segment.end_s),
+                    )
+                    if segment_overlap_decisions:
+                        x_keyframes, y_keyframes = build_camera_path(
+                            clip_start_s=segment.start_s,
+                            clip_end_s=segment.end_s,
+                            fps=fps,
+                            src_w=src_w,
+                            src_h=src_h,
+                            bindings=clip_follow_bindings if clip_follow_bindings else bindings,
+                            person_track_index=person_track_index,
+                            face_track_index=face_track_index,
+                            frame_detection_index=frame_detection_index,
+                            motion_profile=single_profile,
+                            overlap_follow_decisions=segment_overlap_decisions,
+                            prefer_local_track_ids=prefer_local_track_ids,
+                        )
+                    else:
+                        x_keyframes, y_keyframes = build_single_track_path(
+                            track_id=segment.primary_track_id,
+                            clip_start_s=segment.start_s,
+                            clip_end_s=segment.end_s,
+                            fps=fps,
+                            src_w=src_w,
+                            src_h=src_h,
+                            person_track_index=person_track_index,
+                            face_track_index=face_track_index,
+                            frame_detection_index=frame_detection_index,
+                            out_h=OUT_H,
+                            motion_profile=single_profile,
+                        )
                     overlay_path = build_overlay_box_path(
                         track_id=segment.primary_track_id,
                         clip_start_s=segment.start_s,
@@ -3102,6 +3344,7 @@ def main() -> None:
                             frame_detection_index=frame_detection_index,
                             follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
                             raw_track_ids=[str(b.get("track_id", "")) for b in segment_raw_bindings],
+                            active_track_ids=segment_overlap_state["visible_track_ids"],
                             camera_zoom=single_profile.camera_zoom,
                             keyframe_step_s=single_profile.keyframe_step_s,
                             include_faces=RENDER_DEBUG_SHOW_FACES,
@@ -3126,6 +3369,9 @@ def main() -> None:
                             follow_track_ids=[segment.primary_track_id] if segment.primary_track_id else [],
                             face_track_ids=visible_face_ids,
                             speaker_candidate_debug=speaker_candidate_debug,
+                            active_track_ids=segment_overlap_state["visible_track_ids"],
+                            offscreen_audio_speaker_ids=segment_overlap_state["offscreen_audio_speaker_ids"],
+                            overlap_active=bool(segment_overlap_state["overlap"]),
                         )
                     render_clip(
                         video_path=VIDEO_PATH,

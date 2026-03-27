@@ -127,6 +127,77 @@ def active_binding_at_ms(bindings: list[dict], timestamp_ms: int) -> str | None:
     return None
 
 
+def _normalized_id_list(values: list[object] | None) -> list[str]:
+    normalized: list[str] = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _select_visible_track_ids_for_span(
+    span: dict,
+    *,
+    prefer_local_track_ids: bool,
+    available_track_ids: set[str] | None = None,
+) -> list[str]:
+    candidate_lists = (
+        [
+            _normalized_id_list(span.get("visible_local_track_ids")),
+            _normalized_id_list(span.get("visible_track_ids")),
+        ]
+        if prefer_local_track_ids
+        else [
+            _normalized_id_list(span.get("visible_track_ids")),
+            _normalized_id_list(span.get("visible_local_track_ids")),
+        ]
+    )
+
+    available = {track_id for track_id in (available_track_ids or set()) if track_id}
+    for candidate_ids in candidate_lists:
+        if not candidate_ids:
+            continue
+        if not available:
+            return candidate_ids
+        matched = [track_id for track_id in candidate_ids if track_id in available]
+        if matched:
+            return matched
+    return []
+
+
+def active_speaker_state_at_ms(
+    audio: dict,
+    timestamp_ms: int,
+    *,
+    available_track_ids: set[str] | None = None,
+) -> dict:
+    prefer_local_track_ids = _use_local_clip_bindings_experiment()
+    for span in audio.get("active_speakers_local", []) or []:
+        start_ms = int(span.get("start_time_ms", 0) or 0)
+        end_ms = int(span.get("end_time_ms", start_ms) or start_ms)
+        if not (start_ms <= timestamp_ms < end_ms):
+            continue
+        visible_track_ids = _select_visible_track_ids_for_span(
+            span,
+            prefer_local_track_ids=prefer_local_track_ids,
+            available_track_ids=available_track_ids,
+        )
+        offscreen_audio_speaker_ids = _normalized_id_list(span.get("offscreen_audio_speaker_ids"))
+        return {
+            "visible_track_ids": visible_track_ids,
+            "offscreen_audio_speaker_ids": offscreen_audio_speaker_ids,
+            "overlap": bool(span.get("overlap")) or len(visible_track_ids) > 1 or bool(offscreen_audio_speaker_ids),
+            "decision_source": str(span.get("decision_source") or "unknown"),
+        }
+    return {
+        "visible_track_ids": [],
+        "offscreen_audio_speaker_ids": [],
+        "overlap": False,
+        "decision_source": "none",
+    }
+
+
 def current_word_text_at_ms(words: list[dict], timestamp_ms: int) -> str:
     for word in words or []:
         if int(word.get("start_time_ms", 0)) <= timestamp_ms < int(word.get("end_time_ms", 0)):
@@ -143,13 +214,21 @@ def hybrid_debug_entry_at_ms(speaker_candidate_debug: list[dict], timestamp_ms: 
     return None
 
 
-def role_style_for_track(track_id: str, *, raw_track_id: str | None, follow_track_id: str | None) -> dict:
+def role_style_for_track(
+    track_id: str,
+    *,
+    raw_track_id: str | None,
+    follow_track_id: str | None,
+    active_track_ids: set[str] | None = None,
+) -> dict:
     if track_id and raw_track_id == track_id and follow_track_id == track_id:
         return {"color": (0, 200, 255), "thickness": 4, "label_suffix": "RAW+FOLLOW"}
     if track_id and follow_track_id == track_id:
         return {"color": (80, 220, 80), "thickness": 4, "label_suffix": "FOLLOW"}
     if track_id and raw_track_id == track_id:
         return {"color": (0, 235, 255), "thickness": 3, "label_suffix": "RAW"}
+    if track_id and track_id in (active_track_ids or set()):
+        return {"color": (0, 170, 255), "thickness": 3, "label_suffix": "ACTIVE"}
     return {"color": (200, 200, 200), "thickness": 2, "label_suffix": ""}
 
 
@@ -178,6 +257,9 @@ def build_hud_lines(
     binding_source: str,
     track_source: str,
     hybrid_debug: dict | None = None,
+    active_visible_track_ids: list[str] | None = None,
+    offscreen_audio_speaker_ids: list[str] | None = None,
+    overlap_active: bool = False,
 ) -> list[str]:
     lines = [
         f"time: {timestamp_ms / 1000.0:07.2f}s",
@@ -187,6 +269,12 @@ def build_hud_lines(
         f"follow speaker: {follow_track_id or 'unknown'}",
         f"word: {current_word or '-'}",
     ]
+    if overlap_active or active_visible_track_ids or offscreen_audio_speaker_ids:
+        lines.append(f"overlap: {'yes' if overlap_active else 'no'}")
+    if active_visible_track_ids:
+        lines.append(f"active visible: {','.join(active_visible_track_ids)}")
+    if offscreen_audio_speaker_ids:
+        lines.append(f"offscreen active audio: {','.join(offscreen_audio_speaker_ids)}")
     if hybrid_debug:
         lines.extend(
             [
@@ -215,6 +303,9 @@ def draw_hud(
     binding_source: str,
     track_source: str,
     hybrid_debug: dict | None = None,
+    active_visible_track_ids: list[str] | None = None,
+    offscreen_audio_speaker_ids: list[str] | None = None,
+    overlap_active: bool = False,
 ) -> None:
     lines = build_hud_lines(
         timestamp_ms=timestamp_ms,
@@ -224,6 +315,9 @@ def draw_hud(
         binding_source=binding_source,
         track_source=track_source,
         hybrid_debug=hybrid_debug,
+        active_visible_track_ids=active_visible_track_ids,
+        offscreen_audio_speaker_ids=offscreen_audio_speaker_ids,
+        overlap_active=overlap_active,
     )
     x = 24
     y = 42
@@ -233,8 +327,20 @@ def draw_hud(
         y += 34
 
 
-def draw_detection_box(frame, det: dict, *, raw_track_id: str | None, follow_track_id: str | None) -> None:
-    style = role_style_for_track(str(det.get("track_id", "")), raw_track_id=raw_track_id, follow_track_id=follow_track_id)
+def draw_detection_box(
+    frame,
+    det: dict,
+    *,
+    raw_track_id: str | None,
+    follow_track_id: str | None,
+    active_track_ids: set[str] | None = None,
+) -> None:
+    style = role_style_for_track(
+        str(det.get("track_id", "")),
+        raw_track_id=raw_track_id,
+        follow_track_id=follow_track_id,
+        active_track_ids=active_track_ids,
+    )
     x1 = int(det["x1"])
     y1 = int(det["y1"])
     x2 = int(det["x2"])
@@ -307,6 +413,12 @@ def render_debug_video(
         frame_width=frame_width,
         frame_height=frame_height,
     )
+    available_track_ids = {
+        str(det.get("track_id", "")).strip()
+        for detections in person_frame_index.values()
+        for det in detections
+        if str(det.get("track_id", "")).strip()
+    }
     face_frame_index = flatten_segmented_detections(
         visual.get("face_detections", []),
         fps=fps,
@@ -348,9 +460,21 @@ def render_debug_video(
             follow_track_id = active_binding_at_ms(follow_bindings, timestamp_ms)
             current_word = current_word_text_at_ms(words, timestamp_ms)
             hybrid_debug = hybrid_debug_entry_at_ms(speaker_candidate_debug, timestamp_ms)
+            active_speaker_state = active_speaker_state_at_ms(
+                audio,
+                timestamp_ms,
+                available_track_ids=available_track_ids,
+            )
+            active_track_ids = set(active_speaker_state["visible_track_ids"])
 
             for det in nearest_frame_detections(person_frame_index, frame_idx, max_delta=1):
-                draw_detection_box(frame, det, raw_track_id=raw_track_id, follow_track_id=follow_track_id)
+                draw_detection_box(
+                    frame,
+                    det,
+                    raw_track_id=raw_track_id,
+                    follow_track_id=follow_track_id,
+                    active_track_ids=active_track_ids,
+                )
             for det in nearest_frame_detections(face_frame_index, frame_idx, max_delta=1):
                 draw_face_box(frame, det)
 
@@ -363,6 +487,9 @@ def render_debug_video(
                 binding_source=binding_source,
                 track_source=track_source,
                 hybrid_debug=hybrid_debug,
+                active_visible_track_ids=active_speaker_state["visible_track_ids"],
+                offscreen_audio_speaker_ids=active_speaker_state["offscreen_audio_speaker_ids"],
+                overlap_active=bool(active_speaker_state["overlap"]),
             )
             writer.write(frame)
             frame_idx += 1

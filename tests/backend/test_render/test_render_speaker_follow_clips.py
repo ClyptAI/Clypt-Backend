@@ -729,6 +729,84 @@ def test_build_debug_timeline_filters_include_raw_and_follow_rows():
     assert "drawbox=" in joined
 
 
+def test_build_debug_hud_filters_include_overlap_truth():
+    mod = load_module()
+
+    filters = mod.build_debug_hud_filters(
+        mode="single_person",
+        binding_source="speaker_follow_bindings_local",
+        follow_track_ids=["A"],
+        raw_track_ids=["A"],
+        face_track_ids=[],
+        active_track_ids=["A", "B"],
+        offscreen_audio_speaker_ids=["SPEAKER_03"],
+        overlap_active=True,
+    )
+    joined = "\n".join(filters)
+
+    assert "overlap=yes" in joined
+    assert ("active=A,B" in joined) or ("active=A\\,B" in joined)
+    assert "offscreen_audio=SPEAKER_03" in joined
+
+
+def test_resolve_follow_identity_uses_overlap_decision_target():
+    mod = load_module()
+    bindings = [
+        {"track_id": "A", "start_time_ms": 0, "end_time_ms": 2000, "word_count": 10},
+    ]
+    overlap_follow_decisions = [
+        {
+            "start_time_ms": 500,
+            "end_time_ms": 1500,
+            "camera_target_track_id": "B",
+            "camera_target_local_track_id": "local_B",
+            "stay_wide": False,
+        }
+    ]
+
+    assert (
+        mod.resolve_follow_identity(
+            bindings,
+            1000,
+            overlap_follow_decisions=overlap_follow_decisions,
+        )
+        == "B"
+    )
+    assert (
+        mod.resolve_follow_identity(
+            bindings,
+            1000,
+            overlap_follow_decisions=overlap_follow_decisions,
+            prefer_local_track_ids=True,
+        )
+        == "local_B"
+    )
+
+
+def test_resolve_follow_identity_returns_none_for_stay_wide_overlap():
+    mod = load_module()
+    bindings = [
+        {"track_id": "A", "start_time_ms": 0, "end_time_ms": 2000, "word_count": 10},
+    ]
+    overlap_follow_decisions = [
+        {
+            "start_time_ms": 500,
+            "end_time_ms": 1500,
+            "camera_target_track_id": "B",
+            "stay_wide": True,
+        }
+    ]
+
+    assert (
+        mod.resolve_follow_identity(
+            bindings,
+            1000,
+            overlap_follow_decisions=overlap_follow_decisions,
+        )
+        is None
+    )
+
+
 def test_build_render_debug_sidecar_payload_records_target_quality_rejections():
     mod = load_module()
     segment = mod.AdaptiveSegment(
