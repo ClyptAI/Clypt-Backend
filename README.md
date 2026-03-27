@@ -1,59 +1,91 @@
 # Clypt: Creator Intelligence and Clipping
 
-Clypt takes a YouTube URL and produces 9:16 short-form clips by combining:
-- Phase 1 Modal GPU extraction (ASR + tracking + speaker binding)
-- Gemini reasoning and embeddings over semantic nodes/edges
-- Spanner + GCS storage
-- Remotion rendering
+Clypt turns a source video into structured multimodal ledgers, graph data, and 9:16 clip renders.
+
+The active extraction path is **DigitalOcean Phase 1**, backed by the code in:
+- `backend/do_phase1_worker.py`
+- `backend/do_phase1_service/`
+- `backend/pipeline/phase_1_do_pipeline.py`
+
+For Phase 1 behavior, those files are the source of truth.
 
 ## Pipeline Overview
 
 ```text
 YouTube URL
-  -> Phase 1   Modal extraction (ASR + tracking + speaker binding)
+  -> Phase 1   DO extraction service (ASR + tracking + face/identity + speaker binding)
   -> Phase 2A  Semantic nodes (Gemini)
   -> Phase 2B  Narrative edges (Gemini)
-  -> Phase 3   Gemini Embedding 2 multimodal vectors
-  -> Phase 4   Persist nodes/edges/tracking to Spanner + GCS
+  -> Phase 3   Multimodal embeddings
+  -> Phase 4   Persist to Spanner + GCS
   -> Phase 5   Clip selection / retrieval
-  -> Render    Remotion 9:16 output clips
+  -> Render    Remotion / QA clip renderers
 ```
 
-## Tech Stack (Current)
+## Phase 1 Stack (Current)
 
-### Phase 1 Modal worker (`modal_worker.py`)
-- ASR: NVIDIA Parakeet-TDT-1.1B
-- Tracking: YOLO26s + BoT-SORT (+ chunk fan-out + stitch)
-- Face: InsightFace/ArcFace for ID stabilization
-- Active speaker binding: TalkNet
-- Runtime: Modal `H100`, `max_containers=8`, memory snapshot enabled
+### Runtime
+- DigitalOcean async extraction API + worker service
+- Local pipeline client submits jobs, polls for completion, then materializes compatibility artifacts for downstream phases
 
-### Local pipeline client (`pipeline/phase_1_modal_pipeline.py`)
-- Downloads source media with `yt-dlp`
-- Converts audio to 16kHz mono WAV
-- Calls Modal worker (single-worker or distributed fan-out mode)
-- Writes canonical JSON and NDJSON handoff files
+### Models and major components
+- ASR: `nvidia/parakeet-tdt-1.1b`
+- Tracking: `YOLO26s + BoT-SORT`
+- Face pipeline: full-frame `SCRFD` face detection on the shared analysis video, then face-track building
+- Identity stabilization: `ArcFace/InsightFace` embeddings on face tracks, short-gap face-track propagation, then signature-only attachment for remaining fragments
+- Active speaker binding: **LR-ASD primary**, heuristic fallback, `auto` runtime mode for large videos
+
+### Important Phase 1 behavior
+- Phase 1 does **not** use TalkNet in the active path.
+- Phase 1 does **not** use Google Video Intelligence or `phase_1a_reconcile.py`.
+- The worker runs **Parakeet ASR first, then tracking on the same GPU** to avoid CUDA-graph conflicts.
+- A shared analysis proxy path is used for tracking, face processing, and LR-ASD when enabled.
+- Canonical face observations are built early and reused across clustering, LR-ASD, and final ledgers.
+- `face_detections` are real detector-derived face tracks when available; `proxy_face_detections` exist only as a compatibility bridge for older consumers.
+- Framing policy metadata currently assumes:
+  - `single_person_plus_two_speaker`
+  - `shared_two_shot_or_explicit_split`
+
+## Phase 1 Service Flow
+
+### In the DigitalOcean extraction service
+1. Download source media from the submitted URL.
+2. Convert audio to 16kHz mono WAV.
+3. Run the local Phase 1 worker in-process.
+4. Inside that worker, run Parakeet ASR, YOLO26s + BoT-SORT tracking, identity clustering, and speaker binding.
+5. Build final `phase_1_visual` / `phase_1_audio` payloads.
+6. Upload the canonical source video and Phase 1 artifacts to GCS.
+7. Persist a contract `v2` manifest and mark the DO job complete.
+
+### In the local pipeline bridge
+1. Submit the async DO job.
+2. Poll until it succeeds or fails.
+3. Fetch the persisted manifest.
+4. Re-download the source media locally for downstream compatibility.
+5. Materialize:
+   - `backend/outputs/phase_1_visual.json`
+   - `backend/outputs/phase_1_audio.json`
+   - `backend/outputs/phase_1_visual.ndjson`
+   - `backend/outputs/phase_1_runtime_controls.json`
+
+That local redownload is still present in code today because later phases and render tooling still expect a local source video alongside the JSON ledgers.
 
 ## Prerequisites
 
 - Python 3.11+
 - Node.js 18+ and npm
 - `ffmpeg` + `ffprobe`
-- Modal account + CLI auth
 - Google Cloud project access for Vertex AI, Spanner, and GCS
+- A running DigitalOcean Phase 1 service if you want to use the active remote extraction path
 
-## Team Setup (Shared Project)
+## Shared Team Resources
 
-This repo and GCP stack are already shared between collaborators.  
-Use this README as an in-place runbook from your local checkout of `Clypt-V2` (no cloning/bootstrap steps here).
-
-### Shared cloud resources (already owned by the team)
-- Project: `clypt-v2`
+- GCP project: `clypt-v2`
 - Bucket: `gs://clypt-storage-v2`
 - Spanner instance: `clypt-spanner-v2`
 - Spanner database: `clypt-graph-db-v2`
 
-## Local One-Time Setup
+## Local Setup
 
 1. Python + Node dependencies
 
@@ -62,19 +94,18 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cd clypt-render-engine && npm install && cd ..
+cd remotion-render && npm install && cd ..
 ```
 
-2. Authenticate CLIs
+2. Authenticate Google CLIs
 
 ```bash
-.venv/bin/modal token new
 gcloud auth login
 gcloud auth application-default login
 gcloud config set project clypt-v2
 ```
 
-3. Enable required Google APIs (safe to run again)
+3. Enable required Google APIs
 
 ```bash
 gcloud services enable \
@@ -83,145 +114,118 @@ gcloud services enable \
   storage.googleapis.com
 ```
 
-4. Verify shared resources exist
+## Deploy the DO Phase 1 Service
+
+Use the deployment runbook in [docs/deployment/do-phase1-digitalocean.md](docs/deployment/do-phase1-digitalocean.md).
+
+The short version on the droplet is:
 
 ```bash
-gcloud storage buckets describe gs://clypt-storage-v2
-gcloud spanner instances describe clypt-spanner-v2
-gcloud spanner databases describe clypt-graph-db-v2 --instance=clypt-spanner-v2
+sudo REPO_DIR=/opt/clypt-phase1/repo \
+  BRANCH=codex/balanced-hybrid-phase1-contract \
+  ENV_FILE=/etc/clypt-phase1/do-phase1.env \
+  REQUIREMENTS_FILE=requirements-do-phase1.txt \
+  bash scripts/do_phase1/deploy_phase1_service.sh
 ```
 
-## Admin-Only: Provision or Repair Infrastructure
+This installs the dedicated Phase 1 dependency bundle, pre-caches the active models, and starts:
+- `clypt-phase1-api.service`
+- `clypt-phase1-worker.service`
 
-Run this section only if resources are missing or intentionally being rebuilt.
+Restart notes that are worth keeping in mind:
+- Preferred provisioning target is `atl1 + gpu-h200x1-141gb + gpu-h100x1-base` (`NVIDIA AI/ML Ready`).
+- If `atl1` is capacity-blocked, the last known good fallback we actually deployed was `nyc2` with the same `H200 + AI/ML Ready` shape.
+- Repo path on droplet: `/opt/clypt-phase1/repo`
+- Env file on droplet: `/etc/clypt-phase1/do-phase1.env`
+- GCP service account path on droplet: `/etc/clypt-phase1/gcp-sa.json`
+- Recommended worker settings for current Phase 1 evals: `DO_PHASE1_WORKER_CONCURRENCY=3`, `DO_PHASE1_GPU_SLOTS=1`
 
-`spannerSchema.sql` includes `CREATE PROPERTY GRAPH`, so the Spanner instance must be `ENTERPRISE` edition.
-
-```bash
-gcloud spanner instances create clypt-spanner-v2 \
-  --config=regional-us-central1 \
-  --description="Clypt graph instance" \
-  --edition=ENTERPRISE \
-  --nodes=1
-
-gcloud spanner databases create clypt-graph-db-v2 \
-  --instance=clypt-spanner-v2 \
-  --ddl-file=spannerSchema.sql
-```
-
-If database exists and schema changed:
-
-```bash
-gcloud spanner databases ddl update clypt-graph-db-v2 \
-  --instance=clypt-spanner-v2 \
-  --ddl-file=spannerSchema.sql
-```
-
-## Deploy Modal Worker
+## Run Phase 1 Against a Video URL
 
 ```bash
 source .venv/bin/activate
-.venv/bin/modal deploy modal_worker.py
+DO_PHASE1_BASE_URL=http://<droplet-ip>:8080 \
+PHASE1_RUNTIME_PROFILE=podcast_eval \
+PHASE1_SPEAKER_BINDING_MODE=lrasd \
+PHASE1_TRACKING_MODE=direct \
+PHASE1_SHARED_ANALYSIS_PROXY=1 \
+.venv/bin/python -c "import asyncio; from backend.pipeline.phase_1_do_pipeline import main; asyncio.run(main('https://www.youtube.com/watch?v=dXUFsDcC0_4'))"
 ```
 
-## Run with a Video URL
+This writes:
+- `backend/outputs/phase_1_visual.json`
+- `backend/outputs/phase_1_audio.json`
+- `backend/outputs/phase_1_visual.ndjson`
+- `backend/outputs/phase_1_runtime_controls.json`
 
-### Option A: Run only Phase 1 (recommended for extraction/debug)
-
-```bash
-source .venv/bin/activate
-CLYPT_DISTRIBUTED_MODAL_FANOUT=1 \
-CLYPT_DISTRIBUTED_DETACH=1 \
-CLYPT_DISTRIBUTED_RESUME=1 \
-CLYPT_MAX_GPU_WORKERS=8 \
-.venv/bin/python -c "import asyncio; from pipeline.phase_1_modal_pipeline import main; asyncio.run(main('https://www.youtube.com/watch?v=dXUFsDcC0_4'))"
-```
-
-This will:
-- download source media locally
-- upload canonical source video to `gs://clypt-storage-v2/phase_1/video.mp4`
-- run Modal extraction
-- write `outputs/phase_1_visual.json`, `outputs/phase_1_audio.json`, and `outputs/phase_1_visual.ndjson`
-
-### Option B: Run full pipeline (all phases + render)
+## Full Pipeline Run
 
 Interactive:
 
 ```bash
 source .venv/bin/activate
-.venv/bin/python pipeline/run_pipeline.py
+.venv/bin/python backend/pipeline/run_pipeline.py
 ```
-
-Then paste a YouTube URL when prompted.
 
 Non-interactive:
 
 ```bash
-printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python pipeline/run_pipeline.py
+printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python backend/pipeline/run_pipeline.py
 ```
 
 ## Important Runtime Flags
 
-### Phase 1 client flags (`pipeline/phase_1_modal_pipeline.py`)
-- `CLYPT_DISTRIBUTED_MODAL_FANOUT` (`1`/`0`): distributed chunk fan-out mode
-- `CLYPT_DISTRIBUTED_DETACH` (`1`/`0`): submit jobs detached and collect later
-- `CLYPT_DISTRIBUTED_RESUME` (`1`/`0`): resume from `outputs/phase_1_detached_state.json`
-- `CLYPT_MAX_GPU_WORKERS` (default `8`, capped to `8`)
-- `GCS_BUCKET` (default `clypt-storage-v2`)
-- `GCS_VIDEO_OBJECT` (default `phase_1/video.mp4`)
+### Local Phase 1 client
+- `DO_PHASE1_BASE_URL`
+- `DO_PHASE1_POLL_INTERVAL_SECONDS`
+- `DO_PHASE1_TIMEOUT_SECONDS`
+- `PHASE1_RUNTIME_PROFILE`
+- `PHASE1_SPEAKER_BINDING_MODE`
+- `PHASE1_TRACKING_MODE`
+- `PHASE1_SHARED_ANALYSIS_PROXY`
+- `PHASE1_HEURISTIC_BINDING_ENABLED`
 
-### Worker flags (`modal_worker.py`)
-- `CLYPT_YOLO_IMGSZ` (default `640`)
-- `CLYPT_ENABLE_ROI_DETECT` (`1`/`0`)
-- `CLYPT_TRACK_CHUNK_WORKERS` (local thread workers inside one container)
-- `CLYPT_ENFORCE_ROLLOUT_GATES` (`1`/`0`)
-- Gate thresholds:
-  - `CLYPT_GATE_MIN_IDF1_PROXY`
-  - `CLYPT_GATE_MIN_MOTA_PROXY`
-  - `CLYPT_GATE_MAX_FRAGMENTATION`
-  - `CLYPT_GATE_MIN_THROUGHPUT_FPS`
-  - `CLYPT_GATE_MAX_WALLCLOCK_S`
-  - `CLYPT_GATE_MIN_SCHEMA_PASS_RATE`
+### DO worker / extraction service
+- `DO_PHASE1_WORKER_CONCURRENCY`
+- `DO_PHASE1_GPU_SLOTS`
+- `DO_PHASE1_STATE_ROOT`
+- `DO_PHASE1_DB_PATH`
+- `DO_PHASE1_OUTPUT_ROOT`
+- `DO_PHASE1_LOG_ROOT`
+- `CLYPT_SPEAKER_BINDING_MODE`
+- `CLYPT_TRACKING_MODE`
+- `CLYPT_TRACK_CHUNK_WORKERS`
+- `CLYPT_LRASD_BATCH_SIZE`
+- `CLYPT_LRASD_PIPELINE_OVERLAP`
+- `CLYPT_LRASD_MAX_INFLIGHT`
+- rollout gate thresholds in `backend/do_phase1_worker.py`
 
-## Expected Outputs
+## Expected Core Artifacts
 
-### Core artifacts
-- `downloads/video.mp4`
-- `downloads/audio_16k.wav`
-- `outputs/phase_1_visual.json`
-- `outputs/phase_1_audio.json`
-- `outputs/phase_1_visual.ndjson`
-- `outputs/phase_2a_nodes.json`
-- `outputs/phase_2b_narrative_edges.json`
-- `outputs/phase_3_embeddings.json`
-- `outputs/remotion_payloads_array.json`
-
-### Rendered clips
-- `clypt-render-engine/out/`
+- `backend/outputs/phase_1_visual.json`
+- `backend/outputs/phase_1_audio.json`
+- `backend/outputs/phase_1_visual.ndjson`
+- `backend/outputs/phase_2a_nodes.json`
+- `backend/outputs/phase_2b_narrative_edges.json`
+- `backend/outputs/phase_3_embeddings.json`
+- `backend/outputs/remotion_payloads_array.json`
 
 ## Script Map
 
 | Phase | Script |
 |---|---|
-| 1 | `pipeline/phase_1_modal_pipeline.py` |
-| 2A | `pipeline/phase_2a_make_nodes.py` |
-| 2B | `pipeline/phase_2b_draw_edges.py` |
-| 3 | `pipeline/phase_3_multimodal_embeddings.py` |
-| 4 | `pipeline/phase_4_store_graph.py` |
-| 5 (auto-curate) | `pipeline/phase_5_auto_curate.py` |
-| 5 (retrieve) | `pipeline/phase_5_retrieve.py` |
-| full orchestrator | `pipeline/run_pipeline.py` |
+| 1 | `backend/pipeline/phase_1_do_pipeline.py` |
+| 2A | `backend/pipeline/phase_2a_make_nodes.py` |
+| 2B | `backend/pipeline/phase_2b_draw_edges.py` |
+| 3 | `backend/pipeline/phase_3_multimodal_embeddings.py` |
+| 4 | `backend/pipeline/phase_4_store_graph.py` |
+| 5 (auto-curate) | `backend/pipeline/phase_5_auto_curate.py` |
+| 5 (retrieve) | `backend/pipeline/phase_5_retrieve.py` |
+| full orchestrator | `backend/pipeline/run_pipeline.py` |
 
-## Metadata Defaults in Code
+## Planning Docs
 
-- `PROJECT_ID`: `clypt-v2`
-- `GCS_BUCKET`: `clypt-storage-v2`
-- `SPANNER_INSTANCE`: `clypt-spanner-v2`
-- `SPANNER_DATABASE`: `clypt-graph-db-v2`
-
-## Planning References
-
-- `planning/01-product-and-demo.md`
-- `planning/02-system-architecture.md`
-- `planning/03-agents-and-clipping.md`
-- `planning/04-data-integrations-and-reference.md`
+- `docs/planning/01-product-and-demo.md`
+- `docs/planning/02-system-architecture.md`
+- `docs/planning/03-agents-and-clipping.md`
+- `docs/planning/04-data-integrations-and-reference.md`

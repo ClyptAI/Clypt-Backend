@@ -5,6 +5,9 @@
 .claude/
 .vscode/
 *.code-workspace
+.superpowers/
+.understand-anything/
+.tmp/
 
 # Python
 __pycache__/
@@ -24,6 +27,11 @@ build/
 downloads/
 outputs/
 clips/
+backend/downloads/
+backend/outputs/
+backend/test-render/downloads/
+backend/test-render/outputs/
+backend/.parallel_runs/
 .parallel_runs/
 
 # Remotion render engine artifacts
@@ -33,3 +41,5 @@ clypt-render-engine/src/remotion_payloads_array.json
 
 # Logs
 *.log
+
+.worktrees/

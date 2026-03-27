@@ -1,0 +1,30 @@
+# DigitalOcean Phase 1 worker runtime only.
+# This avoids dragging the full GCP/graph stack onto the GPU droplet.
+
+google-cloud-storage>=2.18.0
+yt-dlp>=2024.12.0
+
+fastapi>=0.116.0
+uvicorn>=0.35.0
+httpx>=0.28.0
+pydantic>=2.11.0
+
+# Keep the pyannote + NeMo stack on a pre-Torch-2.6 load path until
+# pyannote/speaker-diarization-3.1 is compatible with the weights_only default.
+numpy==1.26.4
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+opencv-python-headless>=4.11.0
+decord>=0.6.0
+ultralytics>=8.3.0
+lap>=0.5.12
+omegaconf>=2.3.0
+insightface>=0.7.3
+onnxruntime-gpu==1.23.2
+nemo-toolkit[asr]==2.5.2
+pyannote.audio==3.3.2
+scipy>=1.15.0
+scikit-learn>=1.7.0
+python-speech-features>=0.6
+mediapipe>=0.10.14

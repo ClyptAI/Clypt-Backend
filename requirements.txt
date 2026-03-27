@@ -9,5 +9,21 @@ google-cloud-aiplatform>=1.82.0
 google-cloud-spanner>=3.49.0
 yt-dlp>=2024.12.0
 
-# Phase 1A migration target
-modal>=0.72.0
+# DigitalOcean Phase 1 service
+fastapi>=0.116.0
+uvicorn>=0.35.0
+httpx>=0.28.0
+pydantic>=2.11.0
+pytest>=8.4.0
+
+# DigitalOcean local Phase 1 extraction runtime
+# Note: GPU droplet images still need compatible CUDA wheels and LR-ASD assets.
+numpy>=2.2.0
+torch>=2.6.0
+opencv-python-headless>=4.11.0
+decord>=0.6.0
+ultralytics>=8.3.0
+omegaconf>=2.3.0
+insightface>=0.7.3
+onnxruntime-gpu>=1.22.0
+nemo-toolkit[asr]>=2.4.0
