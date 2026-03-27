@@ -38,6 +38,9 @@ def test_dashboard_page_renders(tmp_path: Path):
     assert response.status_code == 200
     assert "Clypt Phase 1 Monitor" in response.text
     assert "/dashboard/api/jobs" in response.text
+    assert "Wrap lines" in response.text
+    assert "Tail lines" in response.text
+    assert "Copy logs" in response.text
 
 
 def test_get_jobs_returns_job_status(tmp_path: Path):
