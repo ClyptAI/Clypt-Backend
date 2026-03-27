@@ -687,6 +687,36 @@ def test_audio_turn_overlap_stays_ambiguous_instead_of_committing():
     ]
 
 
+def test_audio_turn_overlap_without_visible_evidence_stays_explicitly_ambiguous():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    turns = [
+        {
+            "speaker_id": "SPEAKER_04",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "exclusive": False,
+            "overlap": True,
+        }
+    ]
+
+    bindings = worker._bind_audio_turns_to_local_tracks(turns, [])
+
+    assert bindings == [
+        {
+            "speaker_id": "SPEAKER_04",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "local_track_id": None,
+            "ambiguous": True,
+            "winning_score": None,
+            "winning_margin": None,
+            "support_ratio": 0.0,
+        }
+    ]
+
+
 def test_audio_turn_overlapping_evidence_does_not_exceed_turn_bounds():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -2668,6 +2698,58 @@ def test_run_lrasd_binding_keeps_unknown_when_audio_turn_has_no_visible_match(mo
     assert words[0]["speaker_local_track_id"] is None
     assert bindings == []
     assert worker._last_speaker_candidate_debug[0]["active_audio_local_track_id"] is None
+    assert worker._last_speaker_candidate_debug[0]["decision_source"] == "unknown"
+
+
+def test_run_lrasd_binding_preserves_overlap_turn_as_ambiguous_unknown(monkeypatch, tmp_path: Path):
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "listener_local": {
+                "x_center": 220.0,
+                "y_center": 104.0,
+                "width": 68.0,
+                "height": 142.0,
+                "confidence": 0.84,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "listener_local": 0.82,
+        },
+        words=[
+            {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_03",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": False,
+                "overlap": True,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_track_id"] is None
+    assert words[0]["speaker_local_track_id"] is None
+    assert bindings == []
+    assert worker._last_audio_turn_bindings == [
+        {
+            "speaker_id": "SPEAKER_03",
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "local_track_id": None,
+            "ambiguous": True,
+            "winning_score": pytest.approx(0.39416, abs=1e-4),
+            "winning_margin": pytest.approx(0.39416, abs=1e-4),
+            "support_ratio": pytest.approx(1.0, abs=1e-6),
+        }
+    ]
+    assert worker._last_speaker_candidate_debug[0]["active_audio_speaker_id"] == "SPEAKER_03"
+    assert worker._last_speaker_candidate_debug[0]["active_audio_local_track_id"] is None
+    assert worker._last_speaker_candidate_debug[0]["ambiguous"] is True
     assert worker._last_speaker_candidate_debug[0]["decision_source"] == "unknown"
 
 

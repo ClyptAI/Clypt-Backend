@@ -1370,6 +1370,8 @@ class ClyptWorker:
             if max_visible_candidates > 2:
                 binding["max_visible_candidates"] = int(max_visible_candidates)
             if not weighted_score_ms_by_track:
+                if high_ambiguity_turn:
+                    binding["ambiguous"] = True
                 bindings.append(binding)
                 continue
 
@@ -6468,11 +6470,7 @@ class ClyptWorker:
         raw_audio_turns = self._serialize_audio_speaker_turns(
             (analysis_context or {}).get("audio_speaker_turns")
         )
-        audio_speaker_turns = [
-            turn
-            for turn in raw_audio_turns
-            if bool(turn.get("exclusive", not bool(turn.get("overlap", False))))
-        ]
+        audio_speaker_turns = [dict(turn) for turn in raw_audio_turns]
 
         def _clear_word_assignment(word: dict):
             word["speaker_track_id"] = None
