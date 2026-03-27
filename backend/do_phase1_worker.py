@@ -6666,6 +6666,13 @@ class ClyptWorker:
                     best_binding = binding
             return best_binding if best_overlap_ms > 0 else None
 
+        def _turn_is_high_ambiguity(turn: dict | None) -> bool:
+            if not isinstance(turn, dict):
+                return False
+            if bool(turn.get("overlap", False)):
+                return True
+            return turn.get("exclusive") is False
+
         audio_prior_bonus = max(0.02, min(0.06, 4.0 * min_assignment_margin))
         audio_prior_margin_threshold = max(0.02, min(0.08, 6.0 * min_assignment_margin))
         strong_visual_margin_threshold = max(0.08, min(0.18, 10.0 * min_assignment_margin))
@@ -6760,6 +6767,11 @@ class ClyptWorker:
                 )
                 if raw_debug_local_track_id not in (None, ""):
                     debug_audio_local_track_id = str(raw_debug_local_track_id)
+            preserve_unknown_for_high_ambiguity_turn = bool(
+                active_turn is not None
+                and debug_turn_binding is not None
+                and _turn_is_high_ambiguity(active_turn)
+            )
             if not scored_candidates:
                 _append_speaker_candidate_debug(
                     word=w,
@@ -6774,7 +6786,14 @@ class ClyptWorker:
                 )
                 _clear_word_assignment(w)
                 continue
-            if active_turn is not None and debug_turn_binding is not None and debug_audio_local_track_id is None:
+            if (
+                active_turn is not None
+                and debug_turn_binding is not None
+                and (
+                    debug_audio_local_track_id is None
+                    or preserve_unknown_for_high_ambiguity_turn
+                )
+            ):
                 audio_prior_abstentions += 1
                 _append_speaker_candidate_debug(
                     word=w,
