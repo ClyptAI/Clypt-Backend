@@ -1,7 +1,11 @@
 import "./index.css";
 import { Composition, staticFile } from "remotion";
 import { ClyptViralShort } from "./ClyptViralShort";
-import type { TrackingFrame, VideoLetterbox } from "./ClyptViralShort";
+import type {
+  TrackingFrame,
+  VideoLetterbox,
+  VideoMetadata,
+} from "./ClyptViralShort";
 
 interface Payload {
   clip_start_ms: number;
@@ -13,6 +17,7 @@ interface Payload {
 interface MergedClipTracking {
   frames?: TrackingFrame[];
   video_letterbox?: VideoLetterbox | null;
+  video_metadata?: VideoMetadata | null;
 }
 
 let payloads: Payload[] = [];
@@ -57,6 +62,9 @@ export const RemotionRoot: React.FC = () => {
         const videoLetterbox: VideoLetterbox | null = Array.isArray(clipTracking)
           ? null
           : (clipTracking?.video_letterbox || null);
+        const videoMetadata: VideoMetadata | null = Array.isArray(clipTracking)
+          ? null
+          : (clipTracking?.video_metadata || null);
 
         return (
           <Composition
@@ -73,6 +81,7 @@ export const RemotionRoot: React.FC = () => {
               videoSrc: staticFile("video.mp4"),
               tracking,
               videoLetterbox,
+              videoMetadata,
             }}
           />
         );

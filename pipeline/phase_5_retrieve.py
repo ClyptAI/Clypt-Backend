@@ -18,11 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import sys
 from pathlib import Path
 
 from google import genai
-from google.genai.types import HttpOptions
 from google.cloud import spanner
 from pydantic import BaseModel, Field
 
@@ -37,7 +36,6 @@ GEMINI_LOCATION = "global"
 GEMINI_MODEL = "gemini-3.1-pro-preview"
 EMBEDDING_MODEL = "gemini-embedding-2-preview"
 EMBEDDING_TASK_TYPE = "RETRIEVAL_QUERY"
-EMBEDDING_API_VERSION = "v1beta"
 
 EMBEDDING_DIM = 3072
 
@@ -45,7 +43,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_PATH = ROOT / "outputs" / "remotion_payload.json"
 SPEAKER_GAP_MERGE_MS = 1500
 
-USER_QUERY = "Find a cynical or sarcastic moment about crypto."
+DEFAULT_QUERY = "Find a cynical or sarcastic moment about crypto."
 
 # ──────────────────────────────────────────────
 # Logging
@@ -84,11 +82,7 @@ class ClipScore(BaseModel):
 # ──────────────────────────────────────────────
 def embed_query(query: str) -> list[float]:
     """Generate a 3072-d query embedding for retrieval."""
-    os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
-    os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
-    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-
-    client = genai.Client(http_options=HttpOptions(api_version=EMBEDDING_API_VERSION))
+    client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
     response = client.models.embed_content(
         model=EMBEDDING_MODEL,
         contents=[query],
@@ -238,19 +232,15 @@ def find_context_nodes(database, anchor_node_id: str) -> list[dict]:
 # ──────────────────────────────────────────────
 # Step 3: ClipScoringAgent via Gemini
 # ──────────────────────────────────────────────
-def score_subgraph(subgraph: dict) -> ClipScore:
+def score_subgraph(subgraph: dict, query: str) -> ClipScore:
     """Send the sub-graph to Gemini 3.1 Pro for clip scoring."""
-    os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
-    os.environ["GOOGLE_CLOUD_LOCATION"] = GEMINI_LOCATION
-    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-
-    client = genai.Client(http_options=HttpOptions(api_version="v1"))
+    client = genai.Client(vertexai=True, project=PROJECT_ID, location=GEMINI_LOCATION)
 
     prompt = (
         f"=== Sub-Graph (anchor + 1-hop context nodes) ===\n"
         f"{json.dumps(subgraph, indent=2)}\n\n"
         "---\n\n"
-        f"User Query: \"{USER_QUERY}\"\n\n"
+        f"User Query: \"{query}\"\n\n"
         "Evaluate the sub-graph above and determine the optimal clip "
         "boundaries. Output your scoring as a JSON object with final_score, "
         "justification, recommended_start_ms, recommended_end_ms, and "
@@ -283,10 +273,12 @@ def main():
     log.info("PHASE 5 — Retrieval & Production Serving")
     log.info("=" * 60)
 
+    user_query = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_QUERY
+
     # ── Step 1: Embed the query ──
-    log.info(f"Query: \"{USER_QUERY}\"")
+    log.info(f"Query: \"{user_query}\"")
     log.info(f"Embedding query via {EMBEDDING_MODEL} ({EMBEDDING_TASK_TYPE})…")
-    query_vector = embed_query(USER_QUERY)
+    query_vector = embed_query(user_query)
     log.info(f"  Query vector: {len(query_vector)}d")
 
     # ── Step 2: Spanner hybrid query ──
@@ -322,7 +314,7 @@ def main():
     all_nodes.sort(key=lambda n: n["start_time_ms"])
 
     subgraph = {
-        "query": USER_QUERY,
+        "query": user_query,
         "anchor_node_id": anchor["node_id"],
         "nodes": all_nodes,
     }
@@ -332,7 +324,7 @@ def main():
     # ── Step 3: ClipScoringAgent ──
     log.info("─" * 50)
     log.info("Sending sub-graph to ClipScoringAgent (Gemini 3.1 Pro)…")
-    clip_score = score_subgraph(subgraph)
+    clip_score = score_subgraph(subgraph, user_query)
     log.info(f"  Score: {clip_score.final_score}/100")
     log.info(f"  Justification: {clip_score.justification}")
     log.info(
@@ -404,7 +396,7 @@ def main():
     # ── Summary ──
     log.info("=" * 60)
     log.info("PHASE 5 COMPLETE")
-    log.info(f"  Query: \"{USER_QUERY}\"")
+    log.info(f"  Query: \"{user_query}\"")
     log.info(f"  Anchor distance: {anchor['distance']:.6f}")
     log.info(f"  Sub-graph nodes: {len(all_nodes)}")
     log.info(f"  Clip score: {clip_score.final_score}/100")

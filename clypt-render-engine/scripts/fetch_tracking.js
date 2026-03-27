@@ -77,6 +77,26 @@ function detectVideoLetterbox(videoPath) {
   }
 }
 
+function detectVideoMetadata(videoPath) {
+  if (!fs.existsSync(videoPath)) return null;
+
+  try {
+    const dimsRaw = execSync(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "${videoPath}"`,
+      { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 },
+    ).trim();
+    const [widthRaw, heightRaw] = dimsRaw.split("x");
+    const width = Number(widthRaw);
+    const height = Number(heightRaw);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+      return null;
+    }
+    return { width, height };
+  } catch {
+    return null;
+  }
+}
+
 function normalizeFrame(frame) {
   const time = Number(frame.time_ms ?? frame.timeMs);
   const cx = Number(frame.center_x ?? frame.centerX);
@@ -217,6 +237,7 @@ async function main() {
 
   const storage = new Storage();
   const videoLetterbox = detectVideoLetterbox(VIDEO_PATH);
+  const videoMetadata = detectVideoMetadata(VIDEO_PATH);
   if (videoLetterbox) {
     console.log(
       `Detected letterbox: left=${videoLetterbox.left.toFixed(4)} ` +
@@ -242,6 +263,7 @@ async function main() {
     result[String(i)] = {
       frames: clipFrames,
       video_letterbox: videoLetterbox,
+      video_metadata: videoMetadata,
     };
 
     console.log(`Clip ${i + 1}: ${clipFrames.length} tracking frames`);

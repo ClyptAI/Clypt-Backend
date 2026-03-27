@@ -1,76 +1,192 @@
-## Changes Since Last Pull
+## TalkNet Refinement Decoupling
 
-Base pulled state:
-- `origin/main` at `c5eeb4d`
+Branch:
+- `feat/talknet-refinement-decouple`
 
-Local commit since that pull:
-- `195f378` `did some bugfixing since initial version did not run`
+Purpose:
+- stop Phase 1 from blocking on expensive inline TalkNet speaker binding
+- preserve higher-quality TalkNet binding as an optional second-pass refinement
+- reduce GPU cost and timeout risk during `finalize_extraction`
 
-Files changed:
+### Problem
+
+Before this change, Phase 1 `finalize_extraction(...)` ran:
+- tracklet clustering
+- TalkNet speaker binding
+
+This made Phase 1 completion slow and expensive, even for short videos. In practice:
+- clustering completed
+- TalkNet dominated runtime
+- `finalize_extraction` could retry across containers
+- Phase 2 could not start until TalkNet finished
+
+### New Design
+
+Phase 1 now uses:
+- heuristic speaker binding inline by default
+
+TalkNet is still available, but moved to:
+- an optional second-pass refinement call
+
+This means:
+- Phase 1 can complete faster and unblock the rest of the pipeline
+- TalkNet quality can still be used when desired
+- TalkNet no longer has to sit on the critical path by default
+
+### Files Changed
+
 - `modal_worker.py`
 - `pipeline/phase_1_modal_pipeline.py`
 
-### Summary
+### `modal_worker.py` Changes
 
-This change set mainly fixes distributed Phase 1 execution issues in Modal:
-- increases the worker timeout budget
-- reduces always-on warm container cost
-- disables memory snapshots
-- improves ffmpeg chunk extraction error visibility
-- reloads the tracking volume before chunk tracking
-- fixes async Modal API usage in the distributed pipeline path
+#### 1. Disabled debug logging by default
 
-### Detailed Changes
+Changed secret defaults:
+- `CLYPT_MODEL_DEBUG: "1" -> "0"`
+- `CLYPT_MODEL_DEBUG_EVERY: "10" -> "20"`
 
-#### `modal_worker.py`
+Impact:
+- reduces TalkNet log spam
+- lowers overhead during model execution
 
-1. Increased class timeout from 30 minutes to 60 minutes.
-- Changed `timeout=1800` to `timeout=3600`
-- Impact: gives `finalize_extraction` and other class methods more time before Modal kills the input
+#### 2. Added inline TalkNet gate
 
-2. Reduced minimum warm containers from 1 to 0.
-- Changed `min_containers=1` to `min_containers=0`
-- Impact: lowers idle GPU spend when the worker is not actively serving requests
+New env flag:
+- `CLYPT_ENABLE_TALKNET_INLINE`
 
-3. Disabled Modal memory snapshots.
-- Changed `enable_memory_snapshot=True` to `enable_memory_snapshot=False`
-- Impact: avoids snapshot-related startup/restore behavior and forces normal container startup
+Default:
+- `"0"`
 
-4. Improved ffmpeg chunk extraction failure handling.
-- Replaced a silent `subprocess.run(..., check=True, stdout=DEVNULL, stderr=DEVNULL)` call with captured output
-- Added explicit return-code handling and raised:
-  - `RuntimeError(f"ffmpeg chunk failed (exit ...): ...")`
-- Impact: chunk extraction failures now surface the actual ffmpeg stderr instead of failing opaquely
+Behavior:
+- when off, Phase 1 finalize skips TalkNet and uses heuristic speaker binding
+- when on, inline finalize may still use TalkNet first and fall back to heuristic if needed
 
-5. Reloaded the shared Modal volume before chunk tracking.
-- Added `TRACKING_VOLUME.reload()` inside `track_chunk_from_staged(...)`
-- Impact: helps each tracking worker see the latest staged files before processing a chunk
+#### 3. Changed `_run_speaker_binding(...)`
 
-#### `pipeline/phase_1_modal_pipeline.py`
+Updated behavior:
+- heuristic binding is now the default inline path
+- TalkNet is only used inline if:
+  - `force_talknet=True`, or
+  - `CLYPT_ENABLE_TALKNET_INLINE=1`
 
-1. Fixed async autoscaler update call.
-- Changed:
-  - `worker.track_chunk_from_staged.update_autoscaler(...)`
-- To:
-  - `await worker.track_chunk_from_staged.update_autoscaler.aio(...)`
-- Impact: uses the async Modal client API correctly from the async orchestration path
+Impact:
+- removes TalkNet from the default critical path
 
-2. Fixed async detached fan-out spawn calls.
-- Changed:
-  - `worker.run_asr_only.spawn(...)`
-  - `worker.track_chunk_from_staged.spawn_map(...)`
-- To:
-  - `await worker.run_asr_only.spawn.aio(...)`
-  - `await worker.track_chunk_from_staged.spawn_map.aio(...)`
-- Impact: detached distributed ASR/chunk fan-out now uses async spawn APIs consistently
+#### 4. Added timing logs to Phase 1 finalize
 
-### Net Effect
+New timing output around:
+- Step 3 clustering
+- Step 4 speaker binding
 
-Expected improvements from this change set:
-- fewer hidden failures during chunk extraction
-- better reliability for distributed Phase 1 staging/chunk workers
-- lower idle container cost
-- more headroom for long-running `finalize_extraction`
+Impact:
+- makes runtime cost visible
+- helps distinguish clustering cost from speaker-binding cost
 
-Known limitation still present:
-- `finalize_extraction` can still be slow because TalkNet speaker binding remains part of the Phase 1 critical path
+#### 5. Added `refine_speaker_bindings(...)`
+
+New Modal method:
+- `refine_speaker_bindings(video_bytes, audio_wav_bytes, words, tracks)`
+
+Behavior:
+- runs TalkNet as a dedicated second-pass refinement
+- returns:
+  - refined `words`
+  - refined `speaker_bindings`
+
+Impact:
+- keeps TalkNet available without forcing it into Phase 1 finalize
+
+### `pipeline/phase_1_modal_pipeline.py` Changes
+
+#### 1. Added optional refinement hook
+
+New helper:
+- `maybe_refine_speaker_bindings(...)`
+
+Behavior:
+- by default, does nothing
+- if refinement is enabled, calls the new worker method after Phase 1 returns
+
+#### 2. Added refinement env flag
+
+New env flag:
+- `CLYPT_RUN_TALKNET_REFINEMENT`
+
+Default:
+- `"0"`
+
+Behavior:
+- `0`: heuristic Phase 1 output is used directly
+- `1`: pipeline runs second-pass TalkNet refinement before writing outputs
+
+Impact:
+- makes TalkNet opt-in instead of mandatory
+
+### Resulting Runtime Modes
+
+#### Fast default mode
+
+Flags:
+- `CLYPT_ENABLE_TALKNET_INLINE=0`
+- `CLYPT_RUN_TALKNET_REFINEMENT=0`
+
+Behavior:
+- Phase 1 uses heuristic speaker binding
+- fastest and cheapest path
+- Phase 2 can start sooner
+
+Recommended for:
+- normal iteration
+- cost-sensitive runs
+- debugging the rest of the pipeline
+
+#### Optional quality refinement mode
+
+Flags:
+- `CLYPT_ENABLE_TALKNET_INLINE=0`
+- `CLYPT_RUN_TALKNET_REFINEMENT=1`
+
+Behavior:
+- Phase 1 completes with heuristic binding
+- pipeline then runs TalkNet refinement as a separate pass
+
+Recommended for:
+- selected runs where speaker quality matters
+- measuring TalkNet quality without blocking every Phase 1 execution
+
+#### Legacy inline TalkNet mode
+
+Flags:
+- `CLYPT_ENABLE_TALKNET_INLINE=1`
+
+Behavior:
+- restores inline TalkNet attempt during finalize
+
+Recommended for:
+- targeted experiments only
+- not recommended as default due to cost and timeout risk
+
+### Expected Benefits
+
+- Phase 1 should complete more reliably
+- less chance of hitting the finalize timeout
+- reduced wasted GPU time on blocking TalkNet runs
+- easier visibility into where runtime is spent
+- TalkNet quality preserved as an optional upgrade path
+
+### Recommended Rollout
+
+1. Deploy this branch.
+2. Run with defaults first:
+   - no refinement
+3. Confirm Phase 1 completes and Phase 2 starts reliably.
+4. Enable `CLYPT_RUN_TALKNET_REFINEMENT=1` only when you want higher-quality speaker binding.
+
+### Notes
+
+- This change does not remove TalkNet.
+- It changes when TalkNet runs.
+- The main tradeoff is explicit:
+  - default path optimizes cost and throughput
+  - optional path optimizes speaker-binding quality

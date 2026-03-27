@@ -18,13 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 
 from google import genai
 from google.genai import types
-from google.genai.types import HttpOptions
 
 # ──────────────────────────────────────────────
 # Configuration
@@ -39,7 +37,6 @@ OUTPUT_PATH = ROOT / "outputs" / "phase_3_embeddings.json"
 MODEL_ID = "gemini-embedding-2-preview"
 EMBEDDING_DIM = 3072
 TASK_TYPE = "RETRIEVAL_DOCUMENT"
-EMBEDDING_API_VERSION = "v1beta"
 MAX_SEGMENT_SEC = 120.0
 MIN_SEGMENT_SEC = 0.2
 
@@ -109,10 +106,7 @@ def _normalize_segment(start_s: float, end_s: float) -> tuple[float, float]:
 
 
 def _make_client():
-    os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
-    os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
-    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-    return genai.Client(http_options=HttpOptions(api_version=EMBEDDING_API_VERSION))
+    return genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
 
 
 def _embed_node(

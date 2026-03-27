@@ -47,18 +47,24 @@ log = logging.getLogger("phase_2b")
 # ──────────────────────────────────────────────
 # System instruction (exact prompt from spec)
 # ──────────────────────────────────────────────
-SYSTEM_INSTRUCTION = """You are a graph topology engine. Your task is to analyze the provided array of sequential Semantic Nodes and map the structural relationships between them by drawing directional edges. Nodes do not have to be adjacent to be connected (e.g., a Callback edge might connect minute 2 to minute 20).
+SYSTEM_INSTRUCTION = """You are a graph topology engine. Your task is to analyze the provided array of sequential Semantic Nodes and map the structural relationships between them by drawing directional edges.
 
-Evaluate the nodes and output an array of edges using ONLY the following edge taxonomy and examples:
+Edge taxonomy:
 - Contradiction: Two claims that logically clash, or text contradicted by visual/audio evidence. (Example: "I prioritize privacy" <-> "We sell your data").
-- Causal Link: One node establishes a problem or setup; the other resolves or extends it. (Example: "Docker keeps crashing" -> "Added memory limits").
+- Causal Link: One node establishes a problem or setup; the other resolves or extends it. This includes adjacent setup→punchline pairs in comedy. (Example: "Docker keeps crashing" -> "Added memory limits"). Look hard for these between consecutive nodes.
 - Thematic: Same entity or topic organically resurfaces after a digression. (Example: Mentions React at min 3, tangent, React again at min 12).
 - Tension / Release: Emotional stakes escalate, then resolve with payoff or relief. (Example: "24 hours to ship" -> "We actually did it. It's live.").
 - Callback: Deliberate authorial reference back to an earlier moment, not organic recurrence. (Example: "Remember the API I showed you?" -> links to min 3).
-- Escalation: Each successive moment more extreme or intense — sustained ramp, no release yet. (Example: Spice challenge: mild -> hot -> Carolina Reaper).
+- Escalation: Each successive moment more extreme or intense — sustained ramp, no release yet. This is common between adjacent nodes in comedy and challenge content. (Example: Spice challenge: mild -> hot -> Carolina Reaper).
 - Subversion: Expectation is established, then broken — audience surprise, not logical clash. (Example: "I followed the tutorial exactly" -> total disaster).
 - Analogy: Concept X is explained by mapping it onto a different, familiar domain Y. (Example: "A blockchain is like a Google Doc everyone edits").
 - Revelation: New information that fundamentally recontextualizes prior nodes. (Example: "What I didn't mention is... this was all staged").
+
+Two passes required:
+1. Adjacent pass: scan every pair of consecutive nodes (node N and node N+1) for Causal Link, Escalation, Tension/Release, and Subversion edges. Comedy and sketch content in particular has dense short-range structure — setup and punchline are often just one node apart.
+2. Global pass: scan all non-adjacent node pairs for Callback, Thematic, Contradiction, Analogy, and Revelation edges.
+
+Only omit an edge if you are confident no meaningful relationship exists.
 
 Output a strictly structured JSON array of these edges. Ensure from_node_start_time and to_node_start_time perfectly match the start_time values of the nodes you are connecting."""
 
@@ -97,10 +103,23 @@ def main():
     log.info(f"  Nodes loaded: {len(nodes_data)}")
     log.info(f"  Size: {len(nodes_json):,} chars")
 
+    # ── Slim nodes to only fields needed for edge detection ──
+    slim_nodes = [
+        {
+            "start_time": n["start_time"],
+            "end_time": n["end_time"],
+            "transcript_segment": n["transcript_segment"],
+            "content_mechanisms": n["content_mechanisms"],
+        }
+        for n in nodes_data
+    ]
+    slim_json = json.dumps(slim_nodes)
+    log.info(f"  Slim node payload: {len(slim_json):,} chars (was {len(nodes_json):,})")
+
     # ── Build the prompt ──
     user_prompt = (
-        "=== SEMANTIC NODES (phase_2a_nodes.json) ===\n"
-        f"{nodes_json}\n\n"
+        "=== SEMANTIC NODES ===\n"
+        f"{slim_json}\n\n"
         "---\n\n"
         "Analyze the nodes above and map the structural narrative "
         "relationships between them. Output a JSON array of directional "

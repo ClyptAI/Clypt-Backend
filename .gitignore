@@ -4,6 +4,7 @@
 # Local tooling/editor state
 .claude/
 .vscode/
+*.code-workspace
 
 # Python
 __pycache__/
@@ -22,7 +23,13 @@ build/
 # Local pipeline outputs/artifacts
 downloads/
 outputs/
+clips/
 .parallel_runs/
+
+# Remotion render engine artifacts
+clypt-render-engine/out/
+clypt-render-engine/public/video.mp4
+clypt-render-engine/src/remotion_payloads_array.json
 
 # Logs
 *.log

@@ -288,23 +288,6 @@ def _extract_spatial_tracking(
     return tracking
 
 
-# ──────────────────────────────────────────────
-# Spanner batched mutation writer
-# ──────────────────────────────────────────────
-def _write_mutations_batched(database, mutations: list, label: str):
-    """Write mutations in batches to avoid per-commit size limits."""
-    total = len(mutations)
-    for i in range(0, total, BATCH_SIZE):
-        batch = mutations[i : i + BATCH_SIZE]
-        database.batch().insert_or_update(
-            table=batch[0]["table"],
-            columns=batch[0]["columns"],
-            values=[m["values"] for m in batch],
-        )
-        log.info(f"  [{label}] Committed batch {i // BATCH_SIZE + 1} "
-                 f"({len(batch)} rows, {i + len(batch)}/{total})")
-
-
 def _table_exists(database, table_name: str) -> bool:
     sql = """
         SELECT TABLE_NAME

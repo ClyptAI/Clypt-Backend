@@ -192,49 +192,76 @@ def run_remotion_render():
     log.info(f"All {len(payloads)} clip(s) rendered to {out_dir}")
 
 
+PHASE_ORDER = ["1", "2a", "2b", "3", "4", "5", "render"]
+
+
+def _phase_enabled(phase: str, start_from: str) -> bool:
+    try:
+        return PHASE_ORDER.index(phase) >= PHASE_ORDER.index(start_from)
+    except ValueError:
+        return True
+
+
 def main():
     banner("CLYPT PIPELINE ORCHESTRATOR")
 
-    url = input("\nEnter YouTube URL: ").strip()
-    if not url:
-        log.error("No URL provided. Exiting.")
+    # START_FROM=2a python run_pipeline.py  →  skips phase 1 + ffmpeg re-encode
+    start_from = os.getenv("START_FROM", "1").lower().strip()
+    if start_from not in PHASE_ORDER:
+        log.error(f"Invalid START_FROM='{start_from}'. Valid values: {PHASE_ORDER}")
         sys.exit(1)
+    if start_from != "1":
+        log.info(f"START_FROM={start_from} — skipping earlier phases")
 
-    log.info(f"Target: {url}\n")
+    url = ""
+    if _phase_enabled("1", start_from):
+        url = input("\nEnter YouTube URL: ").strip()
+        if not url:
+            log.error("No URL provided. Exiting.")
+            sys.exit(1)
+        log.info(f"Target: {url}\n")
 
     # ── Phase 1: Modal deterministic extraction ──
-    from pipeline.phase_1_modal_pipeline import main as phase_1_main
-    asyncio.run(phase_1_main(youtube_url=url))
+    if _phase_enabled("1", start_from):
+        from pipeline.phase_1_modal_pipeline import main as phase_1_main
+        asyncio.run(phase_1_main(youtube_url=url))
 
     # ── FFmpeg Re-encode ──
-    banner("RE-ENCODING VIDEO (FFmpeg)")
-    reencode_video()
+    if _phase_enabled("1", start_from):
+        banner("RE-ENCODING VIDEO (FFmpeg)")
+        reencode_video()
 
     # ── Phase 2A: Content Mechanism Decomposition ──
-    from pipeline.phase_2a_make_nodes import main as phase_2a_main
-    phase_2a_main()
+    if _phase_enabled("2a", start_from):
+        from pipeline.phase_2a_make_nodes import main as phase_2a_main
+        phase_2a_main()
 
     # ── Phase 2B: Narrative Edge Mapping ──
-    from pipeline.phase_2b_draw_edges import main as phase_2b_main
-    phase_2b_main()
+    if _phase_enabled("2b", start_from):
+        from pipeline.phase_2b_draw_edges import main as phase_2b_main
+        phase_2b_main()
 
     # ── Phase 3: Multimodal Embedding ──
-    from pipeline.phase_3_multimodal_embeddings import main as phase_3_main
-    phase_3_main()
+    if _phase_enabled("3", start_from):
+        from pipeline.phase_3_multimodal_embeddings import main as phase_3_main
+        phase_3_main()
 
     # ── Phase 4: Storage & Graph Binding ──
-    from pipeline.phase_4_store_graph import main as phase_4_main
-    phase_4_main()
+    if _phase_enabled("4", start_from):
+        from pipeline.phase_4_store_graph import main as phase_4_main
+        phase_4_main()
 
     # ── Phase 5: Auto-Curate ──
-    from pipeline.phase_5_auto_curate import main as phase_5_main
-    phase_5_main()
+    if _phase_enabled("5", start_from):
+        from pipeline.phase_5_auto_curate import main as phase_5_main
+        phase_5_main()
 
     # ── Remotion Render ──
-    banner("REMOTION RENDER")
-    setup_render_engine()
-    run_fetch_tracking()
-    run_remotion_render()
+    if _phase_enabled("render", start_from):
+        banner("REMOTION RENDER")
+        setup_render_engine()
+        run_fetch_tracking()
+        run_remotion_render()
 
     banner("PIPELINE COMPLETE")
 

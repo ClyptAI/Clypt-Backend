@@ -26,12 +26,18 @@ export interface VideoLetterbox {
   height: number;
 }
 
+export interface VideoMetadata {
+  width: number;
+  height: number;
+}
+
 export interface ClyptViralShortProps extends Record<string, unknown> {
   clipStartMs: number;
   clipEndMs: number;
   videoSrc: string;
   tracking: TrackingFrame[];
   videoLetterbox?: VideoLetterbox | null;
+  videoMetadata?: VideoMetadata | null;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -64,10 +70,9 @@ function findClosestFrame(
     : right;
 }
 
-// 16:9 source into 9:16 viewport baseline.
-const SOURCE_ASPECT = 16 / 9;
 const VIEWPORT_WIDTH = 1080;
 const VIEWPORT_HEIGHT = 1920;
+const VIEWPORT_ASPECT = VIEWPORT_WIDTH / VIEWPORT_HEIGHT;
 const BASE_ZOOM = 1.12;
 
 export const ClyptViralShort: React.FC<ClyptViralShortProps> = ({
@@ -76,6 +81,7 @@ export const ClyptViralShort: React.FC<ClyptViralShortProps> = ({
   videoSrc,
   tracking,
   videoLetterbox = null,
+  videoMetadata = null,
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -94,18 +100,32 @@ export const ClyptViralShort: React.FC<ClyptViralShortProps> = ({
   const targetX = clamp(targetFrame?.center_x ?? 0.5, 0, 1);
   const targetY = clamp(targetFrame?.center_y ?? 0.5, 0, 1);
 
-  const letterboxZoom = useMemo(() => {
-    if (!videoLetterbox) return 1;
-    const w = clamp(Number(videoLetterbox.width) || 1, 0.05, 1);
-    const h = clamp(Number(videoLetterbox.height) || 1, 0.05, 1);
-    return clamp(1 / Math.min(w, h), 1, 1.9);
-  }, [videoLetterbox]);
+  const { effectiveAspect, letterboxZoom } = useMemo(() => {
+    const sourceWidth = Math.max(1, Number(videoMetadata?.width) || 1920);
+    const sourceHeight = Math.max(1, Number(videoMetadata?.height) || 1080);
+    const lbWidth = clamp(Number(videoLetterbox?.width) || 1, 0.05, 1);
+    const lbHeight = clamp(Number(videoLetterbox?.height) || 1, 0.05, 1);
+    const aspect = (sourceWidth * lbWidth) / (sourceHeight * lbHeight);
+    const zoom = videoLetterbox
+      ? clamp(1 / Math.min(lbWidth, lbHeight), 1, 1.9)
+      : 1;
+
+    return {
+      effectiveAspect: clamp(aspect, 0.2, 4),
+      letterboxZoom: zoom,
+    };
+  }, [videoLetterbox, videoMetadata]);
 
   const finalZoom = BASE_ZOOM * letterboxZoom;
-
-  const baseCoverWidth = VIEWPORT_HEIGHT * SOURCE_ASPECT;
+  const sourceIsWiderThanViewport = effectiveAspect >= VIEWPORT_ASPECT;
+  const baseCoverWidth = sourceIsWiderThanViewport
+    ? VIEWPORT_HEIGHT * effectiveAspect
+    : VIEWPORT_WIDTH;
+  const baseCoverHeight = sourceIsWiderThanViewport
+    ? VIEWPORT_HEIGHT
+    : VIEWPORT_WIDTH / effectiveAspect;
   const scaledWidth = baseCoverWidth * finalZoom;
-  const scaledHeight = VIEWPORT_HEIGHT * finalZoom;
+  const scaledHeight = baseCoverHeight * finalZoom;
   const maxShiftX = Math.max(0, (scaledWidth - VIEWPORT_WIDTH) / 2);
   const maxShiftY = Math.max(0, (scaledHeight - VIEWPORT_HEIGHT) / 2);
 

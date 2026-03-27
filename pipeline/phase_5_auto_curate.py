@@ -17,6 +17,7 @@ Pipeline:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -39,6 +40,19 @@ GEMINI_MODEL = "gemini-3.1-pro-preview"
 MIN_SCORE = 85
 FALLBACK_TOP_N = 3
 SPEAKER_GAP_MERGE_MS = 1500
+MAX_CLIPS_OUTPUT = 10
+NMS_OVERLAP_THRESHOLD = 0.5
+
+# Sliding window config
+WINDOW_MIN_NODES = 3
+WINDOW_MAX_NODES = 8
+WINDOW_STEP = 2
+
+# Pre-filter: only send top N windows by mechanism score to Gemini
+PREFILTER_TOP_N = 40
+
+# Async scoring: max concurrent Gemini calls
+MAX_CONCURRENT_SCORING = 5
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_PATH = ROOT / "outputs" / "remotion_payloads_array.json"
@@ -60,28 +74,29 @@ for _name in ("opentelemetry.sdk.metrics._internal.export", "opentelemetry.sdk.m
 # Pydantic schema for ClipScoringAgent response
 # ──────────────────────────────────────────────
 CLIP_SCORING_SYSTEM_INSTRUCTION = """\
-You are an elite Executive Producer and Viral Auto-Curator for platforms like TikTok, YouTube Shorts, and Reels.
+You are a brutally honest Executive Producer for TikTok, YouTube Shorts, and Reels. You have seen thousands of viral clips and you know most content is mediocre.
 
-Your task is to analyze the provided chronological JSON array of 'Semantic Nodes'. You must identify the single best, most engaging, and self-contained short-form clip within this chapter.
+Your task: analyze the provided chronological JSON array of Semantic Nodes and identify the single best clip within this window.
 
-Evaluation Criteria:
+Scoring — use the FULL range, be ruthless:
+- 95-100: Genuinely viral. Someone would stop scrolling, watch twice, and share it. Strong hook + clear payoff + no dead weight. Maybe 1-2 clips per video deserve this.
+- 85-94: Very good. Clear hook and payoff but missing something — slightly slow, slightly too long, or slightly unclear without context.
+- 70-84: Decent. Has a moment but the setup or payoff is weak. Would not stop a scroll but not skip-worthy either.
+- 50-69: Below average. Something interesting is buried in filler. Not clippable without editing.
+- Below 50: Not a clip. Boring, transitional, or completely context-dependent.
 
-The Hook: The clip must start with immediate high retention. Look for a node that begins with a controversial statement, a good concept, a high-energy vocal_delivery, or an arresting visual_description. Do not OVERcompensate for this and start somewhere that does not make sense, however.
+The vast majority of windows should score 50-80. Only score 85+ if you would personally post this clip.
 
-The Payoff: The clip must have a logical flow leading to a clear punchline, profound statement, or emotional spike. You must explicitly look at the content_mechanisms (e.g., high scores in Humor, Subversion, Emotion, or Social Dynamics) to locate the climax.
-
-Pacing & Length: The ideal viral clip is between 15 and 60 seconds long. Do not include meandering setup nodes or trailing filler nodes, unless necessary for context.
-
-Scoring:
-If the chapter contains a perfect viral moment, score it 85-100.
-If the chapter is mildly interesting but lacks a strong hook/payoff, score it 50-84.
-If the chapter is entirely boring or administrative, score it below 50.
+Evaluation:
+1. Hook: Does the first node demand attention? A controversial statement, high-energy delivery, or surprising visual. If the clip starts with filler or slow setup, penalize heavily.
+2. Payoff: Does it build to a punchline, revelation, or emotional spike? Check content_mechanisms for humor/subversion/emotion intensity above 0.7.
+3. Self-contained: Would someone understand and enjoy this with zero context? If not, penalize.
+4. Pacing: 15-45 seconds is ideal. Drop filler nodes from start and end — tighter is better.
 
 Strict Constraints:
-You must return a valid JSON object matching the requested schema.
 recommended_start_ms MUST exactly match the start_time_ms of the first node you select.
 recommended_end_ms MUST exactly match the end_time_ms of the last node you select.
-Your justification must explicitly mention the content_mechanisms or vocal_delivery that made you choose these nodes."""
+Your justification must state the specific content_mechanisms scores and vocal_delivery that drove your decision."""
 
 
 class ClipScore(BaseModel):
@@ -193,27 +208,26 @@ def fetch_all_edges(database) -> list[dict]:
 
 
 # ──────────────────────────────────────────────
-# Step 2: Narrative Chunking
+# Step 2: Sliding Window Chapter Generation
 # ──────────────────────────────────────────────
 def build_narrative_chapters(
     nodes: list[dict],
     edges: list[dict],
 ) -> list[list[dict]]:
-    """Group sequential nodes into 'Narrative Chapters' using edge connectivity.
+    """Generate overlapping sliding windows of consecutive nodes as clip candidates.
 
-    Strategy: Walk through nodes chronologically. Two consecutive nodes belong
-    to the same chapter if there is at least one NarrativeEdge linking them
-    (in either direction) or if they're within the same narrative cluster.
-    When a node has NO edge connection to the previous node, a new chapter
-    begins.
+    Every window of WINDOW_MIN_NODES to WINDOW_MAX_NODES consecutive nodes is
+    a candidate chapter. Windows advance by WINDOW_STEP so candidates overlap
+    and no moment is missed at a boundary.
+
+    Edge connectivity is used as a tiebreaker signal (stored on each window as
+    metadata) but does NOT gate whether a window is created.
     """
     if not nodes:
         return []
 
-    node_ids = [n["node_id"] for n in nodes]
-    node_index = {nid: i for i, nid in enumerate(node_ids)}
-
-    adjacency: dict[str, set[str]] = {nid: set() for nid in node_ids}
+    # Build adjacency for edge-bonus scoring downstream
+    adjacency: dict[str, set[str]] = {n["node_id"]: set() for n in nodes}
     for edge in edges:
         fid, tid = edge["from_node_id"], edge["to_node_id"]
         if fid in adjacency and tid in adjacency:
@@ -221,84 +235,192 @@ def build_narrative_chapters(
             adjacency[tid].add(fid)
 
     chapters: list[list[dict]] = []
-    current_chapter: list[dict] = [nodes[0]]
 
-    for i in range(1, len(nodes)):
-        prev_node = nodes[i - 1]
-        curr_node = nodes[i]
+    for window_size in range(WINDOW_MIN_NODES, WINDOW_MAX_NODES + 1):
+        for start in range(0, len(nodes) - window_size + 1, WINDOW_STEP):
+            window = nodes[start : start + window_size]
+            chapters.append(window)
 
-        connected = curr_node["node_id"] in adjacency.get(prev_node["node_id"], set())
+    # Deduplicate identical windows (same start + end node)
+    seen: set[tuple[str, str]] = set()
+    unique: list[list[dict]] = []
+    for ch in chapters:
+        key = (ch[0]["node_id"], ch[-1]["node_id"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(ch)
 
-        if not connected:
-            any_link = False
-            for ch_node in current_chapter:
-                if curr_node["node_id"] in adjacency.get(ch_node["node_id"], set()):
-                    any_link = True
-                    break
-            connected = any_link
-
-        if connected:
-            current_chapter.append(curr_node)
-        else:
-            chapters.append(current_chapter)
-            current_chapter = [curr_node]
-
-    if current_chapter:
-        chapters.append(current_chapter)
-
-    return chapters
+    return unique
 
 
 # ──────────────────────────────────────────────
-# Step 3: AI Batch Evaluator
+# Content type detection
 # ──────────────────────────────────────────────
-def score_chapter(chapter: list[dict], chapter_idx: int, total: int) -> ClipScore | None:
-    """Send one narrative chapter to Gemini for clip scoring."""
-    os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
-    os.environ["GOOGLE_CLOUD_LOCATION"] = GEMINI_LOCATION
-    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+CONTENT_TYPE_SCORING_GUIDANCE = {
+    "comedy": """\
+This is comedy/sketch content. Weight these signals heavily:
+- Humor mechanisms with subversion or irony type (intensity > 0.7) → strong clip signal
+- Escalation chains between adjacent nodes → look for setup→punchline structure
+- Vocal delivery mentioning laughter, exaggerated tone, or character voices → high value
+- A clip without a clear punchline or comedic payoff should score below 70 regardless of other qualities.""",
 
-    client = genai.Client(http_options=HttpOptions(api_version="v1"))
+    "interview": """\
+This is interview/podcast content. Weight these signals heavily:
+- Social dynamics mechanisms (status reversal, genuine disagreement, unexpected chemistry)
+- Expertise mechanisms with counterintuitive truth or casual flex type
+- Moments where the conversation shifts energy — a surprising answer, a long pause, a laugh
+- A clip that is just two people talking with no energy shift should score below 70.""",
 
-    serializable_chapter = []
-    for n in chapter:
-        serializable_chapter.append({
-            "node_id": n["node_id"],
-            "transcript_text": n["transcript_text"],
-            "vocal_delivery": n["vocal_delivery"],
-            "start_time_ms": n["start_time_ms"],
-            "end_time_ms": n["end_time_ms"],
-            "content_mechanisms": n["content_mechanisms"],
-        })
+    "tutorial": """\
+This is tutorial/educational content. Weight these signals heavily:
+- Expertise mechanisms (counterintuitive truth, elegant simplification, live demo)
+- Moments where a concept clicks — an "aha" explanation or a surprising demonstration
+- Causal Link edges between setup (problem) and resolution (solution)
+- A clip that is just narration without a clear insight or demonstration should score below 70.""",
 
-    prompt = (
-        f"=== Chapter {chapter_idx + 1}/{total} — Semantic Nodes ===\n"
-        f"{json.dumps(serializable_chapter, indent=2)}\n\n"
-        "---\n\n"
-        "Identify the single best viral clip within the chapter above. "
-        "Output your scoring as a JSON object with final_score, justification, "
-        "recommended_start_ms, recommended_end_ms, and included_node_ids."
-    )
+    "vlog": """\
+This is vlog/personal content. Weight these signals heavily:
+- Emotion mechanisms (vulnerability, catharsis, awe, panic)
+- High vocal delivery intensity — raw reactions, genuine emotion, unexpected moments
+- Tension/Release structures — buildup followed by payoff or relief
+- A clip that is just b-roll or filler narration should score below 70.""",
 
-    try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[prompt],
-            config=genai.types.GenerateContentConfig(
-                system_instruction=CLIP_SCORING_SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_schema=ClipScore,
-                temperature=0.2,
-                thinking_config=genai.types.ThinkingConfig(
-                    thinking_level="MEDIUM",
-                ),
-            ),
+    "unknown": "",
+}
+
+
+def detect_content_type(nodes: list[dict]) -> str:
+    """Infer content type from the dominant mechanism distribution across all nodes."""
+    counts: dict[str, float] = {"humor": 0.0, "emotion": 0.0, "social": 0.0, "expertise": 0.0}
+
+    for node in nodes:
+        mechanisms = node.get("content_mechanisms", {})
+        for dim in counts:
+            dim_data = mechanisms.get(dim, {})
+            if isinstance(dim_data, dict) and dim_data.get("present"):
+                counts[dim] += float(dim_data.get("intensity", 0.0))
+
+    total = sum(counts.values())
+    if total == 0:
+        return "unknown"
+
+    dominant = max(counts, key=lambda k: counts[k])
+    dominant_ratio = counts[dominant] / total
+
+    if dominant_ratio < 0.35:
+        return "unknown"
+
+    mapping = {
+        "humor": "comedy",
+        "social": "interview",
+        "expertise": "tutorial",
+        "emotion": "vlog",
+    }
+    content_type = mapping[dominant]
+    log.info(f"  Content type detected: {content_type} "
+             f"(humor={counts['humor']:.1f}, emotion={counts['emotion']:.1f}, "
+             f"social={counts['social']:.1f}, expertise={counts['expertise']:.1f})")
+    return content_type
+
+
+def build_scoring_instruction(content_type: str) -> str:
+    """Build the full scoring system instruction with content-type-specific guidance."""
+    type_guidance = CONTENT_TYPE_SCORING_GUIDANCE.get(content_type, "")
+    type_section = f"\nContent-type guidance:\n{type_guidance}\n" if type_guidance else ""
+    return CLIP_SCORING_SYSTEM_INSTRUCTION + type_section
+
+
+# ──────────────────────────────────────────────
+# Step 2.5: Cheap pre-filter using mechanism scores
+# ──────────────────────────────────────────────
+def _mechanism_score(window: list[dict]) -> float:
+    """Score a window cheaply using content_mechanisms intensities — no API call."""
+    total = 0.0
+    for node in window:
+        mechanisms = node.get("content_mechanisms", {})
+        for dim in ("humor", "emotion", "social", "expertise"):
+            dim_data = mechanisms.get(dim, {})
+            if isinstance(dim_data, dict) and dim_data.get("present"):
+                total += float(dim_data.get("intensity", 0.0))
+    return total / max(1, len(window))
+
+
+def prefilter_windows(windows: list[list[dict]]) -> list[list[dict]]:
+    """Keep only the top PREFILTER_TOP_N windows by mechanism score."""
+    scored = [(w, _mechanism_score(w)) for w in windows]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    kept = [w for w, _ in scored[:PREFILTER_TOP_N]]
+    log.info(f"  Pre-filter: {len(windows)} windows → {len(kept)} (top by mechanism score)")
+    if scored:
+        log.info(f"  Mechanism score range: {scored[-1][1]:.3f} – {scored[0][1]:.3f}")
+    return kept
+
+
+# ──────────────────────────────────────────────
+# Step 3: Async AI Batch Evaluator
+# ──────────────────────────────────────────────
+async def score_chapter_async(
+    chapter: list[dict],
+    chapter_idx: int,
+    total: int,
+    sem: asyncio.Semaphore,
+    scoring_instruction: str,
+) -> ClipScore | None:
+    """Score one window via Gemini asynchronously, respecting the concurrency semaphore."""
+    async with sem:
+        os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
+        os.environ["GOOGLE_CLOUD_LOCATION"] = GEMINI_LOCATION
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+
+        client = genai.Client(http_options=HttpOptions(api_version="v1"))
+
+        serializable_chapter = [
+            {
+                "node_id": n["node_id"],
+                "transcript_text": n["transcript_text"],
+                "vocal_delivery": n["vocal_delivery"],
+                "start_time_ms": n["start_time_ms"],
+                "end_time_ms": n["end_time_ms"],
+                "content_mechanisms": n["content_mechanisms"],
+            }
+            for n in chapter
+        ]
+
+        prompt = (
+            f"=== Window {chapter_idx + 1}/{total} — Semantic Nodes ===\n"
+            f"{json.dumps(serializable_chapter, indent=2)}\n\n"
+            "---\n\n"
+            "Identify the single best viral clip within the window above. "
+            "Output your scoring as a JSON object with final_score, justification, "
+            "recommended_start_ms, recommended_end_ms, and included_node_ids."
         )
-        raw = json.loads(response.text)
-        return ClipScore.model_validate(raw)
-    except Exception as e:
-        log.error(f"  Chapter {chapter_idx + 1} scoring failed: {e}")
-        return None
+
+        try:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=GEMINI_MODEL,
+                contents=[prompt],
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=scoring_instruction,
+                    response_mime_type="application/json",
+                    response_schema=ClipScore,
+                    temperature=0.2,
+                    thinking_config=genai.types.ThinkingConfig(
+                        thinking_level="MEDIUM",
+                    ),
+                ),
+            )
+            raw = json.loads(response.text)
+            score = ClipScore.model_validate(raw)
+            log.info(f"  [{chapter_idx + 1}/{total}] score={score.final_score} "
+                     f"({score.recommended_start_ms}ms–{score.recommended_end_ms}ms)")
+            return score
+        except Exception as e:
+            log.error(f"  [{chapter_idx + 1}/{total}] scoring failed: {e}")
+            return None
+
+
+
 
 
 # ──────────────────────────────────────────────
@@ -307,19 +429,39 @@ def score_chapter(chapter: list[dict], chapter_idx: int, total: int) -> ClipScor
 def rank_and_filter(
     scored_clips: list[tuple[ClipScore, list[dict]]],
 ) -> list[tuple[ClipScore, list[dict]]]:
-    """Sort by score descending, apply 85+ threshold with Top-3 failsafe."""
+    """Sort by score, deduplicate overlapping clips via NMS, cap output."""
     scored_clips.sort(key=lambda x: x[0].final_score, reverse=True)
 
     elite = [(cs, ch) for cs, ch in scored_clips if cs.final_score >= MIN_SCORE]
+    if not elite:
+        log.warning(f"No clips scored {MIN_SCORE}+. Falling back to Top {FALLBACK_TOP_N}.")
+        elite = scored_clips[:FALLBACK_TOP_N]
 
-    if len(elite) >= FALLBACK_TOP_N:
-        return elite
+    # Non-maximum suppression: remove clips that overlap heavily with a better one
+    def _overlap_ratio(a: ClipScore, b: ClipScore) -> float:
+        start = max(a.recommended_start_ms, b.recommended_start_ms)
+        end = min(a.recommended_end_ms, b.recommended_end_ms)
+        if end <= start:
+            return 0.0
+        intersection = end - start
+        len_a = a.recommended_end_ms - a.recommended_start_ms
+        len_b = b.recommended_end_ms - b.recommended_start_ms
+        return intersection / min(len_a, len_b)
 
-    log.warning(
-        f"Only {len(elite)} clips scored {MIN_SCORE}+. "
-        f"Falling back to Top {FALLBACK_TOP_N}."
-    )
-    return scored_clips[:FALLBACK_TOP_N]
+    kept: list[tuple[ClipScore, list[dict]]] = []
+    for candidate_cs, candidate_ch in elite:
+        suppressed = False
+        for kept_cs, _ in kept:
+            if _overlap_ratio(candidate_cs, kept_cs) > NMS_OVERLAP_THRESHOLD:
+                suppressed = True
+                break
+        if not suppressed:
+            kept.append((candidate_cs, candidate_ch))
+        if len(kept) >= MAX_CLIPS_OUTPUT:
+            break
+
+    log.info(f"  After NMS deduplication: {len(kept)} unique clips (from {len(elite)} candidates)")
+    return kept
 
 
 # ──────────────────────────────────────────────
@@ -388,9 +530,9 @@ def build_payloads(
 # ──────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────
-def main():
+async def _run():
     log.info("=" * 60)
-    log.info("PHASE 4 — Auto-Curator (Full-Graph Sweep)")
+    log.info("PHASE 5 — Auto-Curator (Full-Graph Sweep)")
     log.info("=" * 60)
 
     # ── Step 1: Full-Graph Sweep ──
@@ -407,39 +549,46 @@ def main():
     edges = fetch_all_edges(database)
     log.info(f"  Edges: {len(edges)}")
 
-    # ── Step 2: Narrative Chunking ──
+    # ── Step 2: Sliding window generation ──
     log.info("─" * 50)
-    log.info("Building narrative chapters…")
+    log.info("Building sliding windows…")
     chapters = build_narrative_chapters(nodes, edges)
-    log.info(f"  Chapters: {len(chapters)}")
-    for i, ch in enumerate(chapters):
-        t0 = ch[0]["start_time_ms"]
-        t1 = ch[-1]["end_time_ms"]
-        log.info(
-            f"    Chapter {i + 1}: {len(ch)} nodes "
-            f"({t0}ms – {t1}ms, {(t1 - t0) / 1000:.1f}s)"
-        )
+    log.info(f"  Windows generated: {len(chapters)} "
+             f"(sizes {WINDOW_MIN_NODES}–{WINDOW_MAX_NODES} nodes, step={WINDOW_STEP})")
 
-    # ── Step 3: AI Batch Evaluator ──
+    # ── Step 2.5: Pre-filter ──
     log.info("─" * 50)
-    log.info("Scoring chapters with Gemini ClipScoringAgent…")
+    log.info("Pre-filtering windows by mechanism score…")
+    chapters = prefilter_windows(chapters)
 
-    scored_clips: list[tuple[ClipScore, list[dict]]] = []
-    for i, chapter in enumerate(chapters):
-        log.info(f"  Scoring chapter {i + 1}/{len(chapters)}…")
-        clip_score = score_chapter(chapter, i, len(chapters))
-        if clip_score:
-            log.info(f"    Score: {clip_score.final_score}/100")
-            log.info(f"    Range: {clip_score.recommended_start_ms}ms – {clip_score.recommended_end_ms}ms")
-            duration_s = (clip_score.recommended_end_ms - clip_score.recommended_start_ms) / 1000
-            log.info(f"    Duration: {duration_s:.1f}s")
-            scored_clips.append((clip_score, chapter))
-        else:
-            log.warning(f"    Chapter {i + 1} returned no score (skipped)")
+    # ── Content type detection ──
+    log.info("─" * 50)
+    log.info("Detecting content type…")
+    content_type = detect_content_type(nodes)
+    scoring_instruction = build_scoring_instruction(content_type)
+
+    # ── Step 3: Async AI Scoring ──
+    log.info("─" * 50)
+    log.info(f"Scoring {len(chapters)} windows with Gemini (concurrency={MAX_CONCURRENT_SCORING})…")
+
+    sem = asyncio.Semaphore(MAX_CONCURRENT_SCORING)
+    tasks = [
+        score_chapter_async(chapter, i, len(chapters), sem, scoring_instruction)
+        for i, chapter in enumerate(chapters)
+    ]
+    results = await asyncio.gather(*tasks)
+
+    scored_clips: list[tuple[ClipScore, list[dict]]] = [
+        (score, chapter)
+        for score, chapter in zip(results, chapters)
+        if score is not None
+    ]
 
     if not scored_clips:
-        log.error("No chapters could be scored. Exiting.")
+        log.error("No windows could be scored. Exiting.")
         return
+
+    log.info(f"  Scored: {len(scored_clips)}/{len(chapters)} windows")
 
     # ── Step 4: Global Ranking & Filtering ──
     log.info("─" * 50)
@@ -464,10 +613,10 @@ def main():
 
     # ── Summary ──
     log.info("=" * 60)
-    log.info("PHASE 4 AUTO-CURATOR COMPLETE")
+    log.info("PHASE 5 AUTO-CURATOR COMPLETE")
     log.info(f"  Total nodes swept:    {len(nodes)}")
-    log.info(f"  Narrative chapters:   {len(chapters)}")
-    log.info(f"  Chapters scored:      {len(scored_clips)}")
+    log.info(f"  Windows generated:    {len(chapters)}")
+    log.info(f"  Windows scored:       {len(scored_clips)}")
     log.info(f"  Clips exported:       {len(payloads)}")
     for rank, p in enumerate(payloads, 1):
         duration_s = (p["clip_end_ms"] - p["clip_start_ms"]) / 1000
@@ -478,6 +627,10 @@ def main():
         )
     log.info(f"  Output: {OUTPUT_PATH}")
     log.info("=" * 60)
+
+
+def main():
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

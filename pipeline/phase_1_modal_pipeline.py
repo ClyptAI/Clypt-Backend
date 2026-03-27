@@ -500,7 +500,7 @@ async def call_modal_worker_distributed(
 
     t0 = time.time()
     allow_resume = os.getenv("CLYPT_DISTRIBUTED_RESUME", "1") == "1"
-    use_detached = os.getenv("CLYPT_DISTRIBUTED_DETACH", "1") == "1"
+    use_detached = os.getenv("CLYPT_DISTRIBUTED_DETACH", "0") == "1"
     state = load_detached_state() if allow_resume else None
     if state and state.get("status") == "submitted":
         log.info(f"Resuming detached fan-out job {state.get('job_id', '')[:8]}…")
@@ -539,7 +539,7 @@ async def call_modal_worker_distributed(
                 chunks,
             )
             tracking_submitted_ts = time.time()
-            if hasattr(chunk_obj, "get") and hasattr(chunk_obj, "object_id"):
+            if hasattr(chunk_obj, "object_id"):
                 chunk_mode = "indexed"
                 chunk_handle = chunk_obj
                 chunk_handles = None
@@ -686,6 +686,52 @@ async def call_modal_worker_distributed(
     return result
 
 
+async def maybe_refine_speaker_bindings(
+    video_path: str,
+    audio_path: str,
+    phase_1_visual: dict,
+    phase_1_audio: dict,
+) -> tuple[dict, dict]:
+    """Optionally upgrade heuristic speaker bindings via TalkNet refinement."""
+    if os.getenv("CLYPT_RUN_TALKNET_REFINEMENT", "0") != "1":
+        return phase_1_visual, phase_1_audio
+
+    log.info("── Step 2B: Optional TalkNet Speaker Refinement ──")
+    video_bytes = Path(video_path).read_bytes()
+    audio_bytes = Path(audio_path).read_bytes()
+    tracks = list(phase_1_visual.get("tracks", []))
+    words = list(phase_1_audio.get("words", []))
+    if not tracks or not words:
+        log.info("Skipping TalkNet refinement: missing tracks or words.")
+        return phase_1_visual, phase_1_audio
+
+    ClyptWorker = modal.Cls.from_name("clypt-sota-worker", "ClyptWorker")
+    worker = ClyptWorker()
+    t0 = time.time()
+    refined = await worker.refine_speaker_bindings.remote.aio(
+        video_bytes=video_bytes,
+        audio_wav_bytes=audio_bytes,
+        words=words,
+        tracks=tracks,
+    )
+    elapsed = time.time() - t0
+
+    if refined.get("status") != "success":
+        log.warning(
+            "TalkNet refinement failed after %.1fs; keeping heuristic bindings.",
+            elapsed,
+        )
+        return phase_1_visual, phase_1_audio
+
+    phase_1_audio = dict(phase_1_audio)
+    phase_1_audio["words"] = list(refined.get("words", words))
+    phase_1_audio["speaker_bindings"] = list(
+        refined.get("speaker_bindings", phase_1_audio.get("speaker_bindings", []))
+    )
+    log.info("TalkNet refinement complete in %.1fs", elapsed)
+    return phase_1_visual, phase_1_audio
+
+
 # ──────────────────────────────────────────────
 # Orchestration
 # ──────────────────────────────────────────────
@@ -719,6 +765,13 @@ async def main(youtube_url: str | None = None):
     phase_1_audio = result.get("phase_1_audio") or result.get("phase_1a_audio")
     if phase_1_visual is None or phase_1_audio is None:
         raise RuntimeError("Modal worker response missing Phase 1 visual/audio payloads")
+
+    phase_1_visual, phase_1_audio = await maybe_refine_speaker_bindings(
+        video_path=video_path,
+        audio_path=audio_path,
+        phase_1_visual=phase_1_visual,
+        phase_1_audio=phase_1_audio,
+    )
 
     # Step 3A: Upload canonical source video to GCS for downstream Gemini phases.
     video_gcs_uri = upload_video_to_gcs(video_path)

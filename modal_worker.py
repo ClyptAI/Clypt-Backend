@@ -23,8 +23,9 @@ app = modal.App("clypt-sota-worker")
 TRACKING_VOLUME = modal.Volume.from_name("clypt-phase1-tracking", create_if_missing=True)
 MODEL_DEBUG_SECRET = modal.Secret.from_dict(
     {
-        "CLYPT_MODEL_DEBUG": "1",
-        "CLYPT_MODEL_DEBUG_EVERY": "10",
+        "CLYPT_MODEL_DEBUG": "0",
+        "CLYPT_MODEL_DEBUG_EVERY": "20",
+        "CLYPT_ENABLE_TALKNET_INLINE": "0",
     }
 )
 
@@ -558,11 +559,17 @@ class ClyptWorker:
 
         self.model_debug = os.getenv("CLYPT_MODEL_DEBUG", "0") == "1"
         self.model_debug_every = int(os.getenv("CLYPT_MODEL_DEBUG_EVERY", "20"))
+        self.enable_talknet_inline = os.getenv("CLYPT_ENABLE_TALKNET_INLINE", "0") == "1"
         self._talknet_debug_calls = 0
         if self.model_debug:
             print(
                 "Model debug logging enabled: "
                 f"CLYPT_MODEL_DEBUG=1, every={self.model_debug_every} TalkNet forwards"
+            )
+        if not self.enable_talknet_inline:
+            print(
+                "TalkNet inline refinement disabled: "
+                "Phase 1 finalize will use heuristic speaker binding."
             )
 
         # --- Load Parakeet ---
@@ -3118,18 +3125,22 @@ class ClyptWorker:
         words: list[dict],
         frame_to_dets: dict[int, list[dict]] | None = None,
         track_to_dets: dict[str, list[dict]] | None = None,
+        force_talknet: bool = False,
     ) -> list[dict]:
         """Bind words to track IDs using TalkNet, with heuristic fallback."""
-        bindings = self._run_talknet_binding(
-            video_path=video_path,
-            audio_wav_path=audio_wav_path,
-            tracks=tracks,
-            words=words,
-            frame_to_dets=frame_to_dets,
-            track_to_dets=track_to_dets,
-        )
-        if bindings is not None:
-            return bindings
+        if force_talknet or self.enable_talknet_inline:
+            bindings = self._run_talknet_binding(
+                video_path=video_path,
+                audio_wav_path=audio_wav_path,
+                tracks=tracks,
+                words=words,
+                frame_to_dets=frame_to_dets,
+                track_to_dets=track_to_dets,
+            )
+            if bindings is not None:
+                return bindings
+        else:
+            print("TalkNet skipped for inline finalize; using heuristic speaker binding.")
 
         print("Running fallback speaker binding heuristic...")
         return self._run_speaker_binding_heuristic(
@@ -3185,8 +3196,11 @@ class ClyptWorker:
         words: list[dict],
         tracks: list[dict],
         tracking_metrics: dict | None = None,
+        force_talknet: bool = False,
     ) -> dict:
         """Finalize extraction from precomputed ASR words + tracking tracks."""
+        import time
+
         metrics = dict(tracking_metrics) if isinstance(tracking_metrics, dict) else {}
         metrics["schema_pass_rate"] = self._tracking_contract_pass_rate(tracks)
         self._validate_tracking_contract(tracks)
@@ -3196,15 +3210,19 @@ class ClyptWorker:
 
         # Step 3: Global tracklet clustering
         print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
+        t_cluster_start = time.perf_counter()
         tracks = self._cluster_tracklets(
             video_path,
             tracks,
             track_to_dets=track_to_dets,
         )
+        print(f"[Phase 1] Step 3/4 complete in {time.perf_counter() - t_cluster_start:.1f}s")
         frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
 
         # Step 4: Speaker binding
-        print("[Phase 1] Step 4/4: Running speaker binding...")
+        binding_mode = "TalkNet refinement" if (force_talknet or self.enable_talknet_inline) else "heuristic binding"
+        print(f"[Phase 1] Step 4/4: Running speaker binding ({binding_mode})...")
+        t_bind_start = time.perf_counter()
         speaker_bindings = self._run_speaker_binding(
             video_path,
             audio_path,
@@ -3212,7 +3230,9 @@ class ClyptWorker:
             words,
             frame_to_dets=frame_to_dets,
             track_to_dets=track_to_dets,
+            force_talknet=force_talknet,
         )
+        print(f"[Phase 1] Step 4/4 complete in {time.perf_counter() - t_bind_start:.1f}s")
         geometry_type = (
             "mixed"
             if any(str(t.get("geometry_type", "")) == "obb" for t in tracks)
@@ -3364,6 +3384,52 @@ class ClyptWorker:
                 tracks=tracks_local,
                 tracking_metrics=tracking_metrics if isinstance(tracking_metrics, dict) else {},
             )
+        finally:
+            h264_video_path = video_path.replace(".mp4", "_h264.mp4")
+            for p in (video_path, audio_path, h264_video_path):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    @modal.method()
+    def refine_speaker_bindings(
+        self,
+        video_bytes: bytes,
+        audio_wav_bytes: bytes,
+        words: list[dict],
+        tracks: list[dict],
+    ) -> dict:
+        """Optional second-pass TalkNet refinement outside the Phase 1 critical path."""
+        import os
+        import uuid
+
+        dl_dir = "/tmp/clypt"
+        os.makedirs(dl_dir, exist_ok=True)
+        suffix = uuid.uuid4().hex
+        video_path = f"{dl_dir}/video_refine_{suffix}.mp4"
+        audio_path = f"{dl_dir}/audio_refine_{suffix}.wav"
+        with open(video_path, "wb") as f:
+            f.write(video_bytes)
+        with open(audio_path, "wb") as f:
+            f.write(audio_wav_bytes)
+
+        try:
+            words_local = [dict(w) for w in words]
+            tracks_local = [dict(t) for t in tracks]
+            frame_to_dets, track_to_dets = self._build_track_indexes(tracks_local)
+            speaker_bindings = self._run_speaker_binding(
+                video_path=video_path,
+                audio_wav_path=audio_path,
+                tracks=tracks_local,
+                words=words_local,
+                frame_to_dets=frame_to_dets,
+                track_to_dets=track_to_dets,
+                force_talknet=True,
+            )
+            return {
+                "status": "success",
+                "words": words_local,
+                "speaker_bindings": speaker_bindings,
+            }
         finally:
             h264_video_path = video_path.replace(".mp4", "_h264.mp4")
             for p in (video_path, audio_path, h264_video_path):
