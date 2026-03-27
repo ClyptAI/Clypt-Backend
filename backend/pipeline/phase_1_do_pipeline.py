@@ -215,6 +215,7 @@ def build_phase1_runtime_controls() -> dict:
 
     requested_speaker_binding_mode = (os.getenv("PHASE1_SPEAKER_BINDING_MODE", "auto") or "auto").strip().lower()
     requested_tracking_mode = (os.getenv("PHASE1_TRACKING_MODE", "direct") or "direct").strip().lower()
+    requested_tracker_backend = (os.getenv("PHASE1_TRACKER_BACKEND", "botsort_reid") or "botsort_reid").strip().lower()
     shared_analysis_proxy_enabled = (os.getenv("PHASE1_SHARED_ANALYSIS_PROXY", "1") or "1").strip() != "0"
     heuristic_binding_enabled_env = os.getenv("PHASE1_HEURISTIC_BINDING_ENABLED")
 
@@ -230,6 +231,7 @@ def build_phase1_runtime_controls() -> dict:
         "speaker_binding_mode": speaker_binding_mode,
         "heuristic_binding_enabled": heuristic_binding_enabled,
         "tracking_mode": tracking_mode,
+        "tracker_backend": requested_tracker_backend,
         "shared_analysis_proxy_enabled": shared_analysis_proxy_enabled,
         "framing_policy": "single_person_plus_two_speaker",
         "two_speaker_layout_policy": "shared_two_shot_or_explicit_split",

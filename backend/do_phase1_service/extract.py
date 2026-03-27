@@ -293,6 +293,7 @@ def _runtime_controls_env(runtime_controls: dict[str, object] | None) -> Iterato
     env_map = {
         "speaker_binding_mode": "CLYPT_SPEAKER_BINDING_MODE",
         "tracking_mode": "CLYPT_TRACKING_MODE",
+        "tracker_backend": "CLYPT_TRACKER_BACKEND",
         "shared_analysis_proxy_enabled": "CLYPT_SHARED_ANALYSIS_PROXY",
     }
     previous: dict[str, str | None] = {}

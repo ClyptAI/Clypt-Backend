@@ -3191,7 +3191,7 @@ class ClyptWorker:
                         "track_id": tid,
                         "confidence": float(det.get("confidence", 0.0)),
                         "source": "person_tracker",
-                        "provenance": "yolo26_botsort",
+                        "provenance": self._tracking_provenance_tag(),
                     }
                 )
             if not ts_objs:
@@ -3206,7 +3206,7 @@ class ClyptWorker:
                     "person_track_index": idx,
                     "track_id": tid,
                     "source": "person_tracker",
-                    "provenance": "yolo26_botsort",
+                    "provenance": self._tracking_provenance_tag(),
                     "timestamped_objects": ts_objs,
                 }
             )
@@ -3934,6 +3934,20 @@ class ClyptWorker:
             "scale_y": float(scale_y),
         }
 
+    def _prepare_direct_analysis_context(self, video_path: str) -> dict:
+        """Prepare tracking inputs without ever swapping in the shared analysis proxy."""
+        prepared_video_path = self._ensure_h264(video_path)
+        prepared_meta = self._probe_video_meta(prepared_video_path)
+        return {
+            "source_video_path": video_path,
+            "prepared_video_path": prepared_video_path,
+            "analysis_video_path": prepared_video_path,
+            "source_meta": dict(prepared_meta),
+            "analysis_meta": dict(prepared_meta),
+            "scale_x": 1.0,
+            "scale_y": 1.0,
+        }
+
     def _prepare_speaker_binding_video(self, video_path: str) -> tuple[str, float, float]:
         """Compatibility wrapper around the shared analysis proxy."""
         if not self._shared_analysis_proxy_enabled():
@@ -4135,6 +4149,25 @@ class ClyptWorker:
         return plan
 
     @staticmethod
+    def _select_tracker_backend() -> str:
+        requested_backend = os.getenv("CLYPT_TRACKER_BACKEND", "botsort_reid").strip().lower()
+        if requested_backend in {"bytetrack", "byte_track", "byte-track"}:
+            return "bytetrack"
+        if requested_backend in {"", "botsort", "botsort_reid", "bot-sort", "bot-sort-reid"}:
+            return "botsort_reid"
+        print(
+            f"  Warning: unknown CLYPT_TRACKER_BACKEND={requested_backend!r}; "
+            "falling back to botsort_reid"
+        )
+        return "botsort_reid"
+
+    def _tracking_provenance_tag(self) -> str:
+        return "yolo26_bytetrack" if self._select_tracker_backend() == "bytetrack" else "yolo26_botsort"
+
+    def _tracking_backend_display_name(self) -> str:
+        return "ByteTrack" if self._select_tracker_backend() == "bytetrack" else "BoT-SORT"
+
+    @staticmethod
     def _ensure_botsort_reid_yaml() -> str:
         """Write a strict BoT-SORT config with ReID + GMC enabled."""
         import os
@@ -4158,6 +4191,42 @@ class ClyptWorker:
                     "model: auto\n"
                 )
         return out
+
+    @staticmethod
+    def _ensure_bytetrack_yaml() -> str:
+        """Write a ByteTrack config compatible with the direct YOLOv26 pipeline."""
+        import os
+
+        out = "/tmp/clypt/bytetrack.yaml"
+        os.makedirs("/tmp/clypt", exist_ok=True)
+        if not os.path.exists(out):
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(
+                    "tracker_type: bytetrack\n"
+                    "track_high_thresh: 0.35\n"
+                    "track_low_thresh: 0.1\n"
+                    "new_track_thresh: 0.6\n"
+                    "track_buffer: 45\n"
+                    "match_thresh: 0.78\n"
+                    "fuse_score: True\n"
+                )
+        return out
+
+    def _resolve_tracking_backend(self) -> dict:
+        backend = self._select_tracker_backend()
+        if backend == "bytetrack":
+            return {
+                "backend": "bytetrack",
+                "tracker_cfg": self._ensure_bytetrack_yaml(),
+                "provenance": "yolo26_bytetrack",
+                "display_name": "ByteTrack",
+            }
+        return {
+            "backend": "botsort_reid",
+            "tracker_cfg": self._ensure_botsort_reid_yaml(),
+            "provenance": "yolo26_botsort",
+            "display_name": "BoT-SORT",
+        }
 
     @staticmethod
     def _xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float, float, float]:
@@ -4503,7 +4572,7 @@ class ClyptWorker:
             "end_frame": int(end_f),
             "fps": float(fps),
             "model": "yolo26s",
-            "tracker": "botsort_reid",
+            "tracker": self._select_tracker_backend(),
             "letterbox": lb_meta,
         }
         with open(ndjson_path, "w", encoding="utf-8") as f:
@@ -4533,12 +4602,13 @@ class ClyptWorker:
         }
 
     def _run_tracking_direct(self, video_path: str, analysis_context: dict | None = None) -> tuple[list[dict], dict]:
-        """Run YOLO + BoT-SORT as a single full-video stream."""
+        """Run direct YOLO tracking as a single full-video stream."""
         import time
         from concurrent.futures import ThreadPoolExecutor
 
-        print("Running YOLO26s + BoT-SORT direct tracking inference...")
-        analysis_context = analysis_context or self._prepare_analysis_video(video_path)
+        backend_info = self._resolve_tracking_backend()
+        print(f"Running YOLO26s + {backend_info['display_name']} direct tracking inference...")
+        analysis_context = analysis_context or self._prepare_direct_analysis_context(video_path)
         tracking_video_path = str(analysis_context.get("analysis_video_path", video_path))
         meta = dict(analysis_context.get("analysis_meta", self._probe_video_meta(tracking_video_path)))
         source_meta = dict(analysis_context.get("source_meta", meta))
@@ -4555,7 +4625,7 @@ class ClyptWorker:
             return [], {}
 
         infer_imgsz = max(320, int(os.getenv("CLYPT_YOLO_IMGSZ", "640")))
-        tracker_cfg = self._ensure_botsort_reid_yaml()
+        tracker_cfg = str(backend_info["tracker_cfg"])
         model = self._get_tracking_model()
         lb_meta = self._compute_letterbox_meta(width, height, infer_imgsz, infer_imgsz)
         started = time.time()
@@ -4775,6 +4845,8 @@ class ClyptWorker:
             "tracking_wallclock_s": float(elapsed),
             "throughput_fps": float(eff_fps),
             "schema_pass_rate": 1.0,
+            "tracker_backend": str(backend_info["backend"]),
+            "tracking_provenance": str(backend_info["provenance"]),
             "track_fragmentation_rate": float(
                 len({str(t.get("track_id")) for t in tracks}) / max(1.0, len(tracks) ** 0.5)
             ),
@@ -4811,12 +4883,13 @@ class ClyptWorker:
         return tracks, metrics
 
     def _run_tracking_chunked(self, video_path: str, analysis_context: dict | None = None) -> tuple[list[dict], dict]:
-        """Run chunked YOLO + BoT-SORT tracking with stitching."""
+        """Run chunked YOLO tracking with stitching."""
         import os
         import time
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        print("Running YOLO26s + BoT-SORT (ReID/GMC) chunked tracking inference...")
+        backend_info = self._resolve_tracking_backend()
+        print(f"Running YOLO26s + {backend_info['display_name']} chunked tracking inference...")
         analysis_context = analysis_context or self._prepare_analysis_video(video_path)
         tracking_video_path = str(analysis_context.get("analysis_video_path", video_path))
         meta = dict(analysis_context.get("analysis_meta", self._probe_video_meta(tracking_video_path)))
@@ -4830,7 +4903,7 @@ class ClyptWorker:
             return [], {}
 
         chunks = self._build_chunk_plan(total_frames, fps)
-        tracker_cfg = self._ensure_botsort_reid_yaml()
+        tracker_cfg = str(backend_info["tracker_cfg"])
         chunk_dir = "/vol/clypt-chunks"
         os.makedirs(chunk_dir, exist_ok=True)
         for f in os.listdir(chunk_dir):
@@ -5128,6 +5201,8 @@ class ClyptWorker:
             "chunk_processed_frames": int(total_processed_frames),
             "chunk_elapsed_s": float(total_chunk_elapsed),
             "chunk_throughput_fps": float(chunk_throughput_fps),
+            "tracker_backend": str(backend_info["backend"]),
+            "tracking_provenance": str(backend_info["provenance"]),
         }
         if stitched_track_identity_features:
             metrics["track_identity_features"] = stitched_track_identity_features
@@ -5142,7 +5217,10 @@ class ClyptWorker:
         """Run tracking using either direct or chunked execution."""
         mode = self._select_tracking_mode()
         print(f"Tracking mode={mode}")
-        analysis_context = self._prepare_analysis_video(video_path)
+        if mode == "direct":
+            analysis_context = self._prepare_direct_analysis_context(video_path)
+        else:
+            analysis_context = self._prepare_analysis_video(video_path)
         execution_mode = "direct" if mode in {"direct", "shared_analysis_proxy"} else "chunked"
         if execution_mode == "direct":
             try:
@@ -7717,7 +7795,7 @@ class ClyptWorker:
 
         _ = job_id
         TRACKING_VOLUME.reload()
-        tracker_cfg = self._ensure_botsort_reid_yaml()
+        tracker_cfg = str(self._resolve_tracking_backend()["tracker_cfg"])
         chunk_dir = f"/vol/clypt-chunks/jobs/{job_id}/chunks"
         os.makedirs(chunk_dir, exist_ok=True)
         return self._track_single_chunk(video_path, meta, chunk, tracker_cfg, chunk_dir)

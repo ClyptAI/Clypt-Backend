@@ -209,6 +209,7 @@ def test_phase_1_main_waits_for_manifest_and_writes_compat_outputs(configured_ph
             "speaker_binding_mode": "auto",
             "heuristic_binding_enabled": True,
             "tracking_mode": "direct",
+            "tracker_backend": "botsort_reid",
             "shared_analysis_proxy_enabled": True,
             "framing_policy": "single_person_plus_two_speaker",
             "two_speaker_layout_policy": "shared_two_shot_or_explicit_split",
@@ -303,6 +304,7 @@ def test_submit_or_resume_phase1_job_persists_runtime_controls(configured_phase1
     assert saved_state["runtime_controls"]["speaker_binding_mode"] == "lrasd"
     assert saved_state["runtime_controls"]["heuristic_binding_enabled"] is False
     assert saved_state["runtime_controls"]["tracking_mode"] == "direct"
+    assert saved_state["runtime_controls"]["tracker_backend"] == "botsort_reid"
 
 
 def test_materialize_phase1_manifest_uses_compatibility_bridge_face_fallback_and_runtime_controls(

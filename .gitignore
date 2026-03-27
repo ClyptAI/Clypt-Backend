@@ -4,6 +4,9 @@
 # Local tooling/editor state
 .claude/
 .vscode/
+.superpowers/
+.understand-anything/
+.tmp/
 
 # Python
 __pycache__/
@@ -22,6 +25,8 @@ build/
 # Local pipeline outputs/artifacts
 backend/downloads/
 backend/outputs/
+backend/test-render/downloads/
+backend/test-render/outputs/
 backend/.parallel_runs/
 .parallel_runs/
 

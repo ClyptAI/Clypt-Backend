@@ -233,6 +233,7 @@ def test_extract_job_applies_runtime_controls_to_local_extraction_env(tmp_path: 
 
         observed["speaker_binding_mode"] = os.getenv("CLYPT_SPEAKER_BINDING_MODE")
         observed["tracking_mode"] = os.getenv("CLYPT_TRACKING_MODE")
+        observed["tracker_backend"] = os.getenv("CLYPT_TRACKER_BACKEND")
         observed["eval_profile"] = os.getenv("CLYPT_PHASE1_EVAL_PROFILE")
         return {
             "status": "success",
@@ -274,6 +275,7 @@ def test_extract_job_applies_runtime_controls_to_local_extraction_env(tmp_path: 
             "evaluation_mode": True,
             "speaker_binding_mode": "lrasd",
             "tracking_mode": "direct",
+            "tracker_backend": "bytetrack",
         },
         output_dir=tmp_path,
         storage=FakeStorage(),
@@ -283,6 +285,7 @@ def test_extract_job_applies_runtime_controls_to_local_extraction_env(tmp_path: 
     assert observed == {
         "speaker_binding_mode": "lrasd",
         "tracking_mode": "direct",
+        "tracker_backend": "bytetrack",
         "eval_profile": "podcast_eval",
     }
 
@@ -4501,6 +4504,24 @@ def test_tracking_mode_auto_prefers_chunked_with_multiple_workers(monkeypatch):
     assert worker._select_tracking_mode() == "chunked"
 
 
+def test_tracking_backend_defaults_to_botsort_reid(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_TRACKER_BACKEND", raising=False)
+
+    assert worker._select_tracker_backend() == "botsort_reid"
+
+
+def test_tracking_backend_accepts_bytetrack(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_TRACKER_BACKEND", "bytetrack")
+
+    assert worker._select_tracker_backend() == "bytetrack"
+
+
 def test_run_tracking_uses_direct_mode(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -4523,6 +4544,38 @@ def test_run_tracking_uses_direct_mode(monkeypatch):
     assert tracks == [{"track_id": "t1"}]
     assert metrics == {"tracking_mode": "direct"}
     assert calls == [("direct", "video.mp4")]
+
+
+def test_run_tracking_direct_mode_bypasses_shared_analysis_proxy(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    seen = {}
+
+    def fake_run_tracking_direct(video_path, analysis_context=None):
+        seen["analysis_context"] = analysis_context
+        return [{"track_id": "t1"}], {}
+
+    monkeypatch.setattr(worker, "_select_tracking_mode", lambda: "direct")
+    monkeypatch.setattr(
+        worker,
+        "_prepare_direct_analysis_context",
+        lambda video_path: {"analysis_video_path": "video.mp4", "prepared_video_path": "video.mp4"},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_prepare_analysis_video",
+        lambda video_path: {"analysis_video_path": "video_proxy.mp4", "prepared_video_path": "video.mp4"},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_run_tracking_direct",
+        fake_run_tracking_direct,
+    )
+    monkeypatch.setattr(worker, "_run_tracking_chunked", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("chunked should not run")))
+
+    worker._run_tracking("video.mp4")
+
+    assert seen["analysis_context"]["analysis_video_path"] == "video.mp4"
 
 
 def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
@@ -4562,6 +4615,42 @@ def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
     assert tracks[0]["chunk_idx"] == 0
     assert "tracking_mode" not in metrics
     assert track_calls[0]["device"] == "cpu"
+
+
+def test_run_tracking_direct_uses_bytetrack_when_requested(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    track_calls = []
+
+    class _Boxes:
+        xyxy = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([[10, 20, 30, 40]])})()
+        id = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([7])})()
+        conf = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([0.9])})()
+
+    class _Result:
+        boxes = _Boxes()
+        obb = None
+
+    class _Model:
+        def track(self, **kwargs):
+            track_calls.append(kwargs)
+            return [_Result()]
+
+    monkeypatch.setenv("CLYPT_TRACKER_BACKEND", "bytetrack")
+    monkeypatch.setattr(worker, "_ensure_h264", lambda path: path)
+    monkeypatch.setattr(worker, "_probe_video_meta", lambda path: {"fps": 24.0, "total_frames": 1, "width": 1920, "height": 1080})
+    monkeypatch.setattr(worker, "_ensure_bytetrack_yaml", lambda: "bytetrack.yaml")
+    monkeypatch.setattr(worker, "_get_tracking_model", lambda: _Model())
+    monkeypatch.setattr(worker, "_compute_letterbox_meta", lambda *args: {})
+    monkeypatch.setattr(worker, "_xyxy_abs_to_xywhn", lambda *args: (0.1, 0.2, 0.3, 0.4))
+    monkeypatch.setattr(worker, "_xywhn_to_xyxy_abs", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_forward_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_inverse_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
+    monkeypatch.setattr(worker, "_xyxy_to_xywh", lambda *args: (20.0, 30.0, 20.0, 20.0))
+
+    worker._run_tracking_direct("video.mp4")
+
+    assert track_calls[0]["tracker"] == "bytetrack.yaml"
 
 
 
