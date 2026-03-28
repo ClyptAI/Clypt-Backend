@@ -46,10 +46,11 @@ The plan below is based on the current committed code at `7002bf9` plus the live
 ### Key architectural problems to fix
 1. LR-ASD still thinks in words too early, which duplicates work and makes candidate starvation easier.
 2. Pyannote exists, but mostly as context for a word binder instead of as the scheduler that shapes the binding workload.
-3. “Easy” spans still pay too much of the expensive LR-ASD tax.
-4. Current body support is mostly a scoring prior; it is not a first-class continuity/candidate-survival cue.
-5. LR-ASD prep is more efficient than before, but it is not yet a proper producer/consumer pipeline around scheduled spans.
-6. The binding code is concentrated in `backend/do_phase1_worker.py`, which makes performance changes riskier and harder to reason about.
+3. Downstream overlap and off-screen truth currently depend on `audio_turn_bindings` emitted from the LR-ASD path, which means easy-span skipping needs a replacement evidence path instead of simply bypassing LR-ASD.
+4. “Easy” spans still pay too much of the expensive LR-ASD tax.
+5. Current body support is mostly a scoring prior; it is not a first-class continuity/candidate-survival cue.
+6. LR-ASD prep is more efficient than before, but it is not yet a proper producer/consumer pipeline around scheduled spans.
+7. The binding code is concentrated in `backend/do_phase1_worker.py`, which makes performance changes riskier and harder to reason about.
 
 ## Performance-First Design Decisions
 
@@ -143,7 +144,7 @@ Add explicit envs so the new behavior is measurable and tunable without code edi
 - `CLYPT_BINDING_DISCONTINUITY_HISTOGRAM_DELTA_THRESHOLD=0.18`
 - `CLYPT_LRASD_PREP_WORKERS=4`
 - `CLYPT_LRASD_PREP_QUEUE_SIZE=128`
-- `CLYPT_LRASD_INFER_WORKERS=2`
+- `CLYPT_LRASD_INFER_WORKERS=1` (raise only after benchmark proof)
 - `CLYPT_LRASD_SPAN_REUSE_ENABLE=1`
 - `CLYPT_LRASD_SPAN_REUSE_MIN_SUPPORT=0.75`
 
@@ -164,10 +165,14 @@ The refactor should promote span-first outputs to first-class artifacts.
   - span-level decisions with `single`, `overlap`, `offscreen`, `easy_span`, `lrasd_span` source metadata.
 - `speaker_assignment_spans_global`
   - projected global equivalent when available.
-- `word_active_speakers_local`
-  - per-word list of visible local speaker ids.
-- `word_offscreen_audio_speakers`
-  - per-word list of audio speakers that are active but off-screen.
+- `word_speaker_assignments`
+  - explicit per-word structured objects containing:
+    - `visible_local_track_ids`
+    - `visible_track_ids`
+    - `offscreen_audio_speaker_ids`
+    - `decision_source`
+    - `overlap`
+  - this replaces the fragile parallel-array idea.
 
 ### Keep for backward compatibility
 - `speaker_bindings`
@@ -179,7 +184,8 @@ The refactor should promote span-first outputs to first-class artifacts.
 
 Backward compatibility rule:
 - legacy single-speaker fields still get populated where a single dominant visible speaker exists.
-- overlap-aware fields become the source of truth for debug overlays and future camera-follow work.
+- legacy debug outputs (`speaker_candidate_debug`, `speaker_bindings_local`, `speaker_follow_bindings_local`) are dual-written until overlap follow, storage, and debug renderers are migrated.
+- overlap-aware fields become the source of truth for debug overlays and future camera-follow work only after consumer migration is complete.
 
 ## Refactor Sequence
 
@@ -383,6 +389,7 @@ git commit -m "feat: add body continuity support for speaker binding"
 - [ ] **Step 3: Implement cheap assignment for easy spans**
   - assign visible local/global track directly at span level
   - record `decision_source="easy_span"`
+  - emit synthetic turn-binding evidence rows so downstream `active_speakers_local`, off-screen logic, and audio-speaker-to-local-track maps do not depend exclusively on LR-ASD spans
 
 - [ ] **Step 4: Emit metrics**
   - scheduled spans total
@@ -412,7 +419,7 @@ git commit -m "feat: add easy-span cascade before lrasd"
 
 - [ ] **Step 1: Write failing LR-ASD runner tests**
   - only scheduled hard spans generate LR-ASD jobs
-  - solo easy spans generate zero LR-ASD jobs
+  - solo easy spans generate zero LR-ASD jobs while still leaving valid turn-binding evidence behind
   - overlap span creates multi-speaker-capable LR-ASD jobs
   - span reuse avoids duplicate per-word work inside the same span/sub-span
 
@@ -462,9 +469,10 @@ git commit -m "refactor: run lrasd on scheduled hard spans"
   - keep decode/preprocess on current GPU path where available
   - push prepared jobs into a bounded queue
 
-- [ ] **Step 3: Implement bounded inference workers**
-  - start with `CLYPT_LRASD_INFER_WORKERS=2`
+- [ ] **Step 3: Keep inference single-stream first**
+  - default `CLYPT_LRASD_INFER_WORKERS=1`
   - preserve deterministic output ordering in aggregation
+  - add a benchmark-only seam for `>1` workers, but do not enable it by default without proof on the target GPU
 
 - [ ] **Step 4: Emit queue and throughput metrics**
   - prep queue depth
@@ -504,15 +512,16 @@ git commit -m "feat: parallelize lrasd prep pipeline"
 
 - [ ] **Step 2: Implement span-to-word projection**
   - use span intersections, not per-word re-scoring
-  - assign `word_active_speakers_local`
-  - assign `word_offscreen_audio_speakers`
+  - emit structured `word_speaker_assignments` objects
   - preserve legacy `speaker_local_track_id`/`speaker_track_id` when exactly one dominant visible speaker exists
 
 - [ ] **Step 3: Extend transcript contract models**
-  - add new fields and validators
+  - add new structured per-word assignment model and validators
+  - update `Phase1Word` or its enclosing transcript artifact so consumer ordering cannot drift
 
 - [ ] **Step 4: Adapt overlap follow post-pass**
   - consume span-level overlap truth instead of reconstructing it from legacy fields
+  - keep `speaker_candidate_debug` and legacy local bindings available until render/debug consumers migrate
 
 - [ ] **Step 5: Run tests**
 
@@ -540,8 +549,8 @@ git commit -m "feat: project span assignments to words with overlap support"
 
 - [ ] **Step 2: Delete obsolete helpers and metrics**
   - remove dead turn-top-K selection code
-  - remove stale word-level-only debug fields that are superseded by span outputs
-  - keep compatibility shims only where artifacts still require them
+  - remove only the truly dead word-first helpers
+  - keep compatibility shims and dual-write outputs for `speaker_candidate_debug`, `speaker_bindings_local`, and `speaker_follow_bindings_local` until overlap follow, storage, and debug rendering have switched to span-level inputs
 
 - [ ] **Step 3: Run focused full speaker-binding suites**
 
@@ -627,5 +636,5 @@ Expected: PASS
 6. Span-first LR-ASD runner
 7. Parallel prep
 8. Word projection + overlap contract
-9. Dead-path cleanup
+9. Consumer migration + dead-path cleanup
 10. Benchmark + deploy
