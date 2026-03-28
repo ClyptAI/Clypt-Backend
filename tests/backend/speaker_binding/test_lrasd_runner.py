@@ -1,4 +1,7 @@
-from backend.speaker_binding.lrasd_runner import build_lrasd_span_jobs
+import threading
+import time
+
+from backend.speaker_binding.lrasd_runner import LrasdPrepPipeline, build_lrasd_span_jobs
 
 
 def test_build_lrasd_span_jobs_includes_only_hard_spans_and_surviving_candidates():
@@ -155,3 +158,63 @@ def test_build_lrasd_span_jobs_skips_spans_with_no_surviving_candidates():
 
     assert jobs == []
     assert debug_rows == []
+
+
+def test_lrasd_prep_pipeline_preserves_submission_order_when_prep_finishes_out_of_order():
+    pipeline = LrasdPrepPipeline(
+        prepare_fn=lambda spec: (time.sleep(spec["delay_s"]), spec["job_id"])[1],
+        prep_workers=2,
+        queue_size=2,
+    )
+
+    try:
+        pipeline.submit({"job_id": "job-0", "delay_s": 0.06})
+        pipeline.submit({"job_id": "job-1", "delay_s": 0.01})
+        pipeline.submit({"job_id": "job-2", "delay_s": 0.03})
+        prepared = pipeline.drain()
+    finally:
+        pipeline.close()
+
+    assert prepared == ["job-0", "job-1", "job-2"]
+
+
+def test_lrasd_prep_pipeline_applies_backpressure_when_queue_is_full():
+    started: list[str] = []
+    release_first = threading.Event()
+
+    def _prepare(spec: dict) -> str:
+        started.append(spec["job_id"])
+        if spec["job_id"] == "job-0":
+            release_first.wait(timeout=1.0)
+        return spec["job_id"]
+
+    pipeline = LrasdPrepPipeline(
+        prepare_fn=_prepare,
+        prep_workers=2,
+        queue_size=2,
+    )
+
+    def _submit_all():
+        pipeline.submit({"job_id": "job-0"})
+        pipeline.submit({"job_id": "job-1"})
+        pipeline.submit({"job_id": "job-2"})
+
+    submit_thread = threading.Thread(target=_submit_all)
+    submit_thread.start()
+    time.sleep(0.1)
+
+    assert started[:2] == ["job-0", "job-1"]
+    assert len(started) == 2
+    assert submit_thread.is_alive()
+
+    release_first.set()
+    submit_thread.join(timeout=1.0)
+    assert not submit_thread.is_alive()
+
+    try:
+        prepared = pipeline.drain()
+    finally:
+        pipeline.close()
+
+    assert prepared == ["job-0", "job-1", "job-2"]
+    assert pipeline.metrics["lrasd_prep_queue_depth_max"] >= 1

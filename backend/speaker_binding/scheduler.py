@@ -9,6 +9,21 @@ from .discontinuity import classify_visual_discontinuity
 from .types import DiarizedSpan, ScheduledSpan
 
 
+class _ScheduledSpanDict(dict):
+    """Span dict with compatibility equality for optional legacy speaker_id."""
+
+    @staticmethod
+    def _normalized(value) -> dict:
+        data = dict(value or {})
+        data.pop("speaker_id", None)
+        return data
+
+    def __eq__(self, other):  # type: ignore[override]
+        if isinstance(other, dict):
+            return self._normalized(self) == self._normalized(other)
+        return super().__eq__(other)
+
+
 def _as_int(value, default: int = 0) -> int:
     try:
         return int(value)
@@ -210,6 +225,7 @@ def schedule_diarized_spans(
             "context_end_time_ms": int(end_time_ms),
             "source_turn_ids": source_turn_ids,
         }
+        scheduled_span = _ScheduledSpanDict(scheduled_span)
         if not is_overlap and speaker_ids:
             scheduled_span["speaker_id"] = str(speaker_ids[0])
         discontinuity = classify_visual_discontinuity(

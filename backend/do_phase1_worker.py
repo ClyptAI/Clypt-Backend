@@ -7210,7 +7210,7 @@ class ClyptWorker:
             "  LR-ASD candidate pruning: "
             f"eligible={len(eligible_lrasd_track_ids)}/{len(track_to_dets)}"
         )
-        from backend.speaker_binding.lrasd_runner import build_lrasd_span_jobs
+        from backend.speaker_binding.lrasd_runner import LrasdPrepPipeline, build_lrasd_span_jobs
 
         def _rank_span_candidates(span: dict) -> list[dict]:
             span_turn = {
@@ -7366,10 +7366,12 @@ class ClyptWorker:
         min_lrasd_prob = 0.15
         min_lrasd_assign_ratio = 0.15
         min_body_fallback_score = 0.62
+        prep_workers = max(1, int(os.getenv("CLYPT_LRASD_PREP_WORKERS", "4")))
+        prep_queue_size = max(1, int(os.getenv("CLYPT_LRASD_PREP_QUEUE_SIZE", "128")))
         print(
             "  LR-ASD pipeline: "
             f"batch_size={lrasd_batch_size}, overlap={'on' if enable_lrasd_overlap else 'off'}, "
-            f"max_inflight={max_inflight}"
+            f"max_inflight={max_inflight}, prep_workers={prep_workers}, prep_queue={prep_queue_size}"
         )
 
         # Use scheduled hard-span subspans to skip irrelevant chunks and reuse evidence.
@@ -7462,6 +7464,21 @@ class ClyptWorker:
                         continue
                     total_chunks += 1
 
+        prep_pipeline_metrics: dict = {}
+        prep_pipeline = LrasdPrepPipeline(
+            prepare_fn=lambda payload: self._lrasd_build_pending_subchunk(
+                tid=str(payload["tid"]),
+                frames=list(payload["frames"]),
+                crops=list(payload["crops"]),
+                full_audio_features=full_audio_features,
+                min_chunk_frames=min_chunk_frames,
+            ),
+            prep_workers=prep_workers,
+            queue_size=prep_queue_size,
+            infer_workers=1,
+            metrics=prep_pipeline_metrics,
+        )
+
         chunk_counter = 0
         scored_chunks = 0
         prepared_chunks = 0
@@ -7495,11 +7512,15 @@ class ClyptWorker:
                 print("   " + self._tensor_debug_stats("visual_t", visual_t))
                 print(f"   batch={len(pending)} t_len={t_len}")
 
+            infer_started_at = time.perf_counter()
             with torch.no_grad():
                 score_bt = self._lrasd_forward_scores(
                     audio_t,
                     visual_t,
                 )
+            prep_pipeline_metrics["lrasd_infer_wallclock_s"] = float(
+                prep_pipeline_metrics.get("lrasd_infer_wallclock_s", 0.0) or 0.0
+            ) + float(time.perf_counter() - infer_started_at)
             score_np = score_bt.detach().float().cpu().numpy()
 
             rows: list[tuple[str, list[int], np.ndarray]] = []
@@ -7530,6 +7551,18 @@ class ClyptWorker:
                 rows = fut.result()
                 _commit_scored_rows(rows)
 
+        def _queue_prepared_entry(pending_entry):
+            nonlocal prepared_chunks
+            if pending_entry is None:
+                return
+            bucket_length, pending_item = pending_entry
+            pending_by_t.setdefault(int(bucket_length), []).append(pending_item)
+            pending_bucket_started_at.setdefault(int(bucket_length), time.monotonic())
+            pending_bucket_last_seen_chunk[int(bucket_length)] = chunk_counter
+            prepared_chunks += 1
+            if len(pending_by_t[int(bucket_length)]) >= lrasd_batch_size:
+                _flush_pending(int(bucket_length))
+
         def _flush_pending(t_len: int):
             nonlocal flush_counter
             pending = pending_by_t.get(t_len, [])
@@ -7549,24 +7582,15 @@ class ClyptWorker:
             )
             _drain_one(block=False)
 
-        def _queue_subchunk(tid, frames, crops):
-            nonlocal prepared_chunks
-            pending_entry = self._lrasd_build_pending_subchunk(
-                tid=tid,
-                frames=frames,
-                crops=crops,
-                full_audio_features=full_audio_features,
-                min_chunk_frames=min_chunk_frames,
-            )
-            if pending_entry is None:
-                return
-            bucket_length, pending_item = pending_entry
-            pending_by_t.setdefault(bucket_length, []).append(pending_item)
-            pending_bucket_started_at.setdefault(bucket_length, time.monotonic())
-            pending_bucket_last_seen_chunk[bucket_length] = chunk_counter
-            prepared_chunks += 1
-            if len(pending_by_t[bucket_length]) >= lrasd_batch_size:
-                _flush_pending(bucket_length)
+        def _submit_subchunk(tid, frames, crops):
+            for pending_entry in prep_pipeline.submit(
+                {
+                    "tid": tid,
+                    "frames": list(frames),
+                    "crops": list(crops),
+                }
+            ):
+                _queue_prepared_entry(pending_entry)
 
         def _flush_stale_pending(current_chunk_counter: int):
             now = time.monotonic()
@@ -7688,7 +7712,7 @@ class ClyptWorker:
 
                         # Flush remainder
                         if len(current_face_subchunk) >= min_chunk_frames:
-                            _queue_subchunk(tid, current_face_subchunk, current_crops)
+                            _submit_subchunk(tid, current_face_subchunk, current_crops)
 
                         if chunk_counter % 40 == 0:
                             print(
@@ -7699,11 +7723,22 @@ class ClyptWorker:
                                 f"scored_tracks={len(scored_track_ids)}"
                             )
 
+            for pending_entry in prep_pipeline.drain():
+                _queue_prepared_entry(pending_entry)
             for t_len in list(pending_by_t.keys()):
                 _flush_pending(t_len)
             while inflight_futures:
                 _drain_one(block=True)
         finally:
+            prep_pipeline.close()
+            self._last_speaker_binding_metrics.update(
+                {
+                    "lrasd_prep_workers": int(prep_pipeline.prep_workers),
+                    "lrasd_prep_queue_size": int(prep_pipeline.queue_size),
+                    "lrasd_infer_workers": int(prep_pipeline.infer_workers),
+                }
+            )
+            self._last_speaker_binding_metrics.update(prep_pipeline.metrics)
             if infer_executor is not None:
                 infer_executor.shutdown(wait=True, cancel_futures=False)
 
@@ -8975,6 +9010,9 @@ class ClyptWorker:
                 track_id_remap=track_id_remap,
             )
             speaker_metrics.update(easy_span_cascade["metrics"])
+            speaker_metrics["lrasd_easy_cascade_skipped_jobs"] = int(
+                easy_span_cascade["metrics"].get("easy_spans_resolved", 0)
+            )
             lrasd_analysis_context = dict(analysis_context or {})
             merged_scheduled_hard_spans: list[dict] = []
             seen_scheduled_hard_span_keys: set[tuple] = set()

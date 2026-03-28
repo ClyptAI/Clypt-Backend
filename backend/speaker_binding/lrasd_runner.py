@@ -3,6 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+import os
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from collections import deque
+
+from .metrics import finalize_lrasd_pipeline_metrics, new_lrasd_pipeline_metrics
 
 
 def _as_int(value, default: int = 0) -> int:
@@ -153,4 +161,134 @@ def build_lrasd_span_jobs(
     return jobs, debug_rows
 
 
-__all__ = ["build_lrasd_span_jobs"]
+@dataclass(slots=True)
+class _PreparedItem:
+    seq: int
+    value: object
+    prep_wallclock_s: float
+
+
+class LrasdPrepPipeline:
+    """Bounded prep queue for LR-ASD subchunk preparation.
+
+    The pipeline parallelizes preparation work while keeping emitted items in
+    submission order so downstream inference remains deterministic.
+    """
+
+    def __init__(
+        self,
+        *,
+        prepare_fn: Callable[[dict], object],
+        prep_workers: int | None = None,
+        queue_size: int | None = None,
+        infer_workers: int | None = None,
+        metrics: dict | None = None,
+    ) -> None:
+        self._prepare_fn = prepare_fn
+        self.prep_workers = max(1, _as_int(prep_workers, default=_as_int(os.getenv("CLYPT_LRASD_PREP_WORKERS", "4"), default=4)))
+        self.queue_size = max(1, _as_int(queue_size, default=_as_int(os.getenv("CLYPT_LRASD_PREP_QUEUE_SIZE", "128"), default=128)))
+        self.infer_workers = max(1, _as_int(infer_workers, default=_as_int(os.getenv("CLYPT_LRASD_INFER_WORKERS", "1"), default=1)))
+        self.metrics = dict(metrics or new_lrasd_pipeline_metrics())
+        self.metrics.setdefault("lrasd_infer_workers", int(self.infer_workers))
+        self._executor = ThreadPoolExecutor(max_workers=self.prep_workers)
+        self._lock = threading.Lock()
+        self._futures: dict[int, Future[_PreparedItem]] = {}
+        self._ready_buffer: deque[object] = deque()
+        self._next_submit_seq = 0
+        self._next_emit_seq = 0
+        self._closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        try:
+            self.drain()
+        finally:
+            self._executor.shutdown(wait=True, cancel_futures=False)
+
+    def _prepare_item(self, seq: int, payload: dict) -> _PreparedItem:
+        started_at = time.perf_counter()
+        value = self._prepare_fn(payload)
+        return _PreparedItem(
+            seq=int(seq),
+            value=value,
+            prep_wallclock_s=float(time.perf_counter() - started_at),
+        )
+
+    def submit(self, payload: dict) -> list[object]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("LR-ASD prep pipeline has been closed")
+            seq = self._next_submit_seq
+            self._next_submit_seq += 1
+            future = self._executor.submit(self._prepare_item, seq, dict(payload))
+            self._futures[seq] = future
+            current_depth = len(self._futures)
+            self.metrics["lrasd_prep_queue_depth"] = int(current_depth)
+            self.metrics["lrasd_prep_queue_depth_max"] = max(
+                int(self.metrics.get("lrasd_prep_queue_depth_max", 0) or 0),
+                int(current_depth),
+            )
+            self.metrics["lrasd_prep_jobs_submitted"] = int(
+                self.metrics.get("lrasd_prep_jobs_submitted", 0) or 0
+            ) + 1
+        ready = self._drain_ready(block=False)
+        self._ready_buffer.extend(ready)
+        if len(self._futures) >= self.queue_size:
+            self._ready_buffer.extend(self._drain_ready(block=True))
+        return ready
+
+    def drain(self) -> list[object]:
+        buffered = list(self._ready_buffer)
+        self._ready_buffer.clear()
+        buffered.extend(self._drain_ready(block=True))
+        return buffered
+
+    def _drain_ready(self, *, block: bool) -> list[object]:
+        ready_values: list[object] = []
+        while True:
+            with self._lock:
+                future = self._futures.get(self._next_emit_seq)
+                if future is None:
+                    break
+            if not future.done():
+                if not block:
+                    break
+                future.result()
+            prepared_item = future.result()
+            with self._lock:
+                current = self._futures.get(prepared_item.seq)
+                if current is not future:
+                    continue
+                del self._futures[prepared_item.seq]
+                self._next_emit_seq += 1
+                remaining_depth = len(self._futures)
+                self.metrics["lrasd_prep_queue_depth"] = int(remaining_depth)
+                self.metrics["lrasd_prep_queue_depth_max"] = max(
+                    int(self.metrics.get("lrasd_prep_queue_depth_max", 0) or 0),
+                    int(remaining_depth),
+                )
+                self.metrics["lrasd_prep_jobs_completed"] = int(
+                    self.metrics.get("lrasd_prep_jobs_completed", 0) or 0
+                ) + 1
+                self.metrics["lrasd_prep_wallclock_s"] = float(
+                    self.metrics.get("lrasd_prep_wallclock_s", 0.0) or 0.0
+                ) + float(prepared_item.prep_wallclock_s)
+                self.metrics["lrasd_spans_processed"] = int(
+                    self.metrics.get("lrasd_spans_processed", 0) or 0
+                ) + 1
+            ready_values.append(prepared_item.value)
+        self.metrics = finalize_lrasd_pipeline_metrics(self.metrics)
+        return ready_values
+
+
+__all__ = ["LrasdPrepPipeline", "build_lrasd_span_jobs"]
