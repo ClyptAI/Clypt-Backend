@@ -8783,7 +8783,7 @@ class ClyptWorker:
                 "metrics": metrics,
                 "easy_assignments": [],
                 "synthetic_bindings": [],
-                "has_hard_non_overlap_span": False,
+                "has_hard_span": False,
             }
 
         binding_meta = self._probe_video_meta(video_path) or {}
@@ -8803,7 +8803,7 @@ class ClyptWorker:
 
         easy_assignments: list[dict] = []
         synthetic_bindings: list[dict] = []
-        has_hard_non_overlap_span = False
+        has_hard_span = False
         for span in scheduled_audio_spans:
             if bool(span.get("overlap", False)):
                 metrics["overlap_spans_count"] += 1
@@ -8852,15 +8852,14 @@ class ClyptWorker:
                 metrics["easy_spans_resolved"] += 1
                 continue
 
-            if not bool(span.get("overlap", False)):
-                metrics["hard_spans_routed_to_lrasd"] += 1
-                has_hard_non_overlap_span = True
+            metrics["hard_spans_routed_to_lrasd"] += 1
+            has_hard_span = True
 
         return {
             "metrics": metrics,
             "easy_assignments": easy_assignments,
             "synthetic_bindings": synthetic_bindings,
-            "has_hard_non_overlap_span": has_hard_non_overlap_span,
+            "has_hard_span": has_hard_span,
         }
 
     def _run_speaker_binding_impl(
@@ -8915,7 +8914,7 @@ class ClyptWorker:
             speaker_metrics.update(easy_span_cascade["metrics"])
             if (
                 easy_span_cascade["easy_assignments"]
-                and not easy_span_cascade["has_hard_non_overlap_span"]
+                and not easy_span_cascade["has_hard_span"]
             ):
                 self._apply_easy_span_assignments_to_words(
                     words,

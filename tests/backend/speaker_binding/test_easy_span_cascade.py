@@ -109,3 +109,33 @@ def test_classify_easy_span_rejects_weak_visibility_or_handoff_span():
 
     assert decision["decision"] == "hard"
     assert decision["reason"] == "weak_visibility_or_handoff"
+
+
+def test_classify_easy_span_rejects_winner_without_local_track_id():
+    decision = classify_easy_span(
+        {
+            "span_id": "scheduled-4",
+            "span_type": "single",
+            "speaker_ids": ["SPEAKER_00"],
+            "overlap": False,
+        },
+        [
+            {
+                "local_track_id": "",
+                "candidate_survives": True,
+                "speech_overlap_ratio": 0.98,
+                "continuity_support_score": 0.92,
+                "rank_score": 0.95,
+            },
+            {
+                "local_track_id": "local-2",
+                "candidate_survives": True,
+                "speech_overlap_ratio": 0.15,
+                "continuity_support_score": 0.40,
+                "rank_score": 0.21,
+            },
+        ],
+    )
+
+    assert decision["decision"] == "hard"
+    assert decision["reason"] == "missing_local_track"

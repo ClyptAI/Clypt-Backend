@@ -1596,6 +1596,184 @@ def test_run_speaker_binding_uses_easy_span_cascade_without_lrasd(monkeypatch):
     assert worker._last_speaker_binding_metrics["overlap_spans_count"] == 0
 
 
+def test_run_speaker_binding_routes_overlap_span_to_lrasd_even_with_easy_single_span(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.lrasd_model = object()
+    worker.lrasd_loss_av = object()
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "lrasd")
+    monkeypatch.setattr(
+        worker,
+        "_probe_video_meta",
+        lambda path: {"width": 1280, "height": 720, "duration_s": 30.0},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_build_speaker_binding_track_quality",
+        lambda *args, **kwargs: {
+            "local-1": {"track_quality": 0.92},
+            "local-2": {"track_quality": 0.78},
+        },
+    )
+
+    observed = {"lrasd_calls": 0}
+
+    def _fake_rank_candidates(**kwargs):
+        turn = kwargs["turn"]
+        if int(turn["start_time_ms"]) == 0:
+            return [
+                {
+                    "local_track_id": "local-1",
+                    "candidate_survives": True,
+                    "speech_overlap_ratio": 0.96,
+                    "continuity_support_score": 0.89,
+                    "rank_score": 0.94,
+                }
+            ]
+        return [
+            {
+                "local_track_id": "local-1",
+                "candidate_survives": True,
+                "speech_overlap_ratio": 0.71,
+                "continuity_support_score": 0.77,
+                "rank_score": 0.78,
+            },
+            {
+                "local_track_id": "local-2",
+                "candidate_survives": True,
+                "speech_overlap_ratio": 0.66,
+                "continuity_support_score": 0.74,
+                "rank_score": 0.74,
+            },
+        ]
+
+    monkeypatch.setattr(worker, "_rank_lrasd_turn_candidates", _fake_rank_candidates)
+
+    def _fake_run_lrasd_binding(**kwargs):
+        observed["lrasd_calls"] += 1
+        words[2]["speaker_track_id"] = "Global_Person_1"
+        words[2]["speaker_tag"] = "Global_Person_1"
+        words[2]["speaker_local_track_id"] = "local-2"
+        words[2]["speaker_local_tag"] = "local-2"
+        words[3]["speaker_track_id"] = "Global_Person_1"
+        words[3]["speaker_tag"] = "Global_Person_1"
+        words[3]["speaker_local_track_id"] = "local-2"
+        words[3]["speaker_local_tag"] = "local-2"
+        worker._last_audio_turn_bindings = [
+            {
+                "speaker_id": "SPEAKER_00",
+                "source_turn_id": "turn-0",
+                "span_id": "scheduled-0",
+                "start_time_ms": 0,
+                "end_time_ms": 400,
+                "local_track_id": "local-1",
+                "track_id": "Global_Person_0",
+                "ambiguous": False,
+                "decision_source": "turn_binding",
+                "winning_score": 0.93,
+                "winning_margin": 0.24,
+                "support_ratio": 0.95,
+                "max_visible_candidates": 1,
+            },
+            {
+                "speaker_id": "SPEAKER_01",
+                "source_turn_id": "turn-1",
+                "span_id": "scheduled-1",
+                "start_time_ms": 400,
+                "end_time_ms": 800,
+                "local_track_id": "local-2",
+                "track_id": "Global_Person_1",
+                "ambiguous": True,
+                "decision_source": "turn_binding",
+                "winning_score": 0.61,
+                "winning_margin": 0.04,
+                "support_ratio": 0.68,
+                "max_visible_candidates": 2,
+            },
+        ]
+        return [
+            {
+                "track_id": "Global_Person_1",
+                "start_time_ms": 400,
+                "end_time_ms": 780,
+                "word_count": 2,
+            }
+        ]
+
+    monkeypatch.setattr(worker, "_run_lrasd_binding", _fake_run_lrasd_binding)
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding_heuristic",
+        lambda *args, **kwargs: pytest.fail("mixed easy/overlap case should stay on LR-ASD path"),
+    )
+
+    words = [
+        {"text": "alpha", "start_time_ms": 0, "end_time_ms": 180},
+        {"text": "beta", "start_time_ms": 180, "end_time_ms": 380},
+        {"text": "gamma", "start_time_ms": 420, "end_time_ms": 580},
+        {"text": "delta", "start_time_ms": 580, "end_time_ms": 780},
+    ]
+    tracks = [
+        {"track_id": "local-1", "frame_idx": 0, "x_center": 80.0, "y_center": 100.0, "width": 72.0, "height": 148.0, "confidence": 0.93},
+        {"track_id": "local-2", "frame_idx": 1, "x_center": 220.0, "y_center": 102.0, "width": 70.0, "height": 144.0, "confidence": 0.89},
+    ]
+
+    result = worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=tracks,
+        words=words,
+        frame_to_dets={0: [tracks[0]], 1: [tracks[1]]},
+        track_to_dets={"local-1": [tracks[0]], "local-2": [tracks[1]]},
+        analysis_context={
+            "audio_speaker_turns": [
+                {"speaker_id": "SPEAKER_00", "turn_id": "turn-0", "start_time_ms": 0, "end_time_ms": 400},
+                {"speaker_id": "SPEAKER_00", "turn_id": "turn-1", "start_time_ms": 400, "end_time_ms": 800},
+                {"speaker_id": "SPEAKER_01", "turn_id": "turn-2", "start_time_ms": 400, "end_time_ms": 800},
+            ],
+            "scheduled_audio_spans": [
+                {
+                    "span_id": "scheduled-0",
+                    "span_type": "single",
+                    "speaker_ids": ["SPEAKER_00"],
+                    "speaker_id": "SPEAKER_00",
+                    "exclusive": True,
+                    "overlap": False,
+                    "start_time_ms": 0,
+                    "end_time_ms": 400,
+                    "context_start_time_ms": 0,
+                    "context_end_time_ms": 400,
+                    "source_turn_ids": ["turn-0"],
+                },
+                {
+                    "span_id": "scheduled-1",
+                    "span_type": "overlap",
+                    "speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
+                    "exclusive": False,
+                    "overlap": True,
+                    "start_time_ms": 400,
+                    "end_time_ms": 800,
+                    "context_start_time_ms": 400,
+                    "context_end_time_ms": 800,
+                    "source_turn_ids": ["turn-1", "turn-2"],
+                },
+            ],
+        },
+        track_id_remap={"local-1": "Global_Person_0", "local-2": "Global_Person_1"},
+    )
+
+    assert observed["lrasd_calls"] == 1
+    assert result == [
+        {"track_id": "Global_Person_0", "start_time_ms": 0, "end_time_ms": 380, "word_count": 2},
+        {"track_id": "Global_Person_1", "start_time_ms": 420, "end_time_ms": 780, "word_count": 2},
+    ]
+    assert worker._last_speaker_binding_metrics["scheduled_spans_total"] == 2
+    assert worker._last_speaker_binding_metrics["easy_spans_resolved"] == 1
+    assert worker._last_speaker_binding_metrics["hard_spans_routed_to_lrasd"] == 1
+    assert worker._last_speaker_binding_metrics["overlap_spans_count"] == 1
+
+
 def test_run_speaker_binding_delegates_to_package_entrypoint(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)

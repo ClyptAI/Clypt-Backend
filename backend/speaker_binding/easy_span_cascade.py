@@ -36,6 +36,9 @@ def classify_easy_span(
         return {"decision": "hard", "reason": "no_visible_candidate"}
 
     winner = candidates[0]
+    winner_local_track_id = str(winner.get("local_track_id", "") or "")
+    if not winner_local_track_id:
+        return {"decision": "hard", "reason": "missing_local_track"}
     if not bool(winner.get("candidate_survives", False)):
         return {"decision": "hard", "reason": "weak_body_continuity"}
 
@@ -65,7 +68,7 @@ def classify_easy_span(
         "decision": "easy",
         "decision_source": "easy_span",
         "speaker_id": speaker_ids[0],
-        "local_track_id": str(winner.get("local_track_id", "") or ""),
+        "local_track_id": winner_local_track_id,
         "support_ratio": float(winner_visibility),
         "continuity_support_score": float(winner_continuity),
         "competitor_ratio": float(competitor_ratio),
