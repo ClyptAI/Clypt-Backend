@@ -7209,6 +7209,19 @@ class ClyptWorker:
                     return True
             return False
 
+        def _track_is_runtime_relevant(frame_list: list[int]) -> bool:
+            if not frame_list:
+                return False
+            for ws, we in word_frame_ranges:
+                window_start = int(ws) - int(word_match_max_gap)
+                window_end = int(we) + int(word_match_max_gap)
+                for fi in frame_list:
+                    if fi > window_end:
+                        break
+                    if fi >= window_start:
+                        return True
+            return False
+
         def _chunk_allowed_for_turn_candidates(tid: str, start_fi: int, end_fi: int) -> bool:
             return True
 
@@ -7227,12 +7240,15 @@ class ClyptWorker:
             return runs
 
         total_chunks = 0
+        runtime_relevant_eligible_track_ids: set[str] = set()
         for tid in sorted(eligible_lrasd_track_ids):
             dets = track_to_dets.get(tid, [])
             best_by_frame = self._interpolate_track_detections(
                 dets, max_gap=interpolation_gap
             )
             frame_list = sorted(best_by_frame.keys())
+            if _track_is_runtime_relevant(frame_list):
+                runtime_relevant_eligible_track_ids.add(str(tid))
             if len(frame_list) < min_chunk_frames:
                 continue
             for run in _split_contiguous_runs(frame_list, contiguous_frame_gap):
@@ -7589,7 +7605,6 @@ class ClyptWorker:
         words_with_frame = 0
         words_with_dets = 0
         words_with_scored_candidate = 0
-        runtime_candidate_track_ids: set[str] = set()
         local_candidate_evidence: list[dict] = []
         word_candidate_rows: list[dict] = []
         for w in words:
@@ -7686,11 +7701,6 @@ class ClyptWorker:
                     item["confidence"],
                 ),
                 reverse=True,
-            )
-            runtime_candidate_track_ids.update(
-                str(candidate.get("local_tid", ""))
-                for candidate in scored_candidates
-                if candidate.get("local_tid") not in (None, "")
             )
             local_candidate_evidence.append(
                 {
@@ -8165,12 +8175,7 @@ class ClyptWorker:
         )
         assigned_ratio = assigned / max(1, len(words))
         print(f"  LR-ASD assignment ratio: {assigned}/{len(words)}={assigned_ratio:.1%}")
-        effective_candidate_track_count = len(
-            {
-                tid for tid in runtime_candidate_track_ids
-                if tid in eligible_lrasd_track_ids
-            }
-        )
+        effective_candidate_track_count = len(runtime_relevant_eligible_track_ids)
         insufficient_track_support = (
             len(scored_track_ids) < 2
             and effective_candidate_track_count >= 2

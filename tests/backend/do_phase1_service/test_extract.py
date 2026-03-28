@@ -2334,6 +2334,17 @@ def _run_fake_lrasd_binding_case(
     audio_speaker_turns: list[dict] | None = None,
     audio_turn_bindings: list[dict] | None = None,
 ):
+    def _frame_is_visible(spec: dict, frame_idx: int, default_end: int) -> bool:
+        visible_frames = spec.get("visible_frames")
+        if visible_frames is not None:
+            return frame_idx in {int(fi) for fi in visible_frames}
+        hidden_frames = spec.get("hidden_frames")
+        if hidden_frames is not None and frame_idx in {int(fi) for fi in hidden_frames}:
+            return False
+        visible_start = int(spec.get("visible_start_frame", 0))
+        visible_end = int(spec.get("visible_end_frame", default_end))
+        return visible_start <= frame_idx <= visible_end
+
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
     worker.lrasd_model = object()
@@ -2360,9 +2371,7 @@ def _run_fake_lrasd_binding_case(
     for frame_idx in range(frame_count):
         frame = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
         for spec in track_specs.values():
-            visible_start = int(spec.get("visible_start_frame", 0))
-            visible_end = int(spec.get("visible_end_frame", frame_count - 1))
-            if frame_idx < visible_start or frame_idx > visible_end:
+            if not _frame_is_visible(spec, frame_idx, frame_count - 1):
                 continue
             x1 = max(0, int(round(float(spec["x_center"]) - (0.5 * float(spec["width"])))))
             y1 = max(0, int(round(float(spec["y_center"]) - (0.5 * float(spec["height"])))))
@@ -2415,9 +2424,7 @@ def _run_fake_lrasd_binding_case(
     tracks = []
     for frame_idx in range(frame_count):
         for tid, spec in track_specs.items():
-            visible_start = int(spec.get("visible_start_frame", 0))
-            visible_end = int(spec.get("visible_end_frame", frame_count - 1))
-            if frame_idx < visible_start or frame_idx > visible_end:
+            if not _frame_is_visible(spec, frame_idx, frame_count - 1):
                 continue
             width = float(spec["width"])
             height = float(spec["height"])
@@ -2945,6 +2952,47 @@ def test_run_lrasd_binding_uses_runtime_relevant_candidate_count_for_fallback_ga
     assert bindings == [
         {"track_id": "speaker", "start_time_ms": 800, "end_time_ms": 1000, "word_count": 1}
     ]
+
+
+def test_run_lrasd_binding_counts_occluded_runtime_candidate_for_fallback_gate(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "listener": {
+                "x_center": 222.0,
+                "y_center": 102.0,
+                "width": 68.0,
+                "height": 144.0,
+                "confidence": 0.9,
+                "intensity": 120,
+                "visible_frames": list(range(0, 19)) + [25, 27, 28, 29],
+            },
+            "speaker": {
+                "x_center": 82.0,
+                "y_center": 100.0,
+                "width": 78.0,
+                "height": 152.0,
+                "confidence": 0.91,
+                "intensity": 210,
+            },
+        },
+        score_by_track={
+            "listener": 0.79,
+            "speaker": 0.77,
+        },
+        words=[
+            {"text": "late", "start_time_ms": 760, "end_time_ms": 980},
+        ],
+        audio_speaker_turns=[
+            {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+    )
+
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
+    assert worker._last_speaker_binding_metrics["lrasd_eligible_track_count"] == 2
+    assert bindings is None
 
 
 def test_run_lrasd_binding_allows_scoring_in_diarization_gap(monkeypatch, tmp_path: Path):
