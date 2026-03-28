@@ -8,6 +8,8 @@
 
 **Tech Stack:** pyannote diarization, Ultralytics tracking + pose, InsightFace face embeddings, high-accuracy person ReID (BPBreID-class primary path), MediaPipe face landmarks for mouth-motion features, FAISS similarity search, existing Phase 1 worker/service stack, pytest.
 
+**Explicit Branch Rule:** On this branch, the intended assignment pipeline is **pyannote + the new visual pipeline only**. LR-ASD is not part of the planned assignment path here. The old LR-ASD code may remain in the repository temporarily for safety and comparison, but it is out of scope for the branch’s actual binding architecture.
+
 ---
 
 ## File / Module Plan
