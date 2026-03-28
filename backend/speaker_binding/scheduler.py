@@ -210,6 +210,8 @@ def schedule_diarized_spans(
             "context_end_time_ms": int(end_time_ms),
             "source_turn_ids": source_turn_ids,
         }
+        if not is_overlap and speaker_ids:
+            scheduled_span["speaker_id"] = str(speaker_ids[0])
         discontinuity = classify_visual_discontinuity(
             _collect_visual_samples_within_window(
                 active_turns,

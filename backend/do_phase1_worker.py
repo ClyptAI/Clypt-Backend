@@ -8691,6 +8691,178 @@ class ClyptWorker:
             track_id_remap=track_id_remap,
         )
 
+    @staticmethod
+    def _merge_audio_turn_bindings(
+        existing_bindings: list[dict] | None,
+        synthetic_bindings: list[dict] | None,
+    ) -> list[dict]:
+        merged: list[dict] = []
+        seen: set[tuple] = set()
+        for binding in list(synthetic_bindings or []) + list(existing_bindings or []):
+            if not isinstance(binding, dict):
+                continue
+            key = (
+                str(binding.get("speaker_id", "") or ""),
+                str(binding.get("source_turn_id", "") or ""),
+                int(binding.get("start_time_ms", 0) or 0),
+                int(binding.get("end_time_ms", 0) or 0),
+                str(binding.get("local_track_id", "") or ""),
+                str(binding.get("decision_source", "") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(dict(binding))
+        return merged
+
+    @staticmethod
+    def _apply_easy_span_assignments_to_words(
+        words: list[dict],
+        easy_assignments: list[dict] | None,
+    ) -> bool:
+        changed = False
+        for assignment in easy_assignments or []:
+            if not isinstance(assignment, dict):
+                continue
+            start_time_ms = int(assignment.get("start_time_ms", 0) or 0)
+            end_time_ms = int(assignment.get("end_time_ms", start_time_ms) or start_time_ms)
+            if end_time_ms < start_time_ms:
+                start_time_ms, end_time_ms = end_time_ms, start_time_ms
+            global_track_id = str(assignment.get("track_id", "") or "")
+            local_track_id = str(assignment.get("local_track_id", "") or "")
+            if not global_track_id or not local_track_id:
+                continue
+            for word in words or []:
+                word_start_ms = int(word.get("start_time_ms", 0) or 0)
+                word_end_ms = int(word.get("end_time_ms", word_start_ms) or word_start_ms)
+                if word_end_ms < word_start_ms:
+                    word_start_ms, word_end_ms = word_end_ms, word_start_ms
+                word_mid_ms = (word_start_ms + word_end_ms) // 2
+                if not (start_time_ms <= word_mid_ms <= end_time_ms):
+                    continue
+                if (
+                    word.get("speaker_track_id") == global_track_id
+                    and word.get("speaker_local_track_id") == local_track_id
+                ):
+                    continue
+                word["speaker_track_id"] = global_track_id
+                word["speaker_tag"] = global_track_id
+                word["speaker_local_track_id"] = local_track_id
+                word["speaker_local_tag"] = local_track_id
+                changed = True
+        return changed
+
+    def _resolve_easy_span_cascade(
+        self,
+        *,
+        video_path: str,
+        track_to_dets: dict[str, list[dict]] | None,
+        frame_to_dets: dict[int, list[dict]] | None,
+        track_identity_features: dict[str, dict] | None,
+        analysis_context: dict | None,
+        track_id_remap: dict[str, str] | None,
+    ) -> dict:
+        from backend.speaker_binding.easy_span_cascade import (
+            build_easy_span_binding_rows,
+            classify_easy_span,
+        )
+
+        scheduled_audio_spans = [
+            dict(span)
+            for span in list((analysis_context or {}).get("scheduled_audio_spans") or [])
+            if isinstance(span, dict)
+        ]
+        metrics = {
+            "scheduled_spans_total": int(len(scheduled_audio_spans)),
+            "easy_spans_resolved": 0,
+            "hard_spans_routed_to_lrasd": 0,
+            "overlap_spans_count": 0,
+        }
+        if not scheduled_audio_spans or not track_to_dets:
+            return {
+                "metrics": metrics,
+                "easy_assignments": [],
+                "synthetic_bindings": [],
+                "has_hard_non_overlap_span": False,
+            }
+
+        binding_meta = self._probe_video_meta(video_path) or {}
+        frame_width = int(binding_meta.get("width", 0) or 0) or 1
+        frame_height = int(binding_meta.get("height", 0) or 0) or 1
+        fps = float(binding_meta.get("fps", 30.0) or 30.0)
+        track_quality_by_tid = self._build_speaker_binding_track_quality(
+            track_to_dets,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        local_to_global_track_id = {
+            str(local_track_id): str(global_track_id)
+            for local_track_id, global_track_id in dict(track_id_remap or {}).items()
+            if str(local_track_id or "") and str(global_track_id or "")
+        }
+
+        easy_assignments: list[dict] = []
+        synthetic_bindings: list[dict] = []
+        has_hard_non_overlap_span = False
+        for span in scheduled_audio_spans:
+            if bool(span.get("overlap", False)):
+                metrics["overlap_spans_count"] += 1
+            span_turn = {
+                "speaker_id": str(
+                    span.get("speaker_id")
+                    or next(iter(span.get("speaker_ids") or []), "")
+                    or ""
+                ),
+                "start_time_ms": int(span.get("context_start_time_ms", span.get("start_time_ms", 0)) or 0),
+                "end_time_ms": int(span.get("context_end_time_ms", span.get("end_time_ms", 0)) or 0),
+            }
+            ranked_candidates = self._rank_lrasd_turn_candidates(
+                turn=span_turn,
+                eligible_track_ids=set(str(tid) for tid in (track_to_dets or {}).keys()),
+                track_to_dets=track_to_dets or {},
+                frame_to_dets=frame_to_dets or {},
+                track_quality_by_tid=track_quality_by_tid,
+                track_identity_features=track_identity_features,
+                canonical_face_boxes={},
+                frame_width=frame_width,
+                frame_height=frame_height,
+                fps=fps,
+            )
+            decision = classify_easy_span(span, ranked_candidates)
+            if decision.get("decision") == "easy":
+                local_track_id = str(decision.get("local_track_id", "") or "")
+                global_track_id = local_to_global_track_id.get(local_track_id, local_track_id)
+                easy_assignments.append(
+                    {
+                        "span_id": str(span.get("span_id", "") or ""),
+                        "speaker_id": str(decision.get("speaker_id", "") or ""),
+                        "start_time_ms": int(span_turn["start_time_ms"]),
+                        "end_time_ms": int(span_turn["end_time_ms"]),
+                        "local_track_id": local_track_id,
+                        "track_id": global_track_id,
+                    }
+                )
+                synthetic_bindings.extend(
+                    build_easy_span_binding_rows(
+                        span,
+                        decision,
+                        global_track_id=global_track_id,
+                    )
+                )
+                metrics["easy_spans_resolved"] += 1
+                continue
+
+            if not bool(span.get("overlap", False)):
+                metrics["hard_spans_routed_to_lrasd"] += 1
+                has_hard_non_overlap_span = True
+
+        return {
+            "metrics": metrics,
+            "easy_assignments": easy_assignments,
+            "synthetic_bindings": synthetic_bindings,
+            "has_hard_non_overlap_span": has_hard_non_overlap_span,
+        }
+
     def _run_speaker_binding_impl(
         self,
         video_path: str,
@@ -8732,6 +8904,33 @@ class ClyptWorker:
             "speaker_binding_fallback_used": False,
         }
         if mode in {"lrasd", "shared_analysis_proxy"}:
+            easy_span_cascade = self._resolve_easy_span_cascade(
+                video_path=video_path,
+                track_to_dets=track_to_dets,
+                frame_to_dets=frame_to_dets,
+                track_identity_features=track_identity_features,
+                analysis_context=analysis_context,
+                track_id_remap=track_id_remap,
+            )
+            speaker_metrics.update(easy_span_cascade["metrics"])
+            if (
+                easy_span_cascade["easy_assignments"]
+                and not easy_span_cascade["has_hard_non_overlap_span"]
+            ):
+                self._apply_easy_span_assignments_to_words(
+                    words,
+                    easy_span_cascade["easy_assignments"],
+                )
+                self._last_audio_turn_bindings = [
+                    dict(binding)
+                    for binding in easy_span_cascade["synthetic_bindings"]
+                ]
+                bindings = self._build_bindings_from_word_track_field(
+                    words,
+                    field_name="speaker_track_id",
+                )
+                self._last_speaker_binding_metrics = speaker_metrics
+                return bindings
             lrasd_started_at = time.perf_counter()
             bindings = self._run_lrasd_binding(
                 video_path=video_path,
@@ -8752,6 +8951,19 @@ class ClyptWorker:
             if isinstance(lrasd_aux_metrics, dict):
                 speaker_metrics.update(lrasd_aux_metrics)
             if bindings is not None:
+                if easy_span_cascade["synthetic_bindings"]:
+                    self._last_audio_turn_bindings = self._merge_audio_turn_bindings(
+                        getattr(self, "_last_audio_turn_bindings", []),
+                        easy_span_cascade["synthetic_bindings"],
+                    )
+                if self._apply_easy_span_assignments_to_words(
+                    words,
+                    easy_span_cascade["easy_assignments"],
+                ):
+                    bindings = self._build_bindings_from_word_track_field(
+                        words,
+                        field_name="speaker_track_id",
+                    )
                 if _restore_protected_unknowns(words):
                     bindings = self._build_bindings_from_word_track_field(
                         words,
