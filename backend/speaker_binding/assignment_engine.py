@@ -128,6 +128,7 @@ def resolve_span_assignments(
     assignments: list[dict[str, Any]] = []
     for span in span_rows:
         audio_speaker_ids = _normalized_ids(span.get("audio_speaker_ids"))
+        visible_local_track_ids = _normalized_ids(span.get("visible_local_track_ids"))
         visible_track_ids = _normalized_ids(span.get("visible_track_ids"))
         offscreen_audio_speaker_ids = _normalized_ids(span.get("offscreen_audio_speaker_ids"))
         overlap = bool(span.get("overlap", False))
@@ -182,7 +183,15 @@ def resolve_span_assignments(
         if best_mapping is None or best_mapping["ambiguous"]:
             hard_span_candidates = span.get("hard_span_candidates")
             if hard_span_candidates:
-                hard_result = choose_visual_speaking_candidate(hard_span_candidates)
+                visible_hard_span_candidates = [
+                    candidate
+                    for candidate in hard_span_candidates
+                    if (
+                        _normalized_id(candidate.get("visual_identity_id")) in visible_track_ids
+                        or _normalized_id(candidate.get("local_track_id")) in visible_local_track_ids
+                    )
+                ]
+                hard_result = choose_visual_speaking_candidate(visible_hard_span_candidates)
                 winner_visual_identity_id = _normalized_id(hard_result.get("winner_visual_identity_id"))
                 if winner_visual_identity_id:
                     assignments.append(

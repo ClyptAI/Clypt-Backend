@@ -4653,6 +4653,7 @@ def test_finalize_projects_hard_span_visual_disambiguation_to_words(monkeypatch)
     assert result["phase_1_audio"]["words"][0]["speaker_track_id"] == "Global_Person_0"
     assert result["phase_1_audio"]["words"][0]["speaker_track_ids"] == ["Global_Person_0"]
     assert result["phase_1_audio"]["words"][0]["speaker_assignment_source"] == "hard_visual_disambiguation"
+    assert "hard_span_candidates" not in result["phase_1_audio"]["active_speakers_local"][0]
 
 
 def test_finalize_projects_overlap_visible_and_offscreen_truth_without_fake_single_winner(monkeypatch):

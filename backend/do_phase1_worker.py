@@ -9147,6 +9147,14 @@ class ClyptWorker:
             spans=enriched_active_speakers_local,
             mapping_summaries=audio_visual_mappings,
         )
+        serialized_active_speakers_local = [
+            {
+                key: value
+                for key, value in span.items()
+                if key != "hard_span_candidates"
+            }
+            for span in enriched_active_speakers_local
+        ]
         projected_words = project_words(
             words=words,
             span_assignments=span_assignments,
@@ -9219,7 +9227,7 @@ class ClyptWorker:
             "speaker_candidate_debug": getattr(self, "_last_speaker_candidate_debug", []),
             "speaker_follow_bindings": speaker_follow_bindings,
             "audio_visual_mappings": audio_visual_mappings,
-            "active_speakers_local": enriched_active_speakers_local,
+            "active_speakers_local": serialized_active_speakers_local,
             "span_assignments": span_assignments,
             "overlap_follow_decisions": overlap_follow_decisions,
         }

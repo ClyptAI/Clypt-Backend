@@ -233,3 +233,57 @@ def test_resolve_span_assignments_uses_hard_span_candidates_for_single_speaker_a
             "decision_source": "hard_visual_disambiguation",
         }
     ]
+
+
+def test_resolve_span_assignments_ignores_hard_candidates_not_visible_in_span() -> None:
+    assignments = resolve_span_assignments(
+        spans=[
+            {
+                "start_time_ms": 700,
+                "end_time_ms": 1200,
+                "audio_speaker_ids": ["speaker-4"],
+                "visible_track_ids": ["Global_Person_4"],
+                "offscreen_audio_speaker_ids": [],
+                "overlap": False,
+                "hard_span_candidates": [
+                    {
+                        "visual_identity_id": "Global_Person_9",
+                        "mouth_motion_score": 0.99,
+                        "pose_visibility_score": 0.99,
+                        "face_visibility_score": 0.99,
+                        "mapping_confidence": 0.99,
+                    },
+                    {
+                        "visual_identity_id": "Global_Person_4",
+                        "mouth_motion_score": 0.7,
+                        "pose_visibility_score": 0.7,
+                        "face_visibility_score": 0.7,
+                        "mapping_confidence": 0.51,
+                    },
+                ],
+            },
+        ],
+        mapping_summaries=[
+            {
+                "audio_speaker_id": "speaker-4",
+                "matched_visual_identity_id": "Global_Person_4",
+                "confidence": 0.51,
+                "candidate_visual_identity_ids": ["Global_Person_4", "Global_Person_9"],
+                "ambiguous": True,
+            }
+        ],
+    )
+
+    assert assignments == [
+        {
+            "start_time_ms": 700,
+            "end_time_ms": 1200,
+            "audio_speaker_ids": ("speaker-4",),
+            "assigned_visual_identity_ids": ("Global_Person_4",),
+            "dominant_visual_identity_id": "Global_Person_4",
+            "offscreen_audio_speaker_ids": (),
+            "unresolved_audio_speaker_ids": (),
+            "require_hard_disambiguation": False,
+            "decision_source": "hard_visual_disambiguation",
+        }
+    ]
