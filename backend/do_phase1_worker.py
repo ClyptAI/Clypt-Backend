@@ -6562,7 +6562,6 @@ class ClyptWorker:
                 float(item["body_track_quality"]),
                 float(item["prominence"]),
                 float(item["tie_break_bonus"]),
-                float(item["face_coverage"]),
                 str(item["local_track_id"]),
             ),
             reverse=True,
