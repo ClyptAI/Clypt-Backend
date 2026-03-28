@@ -1919,7 +1919,7 @@ def test_prepare_lrasd_visual_batch_uses_torch_path_and_returns_tensor(monkeypat
     assert torch.equal(batch[3], batch[1])
 
 
-def test_open_lrasd_video_reader_prefers_gpu_and_falls_back_to_cpu(monkeypatch, tmp_path: Path):
+def test_open_lrasd_video_reader_prefers_gpu_when_available(monkeypatch, tmp_path: Path):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
 
@@ -1931,8 +1931,6 @@ def test_open_lrasd_video_reader_prefers_gpu_and_falls_back_to_cpu(monkeypatch, 
     class _VideoReader:
         def __init__(self, path, ctx=None):
             calls.append((str(path), ctx))
-            if ctx == "gpu:0":
-                raise RuntimeError("gpu unavailable")
             self.path = path
             self.ctx = ctx
 
@@ -1940,20 +1938,20 @@ def test_open_lrasd_video_reader_prefers_gpu_and_falls_back_to_cpu(monkeypatch, 
     fake_decord.VideoReader = _VideoReader
     fake_decord.cpu = lambda index: f"cpu:{index}"
     fake_decord.gpu = lambda index: f"gpu:{index}"
+    fake_decord.bridge = types.SimpleNamespace(set_bridge=lambda _name: None)
     monkeypatch.setitem(__import__("sys").modules, "decord", fake_decord)
     monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE", "1")
 
     vr, backend = worker._open_lrasd_video_reader(str(video_path))
 
-    assert backend == "cpu"
+    assert backend == "gpu"
     assert calls == [
         (str(video_path), "gpu:0"),
-        (str(video_path), "cpu:0"),
     ]
-    assert vr.ctx == "cpu:0"
+    assert vr.ctx == "gpu:0"
 
 
-def test_open_lrasd_video_reader_strict_mode_raises_when_gpu_unavailable(monkeypatch, tmp_path: Path):
+def test_open_lrasd_video_reader_raises_when_gpu_unavailable(monkeypatch, tmp_path: Path):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
 
@@ -1974,9 +1972,9 @@ def test_open_lrasd_video_reader_strict_mode_raises_when_gpu_unavailable(monkeyp
     fake_decord.VideoReader = _VideoReader
     fake_decord.cpu = lambda index: f"cpu:{index}"
     fake_decord.gpu = lambda index: f"gpu:{index}"
+    fake_decord.bridge = types.SimpleNamespace(set_bridge=lambda _name: None)
     monkeypatch.setitem(__import__("sys").modules, "decord", fake_decord)
     monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE", "1")
-    monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE_STRICT", "1")
 
     with pytest.raises(RuntimeError, match="gpu unavailable"):
         worker._open_lrasd_video_reader(str(video_path))
@@ -1997,7 +1995,7 @@ def test_run_lrasd_binding_strict_gpu_decode_error_includes_underlying_exception
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"audio")
 
-    monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE_STRICT", "1")
+    monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE", "1")
     monkeypatch.setattr(
         worker,
         "_open_lrasd_video_reader",
@@ -2006,7 +2004,7 @@ def test_run_lrasd_binding_strict_gpu_decode_error_includes_underlying_exception
 
     with pytest.raises(
         RuntimeError,
-        match="Strict LR-ASD GPU decode is enabled.*RuntimeError: nvdec init failed",
+        match="LR-ASD GPU decode was requested but binding video initialization failed.*nvdec init failed",
     ):
         worker._run_lrasd_binding(
             video_path=str(video_path),
@@ -2274,6 +2272,109 @@ def test_prepare_lrasd_chunk_pending_entries_splits_on_real_face_gap(monkeypatch
     assert payload["face_misses"] == 7
     assert [len(entry[1][1]) for entry in payload["pending_entries"]] == [20, 20]
     assert pending_calls == [list(range(20)), list(range(27, 47))]
+
+
+def test_lrasd_should_report_drain_progress_on_progress_or_stall():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    assert worker._lrasd_should_report_drain_progress(
+        prepared_chunks=10,
+        scored_chunks=8,
+        last_prepared_chunks=9,
+        last_scored_chunks=8,
+        prep_queue_depth=4,
+        inflight_batches=1,
+        pending_bucket_count=2,
+        now_s=10.0,
+        last_report_s=9.5,
+    )
+
+    assert worker._lrasd_should_report_drain_progress(
+        prepared_chunks=10,
+        scored_chunks=8,
+        last_prepared_chunks=10,
+        last_scored_chunks=8,
+        prep_queue_depth=4,
+        inflight_batches=0,
+        pending_bucket_count=0,
+        now_s=15.1,
+        last_report_s=10.0,
+    )
+
+    assert not worker._lrasd_should_report_drain_progress(
+        prepared_chunks=10,
+        scored_chunks=8,
+        last_prepared_chunks=10,
+        last_scored_chunks=8,
+        prep_queue_depth=4,
+        inflight_batches=0,
+        pending_bucket_count=0,
+        now_s=12.0,
+        last_report_s=10.0,
+    )
+
+
+def test_extract_lrasd_visual_crop_region_supports_torch_tensor():
+    import torch
+
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    frame = torch.arange(6 * 8 * 3, dtype=torch.float32).reshape(6, 8, 3)
+    crop = worker._extract_lrasd_visual_crop_region(
+        frame,
+        x1=1,
+        y1=2,
+        x2=5,
+        y2=6,
+    )
+
+    assert isinstance(crop, torch.Tensor)
+    assert tuple(crop.shape) == (4, 4, 3)
+    assert crop.is_contiguous()
+
+
+def test_prepare_lrasd_visual_batch_supports_torch_crops():
+    import torch
+
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.gpu_device = "cpu"
+
+    crop_a = torch.full((12, 10, 3), 32.0)
+    crop_b = torch.full((8, 6, 3), 96.0)
+    batch = worker._prepare_lrasd_visual_batch(
+        [crop_a, crop_b],
+        bucket_length=4,
+        output_size=(16, 16),
+    )
+
+    assert isinstance(batch, torch.Tensor)
+    assert tuple(batch.shape) == (4, 16, 16)
+    assert str(batch.dtype) == "torch.float32"
+
+
+def test_open_lrasd_video_reader_requires_gpu_when_enabled(monkeypatch):
+    fake_decord = types.ModuleType("decord")
+
+    class _VideoReader:
+        def __init__(self, path, ctx=None):
+            raise RuntimeError(f"ctx={ctx}")
+
+    fake_decord.VideoReader = _VideoReader
+    fake_decord.cpu = lambda _index: "cpu"
+    fake_decord.gpu = lambda _index: "gpu"
+    fake_decord.bridge = types.SimpleNamespace(set_bridge=lambda _name: None)
+    monkeypatch.setitem(__import__("sys").modules, "decord", fake_decord)
+    monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE", "1")
+    monkeypatch.delenv("CLYPT_LRASD_GPU_DECODE_STRICT", raising=False)
+
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    with pytest.raises(RuntimeError, match="ctx=gpu"):
+        worker._open_lrasd_video_reader("/tmp/demo.mp4")
 
 
 def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path: Path):

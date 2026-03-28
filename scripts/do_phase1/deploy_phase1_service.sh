@@ -6,6 +6,7 @@ BRANCH="${BRANCH:-codex/balanced-hybrid-phase1-contract}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase1/do-phase1.env}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-requirements-do-phase1.txt}"
 SKIP_GIT_SYNC="${SKIP_GIT_SYNC:-0}"
+BUILD_CUDA_DECORD="${BUILD_CUDA_DECORD:-1}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing env file: $ENV_FILE" >&2
@@ -37,6 +38,34 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r "$REQUIREMENTS_FILE"
+
+if [[ "$BUILD_CUDA_DECORD" == "1" ]]; then
+  apt-get update
+  apt-get install -y \
+    build-essential \
+    cmake \
+    ffmpeg \
+    git \
+    libavcodec-dev \
+    libavdevice-dev \
+    libavfilter-dev \
+    libavformat-dev \
+    libavutil-dev
+  python -m pip uninstall -y decord || true
+  rm -rf /tmp/decord-src
+  git clone --recursive https://github.com/dmlc/decord.git /tmp/decord-src
+  pushd /tmp/decord-src >/dev/null
+  mkdir -p build
+  pushd build >/dev/null
+  cmake .. -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+  make -j"$(nproc)"
+  popd >/dev/null
+  pushd python >/dev/null
+  python setup.py install
+  popd >/dev/null
+  popd >/dev/null
+fi
+
 # InsightFace can pull in the CPU-only onnxruntime package transitively. Keep
 # only the GPU build so CUDAExecutionProvider is available at runtime.
 python -m pip uninstall -y onnxruntime || true

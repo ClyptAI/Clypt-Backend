@@ -6670,20 +6670,16 @@ class ClyptWorker:
             "yes",
             "on",
         }
-        gpu_decode_strict = str(os.getenv("CLYPT_LRASD_GPU_DECODE_STRICT", "0")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
         if gpu_decode_enabled:
             try:
-                from decord import gpu
+                from decord import bridge, gpu
 
+                bridge.set_bridge("torch")
                 return VideoReader(video_path, ctx=gpu(0)), "gpu"
-            except Exception:
-                if gpu_decode_strict:
-                    raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"LR-ASD GPU decode requested but unavailable ({type(exc).__name__}: {exc})"
+                ) from exc
         return VideoReader(video_path, ctx=cpu(0)), "cpu"
 
     @staticmethod
@@ -6714,8 +6710,15 @@ class ClyptWorker:
             missing_indices = [fi for fi in fetch_indices if fi not in frame_cache]
             if missing_indices:
                 try:
-                    batch = active_reader.get_batch(missing_indices).asnumpy()
-                    for idx, frame_data in zip(missing_indices, batch):
+                    batch = active_reader.get_batch(missing_indices)
+                    batch_items = batch.asnumpy() if hasattr(batch, "asnumpy") else batch
+                    for offset, idx in enumerate(missing_indices):
+                        frame_data = batch_items[offset]
+                        if hasattr(frame_data, "contiguous"):
+                            try:
+                                frame_data = frame_data.contiguous()
+                            except Exception:
+                                pass
                         frame_cache[idx] = frame_data
                 except Exception:
                     if gpu_decode_strict:
@@ -6731,8 +6734,15 @@ class ClyptWorker:
                             retry_indices = list(range(frame_idx, retry_end))
                             missing_indices = [fi for fi in retry_indices if fi not in frame_cache]
                             if missing_indices:
-                                batch = active_reader.get_batch(missing_indices).asnumpy()
-                                for idx, frame_data in zip(missing_indices, batch):
+                                batch = active_reader.get_batch(missing_indices)
+                                batch_items = batch.asnumpy() if hasattr(batch, "asnumpy") else batch
+                                for offset, idx in enumerate(missing_indices):
+                                    frame_data = batch_items[offset]
+                                    if hasattr(frame_data, "contiguous"):
+                                        try:
+                                            frame_data = frame_data.contiguous()
+                                        except Exception:
+                                            pass
                                     frame_cache[idx] = frame_data
                         except Exception:
                             frame_cache[frame_idx] = None
@@ -6761,6 +6771,10 @@ class ClyptWorker:
         y2,
     ):
         import numpy as np
+        try:
+            import torch
+        except Exception:
+            torch = None
 
         if frame is None:
             return None
@@ -6779,6 +6793,10 @@ class ClyptWorker:
             return None
 
         crop = frame[top:bottom, left:right]
+        if torch is not None and isinstance(crop, torch.Tensor):
+            if crop.numel() == 0:
+                return None
+            return crop.contiguous()
         if crop is None or crop.size == 0:
             return None
         return np.ascontiguousarray(crop)
@@ -6792,26 +6810,68 @@ class ClyptWorker:
     ):
         import cv2
         import numpy as np
+        import torch
+        import torch.nn.functional as F
 
-        valid_crops = [np.ascontiguousarray(crop) for crop in (crops or []) if crop is not None and getattr(crop, "size", 0) > 0]
+        valid_crops = [
+            crop
+            for crop in (crops or [])
+            if crop is not None
+            and (
+                (isinstance(crop, torch.Tensor) and crop.numel() > 0)
+                or (not isinstance(crop, torch.Tensor) and getattr(crop, "size", 0) > 0)
+            )
+        ]
         if not valid_crops:
             return None
 
         target_w, target_h = int(output_size[0]), int(output_size[1])
         bucket_length = max(len(valid_crops), int(bucket_length))
 
+        if any(isinstance(crop, torch.Tensor) for crop in valid_crops):
+            try:
+                prepared_rows = []
+                for crop in valid_crops:
+                    crop_t = crop if isinstance(crop, torch.Tensor) else torch.from_numpy(np.asarray(crop))
+                    if crop_t.ndim == 2:
+                        crop_t = crop_t[:, :, None]
+                    if crop_t.shape[2] == 1:
+                        crop_t = crop_t.repeat(1, 1, 3)
+                    elif crop_t.shape[2] == 2:
+                        crop_t = torch.cat([crop_t, crop_t[:, :, 1:2]], dim=2)
+                    elif crop_t.shape[2] > 3:
+                        crop_t = crop_t[:, :, :3]
+                    crop_t = crop_t.permute(2, 0, 1).unsqueeze(0).to(dtype=torch.float32)
+                    resized_t = F.interpolate(
+                        crop_t,
+                        size=(target_h, target_w),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    rgb = resized_t[:, :3, :, :]
+                    grayscale = (
+                        (0.2989 * rgb[:, 0, :, :])
+                        + (0.5870 * rgb[:, 1, :, :])
+                        + (0.1140 * rgb[:, 2, :, :])
+                    ).clamp(0, 255)
+                    prepared_rows.append(grayscale[0])
+                prepared_t = torch.stack(prepared_rows, dim=0)
+                if prepared_t.shape[0] < bucket_length:
+                    pad = prepared_t[-1:].expand(bucket_length - prepared_t.shape[0], -1, -1).clone()
+                    prepared_t = torch.cat([prepared_t, pad], dim=0)
+                return prepared_t.contiguous()
+            except Exception:
+                pass
+
         if str(os.getenv("CLYPT_LRASD_GPU_PREPROCESS", "0")).strip().lower() in {"1", "true", "yes", "on"}:
             try:
-                import torch
-                import torch.nn.functional as F
-
                 device = str(getattr(self, "gpu_device", "cpu") or "cpu")
-                max_h = max(int(crop.shape[0]) for crop in valid_crops)
-                max_w = max(int(crop.shape[1]) for crop in valid_crops)
+                valid_crops_np = [np.ascontiguousarray(np.asarray(crop)) for crop in valid_crops]
+                max_h = max(int(crop.shape[0]) for crop in valid_crops_np)
+                max_w = max(int(crop.shape[1]) for crop in valid_crops_np)
                 batch_np = np.empty((len(valid_crops), max_h, max_w, 3), dtype=np.float32)
 
-                for idx, crop in enumerate(valid_crops):
-                    crop_np = np.asarray(crop)
+                for idx, crop_np in enumerate(valid_crops_np):
                     if crop_np.ndim == 2:
                         crop_np = crop_np[:, :, None]
                     if crop_np.shape[2] == 1:
@@ -6850,6 +6910,7 @@ class ClyptWorker:
 
         prepared_np = []
         for crop in valid_crops:
+            crop = np.ascontiguousarray(np.asarray(crop))
             resized = cv2.resize(crop, tuple(output_size), interpolation=cv2.INTER_LINEAR)
             if resized.ndim == 2:
                 grayscale = resized
@@ -7020,6 +7081,39 @@ class ClyptWorker:
             value = 128
         default_floor = max(1, int(prep_workers or 1) * 2)
         return max(default_floor, min(512, value))
+
+    @staticmethod
+    def _lrasd_pending_bucket_counts(
+        pending_by_t: dict[int, list[tuple[str, list[int], int, object, object]]],
+    ) -> dict[int, int]:
+        return {
+            int(bucket_length): int(len(pending))
+            for bucket_length, pending in sorted(pending_by_t.items())
+            if pending
+        }
+
+    @staticmethod
+    def _lrasd_should_report_drain_progress(
+        *,
+        prepared_chunks: int,
+        scored_chunks: int,
+        last_prepared_chunks: int,
+        last_scored_chunks: int,
+        prep_queue_depth: int,
+        inflight_batches: int,
+        pending_bucket_count: int,
+        now_s: float,
+        last_report_s: float,
+    ) -> bool:
+        if prepared_chunks != last_prepared_chunks or scored_chunks != last_scored_chunks:
+            return True
+        if prep_queue_depth > 0 and (now_s - last_report_s) >= 5.0:
+            return True
+        if inflight_batches > 0 and (now_s - last_report_s) >= 5.0:
+            return True
+        if pending_bucket_count > 0 and (now_s - last_report_s) >= 5.0:
+            return True
+        return False
 
     def _prepare_lrasd_chunk_pending_entries(
         self,
@@ -7232,15 +7326,15 @@ class ClyptWorker:
         try:
             vr, decode_backend = self._open_lrasd_video_reader(binding_video_path)
         except Exception as e:
-            strict_gpu_decode = str(os.getenv("CLYPT_LRASD_GPU_DECODE_STRICT", "0")).strip().lower() in {
+            gpu_decode_enabled = str(os.getenv("CLYPT_LRASD_GPU_DECODE", "0")).strip().lower() in {
                 "1",
                 "true",
                 "yes",
                 "on",
             }
-            if strict_gpu_decode:
+            if gpu_decode_enabled:
                 raise RuntimeError(
-                    "Strict LR-ASD GPU decode is enabled and the analysis video could not be opened with GPU decode "
+                    "LR-ASD GPU decode was requested but binding video initialization failed "
                     f"({type(e).__name__}: {e})"
                 ) from e
             print(
@@ -7373,19 +7467,7 @@ class ClyptWorker:
             fps=fps,
         )
 
-        frame_reader_fallback_factory = None
-        if decode_backend == "gpu":
-            def _open_cpu_reader():
-                from decord import VideoReader, cpu
-
-                return VideoReader(binding_video_path, ctx=cpu(0))
-
-            frame_reader_fallback_factory = _open_cpu_reader
-
-        get_frame = self._make_lrasd_frame_provider(
-            vr,
-            fallback_factory=frame_reader_fallback_factory,
-        )
+        get_frame = self._make_lrasd_frame_provider(vr)
 
         asd_scores: dict[tuple[str, int], float] = {}
         scored_track_ids = set()
@@ -7487,10 +7569,11 @@ class ClyptWorker:
                         continue
                     total_chunks += 1
 
-        chunk_counter = 0
+        scanned_chunk_counter = 0
+        eligible_chunk_counter = 0
         scored_chunks = 0
         prepared_chunks = 0
-        pending_by_t: dict[int, list[tuple[str, list[int], int, np.ndarray, np.ndarray]]] = {}
+        pending_by_t: dict[int, list[tuple[str, list[int], int, object, np.ndarray]]] = {}
         pending_bucket_started_at: dict[int, float] = {}
         pending_bucket_last_seen_chunk: dict[int, int] = {}
         flush_counter = 0
@@ -7506,20 +7589,9 @@ class ClyptWorker:
             runtime = getattr(prep_runtime_local, "runtime", None)
             if runtime is not None:
                 return runtime
-            local_vr, local_decode_backend = self._open_lrasd_video_reader(binding_video_path)
-            local_fallback_factory = None
-            if local_decode_backend == "gpu":
-                def _open_local_cpu_reader():
-                    from decord import VideoReader, cpu
-
-                    return VideoReader(binding_video_path, ctx=cpu(0))
-
-                local_fallback_factory = _open_local_cpu_reader
+            local_vr, _local_decode_backend = self._open_lrasd_video_reader(binding_video_path)
             runtime = {
-                "get_frame": self._make_lrasd_frame_provider(
-                    local_vr,
-                    fallback_factory=local_fallback_factory,
-                ),
+                "get_frame": self._make_lrasd_frame_provider(local_vr),
                 "face_cache": {},
             }
             prep_runtime_local.runtime = runtime
@@ -7678,6 +7750,19 @@ class ClyptWorker:
                 binding_scale_y=binding_scale_y,
             )
 
+        def _log_lrasd_progress(prefix: str):
+            pending_buckets = self._lrasd_pending_bucket_counts(pending_by_t)
+            print(
+                f"  {prefix}: "
+                f"prepared={prepared_chunks}, "
+                f"inferred={scored_chunks}, "
+                f"track_windows={eligible_chunk_counter}/{max(total_chunks, 1)}, "
+                f"prep_queue_depth={len(prep_futures)}, "
+                f"pending_buckets={pending_buckets}, "
+                f"inflight_batches={len(inflight_futures)}, "
+                f"scored_tracks={len(scored_track_ids)}"
+            )
+
         try:
             prep_seq = 0
             for tid in sorted(eligible_lrasd_track_ids):
@@ -7696,15 +7781,16 @@ class ClyptWorker:
                         continue
                     for start in range(0, len(run), chunk_size):
                         chunk_frames = run[start:start + chunk_size]
-                        chunk_counter += 1
+                        scanned_chunk_counter += 1
                         _drain_prepared(block=False)
-                        _flush_stale_pending(chunk_counter)
+                        _flush_stale_pending(eligible_chunk_counter)
                         if len(chunk_frames) < min_chunk_frames:
                             continue
                         if not _chunk_overlaps_words(chunk_frames[0], chunk_frames[-1]):
                             continue
                         if not _chunk_allowed_for_turn_candidates(tid, chunk_frames[0], chunk_frames[-1]):
                             continue
+                        eligible_chunk_counter += 1
                         chunk_best_by_frame = {
                             fi: best_by_frame[fi]
                             for fi in chunk_frames
@@ -7712,11 +7798,11 @@ class ClyptWorker:
                         }
                         if prep_executor is None:
                             payload = _prepare_chunk_job(tid, list(chunk_frames), chunk_best_by_frame)
-                            _commit_prepared_payload(payload, chunk_idx=chunk_counter)
+                            _commit_prepared_payload(payload, chunk_idx=eligible_chunk_counter)
                         else:
                             while len(prep_futures) >= prep_queue_limit:
                                 _drain_prepared(block=True)
-                                _flush_stale_pending(chunk_counter)
+                                _flush_stale_pending(eligible_chunk_counter)
                                 _drain_one(block=False)
                             prep_seq += 1
                             future = prep_executor.submit(
@@ -7725,27 +7811,61 @@ class ClyptWorker:
                                 list(chunk_frames),
                                 chunk_best_by_frame,
                             )
-                            prep_futures.append((prep_seq, chunk_counter, future))
+                            prep_futures.append((prep_seq, eligible_chunk_counter, future))
                             _drain_one(block=False)
 
-                        if chunk_counter % 40 == 0:
-                            print(
-                                "  LR-ASD progress: "
-                                f"prepared={prepared_chunks}, "
-                                f"inferred={scored_chunks}, "
-                                f"track_windows={chunk_counter}/{max(total_chunks, 1)}, "
-                                f"prep_queue_depth={len(prep_futures)}, "
-                                f"scored_tracks={len(scored_track_ids)}"
-                            )
+                        if eligible_chunk_counter % 40 == 0:
+                            _log_lrasd_progress("LR-ASD progress")
 
+            if prep_futures or pending_by_t or inflight_futures:
+                _log_lrasd_progress("LR-ASD drain start")
+            last_drain_prepared = prepared_chunks
+            last_drain_scored = scored_chunks
+            last_drain_report_s = time.monotonic()
             while prep_futures:
                 _drain_prepared(block=True)
-                _flush_stale_pending(chunk_counter)
+                _flush_stale_pending(eligible_chunk_counter)
                 _drain_one(block=False)
+                now_s = time.monotonic()
+                if self._lrasd_should_report_drain_progress(
+                    prepared_chunks=prepared_chunks,
+                    scored_chunks=scored_chunks,
+                    last_prepared_chunks=last_drain_prepared,
+                    last_scored_chunks=last_drain_scored,
+                    prep_queue_depth=len(prep_futures),
+                    inflight_batches=len(inflight_futures),
+                    pending_bucket_count=len(self._lrasd_pending_bucket_counts(pending_by_t)),
+                    now_s=now_s,
+                    last_report_s=last_drain_report_s,
+                ):
+                    _log_lrasd_progress("LR-ASD draining prep")
+                    last_drain_prepared = prepared_chunks
+                    last_drain_scored = scored_chunks
+                    last_drain_report_s = now_s
             for t_len in list(pending_by_t.keys()):
                 _flush_pending(t_len)
+            if inflight_futures:
+                _log_lrasd_progress("LR-ASD draining inference")
             while inflight_futures:
                 _drain_one(block=True)
+                now_s = time.monotonic()
+                if self._lrasd_should_report_drain_progress(
+                    prepared_chunks=prepared_chunks,
+                    scored_chunks=scored_chunks,
+                    last_prepared_chunks=last_drain_prepared,
+                    last_scored_chunks=last_drain_scored,
+                    prep_queue_depth=len(prep_futures),
+                    inflight_batches=len(inflight_futures),
+                    pending_bucket_count=len(self._lrasd_pending_bucket_counts(pending_by_t)),
+                    now_s=now_s,
+                    last_report_s=last_drain_report_s,
+                ):
+                    _log_lrasd_progress("LR-ASD draining inference")
+                    last_drain_prepared = prepared_chunks
+                    last_drain_scored = scored_chunks
+                    last_drain_report_s = now_s
+            if prepared_chunks > 0 or scored_chunks > 0:
+                _log_lrasd_progress("LR-ASD drain complete")
         finally:
             if prep_executor is not None:
                 prep_executor.shutdown(wait=True, cancel_futures=False)
