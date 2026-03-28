@@ -474,6 +474,23 @@ def _single_visible_detection_rescue(
     return target_track_id, rendered
 
 
+def _dominant_visible_track_id_when_unbound(
+    *,
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> str | None:
+    if len(frame_detections) != 2:
+        return None
+    plausible = [det for det in frame_detections if _is_plausible_render_target(det, frame_width, frame_height)]
+    if len(plausible) != 2:
+        return None
+    dominant = _dominant_larger_track_detection(plausible, frame_width, frame_height)
+    if dominant is None:
+        return None
+    return str(dominant.get("track_id", "")).strip() or None
+
+
 def select_render_detections(
     frame_detections: list[dict],
     *,
@@ -541,6 +558,8 @@ def resolve_render_binding_ids(
     raw_track_id: str | None,
     follow_track_id: str | None,
     frame_detections: list[dict],
+    frame_width: int | None = None,
+    frame_height: int | None = None,
 ) -> tuple[str | None, str | None]:
     if raw_track_id or follow_track_id:
         return raw_track_id, follow_track_id
@@ -553,6 +572,14 @@ def resolve_render_binding_ids(
     if len(visible_track_ids) == 1:
         lone_track_id = visible_track_ids[0]
         return lone_track_id, lone_track_id
+    if frame_width and frame_height:
+        dominant_track_id = _dominant_visible_track_id_when_unbound(
+            frame_detections=frame_detections,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        if dominant_track_id:
+            return dominant_track_id, dominant_track_id
     return raw_track_id, follow_track_id
 
 
@@ -782,6 +809,8 @@ def render_debug_video(
                 raw_track_id=raw_track_id,
                 follow_track_id=follow_track_id,
                 frame_detections=person_detections,
+                frame_width=frame_width,
+                frame_height=frame_height,
             )
             active_track_ids = set(active_speaker_state["visible_track_ids"])
             if follow_track_id:

@@ -212,3 +212,38 @@ def test_resolve_render_binding_ids_uses_lone_visible_track_when_local_binding_m
 
     assert raw_track_id == "track_12"
     assert follow_track_id == "track_12"
+
+
+def test_resolve_render_binding_ids_prefers_dominant_box_over_fragment_when_unbound():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_51",
+            "frame_idx": 3769,
+            "x1": 187,
+            "y1": 99,
+            "x2": 1207,
+            "y2": 1073,
+            "confidence": 0.948,
+        },
+        {
+            "track_id": "track_67",
+            "frame_idx": 3769,
+            "x1": 2,
+            "y1": 454,
+            "x2": 430,
+            "y2": 1066,
+            "confidence": 0.681,
+        },
+    ]
+
+    raw_track_id, follow_track_id = mod.resolve_render_binding_ids(
+        raw_track_id=None,
+        follow_track_id=None,
+        frame_detections=frame_detections,
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    assert raw_track_id == "track_51"
+    assert follow_track_id == "track_51"
