@@ -3064,9 +3064,36 @@ def test_lrasd_should_abort_chunk_early_for_prolonged_zero_face_chunk():
     ) is True
     assert worker._lrasd_should_abort_chunk_early(
         frames_processed=24,
+        face_hits=0,
+        face_misses=24,
+        missing_streak=0,
+    ) is True
+    assert worker._lrasd_should_abort_chunk_early(
+        frames_processed=24,
         face_hits=1,
         face_misses=23,
         missing_streak=23,
+    ) is False
+
+
+def test_lrasd_should_skip_chunk_without_canonical_faces_only_when_long_enough():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    assert worker._lrasd_should_skip_chunk_without_canonical_faces(
+        tid="track_33",
+        chunk_frames=list(range(100, 220)),
+        canonical_face_boxes={},
+    ) is True
+    assert worker._lrasd_should_skip_chunk_without_canonical_faces(
+        tid="track_33",
+        chunk_frames=list(range(100, 140)),
+        canonical_face_boxes={},
+    ) is False
+    assert worker._lrasd_should_skip_chunk_without_canonical_faces(
+        tid="track_33",
+        chunk_frames=list(range(100, 220)),
+        canonical_face_boxes={("track_33", 150): (1, 2, 3, 4, 0.9, 0.9)},
     ) is False
     assert worker._lrasd_should_abort_chunk_early(
         frames_processed=10,

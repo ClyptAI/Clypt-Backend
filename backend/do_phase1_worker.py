@@ -6865,7 +6865,23 @@ class ClyptWorker:
             return False
         if int(face_misses) < min_probe_frames:
             return False
-        return int(missing_streak) >= min_probe_frames
+        return True
+
+    @staticmethod
+    def _lrasd_should_skip_chunk_without_canonical_faces(
+        *,
+        tid: str,
+        chunk_frames: list[int],
+        canonical_face_boxes: dict[tuple[str, int], tuple],
+    ) -> bool:
+        min_chunk_frames = max(24, int(os.getenv("CLYPT_LRASD_ZERO_CANONICAL_SKIP_MIN_FRAMES", "48")))
+        if len(chunk_frames) < min_chunk_frames:
+            return False
+        tid = str(tid)
+        for fi in chunk_frames:
+            if (tid, int(fi)) in canonical_face_boxes:
+                return False
+        return True
 
     def _lrasd_build_pending_subchunk(
         self,
@@ -7536,6 +7552,17 @@ class ClyptWorker:
                         if not _chunk_overlaps_jobs(chunk_frames[0], chunk_frames[-1]):
                             continue
                         if not _chunk_allowed_for_turn_candidates(tid, chunk_frames[0], chunk_frames[-1]):
+                            continue
+                        if self._lrasd_should_skip_chunk_without_canonical_faces(
+                            tid=tid,
+                            chunk_frames=chunk_frames,
+                            canonical_face_boxes=canonical_face_boxes,
+                        ):
+                            print(
+                                "  LR-ASD skipped chunk: "
+                                f"track_id={tid}, frame_span={chunk_frames[0]}-{chunk_frames[-1]}, "
+                                f"frames={len(chunk_frames)}, reason=no_canonical_face_support"
+                            )
                             continue
 
                         # --- FIX: FAULT-TOLERANT CROP-AND-DROP ---
