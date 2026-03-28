@@ -1335,7 +1335,12 @@ class ClyptWorker:
                 )
 
         bindings: list[dict] = []
-        for turn in turns or []:
+        total_turns = len(turns or [])
+        progress_stride = max(10, total_turns // 8) if total_turns else 10
+        resolved_bindings = 0
+        ambiguous_bindings = 0
+        unresolved_bindings = 0
+        for turn_index, turn in enumerate(turns or [], start=1):
             start_time_ms = _as_int_ms(turn.get("start_time_ms"), default=0)
             end_time_ms = _as_int_ms(turn.get("end_time_ms"), default=start_time_ms)
             if end_time_ms < start_time_ms:
@@ -1487,6 +1492,20 @@ class ClyptWorker:
                 binding["local_track_id"] = str(best_local_track_id)
 
             bindings.append(binding)
+            if binding.get("local_track_id") not in (None, ""):
+                resolved_bindings += 1
+            elif bool(binding.get("ambiguous", False)):
+                ambiguous_bindings += 1
+            else:
+                unresolved_bindings += 1
+
+            if total_turns and (turn_index == total_turns or turn_index % progress_stride == 0):
+                print(
+                    "  Pyannote visual binding progress: "
+                    f"turns={turn_index}/{total_turns}, "
+                    f"resolved={resolved_bindings}, ambiguous={ambiguous_bindings}, "
+                    f"unresolved={unresolved_bindings}"
+                )
 
         return bindings
 
@@ -5153,10 +5172,14 @@ class ClyptWorker:
         }
 
         candidate_rows: list[dict] = []
+        total_turns = len(normalized_turns)
+        progress_stride = max(10, total_turns // 8) if total_turns else 10
         min_support_frames = max(2, int(round(max(float(fps), 1.0) * 0.20)))
         min_support_ratio = 0.15
+        turns_with_candidates = 0
+        candidate_count = 0
 
-        for turn in normalized_turns:
+        for turn_index, turn in enumerate(normalized_turns, start=1):
             speaker_id = str(turn.get("speaker_id", "") or "")
             if not speaker_id:
                 continue
@@ -5218,6 +5241,8 @@ class ClyptWorker:
                 reverse=True,
             )
             if candidate_payloads:
+                turns_with_candidates += 1
+                candidate_count += len(candidate_payloads)
                 candidate_rows.append(
                     {
                         "speaker_id": speaker_id,
@@ -5225,6 +5250,14 @@ class ClyptWorker:
                         "end_time_ms": turn_end_ms,
                         "candidates": candidate_payloads[:4],
                     }
+                )
+
+            if total_turns and (turn_index == total_turns or turn_index % progress_stride == 0):
+                print(
+                    "  Pyannote visual scoring progress: "
+                    f"turns={turn_index}/{total_turns}, "
+                    f"candidate_intervals={turns_with_candidates}, "
+                    f"candidates={candidate_count}"
                 )
 
         return candidate_rows
@@ -5261,6 +5294,10 @@ class ClyptWorker:
             track_identity_features=track_identity_features,
             local_to_global_track_id=track_id_remap,
             fps=fps,
+        )
+        print(
+            "Pyannote visual candidate scoring complete: "
+            f"turns={len(audio_speaker_turns)}, candidate_intervals={len(candidate_evidence)}"
         )
         turn_bindings = self._bind_audio_turns_to_local_tracks(
             self._normalize_audio_speaker_turns_for_binding_context(audio_speaker_turns),

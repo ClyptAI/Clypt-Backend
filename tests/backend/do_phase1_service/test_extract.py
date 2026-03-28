@@ -633,6 +633,35 @@ def test_audio_turn_stays_unknown_when_candidates_are_near_tied():
     ]
 
 
+def test_audio_turn_binding_emits_progress_logs(capsys):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    turns = [
+        {
+            "speaker_id": f"SPEAKER_{index:02d}",
+            "start_time_ms": index * 100,
+            "end_time_ms": (index * 100) + 100,
+            "exclusive": True,
+        }
+        for index in range(10)
+    ]
+    local_candidate_evidence = [
+        {
+            "start_time_ms": turn["start_time_ms"],
+            "end_time_ms": turn["end_time_ms"],
+            "candidates": [{"local_track_id": f"track_{index}", "score": 0.9}],
+        }
+        for index, turn in enumerate(turns)
+    ]
+
+    bindings = worker._bind_audio_turns_to_local_tracks(turns, local_candidate_evidence)
+
+    assert len(bindings) == 10
+    captured = capsys.readouterr().out
+    assert "Pyannote visual binding progress: turns=10/10" in captured
+
+
 def test_audio_turn_breaks_score_tie_with_stronger_support():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -676,6 +705,54 @@ def test_audio_turn_breaks_score_tie_with_stronger_support():
             "support_ratio": pytest.approx(1.0, abs=1e-6),
         }
     ]
+
+
+def test_build_visual_turn_candidate_evidence_emits_progress_logs(monkeypatch, capsys):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setattr(
+        worker,
+        "_extract_candidate_visual_signals",
+        lambda **kwargs: {
+            "local_track_id": kwargs["local_track_id"],
+            "track_id": kwargs["global_track_id"],
+            "composite_score": 0.42,
+            "face_visibility_score": 0.2,
+            "pose_visibility_score": 0.8,
+        },
+    )
+
+    audio_speaker_turns = [
+        {
+            "speaker_id": f"SPEAKER_{index:02d}",
+            "start_time_ms": index * 200,
+            "end_time_ms": (index * 200) + 200,
+            "exclusive": True,
+            "overlap": False,
+            "confidence": 0.9,
+        }
+        for index in range(10)
+    ]
+    track_to_dets = {
+        "track_1": [
+            {"frame_idx": frame_idx}
+            for frame_idx in range(0, 20)
+        ]
+    }
+
+    candidate_rows = worker._build_visual_turn_candidate_evidence(
+        video_path="video.mp4",
+        audio_speaker_turns=audio_speaker_turns,
+        track_to_dets=track_to_dets,
+        track_identity_features={},
+        local_to_global_track_id={"track_1": "Global_Person_0"},
+        fps=10.0,
+    )
+
+    assert len(candidate_rows) == 10
+    captured = capsys.readouterr().out
+    assert "Pyannote visual scoring progress: turns=10/10" in captured
 
 
 def test_audio_turn_overlap_stays_ambiguous_instead_of_committing():
