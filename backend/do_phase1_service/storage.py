@@ -64,6 +64,11 @@ def persist_phase1_outputs(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    phase_1_audio = dict(phase_1_audio)
+    phase_1_audio["speaker_candidate_debug"] = _normalize_speaker_candidate_debug(
+        phase_1_audio.get("speaker_candidate_debug") or []
+    )
+
     transcript_uri = _upload_json(storage, phase_1_audio, f"phase_1/jobs/{job_id}/phase_1_audio.json")
     visual_uri = _upload_json(storage, phase_1_visual, f"phase_1/jobs/{job_id}/phase_1_visual.json")
 
@@ -136,3 +141,108 @@ def persist_phase1_outputs(
 
 def _upload_json(storage: StorageBackend, payload: dict, object_name: str) -> str:
     return storage.upload_bytes(json.dumps(payload, indent=2).encode("utf-8"), object_name)
+
+
+def _normalize_speaker_candidate_debug(entries: list[dict]) -> list[dict]:
+    normalized_entries: list[dict] = []
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict):
+            continue
+
+        normalized_candidates = _normalize_speaker_candidate_debug_candidates(
+            raw_entry.get("candidates") or []
+        )
+        chosen_local_track_id = _coerce_optional_str(raw_entry.get("chosen_local_track_id"))
+        chosen_track_id = _coerce_optional_str(raw_entry.get("chosen_track_id"))
+        if (not chosen_local_track_id or not chosen_track_id) and normalized_candidates:
+            top_candidate = normalized_candidates[0]
+            chosen_local_track_id = chosen_local_track_id or top_candidate["local_track_id"]
+            chosen_track_id = chosen_track_id or top_candidate["track_id"]
+
+        decision_source = raw_entry.get("decision_source")
+        if decision_source not in {"visual", "audio_boosted_visual", "unknown"}:
+            decision_source = "visual" if normalized_candidates else "unknown"
+
+        top_margin = raw_entry.get("top_1_top_2_margin")
+        if top_margin is None and len(normalized_candidates) >= 2:
+            top_margin = float(
+                normalized_candidates[0]["blended_score"] - normalized_candidates[1]["blended_score"]
+            )
+
+        normalized_entries.append(
+            {
+                "word": _coerce_optional_str(raw_entry.get("word")),
+                "start_time_ms": int(raw_entry.get("start_time_ms", 0) or 0),
+                "end_time_ms": int(
+                    raw_entry.get("end_time_ms", raw_entry.get("start_time_ms", 0)) or 0
+                ),
+                "active_audio_speaker_id": _coerce_optional_str(
+                    raw_entry.get("active_audio_speaker_id") or raw_entry.get("speaker_id")
+                ),
+                "active_audio_local_track_id": _coerce_optional_str(
+                    raw_entry.get("active_audio_local_track_id")
+                ),
+                "chosen_track_id": chosen_track_id,
+                "chosen_local_track_id": chosen_local_track_id,
+                "decision_source": decision_source,
+                "ambiguous": bool(
+                    raw_entry.get("ambiguous", len(normalized_candidates) > 1)
+                ),
+                "top_1_top_2_margin": (
+                    None if top_margin is None else float(top_margin)
+                ),
+                "candidates": normalized_candidates,
+            }
+        )
+    return normalized_entries
+
+
+def _normalize_speaker_candidate_debug_candidates(candidates: list[dict]) -> list[dict]:
+    normalized_candidates: list[dict] = []
+    for raw_candidate in candidates[:3]:
+        if not isinstance(raw_candidate, dict):
+            continue
+        local_track_id = _coerce_optional_str(
+            raw_candidate.get("local_track_id") or raw_candidate.get("clean_local_track_id")
+        )
+        track_id = _coerce_optional_str(
+            raw_candidate.get("track_id") or raw_candidate.get("visual_identity_id")
+        )
+        if not local_track_id:
+            local_track_id = track_id or "unknown_local_track"
+        if not track_id:
+            track_id = local_track_id
+
+        blended_score = raw_candidate.get("blended_score")
+        if blended_score is None:
+            blended_score = raw_candidate.get("composite_score")
+        if blended_score is None:
+            blended_score = raw_candidate.get("score")
+        if blended_score is None:
+            blended_score = 0.0
+
+        normalized_candidates.append(
+            {
+                "local_track_id": str(local_track_id),
+                "track_id": str(track_id),
+                "blended_score": float(blended_score),
+                "asd_probability": _coerce_optional_float(raw_candidate.get("asd_probability")),
+                "body_prior": _coerce_optional_float(raw_candidate.get("body_prior")),
+                "detection_confidence": _coerce_optional_float(
+                    raw_candidate.get("detection_confidence")
+                ),
+            }
+        )
+    return normalized_candidates
+
+
+def _coerce_optional_str(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
+def _coerce_optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(value)

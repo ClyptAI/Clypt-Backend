@@ -219,6 +219,83 @@ def test_manifest_persists_local_clip_experiment_fields(tmp_path: Path):
     assert manifest.artifacts.visual_tracking.tracks_local[0].track_id == "track_1"
 
 
+def test_manifest_persistence_normalizes_pyannote_visual_candidate_debug(tmp_path: Path):
+    storage = LocalGCSStorage(bucket="test-bucket", root_dir=tmp_path / "gcs")
+    canonical_video_uri = storage.upload_bytes(b"video", object_name="phase_1/jobs/job_457/source_video.mp4")
+
+    manifest = persist_phase1_outputs(
+        storage=storage,
+        output_dir=tmp_path,
+        job_id="job_457",
+        source_url="https://youtube.com/watch?v=pyannote-visual",
+        canonical_video_uri=canonical_video_uri,
+        phase_1_audio={
+            "source_audio": "https://youtube.com/watch?v=pyannote-visual",
+            "words": [],
+            "speaker_bindings": [],
+            "speaker_candidate_debug": [
+                {
+                    "speaker_id": "SPEAKER_00",
+                    "start_time_ms": 1200,
+                    "end_time_ms": 2200,
+                    "candidates": [
+                        {
+                            "visual_identity_id": "Global_Person_0",
+                            "local_track_id": "track_1",
+                            "mouth_motion_score": 0.12,
+                            "face_visibility_score": 0.0,
+                            "blendshape_support_score": 0.0,
+                            "usable_face_frame_count": 0,
+                            "pose_visibility_score": 0.94,
+                            "pose_stability_score": 0.99,
+                            "usable_pose_frame_count": 8,
+                            "mapping_confidence": 0.0,
+                            "composite_score": 0.271,
+                            "score": 0.271,
+                            "support_ratio": 1.0,
+                            "support_frames": 14,
+                        },
+                        {
+                            "visual_identity_id": "Global_Person_1",
+                            "local_track_id": "track_7",
+                            "composite_score": 0.101,
+                        },
+                    ],
+                }
+            ],
+        },
+        phase_1_visual={
+            "source_video": "https://youtube.com/watch?v=pyannote-visual",
+            "schema_version": "2.0.0",
+            "task_type": "person_tracking",
+            "coordinate_space": "absolute_original_frame_xyxy",
+            "geometry_type": "aabb",
+            "class_taxonomy": {"0": "person"},
+            "tracking_metrics": {"schema_pass_rate": 1.0},
+            "tracks": [],
+            "face_detections": [],
+            "person_detections": [],
+            "label_detections": [],
+            "object_tracking": [],
+            "shot_changes": [{"start_time_ms": 0, "end_time_ms": 3000}],
+            "video_metadata": {"width": 1920, "height": 1080, "fps": 30.0, "duration_ms": 3000},
+        },
+    )
+
+    entry = manifest.artifacts.transcript.speaker_candidate_debug[0]
+    assert entry.active_audio_speaker_id == "SPEAKER_00"
+    assert entry.decision_source == "visual"
+    assert entry.ambiguous is True
+    assert entry.chosen_track_id == "Global_Person_0"
+    assert entry.chosen_local_track_id == "track_1"
+    assert entry.candidates[0].track_id == "Global_Person_0"
+    assert entry.candidates[0].local_track_id == "track_1"
+    assert entry.candidates[0].blended_score == pytest.approx(0.271)
+    assert entry.candidates[0].asd_probability is None
+    assert entry.candidates[0].body_prior is None
+    assert entry.candidates[0].detection_confidence is None
+
+
 def test_manifest_persistence_rejects_unknown_audio_turn_fields(tmp_path: Path):
     storage = LocalGCSStorage(bucket="test-bucket", root_dir=tmp_path / "gcs")
     canonical_video_uri = storage.upload_bytes(b"video", object_name="phase_1/jobs/job_789/source_video.mp4")
@@ -262,50 +339,51 @@ def test_manifest_persistence_rejects_unknown_audio_turn_fields(tmp_path: Path):
         )
 
 
-def test_manifest_persistence_rejects_unknown_speaker_candidate_debug_fields(tmp_path: Path):
+def test_manifest_persistence_normalizes_unknown_speaker_candidate_debug_fields(tmp_path: Path):
     storage = LocalGCSStorage(bucket="test-bucket", root_dir=tmp_path / "gcs")
     canonical_video_uri = storage.upload_bytes(b"video", object_name="phase_1/jobs/job_790/source_video.mp4")
 
-    with pytest.raises(ValidationError, match="unexpected_field"):
-        persist_phase1_outputs(
-            storage=storage,
-            output_dir=tmp_path,
-            job_id="job_790",
-            source_url="https://youtube.com/watch?v=bad-debug",
-            canonical_video_uri=canonical_video_uri,
-            phase_1_audio={
-                "source_audio": "https://youtube.com/watch?v=bad-debug",
-                "words": [],
-                "speaker_bindings": [],
-                "speaker_candidate_debug": [
-                    {
-                        "word": "hello",
-                        "start_time_ms": 0,
-                        "end_time_ms": 100,
-                        "decision_source": "visual",
-                        "ambiguous": False,
-                        "candidates": [],
-                        "unexpected_field": True,
-                    }
-                ],
-            },
-            phase_1_visual={
-                "source_video": "https://youtube.com/watch?v=bad-debug",
-                "schema_version": "2.0.0",
-                "task_type": "person_tracking",
-                "coordinate_space": "absolute_original_frame_xyxy",
-                "geometry_type": "aabb",
-                "class_taxonomy": {"0": "person"},
-                "tracking_metrics": {"schema_pass_rate": 1.0},
-                "tracks": [],
-                "face_detections": [],
-                "person_detections": [],
-                "label_detections": [],
-                "object_tracking": [],
-                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
-                "video_metadata": {"width": 1920, "height": 1080, "fps": 30.0, "duration_ms": 1000},
-            },
-        )
+    manifest = persist_phase1_outputs(
+        storage=storage,
+        output_dir=tmp_path,
+        job_id="job_790",
+        source_url="https://youtube.com/watch?v=bad-debug",
+        canonical_video_uri=canonical_video_uri,
+        phase_1_audio={
+            "source_audio": "https://youtube.com/watch?v=bad-debug",
+            "words": [],
+            "speaker_bindings": [],
+            "speaker_candidate_debug": [
+                {
+                    "word": "hello",
+                    "start_time_ms": 0,
+                    "end_time_ms": 100,
+                    "decision_source": "visual",
+                    "ambiguous": False,
+                    "candidates": [],
+                    "unexpected_field": True,
+                }
+            ],
+        },
+        phase_1_visual={
+            "source_video": "https://youtube.com/watch?v=bad-debug",
+            "schema_version": "2.0.0",
+            "task_type": "person_tracking",
+            "coordinate_space": "absolute_original_frame_xyxy",
+            "geometry_type": "aabb",
+            "class_taxonomy": {"0": "person"},
+            "tracking_metrics": {"schema_pass_rate": 1.0},
+            "tracks": [],
+            "face_detections": [],
+            "person_detections": [],
+            "label_detections": [],
+            "object_tracking": [],
+            "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+            "video_metadata": {"width": 1920, "height": 1080, "fps": 30.0, "duration_ms": 1000},
+        },
+    )
+
+    assert not hasattr(manifest.artifacts.transcript.speaker_candidate_debug[0], "unexpected_field")
 
 
 def test_manifest_persistence_rejects_unknown_overlap_follow_decision_fields(tmp_path: Path):
