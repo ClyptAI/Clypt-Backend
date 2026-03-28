@@ -904,6 +904,45 @@ def _group_duplicate_render_targets(frame_detections: list[dict], frame_width: i
     return grouped
 
 
+def _dominant_larger_render_target(
+    candidates: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> dict | None:
+    if len(candidates) != 2:
+        return None
+    first, second = candidates
+    first_metrics = bbox_geometry_metrics(first["bbox"], frame_width, frame_height)
+    second_metrics = bbox_geometry_metrics(second["bbox"], frame_width, frame_height)
+
+    if first_metrics["area"] >= second_metrics["area"]:
+        larger, larger_metrics = first, first_metrics
+        smaller, smaller_metrics = second, second_metrics
+    else:
+        larger, larger_metrics = second, second_metrics
+        smaller, smaller_metrics = first, first_metrics
+
+    area_ratio = larger_metrics["area"] / max(1e-6, smaller_metrics["area"])
+    height_ratio = larger_metrics["h"] / max(1e-6, smaller_metrics["h"])
+
+    if area_ratio < 1.8 or height_ratio < 1.2:
+        return None
+    if larger_metrics["h"] < 0.55 or larger_metrics["area"] < 0.14:
+        return None
+
+    # Small, lower-frame boxes are often hands / cropped fragments. When the
+    # larger candidate looks like a full person, prefer it decisively.
+    suspicious_smaller = (
+        smaller_metrics["h"] < 0.42
+        or smaller_metrics["area"] < 0.09
+        or (smaller_metrics["bottom"] > 0.84 and smaller_metrics["center_y"] > 0.66)
+    )
+    if not suspicious_smaller:
+        return None
+
+    return larger
+
+
 def choose_clean_render_target(
     *,
     target_track_id: str,
@@ -922,6 +961,9 @@ def choose_clean_render_target(
         return None
 
     grouped = _group_duplicate_render_targets(candidates, frame_width, frame_height)
+    dominant = _dominant_larger_render_target(grouped, frame_width, frame_height)
+    if dominant is not None:
+        return dominant
     return grouped[0] if grouped else None
 
 

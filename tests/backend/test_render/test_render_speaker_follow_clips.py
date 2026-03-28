@@ -77,6 +77,24 @@ def make_low_overlap_same_frame_detection(track_id="Global_Person_0"):
     }
 
 
+def make_large_full_body_detection(track_id="Global_Person_0"):
+    return {
+        "track_id": track_id,
+        "bbox": [0.22, 0.08, 0.58, 0.96],
+        "score": 0.58,
+        "frame_idx": 100,
+    }
+
+
+def make_small_false_positive_detection(track_id="Global_Person_0"):
+    return {
+        "track_id": track_id,
+        "bbox": [0.66, 0.54, 0.82, 0.88],
+        "score": 0.97,
+        "frame_idx": 100,
+    }
+
+
 def make_raw_render_primary_detection(track_id="Global_Person_0"):
     return {
         "track_id": track_id,
@@ -174,6 +192,21 @@ def test_choose_clean_render_target_prefers_primary_box_over_duplicate_fragment(
     )
 
     assert chosen == primary
+
+
+def test_choose_clean_render_target_prefers_dominant_larger_box_over_smaller_false_positive():
+    mod = load_module()
+    larger = make_large_full_body_detection()
+    smaller = make_small_false_positive_detection()
+
+    chosen = mod.choose_clean_render_target(
+        target_track_id="Global_Person_0",
+        frame_detections=[smaller, larger],
+        frame_width=1280,
+        frame_height=720,
+    )
+
+    assert chosen == larger
 
 
 def test_group_duplicate_render_targets_keeps_clean_primary_only():
