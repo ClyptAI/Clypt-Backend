@@ -160,3 +160,31 @@ def test_select_render_detections_can_rescue_active_track_with_larger_nearby_tra
     assert selected[0]["x1"] == 212
     assert selected[0]["y1"] == 95
     assert selected[0]["_render_role_track_id"] == "track_2"
+
+
+def test_select_render_detections_uses_lone_visible_box_for_single_target_track():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_12",
+            "frame_idx": 334,
+            "x1": 212,
+            "y1": 95,
+            "x2": 1220,
+            "y2": 1072,
+            "confidence": 0.93,
+        },
+    ]
+
+    selected = mod.select_render_detections(
+        frame_detections,
+        raw_track_id="track_2",
+        follow_track_id="track_2",
+        active_track_ids={"track_2"},
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["track_id"] == "track_12"
+    assert selected[0]["_render_role_track_id"] == "track_2"

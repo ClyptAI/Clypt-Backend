@@ -459,6 +459,21 @@ def choose_clean_track_detection(
     return grouped[0] if grouped else None
 
 
+def _single_visible_detection_rescue(
+    *,
+    target_track_ids: set[str],
+    frame_detections: list[dict],
+) -> tuple[str, dict] | None:
+    if len(target_track_ids) != 1 or len(frame_detections) != 1:
+        return None
+    target_track_id = next(iter(target_track_ids))
+    det = frame_detections[0]
+    rendered = dict(det)
+    if str(det.get("track_id", "")) != target_track_id:
+        rendered["_render_role_track_id"] = target_track_id
+    return target_track_id, rendered
+
+
 def select_render_detections(
     frame_detections: list[dict],
     *,
@@ -473,6 +488,14 @@ def select_render_detections(
         for track_id in ([raw_track_id, follow_track_id] + list(active_track_ids or set()))
         if track_id
     }
+    lone_visible_rescue = _single_visible_detection_rescue(
+        target_track_ids=targeted_track_ids,
+        frame_detections=frame_detections,
+    )
+    if lone_visible_rescue is not None:
+        _, rendered = lone_visible_rescue
+        return [rendered]
+
     selected: list[dict] = []
     chosen_by_track_id: dict[str, dict | None] = {}
     for track_id in targeted_track_ids:
