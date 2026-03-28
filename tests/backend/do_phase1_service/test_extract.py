@@ -2780,7 +2780,7 @@ def test_rank_lrasd_turn_candidates_penalizes_tiny_face_heavy_fragment():
     assert ranked[0]["rank_score"] > ranked[1]["rank_score"]
 
 
-def test_run_lrasd_binding_scores_only_turn_topk_track(monkeypatch, tmp_path: Path):
+def test_run_lrasd_binding_scores_all_globally_eligible_candidates_when_turn_topk_enabled(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
     worker, words, bindings = _run_fake_lrasd_binding_case(
         monkeypatch,
@@ -2812,7 +2812,7 @@ def test_run_lrasd_binding_scores_only_turn_topk_track(monkeypatch, tmp_path: Pa
         ],
     )
 
-    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
 
 
 def test_lrasd_topk_candidates_per_turn_disabled_when_unset_or_zero(monkeypatch):
@@ -2860,7 +2860,7 @@ def test_run_lrasd_binding_turn_topk_zero_disables_pruning(monkeypatch, tmp_path
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
 
 
-def test_run_lrasd_binding_turn_topk_uses_word_subsegment_for_late_entry_speaker(monkeypatch, tmp_path: Path):
+def test_run_lrasd_binding_does_not_reduce_candidates_using_turn_subselection(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
     worker, words, bindings = _run_fake_lrasd_binding_case(
         monkeypatch,
@@ -2897,7 +2897,7 @@ def test_run_lrasd_binding_turn_topk_uses_word_subsegment_for_late_entry_speaker
         ],
     )
 
-    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
 
 
 def test_run_lrasd_binding_allows_scoring_in_diarization_gap(monkeypatch, tmp_path: Path):

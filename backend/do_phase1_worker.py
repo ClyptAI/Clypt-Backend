@@ -7210,26 +7210,7 @@ class ClyptWorker:
             return False
 
         def _chunk_allowed_for_turn_candidates(tid: str, start_fi: int, end_fi: int) -> bool:
-            if not selected_turn_candidates:
-                return True
-            tid = str(tid)
-            overlapping_rows: list[dict] = []
-            for turn_row in selected_turn_candidates:
-                turn_start = int(turn_row.get("start_frame_idx", start_fi))
-                turn_end = int(turn_row.get("end_frame_idx", end_fi))
-                if turn_start > end_fi:
-                    break
-                if turn_end < start_fi:
-                    continue
-                overlapping_rows.append(turn_row)
-            if not overlapping_rows:
-                return True
-            if any(int(row.get("overlap_active_count", 1)) > 1 for row in overlapping_rows):
-                return True
-            return any(
-                tid in set(row.get("selected_local_track_ids", []) or [])
-                for row in overlapping_rows
-            )
+            return True
 
         def _split_contiguous_runs(frame_list: list[int], max_gap: int) -> list[list[int]]:
             if not frame_list:
