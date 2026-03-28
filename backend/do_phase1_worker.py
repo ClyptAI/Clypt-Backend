@@ -1785,6 +1785,10 @@ class ClyptWorker:
         self._visual_signal_frame_provider_cache[cache_key] = provider
         return provider
 
+    def _make_video_reader(self, video_path: str):
+        """Compatibility wrapper for visual-signal decoding helpers."""
+        return self._open_lrasd_video_reader(video_path)
+
     @staticmethod
     def _nearest_face_observation(
         face_observations: list[dict] | None,

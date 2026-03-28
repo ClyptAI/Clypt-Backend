@@ -2028,6 +2028,26 @@ def test_open_lrasd_video_reader_strict_mode_raises_when_gpu_unavailable(monkeyp
     ]
 
 
+def test_make_video_reader_delegates_to_open_lrasd_video_reader(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    sentinel = object()
+    calls = []
+
+    def _fake_open(path):
+        calls.append(path)
+        return sentinel, "gpu"
+
+    monkeypatch.setattr(worker, "_open_lrasd_video_reader", _fake_open)
+
+    vr, backend = worker._make_video_reader("video.mp4")
+
+    assert vr is sentinel
+    assert backend == "gpu"
+    assert calls == ["video.mp4"]
+
+
 def test_run_lrasd_binding_strict_gpu_decode_error_includes_underlying_exception(monkeypatch, tmp_path: Path):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
