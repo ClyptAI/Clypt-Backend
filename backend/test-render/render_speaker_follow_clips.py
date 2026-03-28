@@ -669,17 +669,37 @@ def resolve_follow_identity(
     *,
     overlap_follow_decisions: list[dict] | None = None,
     prefer_local_track_ids: bool = False,
+    frame_detections: list[dict] | None = None,
 ) -> str | None:
+    def _single_visible_track_id() -> str | None:
+        track_ids: list[str] = []
+        for det in frame_detections or []:
+            track_id = str(det.get("track_id") or "").strip()
+            if track_id and track_id not in track_ids:
+                track_ids.append(track_id)
+        if len(track_ids) == 1:
+            return track_ids[0]
+        return None
+
     active_decision = overlap_follow_decision_at_ms(overlap_follow_decisions, abs_ms)
     if active_decision is not None:
-        if bool(active_decision.get("stay_wide")):
-            return None
-        decision_target = _decision_camera_target_track_id(
-            active_decision,
-            prefer_local_track_ids=prefer_local_track_ids,
-        )
+        decision_target = None
+        if not bool(active_decision.get("stay_wide")):
+            decision_target = _decision_camera_target_track_id(
+                active_decision,
+                prefer_local_track_ids=prefer_local_track_ids,
+            )
         if decision_target:
             return decision_target
+        singleton_track_id = _single_visible_track_id()
+        if singleton_track_id:
+            return singleton_track_id
+        if bool(active_decision.get("stay_wide")):
+            return None
+
+    singleton_track_id = _single_visible_track_id()
+    if singleton_track_id:
+        return singleton_track_id
 
     for binding in reversed(bindings):
         if int(binding["start_time_ms"]) == abs_ms:
@@ -1693,6 +1713,7 @@ def build_camera_path(
             abs_ms,
             overlap_follow_decisions=overlap_follow_decisions,
             prefer_local_track_ids=prefer_local_track_ids,
+            frame_detections=(frame_detection_index or {}).get(frame_idx, []),
         )
         person_det = interpolate_detection(person_track_index.get(tid), frame_idx, fps) if tid else None
         det = _track_anchor_candidate(

@@ -256,6 +256,39 @@ def test_resolve_follow_identity_prefers_new_speaker_on_boundary():
     assert mod.resolve_follow_identity(bindings, 1000) == "B"
 
 
+def test_resolve_follow_identity_falls_back_to_single_visible_frame_track():
+    mod = load_module()
+    bindings = []
+    frame_detections = [make_clean_body_detection("track_43")]
+
+    assert mod.resolve_follow_identity(
+        bindings,
+        1000,
+        frame_detections=frame_detections,
+    ) == "track_43"
+
+
+def test_resolve_follow_identity_single_visible_frame_track_overrides_stay_wide_overlap():
+    mod = load_module()
+    bindings = []
+    overlap_follow_decisions = [
+        {
+            "start_time_ms": 500,
+            "end_time_ms": 1500,
+            "camera_target_track_id": None,
+            "stay_wide": True,
+        }
+    ]
+    frame_detections = [make_clean_body_detection("track_43")]
+
+    assert mod.resolve_follow_identity(
+        bindings,
+        1000,
+        overlap_follow_decisions=overlap_follow_decisions,
+        frame_detections=frame_detections,
+    ) == "track_43"
+
+
 def test_build_camera_path_uses_clean_follow_box_for_active_speaker():
     mod = load_module()
     mod.KEYFRAME_STEP_S = 0.5

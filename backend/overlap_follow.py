@@ -64,7 +64,7 @@ def build_deterministic_overlap_follow_decisions(active_speakers_local: list[dic
         camera_target_local_track_id = None
         camera_target_track_id = None
         stay_wide = True
-        if len(visible_local_track_ids) == 1 and not offscreen_audio_speaker_ids:
+        if len(visible_local_track_ids) == 1:
             camera_target_local_track_id = visible_local_track_ids[0]
             camera_target_track_id = visible_track_map.get(camera_target_local_track_id)
             stay_wide = False
