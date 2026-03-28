@@ -2396,6 +2396,7 @@ def _run_fake_lrasd_binding_case(
     track_id_remap: dict[str, str] | None = None,
     audio_speaker_turns: list[dict] | None = None,
     audio_turn_bindings: list[dict] | None = None,
+    scheduled_audio_spans: list[dict] | None = None,
 ):
     def _frame_is_visible(spec: dict, frame_idx: int, default_end: int) -> bool:
         visible_frames = spec.get("visible_frames")
@@ -2577,6 +2578,7 @@ def _run_fake_lrasd_binding_case(
             "scale_y": 1.0,
             "analysis_meta": {"width": frame_w, "height": frame_h, "fps": 30.0},
             "audio_speaker_turns": audio_speaker_turns or [],
+            "scheduled_audio_spans": scheduled_audio_spans or [],
         },
         track_id_remap=track_id_remap,
     )
@@ -4851,6 +4853,172 @@ def test_finalize_persists_overlap_artifacts_when_experiment_enabled(monkeypatch
         },
     ]
     assert result["phase_1_audio"]["overlap_follow_decisions"] == overlap_decisions
+
+
+def test_finalize_builds_active_speakers_local_from_scheduled_spans(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "local-1",
+            "class_id": 0,
+            "label": "person",
+            "geometry_type": "aabb",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        }
+    ]
+    words = [
+        {
+            "text": "hello",
+            "start_time_ms": 0,
+            "end_time_ms": 100,
+            "speaker_track_id": "Global_Person_0",
+            "speaker_tag": "Global_Person_0",
+            "speaker_local_track_id": "local-1",
+            "speaker_local_tag": "local-1",
+        }
+    ]
+    audio_turns = [
+        {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 100, "exclusive": True},
+        {"speaker_id": "SPEAKER_00", "start_time_ms": 105, "end_time_ms": 200, "exclusive": True},
+    ]
+
+    monkeypatch.setenv("CLYPT_BINDING_SCHEDULER_SAME_SPEAKER_GAP_MS", "10")
+    monkeypatch.setenv("CLYPT_BINDING_SCHEDULER_BOUNDARY_PAD_MS", "0")
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(worker, "_build_track_indexes", lambda tracks: ({0: tracks}, {"local-1": tracks}))
+    monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: audio_turns)
+    monkeypatch.setattr(worker, "_run_overlap_follow_postpass", lambda **kwargs: [])
+
+    def _fake_cluster(video_path, tracks, **kwargs):
+        worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
+        worker._last_track_identity_features_after_clustering = None
+        return [{**track, "track_id": "Global_Person_0"} for track in tracks]
+
+    def _fake_run_speaker_binding(*args, **kwargs):
+        worker._last_audio_turn_bindings = [
+            {
+                "speaker_id": "SPEAKER_00",
+                "source_turn_id": "turn-0",
+                "start_time_ms": 0,
+                "end_time_ms": 100,
+                "local_track_id": "local-1",
+                "ambiguous": False,
+                "winning_score": 0.92,
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "source_turn_id": "turn-1",
+                "start_time_ms": 105,
+                "end_time_ms": 200,
+                "local_track_id": "local-1",
+                "ambiguous": False,
+                "winning_score": 0.91,
+            },
+        ]
+        return [{"track_id": "Global_Person_0", "start_time_ms": 0, "end_time_ms": 100, "word_count": 1}]
+
+    monkeypatch.setattr(worker, "_cluster_tracklets", _fake_cluster)
+    monkeypatch.setattr(worker, "_run_speaker_binding", _fake_run_speaker_binding)
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    assert result["phase_1_audio"]["active_speakers_local"] == [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 200,
+            "audio_speaker_ids": ["SPEAKER_00"],
+            "visible_local_track_ids": ["local-1"],
+            "visible_track_ids": ["Global_Person_0"],
+            "offscreen_audio_speaker_ids": [],
+            "overlap": False,
+            "confidence": pytest.approx(0.92, abs=0.02),
+            "decision_source": "turn_binding",
+        }
+    ]
+
+
+def test_run_lrasd_binding_ignores_synthetic_scheduled_overlap_for_assignment(monkeypatch, tmp_path: Path):
+    _, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker_local": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 72.0,
+                "height": 148.0,
+                "confidence": 0.88,
+                "intensity": 210,
+            },
+            "listener_local": {
+                "x_center": 222.0,
+                "y_center": 104.0,
+                "width": 70.0,
+                "height": 146.0,
+                "confidence": 0.87,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "speaker_local": 0.180,
+            "listener_local": 0.172,
+        },
+        words=[{"text": "hello", "start_time_ms": 0, "end_time_ms": 1000}],
+        audio_speaker_turns=[
+            {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 1000, "exclusive": True}
+        ],
+        scheduled_audio_spans=[
+            {
+                "span_id": "scheduled-0",
+                "span_type": "overlap",
+                "speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
+                "exclusive": False,
+                "overlap": True,
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "context_start_time_ms": 0,
+                "context_end_time_ms": 1000,
+                "source_turn_ids": ["turn-0"],
+            }
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "source_turn_id": "turn-0",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "listener_local",
+                "ambiguous": False,
+                "winning_score": 0.92,
+                "winning_margin": 0.32,
+                "support_ratio": 1.0,
+            }
+        ],
+    )
+
+    assert words[0]["speaker_local_track_id"] == "listener_local"
+    assert bindings[0]["track_id"] == "listener_local"
 
 
 def test_clusters_conflict_by_visibility_detects_far_apart_covisible_people():

@@ -7048,6 +7048,12 @@ class ClyptWorker:
         self._last_speaker_candidate_debug = []
         self._last_audio_turn_bindings = []
         self._last_scheduled_audio_spans = []
+        if isinstance(analysis_context, dict):
+            self._last_scheduled_audio_spans = [
+                dict(span)
+                for span in list(analysis_context.get("scheduled_audio_spans") or [])
+                if isinstance(span, dict)
+            ]
 
         if self.lrasd_model is None or self.lrasd_loss_av is None:
             print("  LR-ASD unavailable; falling back to heuristic binder.")
@@ -7140,12 +7146,6 @@ class ClyptWorker:
             (analysis_context or {}).get("audio_speaker_turns")
         )
         audio_speaker_turns = [dict(turn) for turn in raw_audio_turns]
-        scheduled_audio_spans = [
-            dict(span)
-            for span in list((analysis_context or {}).get("scheduled_audio_spans") or [])
-            if isinstance(span, dict)
-        ]
-        active_audio_context_spans = scheduled_audio_spans or audio_speaker_turns
         track_quality_by_tid = self._build_speaker_binding_track_quality(
             track_to_dets,
             frame_width=int(binding_meta.get("width", 0) or 0) or 1,
@@ -7859,7 +7859,7 @@ class ClyptWorker:
         self._last_audio_turn_bindings = [dict(binding) for binding in audio_turn_bindings]
 
         def _active_audio_turn(word: dict) -> dict | None:
-            if not active_audio_context_spans:
+            if not audio_speaker_turns:
                 return None
             word_start_ms = int(word.get("start_time_ms", 0) or 0)
             word_end_ms = int(word.get("end_time_ms", word_start_ms) or word_start_ms)
@@ -7868,35 +7868,17 @@ class ClyptWorker:
             word_mid_ms = (word_start_ms + word_end_ms) // 2
             best_turn = None
             best_overlap_ms = 0
-            for turn in active_audio_context_spans:
-                turn_start_ms = int(
-                    turn.get("context_start_time_ms", turn.get("start_time_ms", 0)) or 0
-                )
-                turn_end_ms = int(
-                    turn.get("context_end_time_ms", turn.get("end_time_ms", turn_start_ms))
-                    or turn_start_ms
-                )
+            for turn in audio_speaker_turns:
+                turn_start_ms = int(turn.get("start_time_ms", 0) or 0)
+                turn_end_ms = int(turn.get("end_time_ms", turn_start_ms) or turn_start_ms)
                 if turn_end_ms < turn_start_ms:
                     turn_start_ms, turn_end_ms = turn_end_ms, turn_start_ms
-                speaker_ids = [
-                    str(speaker_id)
-                    for speaker_id in list(turn.get("speaker_ids") or [])
-                    if str(speaker_id)
-                ]
-                hydrated_turn = {
-                    **dict(turn),
-                    "speaker_id": str(
-                        turn.get("speaker_id")
-                        or (speaker_ids[0] if len(speaker_ids) == 1 else "")
-                        or ""
-                    ),
-                }
                 if turn_start_ms <= word_mid_ms <= turn_end_ms:
-                    return hydrated_turn
+                    return turn
                 overlap_ms = min(word_end_ms, turn_end_ms) - max(word_start_ms, turn_start_ms)
                 if overlap_ms > best_overlap_ms:
                     best_overlap_ms = overlap_ms
-                    best_turn = hydrated_turn
+                    best_turn = turn
             return best_turn if best_overlap_ms > 0 else None
 
         def _active_audio_turn_binding(
@@ -7914,22 +7896,7 @@ class ClyptWorker:
             word_mid_ms = (word_start_ms + word_end_ms) // 2
             best_binding = None
             best_overlap_ms = 0
-            context_span = _active_audio_turn(word)
-            source_turn_ids = {
-                str(turn_id)
-                for turn_id in list((context_span or {}).get("source_turn_ids") or [])
-                if str(turn_id)
-            }
-            candidate_bindings = list(audio_turn_bindings)
-            if source_turn_ids:
-                matching_bindings = [
-                    binding
-                    for binding in audio_turn_bindings
-                    if str(binding.get("source_turn_id", "") or "") in source_turn_ids
-                ]
-                if matching_bindings:
-                    candidate_bindings = matching_bindings
-            for binding in candidate_bindings:
+            for binding in audio_turn_bindings:
                 local_track_id = binding.get("local_track_id")
                 if require_local_track and local_track_id in (None, ""):
                     continue
@@ -8897,6 +8864,11 @@ class ClyptWorker:
         speaker_binding_started_at = time.perf_counter()
         binding_analysis_context = dict(analysis_context) if isinstance(analysis_context, dict) else {}
         binding_analysis_context["audio_speaker_turns"] = audio_speaker_turns
+        from backend.speaker_binding import normalize_diarization_turns, schedule_diarized_spans
+
+        normalized_audio_turns = normalize_diarization_turns(audio_speaker_turns)
+        binding_analysis_context["audio_speaker_turns"] = [dict(turn) for turn in normalized_audio_turns]
+        binding_analysis_context["scheduled_audio_spans"] = schedule_diarized_spans(normalized_audio_turns)
         self._last_speaker_candidate_debug = []
         speaker_bindings = self._run_speaker_binding(
             video_path,
@@ -8913,7 +8885,11 @@ class ClyptWorker:
         speaker_bindings_local: list[dict] = []
         speaker_follow_bindings_local: list[dict] = []
         audio_speaker_local_track_map: list[dict] = []
-        scheduled_audio_spans = list(getattr(self, "_last_scheduled_audio_spans", []) or [])
+        scheduled_audio_spans = [
+            dict(span)
+            for span in list(binding_analysis_context.get("scheduled_audio_spans") or [])
+            if isinstance(span, dict)
+        ]
         active_speakers_local: list[dict] = self._build_active_speakers_local(
             audio_speaker_turns=scheduled_audio_spans or audio_speaker_turns,
             audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
