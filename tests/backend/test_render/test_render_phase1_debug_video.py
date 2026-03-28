@@ -73,3 +73,51 @@ def test_role_style_marks_non_follow_overlap_speakers_as_active():
 
     assert style["label_suffix"] == "ACTIVE"
     assert style["thickness"] >= 3
+
+
+def test_select_render_detections_prefers_dominant_larger_box_for_active_track():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_2",
+            "frame_idx": 10,
+            "x1": 0,
+            "y1": 520,
+            "x2": 320,
+            "y2": 1080,
+            "confidence": 0.55,
+        },
+        {
+            "track_id": "track_2",
+            "frame_idx": 10,
+            "x1": 110,
+            "y1": 85,
+            "x2": 1120,
+            "y2": 1030,
+            "confidence": 0.51,
+        },
+        {
+            "track_id": "track_9",
+            "frame_idx": 10,
+            "x1": 1200,
+            "y1": 120,
+            "x2": 1700,
+            "y2": 980,
+            "confidence": 0.88,
+        },
+    ]
+
+    selected = mod.select_render_detections(
+        frame_detections,
+        raw_track_id="track_2",
+        follow_track_id="track_2",
+        active_track_ids={"track_2"},
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    selected_track_2 = [det for det in selected if det["track_id"] == "track_2"]
+    assert len(selected_track_2) == 1
+    assert selected_track_2[0]["x1"] == 110
+    assert selected_track_2[0]["y1"] == 85
+    assert any(det["track_id"] == "track_9" for det in selected)

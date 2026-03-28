@@ -248,6 +248,192 @@ def nearest_frame_detections(
     return []
 
 
+def _det_geometry_metrics(det: dict, frame_width: int, frame_height: int) -> dict[str, float]:
+    norm_w = max(1.0, float(frame_width))
+    norm_h = max(1.0, float(frame_height))
+    x1 = float(det.get("x1", 0.0)) / norm_w
+    x2 = float(det.get("x2", 0.0)) / norm_w
+    y1 = float(det.get("y1", 0.0)) / norm_h
+    y2 = float(det.get("y2", 0.0)) / norm_h
+    w = max(0.0, x2 - x1)
+    h = max(0.0, y2 - y1)
+    return {
+        "w": w,
+        "h": h,
+        "area": w * h,
+        "aspect": (w / h) if h > 1e-6 else 0.0,
+        "center_y": (y1 + y2) / 2.0,
+        "bottom": y2,
+    }
+
+
+def _score_render_target_candidate(det: dict, frame_width: int, frame_height: int) -> float:
+    metrics = _det_geometry_metrics(det, frame_width, frame_height)
+    score = float(det.get("confidence", 0.0) or 0.0)
+    score += 0.6 * metrics["h"]
+    if metrics["h"] < 0.30:
+        score -= 2.0
+    if metrics["bottom"] > 0.96 and metrics["center_y"] > 0.72:
+        score -= 1.5
+    if metrics["aspect"] > 0.95:
+        score -= 1.0
+    if metrics["area"] < 0.05:
+        score -= 1.0
+    return score
+
+
+def _is_plausible_render_target(det: dict, frame_width: int, frame_height: int) -> bool:
+    return _score_render_target_candidate(det, frame_width, frame_height) >= 0.25
+
+
+def _render_target_selection_key(det: dict, frame_width: int, frame_height: int) -> tuple[float, float, float, float, float]:
+    metrics = _det_geometry_metrics(det, frame_width, frame_height)
+    return (
+        -_score_render_target_candidate(det, frame_width, frame_height),
+        -float(det.get("confidence", 0.0) or 0.0),
+        -metrics["area"],
+        -metrics["h"],
+        float(det.get("frame_idx", 0)),
+    )
+
+
+def _render_target_iou(left: dict, right: dict) -> float:
+    left_x1 = float(left.get("x1", 0.0))
+    left_y1 = float(left.get("y1", 0.0))
+    left_x2 = float(left.get("x2", 0.0))
+    left_y2 = float(left.get("y2", 0.0))
+    right_x1 = float(right.get("x1", 0.0))
+    right_y1 = float(right.get("y1", 0.0))
+    right_x2 = float(right.get("x2", 0.0))
+    right_y2 = float(right.get("y2", 0.0))
+    ix1 = max(left_x1, right_x1)
+    iy1 = max(left_y1, right_y1)
+    ix2 = min(left_x2, right_x2)
+    iy2 = min(left_y2, right_y2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    union = max(
+        1e-6,
+        (left_x2 - left_x1) * (left_y2 - left_y1)
+        + (right_x2 - right_x1) * (right_y2 - right_y1)
+        - inter,
+    )
+    return float(inter / union)
+
+
+def _is_duplicate_fragment(primary: dict, other: dict) -> bool:
+    if str(primary.get("track_id", "")) != str(other.get("track_id", "")):
+        return False
+    return _render_target_iou(primary, other) >= 0.45
+
+
+def _group_duplicate_track_detections(
+    detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> list[dict]:
+    grouped: list[dict] = []
+    for det in sorted(detections, key=lambda item: _render_target_selection_key(item, frame_width, frame_height)):
+        if any(_is_duplicate_fragment(kept, det) for kept in grouped):
+            continue
+        grouped.append(det)
+    return grouped
+
+
+def _dominant_larger_track_detection(
+    candidates: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> dict | None:
+    if len(candidates) != 2:
+        return None
+    first, second = candidates
+    first_metrics = _det_geometry_metrics(first, frame_width, frame_height)
+    second_metrics = _det_geometry_metrics(second, frame_width, frame_height)
+    if first_metrics["area"] >= second_metrics["area"]:
+        larger, larger_metrics = first, first_metrics
+        smaller, smaller_metrics = second, second_metrics
+    else:
+        larger, larger_metrics = second, second_metrics
+        smaller, smaller_metrics = first, first_metrics
+
+    area_ratio = larger_metrics["area"] / max(1e-6, smaller_metrics["area"])
+    height_ratio = larger_metrics["h"] / max(1e-6, smaller_metrics["h"])
+    if area_ratio < 1.8 or height_ratio < 1.2:
+        return None
+    if larger_metrics["h"] < 0.55 or larger_metrics["area"] < 0.14:
+        return None
+
+    suspicious_smaller = (
+        smaller_metrics["h"] < 0.42
+        or smaller_metrics["area"] < 0.09
+        or (smaller_metrics["bottom"] > 0.84 and smaller_metrics["center_y"] > 0.66)
+    )
+    if not suspicious_smaller:
+        return None
+    return larger
+
+
+def choose_clean_track_detection(
+    *,
+    target_track_id: str,
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> dict | None:
+    candidates = [
+        det
+        for det in frame_detections
+        if str(det.get("track_id", "")) == target_track_id and _is_plausible_render_target(det, frame_width, frame_height)
+    ]
+    if not candidates:
+        return None
+    grouped = _group_duplicate_track_detections(candidates, frame_width, frame_height)
+    dominant = _dominant_larger_track_detection(grouped, frame_width, frame_height)
+    if dominant is not None:
+        return dominant
+    return grouped[0] if grouped else None
+
+
+def select_render_detections(
+    frame_detections: list[dict],
+    *,
+    raw_track_id: str | None,
+    follow_track_id: str | None,
+    active_track_ids: set[str] | None,
+    frame_width: int,
+    frame_height: int,
+) -> list[dict]:
+    targeted_track_ids = {
+        track_id
+        for track_id in ([raw_track_id, follow_track_id] + list(active_track_ids or set()))
+        if track_id
+    }
+    selected: list[dict] = []
+    chosen_by_track_id: dict[str, dict | None] = {}
+    for track_id in targeted_track_ids:
+        chosen_by_track_id[track_id] = choose_clean_track_detection(
+            target_track_id=track_id,
+            frame_detections=frame_detections,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+
+    for det in frame_detections:
+        track_id = str(det.get("track_id", ""))
+        if track_id not in targeted_track_ids:
+            selected.append(det)
+            continue
+        chosen = chosen_by_track_id.get(track_id)
+        if chosen is None:
+            selected.append(det)
+            continue
+        if det is chosen:
+            selected.append(det)
+    return selected
+
+
 def build_hud_lines(
     *,
     timestamp_ms: int,
@@ -467,7 +653,15 @@ def render_debug_video(
             )
             active_track_ids = set(active_speaker_state["visible_track_ids"])
 
-            for det in nearest_frame_detections(person_frame_index, frame_idx, max_delta=1):
+            person_detections = nearest_frame_detections(person_frame_index, frame_idx, max_delta=1)
+            for det in select_render_detections(
+                person_detections,
+                raw_track_id=raw_track_id,
+                follow_track_id=follow_track_id,
+                active_track_ids=active_track_ids,
+                frame_width=frame_width,
+                frame_height=frame_height,
+            ):
                 draw_detection_box(
                     frame,
                     det,
