@@ -2108,12 +2108,14 @@ class ClyptWorker:
 
     @staticmethod
     def _lrasd_topk_candidates_per_turn() -> int:
-        raw = os.getenv("CLYPT_LRASD_TOPK_PER_TURN", "4").strip()
+        raw = os.getenv("CLYPT_LRASD_TOPK_PER_TURN", "").strip()
+        if raw == "":
+            return 0
         try:
             requested = int(raw)
         except Exception:
-            requested = 4
-        return max(1, min(8, requested))
+            requested = 0
+        return max(0, min(8, requested))
 
     @staticmethod
     def _audio_diarization_config() -> dict:
@@ -6434,6 +6436,7 @@ class ClyptWorker:
         fps: float,
     ) -> tuple[list[dict], list[dict]]:
         top_k = self._lrasd_topk_candidates_per_turn()
+        top_k_enabled = top_k > 0
         selected_turns: list[dict] = []
         debug_rows: list[dict] = []
         normalized_turns: list[dict] = []
@@ -6509,13 +6512,13 @@ class ClyptWorker:
                 if end_fi < start_fi:
                     start_fi, end_fi = end_fi, start_fi
 
+                if overlap_active_count > 1 or not top_k_enabled:
+                    selected_candidates = ranked
+                else:
+                    selected_candidates = ranked[:top_k]
                 selected_track_ids = [
                     str(candidate["local_track_id"])
-                    for candidate in (
-                        ranked
-                        if overlap_active_count > 1
-                        else ranked[:top_k]
-                    )
+                    for candidate in selected_candidates
                 ]
                 selected_turns.append(
                     {
@@ -6534,6 +6537,7 @@ class ClyptWorker:
                         "start_time_ms": int(span_start_ms),
                         "end_time_ms": int(span_end_ms),
                         "top_k": int(top_k),
+                        "top_k_enabled": bool(top_k_enabled),
                         "overlap_active_count": int(overlap_active_count),
                         "selected_local_track_ids": list(selected_track_ids),
                         "candidates": [dict(candidate) for candidate in ranked],
@@ -7060,12 +7064,20 @@ class ClyptWorker:
                     "lrasd_turn_selected_track_count": int(len(selected_turn_track_union)),
                 }
             )
-            print(
-                "  LR-ASD turn top-k: "
-                f"top_k={self._lrasd_topk_candidates_per_turn()}, "
-                f"turns={len(selected_turn_candidates)}, "
-                f"selected_tracks={len(selected_turn_track_union)}"
-            )
+            top_k_value = self._lrasd_topk_candidates_per_turn()
+            if top_k_value > 0:
+                print(
+                    "  LR-ASD turn top-k: "
+                    f"top_k={top_k_value}, "
+                    f"turns={len(selected_turn_candidates)}, "
+                    f"selected_tracks={len(selected_turn_track_union)}"
+                )
+            else:
+                print(
+                    "  LR-ASD turn top-k: disabled, "
+                    f"turns={len(selected_turn_candidates)}, "
+                    f"selected_tracks={len(selected_turn_track_union)}"
+                )
         audio_feature_cache_path = binding_video_path.replace(".mp4", "_lrasd_features.npz")
         full_audio_features = self._load_or_build_lrasd_audio_features(
             audio_wav_path=audio_wav_path,

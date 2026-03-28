@@ -2815,6 +2815,51 @@ def test_run_lrasd_binding_scores_only_turn_topk_track(monkeypatch, tmp_path: Pa
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
 
 
+def test_lrasd_topk_candidates_per_turn_disabled_when_unset_or_zero(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+
+    monkeypatch.delenv("CLYPT_LRASD_TOPK_PER_TURN", raising=False)
+    assert worker_cls._lrasd_topk_candidates_per_turn() == 0
+
+    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "0")
+    assert worker_cls._lrasd_topk_candidates_per_turn() == 0
+
+
+def test_run_lrasd_binding_turn_topk_zero_disables_pruning(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "0")
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker": {
+                "x_center": 82.0,
+                "y_center": 100.0,
+                "width": 78.0,
+                "height": 152.0,
+                "confidence": 0.91,
+                "intensity": 210,
+            },
+            "listener": {
+                "x_center": 222.0,
+                "y_center": 102.0,
+                "width": 64.0,
+                "height": 144.0,
+                "confidence": 0.88,
+                "intensity": 120,
+            },
+        },
+        score_by_track={
+            "speaker": 0.77,
+            "listener": 0.79,
+        },
+        audio_speaker_turns=[
+            {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+    )
+
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
+
+
 def test_run_lrasd_binding_turn_topk_uses_word_subsegment_for_late_entry_speaker(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
     worker, words, bindings = _run_fake_lrasd_binding_case(
