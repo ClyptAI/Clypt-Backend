@@ -7589,6 +7589,7 @@ class ClyptWorker:
         words_with_frame = 0
         words_with_dets = 0
         words_with_scored_candidate = 0
+        runtime_candidate_track_ids: set[str] = set()
         local_candidate_evidence: list[dict] = []
         word_candidate_rows: list[dict] = []
         for w in words:
@@ -7685,6 +7686,11 @@ class ClyptWorker:
                     item["confidence"],
                 ),
                 reverse=True,
+            )
+            runtime_candidate_track_ids.update(
+                str(candidate.get("local_tid", ""))
+                for candidate in scored_candidates
+                if candidate.get("local_tid") not in (None, "")
             )
             local_candidate_evidence.append(
                 {
@@ -8159,7 +8165,12 @@ class ClyptWorker:
         )
         assigned_ratio = assigned / max(1, len(words))
         print(f"  LR-ASD assignment ratio: {assigned}/{len(words)}={assigned_ratio:.1%}")
-        effective_candidate_track_count = len(eligible_lrasd_track_ids)
+        effective_candidate_track_count = len(
+            {
+                tid for tid in runtime_candidate_track_ids
+                if tid in eligible_lrasd_track_ids
+            }
+        )
         insufficient_track_support = (
             len(scored_track_ids) < 2
             and effective_candidate_track_count >= 2

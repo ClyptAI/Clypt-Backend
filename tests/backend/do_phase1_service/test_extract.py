@@ -2900,7 +2900,7 @@ def test_run_lrasd_binding_does_not_reduce_candidates_using_turn_subselection(mo
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
 
 
-def test_run_lrasd_binding_uses_global_eligible_count_for_fallback_gate(monkeypatch, tmp_path: Path):
+def test_run_lrasd_binding_uses_runtime_relevant_candidate_count_for_fallback_gate(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
     worker, words, bindings = _run_fake_lrasd_binding_case(
         monkeypatch,
@@ -2942,7 +2942,9 @@ def test_run_lrasd_binding_uses_global_eligible_count_for_fallback_gate(monkeypa
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
     assert worker._last_speaker_binding_metrics["lrasd_eligible_track_count"] == 2
     assert worker._last_speaker_binding_metrics["lrasd_turn_selected_track_count"] == 1
-    assert bindings is None
+    assert bindings == [
+        {"track_id": "speaker", "start_time_ms": 800, "end_time_ms": 1000, "word_count": 1}
+    ]
 
 
 def test_run_lrasd_binding_allows_scoring_in_diarization_gap(monkeypatch, tmp_path: Path):
