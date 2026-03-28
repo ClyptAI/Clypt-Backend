@@ -159,6 +159,143 @@
 
 ---
 
+## Exact Frame Sampling Policy For ReID / Pose
+
+### Sampling unit
+- The primary sampling unit is:
+  - `(visual_identity_candidate, scheduled_span)`
+- Do not sample over the full raw track first unless the span is missing enough evidence that a wider search is necessary.
+- This keeps identity evidence aligned to the same audio decision unit used by pyannote scheduling.
+
+### Pre-filter before any expensive extraction
+- For each candidate local track within a scheduled span, build a lightweight frame list from existing `track_to_dets` entries.
+- Drop frames immediately if any of these are true:
+  - detection confidence below a configurable floor
+  - tiny box area relative to frame
+  - extreme truncation near image edge
+  - frame lies inside a long occlusion gap for that track
+- Mark, but do not immediately drop, profile / weak-face frames. Those are still useful for ReID/pose.
+
+### Tier 1 sampling: cheap representative samples for every plausible candidate
+- For each `(candidate, span)` pair, choose up to **6 representative frames**:
+  - 1 near the span start
+  - 1 near the span end
+  - 1 near the temporal midpoint
+  - up to 3 more spread across the span by quantiles
+- Quantile targets:
+  - `10%, 30%, 50%, 70%, 90%`
+  - collapse duplicates if the span is short
+- At each target point, choose the nearest valid frame with the best score from:
+  - body box size
+  - detector confidence
+  - pose visibility if already available
+  - face visibility bonus when present
+
+### Tier 2 densification: only for ambiguous candidates/spans
+- Densify only if the span is still unresolved after Tier 1, or if the mapping confidence is below threshold.
+- Ambiguous conditions include:
+  - multiple visible identities with similar mapping support
+  - reaction-shot / cut-heavy spans
+  - weak face anchor coverage
+  - strong disagreement between face and ReID identity evidence
+- Densification budget:
+  - add up to **6 more frames** per `(candidate, span)`
+  - max total **12 sampled frames**
+- Densification should focus on:
+  - frames nearest speaker-turn boundaries
+  - frames immediately after cuts
+  - frames with highest motion / mouth-region plausibility if available
+  - frames where pose visibility is strongest
+
+### Tier 3 fallback widening
+- Only if a candidate still has no stable evidence for the current span:
+  - widen to neighboring frames within the same local track
+  - cap widening to a bounded time window around the span
+- Initial widening rule:
+  - up to `+/- 1200 ms` around the scheduled span
+  - never exceed **16 total sampled frames** for that candidate across widened search
+- This widening is for continuity recovery, not as the default path.
+
+### ReID crop policy
+- ReID should use the tracked person crop, not a full frame.
+- Crop policy:
+  - use the person box with a small context margin
+  - keep aspect ratio stable
+  - avoid overly aggressive padding that drags in background identity noise
+- If pose is available, optionally bias the crop to keep torso + upper body centered.
+
+### Pose extraction policy
+- Pose does not need to run on every sampled ReID frame.
+- Default:
+  - run pose on the same Tier 1 sample set
+  - reuse those pose summaries for Tier 1 scoring
+- During densification:
+  - run pose only on newly added frames
+  - skip if the pose budget for that `(candidate, span)` is already exhausted
+- Initial pose cap:
+  - **8 pose frames** per `(candidate, span)`
+
+### Face / ReID / pose interplay
+- If a frame has a strong canonical face box:
+  - it is highly valuable for face identity
+  - but it does not remove the need for at least some ReID/pose support
+- If a span has zero canonical face coverage:
+  - ReID + pose become the primary visual identity evidence
+  - but still stay within the bounded sample caps above
+- If a frame is weak for face but strong for body visibility:
+  - keep it for ReID and pose scoring
+
+### Per-track / per-span caps
+- Hard caps for the first implementation:
+  - Tier 1 ReID frames: `6`
+  - Tier 2 added ReID frames: `6`
+  - widened total ReID frames: `16`
+  - pose frames: `8`
+- Hard caps per local track across one job:
+  - if the same track is sampled repeatedly across many spans, cache and reuse features
+  - do not recompute the same frame crop embedding twice
+
+### Caching keys
+- Cache sampled visual features by:
+  - `track_id`
+  - `frame_idx`
+  - crop type (`reid`, `pose`, optional `face`)
+- Cache span summaries by:
+  - `track_id`
+  - `span_start_time_ms`
+  - `span_end_time_ms`
+  - sampling tier
+- Reuse cached frame-level features whenever multiple spans touch the same track/window.
+
+### Scoring summaries from sampled frames
+- For each candidate span, compute:
+  - ReID centroid
+  - ReID dispersion / variance
+  - pose visibility score
+  - pose stability score
+  - face-anchor count and mean face confidence
+- Favor candidates whose sampled evidence is:
+  - consistent across time
+  - not just one lucky frame
+
+### Failure / recovery rules
+- If Tier 1 returns no usable frames:
+  - mark the candidate as weak and skip to the next candidate unless the span is high priority
+- If Tier 1 and Tier 2 both fail:
+  - allow fallback ASD or audio-only off-screen assignment rather than unbounded widening
+- Never keep widening indefinitely for a low-value candidate.
+
+### Metrics to log
+- For each run, log:
+  - mean sampled ReID frames per candidate/span
+  - mean sampled pose frames per candidate/span
+  - percent of spans resolved at Tier 1
+  - percent of spans needing densification
+  - percent of candidates widened outside the span
+  - cache hit rate for frame-level ReID and pose features
+
+---
+
 ## Architecture Decisions
 
 ### 1. Pyannote owns speaker activity truth
@@ -263,10 +400,10 @@ The current production/default path must remain available until this branch beat
   - representative frames per span
   - max samples per local track
   - denser sampling only for ambiguous tracks/spans
-- [ ] **Step 5: Implement identity clustering rules with same-frame exclusion and continuity constraints**
-- [ ] **Step 6: Persist visual identity metadata into worker analysis context / debug artifacts**
-- [ ] **Step 7: Run tests and fix edge cases**
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Implement identity clustering rules with same-frame exclusion and continuity constraints**
+- [ ] **Step 7: Persist visual identity metadata into worker analysis context / debug artifacts**
+- [ ] **Step 8: Run tests and fix edge cases**
+- [ ] **Step 9: Commit**
 
 ### Task 3: Learn audio-speaker to visual-identity mappings from clean spans only
 
