@@ -2237,17 +2237,6 @@ class ClyptWorker:
         return max(0.0, min(1.0, requested))
 
     @staticmethod
-    def _lrasd_topk_candidates_per_turn() -> int:
-        raw = os.getenv("CLYPT_LRASD_TOPK_PER_TURN", "").strip()
-        if raw == "":
-            return 0
-        try:
-            requested = int(raw)
-        except Exception:
-            requested = 0
-        return max(0, min(8, requested))
-
-    @staticmethod
     def _audio_diarization_config() -> dict:
         """Return the env-driven pyannote diarization config surface."""
         enabled_raw = os.getenv("CLYPT_AUDIO_DIARIZATION_ENABLE", "0").strip().lower()
@@ -6568,147 +6557,6 @@ class ClyptWorker:
         )
         return ranked
 
-    def _select_lrasd_turn_topk_track_ids(
-        self,
-        *,
-        audio_speaker_turns: list[dict],
-        words: list[dict],
-        eligible_track_ids: set[str],
-        track_to_dets: dict[str, list[dict]],
-        frame_to_dets: dict[int, list[dict]],
-        track_quality_by_tid: dict[str, dict],
-        track_identity_features: dict[str, dict] | None = None,
-        canonical_face_boxes: dict[tuple[str, int], tuple],
-        frame_width: int,
-        frame_height: int,
-        fps: float,
-    ) -> tuple[list[dict], list[dict]]:
-        top_k = self._lrasd_topk_candidates_per_turn()
-        top_k_enabled = top_k > 0
-        selected_turns: list[dict] = []
-        debug_rows: list[dict] = []
-        normalized_turns: list[dict] = []
-        for turn in audio_speaker_turns or []:
-            start_time_ms = int(turn.get("start_time_ms", 0) or 0)
-            end_time_ms = int(turn.get("end_time_ms", start_time_ms) or start_time_ms)
-            if end_time_ms < start_time_ms:
-                start_time_ms, end_time_ms = end_time_ms, start_time_ms
-            if end_time_ms <= start_time_ms:
-                continue
-            normalized_turns.append(
-                {
-                    **dict(turn),
-                    "start_time_ms": int(start_time_ms),
-                    "end_time_ms": int(end_time_ms),
-                }
-            )
-
-        def _merged_word_spans_for_turn(turn_row: dict) -> list[tuple[int, int]]:
-            spans: list[tuple[int, int]] = []
-            turn_start = int(turn_row["start_time_ms"])
-            turn_end = int(turn_row["end_time_ms"])
-            for word in words or []:
-                word_start = int(word.get("start_time_ms", 0) or 0)
-                word_end = int(word.get("end_time_ms", word_start) or word_start)
-                if word_end < word_start:
-                    word_start, word_end = word_end, word_start
-                start_ms = max(turn_start, word_start)
-                end_ms = min(turn_end, word_end)
-                if end_ms <= start_ms:
-                    continue
-                spans.append((int(start_ms), int(end_ms)))
-            spans.sort()
-            if not spans:
-                return []
-            merged: list[list[int]] = [[spans[0][0], spans[0][1]]]
-            for start_ms, end_ms in spans[1:]:
-                if start_ms <= merged[-1][1] + 250:
-                    merged[-1][1] = max(merged[-1][1], end_ms)
-                else:
-                    merged.append([start_ms, end_ms])
-            return [(int(start_ms), int(end_ms)) for start_ms, end_ms in merged]
-
-        for turn in normalized_turns:
-            for span_start_ms, span_end_ms in _merged_word_spans_for_turn(turn):
-                subturn = {
-                    **dict(turn),
-                    "start_time_ms": int(span_start_ms),
-                    "end_time_ms": int(span_end_ms),
-                }
-                ranked = self._rank_lrasd_turn_candidates(
-                    turn=subturn,
-                    eligible_track_ids=eligible_track_ids,
-                    track_to_dets=track_to_dets,
-                    frame_to_dets=frame_to_dets,
-                    track_quality_by_tid=track_quality_by_tid,
-                    track_identity_features=track_identity_features,
-                    canonical_face_boxes=canonical_face_boxes,
-                    frame_width=frame_width,
-                    frame_height=frame_height,
-                    fps=fps,
-                )
-                if not ranked:
-                    continue
-
-                overlap_active_count = sum(
-                    1
-                    for peer_turn in normalized_turns
-                    if int(peer_turn["start_time_ms"]) < int(span_end_ms)
-                    and int(peer_turn["end_time_ms"]) > int(span_start_ms)
-                )
-                start_fi = int(round((span_start_ms / 1000.0) * fps))
-                end_fi = int(round((span_end_ms / 1000.0) * fps))
-                if end_fi < start_fi:
-                    start_fi, end_fi = end_fi, start_fi
-
-                if overlap_active_count > 1 or not top_k_enabled:
-                    selected_candidates = ranked
-                else:
-                    selected_candidates = ranked[:top_k]
-                selected_track_ids = [
-                    str(candidate["local_track_id"])
-                    for candidate in selected_candidates
-                ]
-                selected_turns.append(
-                    {
-                        "speaker_id": str(turn.get("speaker_id", "") or ""),
-                        "start_time_ms": int(span_start_ms),
-                        "end_time_ms": int(span_end_ms),
-                        "start_frame_idx": int(start_fi),
-                        "end_frame_idx": int(end_fi),
-                        "selected_local_track_ids": selected_track_ids,
-                        "overlap_active_count": int(overlap_active_count),
-                    }
-                )
-                debug_rows.append(
-                    {
-                        "speaker_id": str(turn.get("speaker_id", "") or ""),
-                        "start_time_ms": int(span_start_ms),
-                        "end_time_ms": int(span_end_ms),
-                        "top_k": int(top_k),
-                        "top_k_enabled": bool(top_k_enabled),
-                        "overlap_active_count": int(overlap_active_count),
-                        "selected_local_track_ids": list(selected_track_ids),
-                        "candidates": [dict(candidate) for candidate in ranked],
-                    }
-                )
-
-        selected_turns.sort(
-            key=lambda item: (
-                int(item.get("start_frame_idx", 0)),
-                int(item.get("end_frame_idx", 0)),
-                str(item.get("speaker_id", "")),
-            )
-        )
-        debug_rows.sort(
-            key=lambda item: (
-                int(item.get("start_time_ms", 0)),
-                int(item.get("end_time_ms", 0)),
-                str(item.get("speaker_id", "")),
-            )
-        )
-        return selected_turns, debug_rows
-
     @staticmethod
     def _open_lrasd_video_reader(video_path: str):
         import os
@@ -7241,22 +7089,14 @@ class ClyptWorker:
             rank_candidates_fn=_rank_span_candidates,
         )
         self._last_lrasd_turn_candidate_debug = [dict(row) for row in lrasd_turn_candidate_debug]
-        selected_turn_track_union = {
-            str(tid)
-            for job in span_jobs
-            for tid in job.get("selected_local_track_ids", []) or []
-        }
         self._last_speaker_binding_metrics.update(
             {
                 "lrasd_turn_count": int(len(span_jobs)),
-                "lrasd_turn_topk": 0,
-                "lrasd_turn_selected_track_count": int(len(selected_turn_track_union)),
-                "lrasd_span_job_count": int(len(span_jobs)),
             }
         )
         print(
             "  LR-ASD span jobs: "
-            f"jobs={len(span_jobs)}, selected_tracks={len(selected_turn_track_union)}"
+            f"jobs={len(span_jobs)}"
         )
         if scheduled_hard_spans and not span_jobs:
             print("  LR-ASD found no runnable hard-span jobs after candidate filtering.")

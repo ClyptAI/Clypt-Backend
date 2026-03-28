@@ -27,6 +27,19 @@ class FakeStorage:
         return f"gs://bucket/{object_name}"
 
 
+def _install_fake_scipy_wavfile(monkeypatch, read_impl=None):
+    fake_scipy = types.ModuleType("scipy")
+    fake_io = types.ModuleType("scipy.io")
+    fake_wavfile = types.ModuleType("scipy.io.wavfile")
+    fake_wavfile.read = read_impl or (lambda path: (16000, np.zeros(48000, dtype=np.int16)))
+    fake_io.wavfile = fake_wavfile
+    fake_scipy.io = fake_io
+    monkeypatch.setitem(sys.modules, "scipy", fake_scipy)
+    monkeypatch.setitem(sys.modules, "scipy.io", fake_io)
+    monkeypatch.setitem(sys.modules, "scipy.io.wavfile", fake_wavfile)
+    return fake_wavfile
+
+
 def test_extract_job_produces_manifest_and_artifacts(tmp_path: Path, monkeypatch):
     video_path = tmp_path / "video.mp4"
     video_path.write_bytes(b"video")
@@ -3126,9 +3139,10 @@ def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path:
     fake_psf.mfcc = _mfcc
     monkeypatch.setitem(__import__("sys").modules, "python_speech_features", fake_psf)
 
-    import scipy.io.wavfile as wavfile_module
-
-    monkeypatch.setattr(wavfile_module, "read", lambda path: (16000, np.zeros(48000, dtype=np.int16)))
+    _install_fake_scipy_wavfile(
+        monkeypatch,
+        read_impl=lambda path: (16000, np.zeros(48000, dtype=np.int16)),
+    )
     monkeypatch.setenv("CLYPT_ASD_PRECOMPUTED_FACE", "0")
     monkeypatch.setattr(
         worker,
@@ -3278,9 +3292,7 @@ def _run_fake_lrasd_binding_case(
     fake_psf.mfcc = lambda *args, **kwargs: np.zeros((10, 13), dtype=np.float32)
     monkeypatch.setitem(sys.modules, "python_speech_features", fake_psf)
 
-    import scipy.io.wavfile as wavfile_module
-
-    monkeypatch.setattr(wavfile_module, "read", lambda path: (16000, np.zeros(48000, dtype=np.int16)))
+    _install_fake_scipy_wavfile(monkeypatch)
     monkeypatch.setattr(worker, "_build_canonical_face_bbox_lookup", lambda **kwargs: {})
     if audio_turn_bindings is not None:
         monkeypatch.setattr(
@@ -3800,18 +3812,15 @@ def test_run_lrasd_binding_scores_all_globally_eligible_candidates_when_turn_top
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
 
 
-def test_lrasd_topk_candidates_per_turn_disabled_when_unset_or_zero(monkeypatch):
+def test_lrasd_turn_topk_helpers_are_removed():
     worker_cls = ClyptWorker._get_user_cls()
 
-    monkeypatch.delenv("CLYPT_LRASD_TOPK_PER_TURN", raising=False)
-    assert worker_cls._lrasd_topk_candidates_per_turn() == 0
-
-    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "0")
-    assert worker_cls._lrasd_topk_candidates_per_turn() == 0
+    assert not hasattr(worker_cls, "_lrasd_topk_candidates_per_turn")
+    assert not hasattr(worker_cls, "_select_lrasd_turn_topk_track_ids")
 
 
-def test_run_lrasd_binding_turn_topk_zero_disables_pruning(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "0")
+def test_run_lrasd_binding_ignores_removed_turn_topk_env_and_metrics(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
     worker, words, bindings = _run_fake_lrasd_binding_case(
         monkeypatch,
         tmp_path,
@@ -3843,46 +3852,8 @@ def test_run_lrasd_binding_turn_topk_zero_disables_pruning(monkeypatch, tmp_path
     )
 
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
-
-
-def test_run_lrasd_binding_does_not_reduce_candidates_using_turn_subselection(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
-    worker, words, bindings = _run_fake_lrasd_binding_case(
-        monkeypatch,
-        tmp_path,
-        track_specs={
-            "listener": {
-                "x_center": 222.0,
-                "y_center": 102.0,
-                "width": 68.0,
-                "height": 144.0,
-                "confidence": 0.9,
-                "intensity": 120,
-            },
-            "speaker": {
-                "x_center": 82.0,
-                "y_center": 100.0,
-                "width": 78.0,
-                "height": 152.0,
-                "confidence": 0.91,
-                "intensity": 210,
-                "visible_start_frame": 20,
-                "visible_end_frame": 39,
-            },
-        },
-        score_by_track={
-            "listener": 0.79,
-            "speaker": 0.77,
-        },
-        words=[
-            {"text": "late", "start_time_ms": 800, "end_time_ms": 1000},
-        ],
-        audio_speaker_turns=[
-            {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 1000},
-        ],
-    )
-
-    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
+    assert "lrasd_turn_topk" not in worker._last_speaker_binding_metrics
+    assert "lrasd_turn_selected_track_count" not in worker._last_speaker_binding_metrics
 
 
 def test_run_lrasd_binding_uses_runtime_relevant_candidate_count_for_fallback_gate(monkeypatch, tmp_path: Path):
@@ -3926,7 +3897,7 @@ def test_run_lrasd_binding_uses_runtime_relevant_candidate_count_for_fallback_ga
 
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
     assert worker._last_speaker_binding_metrics["lrasd_eligible_track_count"] == 2
-    assert worker._last_speaker_binding_metrics["lrasd_turn_selected_track_count"] == 1
+    assert "lrasd_turn_selected_track_count" not in worker._last_speaker_binding_metrics
     assert bindings == [
         {"track_id": "speaker", "start_time_ms": 800, "end_time_ms": 1000, "word_count": 1}
     ]
