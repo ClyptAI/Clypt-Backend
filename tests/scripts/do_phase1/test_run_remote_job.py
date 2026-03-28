@@ -38,3 +38,18 @@ def test_relay_artifact_paths_are_derived_from_video_id(subject_module):
     assert subject_module.remote_relay_path(video_id) == "/opt/clypt-phase1/relay/2jW9lmlfiKQ.mp4"
     assert subject_module.remote_relay_source_url(video_id) == "http://127.0.0.1:8091/2jW9lmlfiKQ.mp4"
     assert subject_module.remote_job_log_path("job_abc") == "/var/lib/clypt/do_phase1_service/workdir/logs/job_abc.log"
+
+
+def test_yt_dlp_command_prefers_binary_on_path(subject_module, monkeypatch):
+    monkeypatch.setattr(subject_module.shutil, "which", lambda name: "/opt/homebrew/bin/yt-dlp" if name == "yt-dlp" else None)
+    assert subject_module._yt_dlp_command() == ["/opt/homebrew/bin/yt-dlp"]
+
+
+def test_yt_dlp_command_falls_back_to_python_module(subject_module, monkeypatch):
+    monkeypatch.setattr(subject_module.shutil, "which", lambda name: "/usr/bin/python3" if name == "python3" else None)
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(subject_module.subprocess, "run", lambda *args, **kwargs: Result())
+    assert subject_module._yt_dlp_command() == ["/usr/bin/python3", "-m", "yt_dlp"]

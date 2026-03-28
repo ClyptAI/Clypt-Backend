@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,6 +24,25 @@ YTDLP_FORMAT = "bv*[vcodec~='^avc1']+ba[ext=m4a]/b[ext=mp4]/b"
 
 class UserFacingError(RuntimeError):
     pass
+
+
+def _yt_dlp_command() -> list[str] | None:
+    yt_dlp_bin = shutil.which("yt-dlp")
+    if yt_dlp_bin:
+        return [yt_dlp_bin]
+
+    python3_bin = shutil.which("python3")
+    if python3_bin:
+        probe = subprocess.run(
+            [python3_bin, "-m", "yt_dlp", "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return [python3_bin, "-m", "yt_dlp"]
+
+    return None
 
 
 def extract_youtube_video_id(url: str) -> str:
@@ -119,24 +139,44 @@ def download_video_locally(url: str, video_id: str) -> Path:
     for stale in LOCAL_CACHE_DIR.glob(f"{video_id}.*"):
         stale.unlink()
 
+    outtmpl = str(LOCAL_CACHE_DIR / f"{video_id}.%(ext)s")
     try:
         import yt_dlp
-    except ImportError as exc:  # pragma: no cover
-        raise UserFacingError("yt-dlp is not available in the repo virtualenv") from exc
+    except ImportError:
+        yt_dlp = None
 
-    outtmpl = str(LOCAL_CACHE_DIR / f"{video_id}.%(ext)s")
-    opts = {
-        "format": YTDLP_FORMAT,
-        "outtmpl": outtmpl,
-        "merge_output_format": "mp4",
-        "quiet": False,
-        "noprogress": False,
-    }
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.extract_info(url, download=True)
-    except Exception as exc:  # pragma: no cover - network/tool failure
-        raise UserFacingError(f"yt-dlp download failed: {exc}") from exc
+    if yt_dlp is not None:
+        opts = {
+            "format": YTDLP_FORMAT,
+            "outtmpl": outtmpl,
+            "merge_output_format": "mp4",
+            "quiet": False,
+            "noprogress": False,
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.extract_info(url, download=True)
+        except Exception as exc:  # pragma: no cover - network/tool failure
+            raise UserFacingError(f"yt-dlp download failed: {exc}") from exc
+    else:
+        yt_dlp_cmd = _yt_dlp_command()
+        if yt_dlp_cmd is None:  # pragma: no cover
+            raise UserFacingError(
+                "yt-dlp is not available in the repo virtualenv or on your PATH"
+            )
+        cmd = [
+            *yt_dlp_cmd,
+            "--format",
+            YTDLP_FORMAT,
+            "--output",
+            outtmpl,
+            "--merge-output-format",
+            "mp4",
+            url,
+        ]
+        result = subprocess.run(cmd, text=True, check=False)
+        if result.returncode != 0:  # pragma: no cover - network/tool failure
+            raise UserFacingError("yt-dlp download failed")
 
     if target.exists() and target.stat().st_size > 0:
         return target
