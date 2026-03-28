@@ -11,7 +11,11 @@ import subprocess
 import time
 from dataclasses import asdict
 
-from backend.speaker_binding import build_visual_identities, learn_audio_visual_mappings
+from backend.speaker_binding import (
+    build_visual_identities,
+    learn_audio_visual_mappings,
+    resolve_span_assignments,
+)
 
 try:
     if os.getenv("CLYPT_ENABLE_LEGACY_SERVERLESS_SDK", "0") != "1":
@@ -8997,6 +9001,10 @@ class ClyptWorker:
             audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
             local_to_global_track_id=cluster_id_remap,
         )
+        span_assignments: list[dict] = resolve_span_assignments(
+            spans=active_speakers_local,
+            mapping_summaries=audio_visual_mappings,
+        )
         overlap_follow_decisions: list[dict] = self._run_overlap_follow_postpass(
             active_speakers_local=active_speakers_local,
             words=words,
@@ -9024,6 +9032,7 @@ class ClyptWorker:
         metrics["speaker_binding_local_segment_count"] = len(speaker_bindings_local)
         metrics["speaker_follow_binding_local_segment_count"] = len(speaker_follow_bindings_local)
         metrics["audio_visual_mapping_count"] = len(audio_visual_mappings)
+        metrics["span_assignment_count"] = len(span_assignments)
         last_binding_metrics = getattr(self, "_last_speaker_binding_metrics", None)
         if isinstance(last_binding_metrics, dict):
             metrics.update(last_binding_metrics)
@@ -9064,6 +9073,7 @@ class ClyptWorker:
             "speaker_follow_bindings": speaker_follow_bindings,
             "audio_visual_mappings": audio_visual_mappings,
             "active_speakers_local": active_speakers_local,
+            "span_assignments": span_assignments,
             "overlap_follow_decisions": overlap_follow_decisions,
         }
         if self._local_clip_bindings_enabled():
