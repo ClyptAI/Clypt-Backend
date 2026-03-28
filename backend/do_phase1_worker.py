@@ -112,6 +112,16 @@ ASR_MODEL_NAME = "nvidia/parakeet-tdt-1.1b"
 LRASD_MODEL_PATH = "/root/.cache/clypt/finetuning_TalkSet.model"
 LRASD_REPO_ROOT = "/root/lrasd"
 YOLO_WEIGHTS_PATH = "yolo26s.pt"
+VISUAL_POSE_WEIGHTS_PATH = "yolo11l-pose.pt"
+VISUAL_SIGNAL_MODEL_ROOT = "/root/.cache/clypt/visual_signals"
+MEDIAPIPE_FACE_LANDMARKER_MODEL_PATH = os.path.join(
+    VISUAL_SIGNAL_MODEL_ROOT,
+    "face_landmarker.task",
+)
+MEDIAPIPE_FACE_LANDMARKER_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+    "face_landmarker/float16/latest/face_landmarker.task"
+)
 PHASE1_SCHEMA_VERSION = "2.0.0"
 PHASE1_TASK_TYPE = "person_tracking"
 PHASE1_COORDINATE_SPACE = "absolute_original_frame_xyxy"
@@ -149,6 +159,25 @@ def download_yolo_model():
 
     print("Downloading YOLO26s weights into container cache...")
     YOLO(YOLO_WEIGHTS_PATH)
+
+
+def download_visual_signal_models():
+    """Cache visual-signal models used by the max-accuracy branch."""
+    import urllib.request
+    from ultralytics import YOLO
+
+    os.makedirs(VISUAL_SIGNAL_MODEL_ROOT, exist_ok=True)
+    if not os.path.exists(MEDIAPIPE_FACE_LANDMARKER_MODEL_PATH):
+        print("Downloading MediaPipe Face Landmarker model into container cache...")
+        urllib.request.urlretrieve(
+            MEDIAPIPE_FACE_LANDMARKER_MODEL_URL,
+            MEDIAPIPE_FACE_LANDMARKER_MODEL_PATH,
+        )
+    else:
+        print("MediaPipe Face Landmarker model already cached.")
+
+    print("Downloading YOLO11 pose weights into container cache...")
+    YOLO(VISUAL_POSE_WEIGHTS_PATH)
 
 
 def download_lrasd_model():
@@ -244,6 +273,7 @@ clypt_image = (
     # Step 3: Cache model weights at build time
     .run_function(download_asr_model)
     .run_function(download_yolo_model)
+    .run_function(download_visual_signal_models)
     .run_function(download_lrasd_model)
     .run_function(download_insightface_model)
 )
@@ -1737,9 +1767,445 @@ class ClyptWorker:
 
         return [asdict(summary) for summary in learn_audio_visual_mappings(evidence_records)]
 
+    def _get_visual_signal_frame_provider(self, video_path: str):
+        from decord import VideoReader, cpu
+
+        cache_key = str(video_path)
+        cached_provider = getattr(self, "_visual_signal_frame_provider_cache", {}).get(cache_key)
+        if cached_provider is not None:
+            return cached_provider
+
+        vr, decode_backend = self._make_video_reader(video_path)
+
+        fallback_factory = None
+        if decode_backend == "gpu":
+            fallback_factory = lambda: VideoReader(video_path, ctx=cpu(0))
+
+        provider = self._make_lrasd_frame_provider(vr, fallback_factory=fallback_factory)
+        self._visual_signal_frame_provider_cache[cache_key] = provider
+        return provider
+
+    @staticmethod
+    def _nearest_face_observation(
+        face_observations: list[dict] | None,
+        *,
+        frame_idx: int,
+        max_gap_frames: int = 3,
+    ) -> dict | None:
+        best_observation = None
+        best_gap = None
+        for observation in face_observations or []:
+            obs_frame_idx = int(observation.get("frame_idx", -1))
+            if obs_frame_idx < 0:
+                continue
+            gap = abs(obs_frame_idx - int(frame_idx))
+            if gap > max_gap_frames:
+                continue
+            if best_gap is None or gap < best_gap:
+                best_gap = gap
+                best_observation = dict(observation)
+        return best_observation
+
+    @staticmethod
+    def _crop_from_normalized_bbox(frame, bbox: dict | None, *, pad: float = 0.08):
+        import numpy as np
+
+        if frame is None or bbox is None:
+            return None
+        try:
+            frame_h, frame_w = frame.shape[:2]
+        except Exception:
+            return None
+        if frame_h <= 0 or frame_w <= 0:
+            return None
+
+        left = float(bbox.get("left", 0.0))
+        top = float(bbox.get("top", 0.0))
+        right = float(bbox.get("right", 1.0))
+        bottom = float(bbox.get("bottom", 1.0))
+        width = max(0.0, right - left)
+        height = max(0.0, bottom - top)
+        left = max(0.0, left - (pad * width))
+        top = max(0.0, top - (pad * height))
+        right = min(1.0, right + (pad * width))
+        bottom = min(1.0, bottom + (pad * height))
+        x1 = max(0, min(frame_w, int(round(left * frame_w))))
+        y1 = max(0, min(frame_h, int(round(top * frame_h))))
+        x2 = max(0, min(frame_w, int(round(right * frame_w))))
+        y2 = max(0, min(frame_h, int(round(bottom * frame_h))))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        crop = frame[y1:y2, x1:x2]
+        if crop is None or getattr(crop, "size", 0) <= 0:
+            return None
+        return np.ascontiguousarray(crop)
+
+    def _extract_face_signal_crop(self, frame, det: dict, face_observation: dict | None):
+        import numpy as np
+
+        if face_observation is not None:
+            crop = self._crop_from_normalized_bbox(frame, face_observation.get("bounding_box"), pad=0.12)
+            if crop is not None:
+                return crop
+
+        if frame is None:
+            return None
+        try:
+            frame_h, frame_w = frame.shape[:2]
+        except Exception:
+            return None
+        if frame_h <= 0 or frame_w <= 0:
+            return None
+
+        x1 = float(det.get("x1", 0.0))
+        y1 = float(det.get("y1", 0.0))
+        x2 = float(det.get("x2", 0.0))
+        y2 = float(det.get("y2", 0.0))
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+        face_left = max(0, int(round(x1 + (0.18 * width))))
+        face_right = min(frame_w, int(round(x2 - (0.18 * width))))
+        face_top = max(0, int(round(y1 - (0.03 * height))))
+        face_bottom = min(frame_h, int(round(y1 + (0.42 * height))))
+        if face_right <= face_left or face_bottom <= face_top:
+            return None
+        crop = frame[face_top:face_bottom, face_left:face_right]
+        if crop is None or getattr(crop, "size", 0) <= 0:
+            return None
+        return np.ascontiguousarray(crop)
+
+    def _extract_pose_signal_crop(self, frame, det: dict):
+        import numpy as np
+
+        if frame is None:
+            return None
+        try:
+            frame_h, frame_w = frame.shape[:2]
+        except Exception:
+            return None
+        if frame_h <= 0 or frame_w <= 0:
+            return None
+
+        x1 = float(det.get("x1", 0.0))
+        y1 = float(det.get("y1", 0.0))
+        x2 = float(det.get("x2", 0.0))
+        y2 = float(det.get("y2", 0.0))
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+        pad_x = 0.08 * width
+        pad_y = 0.05 * height
+        left = max(0, int(round(x1 - pad_x)))
+        top = max(0, int(round(y1 - pad_y)))
+        right = min(frame_w, int(round(x2 + pad_x)))
+        bottom = min(frame_h, int(round(y2 + pad_y)))
+        if right <= left or bottom <= top:
+            return None
+        crop = frame[top:bottom, left:right]
+        if crop is None or getattr(crop, "size", 0) <= 0:
+            return None
+        return np.ascontiguousarray(crop)
+
+    def _create_face_landmarker(self):
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision as mp_vision
+
+        base_options = mp_python.BaseOptions(
+            model_asset_path=self.face_landmarker_model_path,
+        )
+        options = mp_vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            running_mode=mp_vision.RunningMode.VIDEO,
+            output_face_blendshapes=True,
+            num_faces=1,
+        )
+        return mp_vision.FaceLandmarker.create_from_options(options)
+
+    def _run_face_landmarker_samples(self, face_crops: list[tuple[int, object]]) -> list[dict]:
+        if not face_crops or self.face_landmarker_model_path is None or not os.path.exists(self.face_landmarker_model_path):
+            return []
+
+        face_landmarker = None
+        results: list[dict] = []
+        try:
+            face_landmarker = self._create_face_landmarker()
+            mp = getattr(self, "_mediapipe_module", None)
+            if mp is None:
+                import mediapipe as mp  # type: ignore[no-redef]
+            for index, (frame_idx, crop) in enumerate(face_crops):
+                if crop is None or getattr(crop, "size", 0) <= 0:
+                    results.append({"frame_idx": int(frame_idx), "face_detected": False})
+                    continue
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=crop)
+                timestamp_ms = int(frame_idx if frame_idx >= 0 else (index * 33))
+                detection = face_landmarker.detect_for_video(mp_image, timestamp_ms)
+                landmarks = list(getattr(detection, "face_landmarks", []) or [])
+                if not landmarks:
+                    results.append({"frame_idx": int(frame_idx), "face_detected": False})
+                    continue
+
+                landmark_row = landmarks[0]
+
+                def _distance(idx_a: int, idx_b: int) -> float:
+                    point_a = landmark_row[idx_a]
+                    point_b = landmark_row[idx_b]
+                    dx = float(point_a.x) - float(point_b.x)
+                    dy = float(point_a.y) - float(point_b.y)
+                    return float((dx * dx + dy * dy) ** 0.5)
+
+                mouth_width = max(_distance(78, 308), 1e-6)
+                mouth_open_ratio = _distance(13, 14) / mouth_width
+                mouth_wide_ratio = mouth_width
+
+                blendshape_scores = {}
+                for category in list(getattr(detection, "face_blendshapes", []) or [])[:1]:
+                    for item in category:
+                        blendshape_scores[str(item.category_name)] = float(item.score)
+
+                results.append(
+                    {
+                        "frame_idx": int(frame_idx),
+                        "face_detected": True,
+                        "mouth_open_ratio": float(mouth_open_ratio),
+                        "mouth_wide_ratio": float(mouth_wide_ratio),
+                        "blendshape_jaw_open": float(
+                            blendshape_scores.get("jawOpen", 0.0)
+                        ),
+                        "blendshape_mouth_open": float(
+                            max(
+                                blendshape_scores.get("mouthOpen", 0.0),
+                                blendshape_scores.get("mouthSmileLeft", 0.0) * 0.0,
+                            )
+                        ),
+                    }
+                )
+        except Exception:
+            return []
+        finally:
+            if face_landmarker is not None:
+                try:
+                    face_landmarker.close()
+                except Exception:
+                    pass
+        return results
+
+    def _run_pose_signal_samples(self, pose_crops: list[tuple[int, object]]) -> list[dict]:
+        import numpy as np
+
+        if not pose_crops or self.visual_pose_model is None:
+            return []
+
+        results: list[dict] = []
+        try:
+            for frame_idx, crop in pose_crops:
+                if crop is None or getattr(crop, "size", 0) <= 0:
+                    results.append({"frame_idx": int(frame_idx)})
+                    continue
+                predictions = self.visual_pose_model.predict(
+                    source=[crop],
+                    verbose=False,
+                    conf=0.15,
+                    device=self.visual_pose_model_device,
+                )
+                prediction = predictions[0] if predictions else None
+                keypoints = getattr(prediction, "keypoints", None)
+                if keypoints is None or getattr(keypoints, "data", None) is None or len(keypoints.data) == 0:
+                    results.append({"frame_idx": int(frame_idx)})
+                    continue
+                kp = keypoints.data[0].detach().cpu().numpy()
+                if kp.ndim != 2 or kp.shape[0] < 13:
+                    results.append({"frame_idx": int(frame_idx)})
+                    continue
+
+                confs = kp[:, 2] if kp.shape[1] >= 3 else np.zeros((kp.shape[0],), dtype=np.float32)
+
+                def _mean_conf(indices: list[int]) -> float:
+                    valid = [float(confs[idx]) for idx in indices if idx < len(confs)]
+                    return float(sum(valid) / max(1, len(valid)))
+
+                head_visibility = _mean_conf([0, 1, 2, 3, 4])
+                upper_body_visibility = _mean_conf([0, 1, 2, 3, 4, 5, 6, 7, 8])
+                frontal_support = min(
+                    float(confs[5]) if 5 < len(confs) else 0.0,
+                    float(confs[6]) if 6 < len(confs) else 0.0,
+                )
+                left_shoulder = kp[5] if 5 < len(kp) else None
+                right_shoulder = kp[6] if 6 < len(kp) else None
+                torso_center_x = None
+                torso_center_y = None
+                shoulder_span = None
+                if left_shoulder is not None and right_shoulder is not None:
+                    torso_center_x = float((left_shoulder[0] + right_shoulder[0]) * 0.5)
+                    torso_center_y = float((left_shoulder[1] + right_shoulder[1]) * 0.5)
+                    shoulder_span = float(abs(left_shoulder[0] - right_shoulder[0]))
+
+                results.append(
+                    {
+                        "frame_idx": int(frame_idx),
+                        "upper_body_visibility": upper_body_visibility,
+                        "head_visibility": head_visibility,
+                        "frontal_support": frontal_support,
+                        "torso_center_x": torso_center_x,
+                        "torso_center_y": torso_center_y,
+                        "shoulder_span": shoulder_span,
+                    }
+                )
+        except Exception:
+            return []
+        return results
+
+    def _proxy_candidate_visual_signals(
+        self,
+        *,
+        window_dets: list[dict],
+        frame_indices: list[int],
+        feature: dict,
+    ) -> dict:
+        motion_values: list[float] = []
+        prev_det = None
+        for det in window_dets:
+            if prev_det is not None:
+                dx = abs(float(det.get("x_center", 0.0)) - float(prev_det.get("x_center", 0.0)))
+                dy = abs(float(det.get("y_center", 0.0)) - float(prev_det.get("y_center", 0.0)))
+                dh = abs(float(det.get("height", 0.0)) - float(prev_det.get("height", 0.0)))
+                norm = max(float(det.get("height", 1.0)), 1.0)
+                motion_values.append((0.45 * dx + 0.8 * dy + 1.1 * dh) / norm)
+            prev_det = det
+        mouth_motion_score = max(0.0, min(1.0, (sum(motion_values) / max(1, len(motion_values))) * 2.5))
+
+        avg_confidence = sum(float(det.get("confidence", 0.0)) for det in window_dets) / max(1, len(window_dets))
+        avg_area = sum(
+            max(1.0, float(det.get("width", 1.0)) * float(det.get("height", 1.0)))
+            for det in window_dets
+        ) / max(1, len(window_dets))
+        pose_visibility_score = max(0.0, min(1.0, (0.6 * avg_confidence) + (0.4 * min(1.0, avg_area / 50000.0))))
+
+        face_observations = list(feature.get("face_observations", []) or [])
+        face_hits = 0
+        for observation in face_observations:
+            obs_frame_idx = int(observation.get("frame_idx", -1))
+            if obs_frame_idx in frame_indices:
+                face_hits += 1
+        face_visibility_score = max(0.0, min(1.0, face_hits / max(1, len(frame_indices))))
+        return {
+            "mouth_motion_score": round(mouth_motion_score, 3),
+            "pose_visibility_score": round(pose_visibility_score, 3),
+            "face_visibility_score": round(face_visibility_score, 3),
+            "blendshape_support_score": 0.0,
+            "pose_stability_score": 0.0,
+            "usable_face_frame_count": int(face_hits),
+            "usable_pose_frame_count": len(window_dets),
+        }
+
+    def _extract_candidate_visual_signals(
+        self,
+        *,
+        video_path: str,
+        local_track_id: str,
+        global_track_id: str,
+        span_start_ms: int,
+        span_end_ms: int,
+        window_dets: list[dict],
+        feature: dict,
+        mapping_confidence: float,
+    ) -> dict:
+        from backend.speaker_binding.visual_signals import (
+            combine_visual_candidate_signals,
+            sample_span_frame_indices,
+            summarize_mouth_landmark_signal,
+            summarize_pose_signal,
+        )
+
+        frame_indices = [
+            int(det.get("frame_idx", -1))
+            for det in window_dets
+            if int(det.get("frame_idx", -1)) >= 0
+        ]
+        proxy_signals = self._proxy_candidate_visual_signals(
+            window_dets=window_dets,
+            frame_indices=frame_indices,
+            feature=feature,
+        )
+        sampled_frame_indices = sample_span_frame_indices(frame_indices, max_samples=8)
+        if not sampled_frame_indices:
+            return combine_visual_candidate_signals(
+                visual_identity_id=global_track_id,
+                local_track_id=local_track_id,
+                mapping_summary={"mapping_confidence": mapping_confidence},
+                mouth_summary=proxy_signals,
+                pose_summary=proxy_signals,
+            )
+
+        cache_key = (
+            str(video_path),
+            str(local_track_id),
+            str(global_track_id),
+            int(span_start_ms),
+            int(span_end_ms),
+            tuple(sampled_frame_indices),
+            round(float(mapping_confidence), 4),
+        )
+        cached = self._visual_signal_summary_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        frame_provider = self._get_visual_signal_frame_provider(video_path)
+        det_by_frame_idx = {
+            int(det.get("frame_idx", -1)): det
+            for det in window_dets
+            if int(det.get("frame_idx", -1)) >= 0
+        }
+        face_observations = list(feature.get("face_observations", []) or [])
+        face_crops: list[tuple[int, object]] = []
+        pose_crops: list[tuple[int, object]] = []
+        for frame_idx in sampled_frame_indices:
+            det = det_by_frame_idx.get(int(frame_idx))
+            if det is None:
+                continue
+            frame = frame_provider(int(frame_idx))
+            if frame is None:
+                continue
+            face_observation = self._nearest_face_observation(
+                face_observations,
+                frame_idx=int(frame_idx),
+            )
+            face_crop = self._extract_face_signal_crop(frame, det, face_observation)
+            pose_crop = self._extract_pose_signal_crop(frame, det)
+            if face_crop is not None:
+                face_crops.append((int(frame_idx), face_crop))
+            if pose_crop is not None:
+                pose_crops.append((int(frame_idx), pose_crop))
+
+        mouth_samples = self._run_face_landmarker_samples(face_crops)
+        pose_samples = self._run_pose_signal_samples(pose_crops)
+        mouth_summary = summarize_mouth_landmark_signal(mouth_samples)
+        pose_summary = summarize_pose_signal(pose_samples)
+
+        candidate = combine_visual_candidate_signals(
+            visual_identity_id=global_track_id,
+            local_track_id=local_track_id,
+            mapping_summary={"mapping_confidence": mapping_confidence},
+            mouth_summary=mouth_summary,
+            pose_summary=pose_summary,
+        )
+        if (
+            int(candidate.get("usable_face_frame_count", 0) or 0) <= 0
+            and int(candidate.get("usable_pose_frame_count", 0) or 0) <= 0
+        ):
+            candidate = combine_visual_candidate_signals(
+                visual_identity_id=global_track_id,
+                local_track_id=local_track_id,
+                mapping_summary={"mapping_confidence": mapping_confidence},
+                mouth_summary=proxy_signals,
+                pose_summary=proxy_signals,
+            )
+
+        self._visual_signal_summary_cache[cache_key] = dict(candidate)
+        return candidate
+
     def _build_hard_span_candidates(
         self,
         *,
+        video_path: str,
         span: dict,
         track_to_dets: dict[str, list[dict]],
         track_identity_features: dict[str, dict] | None,
@@ -1793,34 +2259,7 @@ class ClyptWorker:
             if not window_dets:
                 continue
 
-            frame_indices = [int(det.get("frame_idx", -1)) for det in window_dets if int(det.get("frame_idx", -1)) >= 0]
-            motion_values: list[float] = []
-            prev_det = None
-            for det in window_dets:
-                if prev_det is not None:
-                    dx = abs(float(det.get("x_center", 0.0)) - float(prev_det.get("x_center", 0.0)))
-                    dy = abs(float(det.get("y_center", 0.0)) - float(prev_det.get("y_center", 0.0)))
-                    dh = abs(float(det.get("height", 0.0)) - float(prev_det.get("height", 0.0)))
-                    norm = max(float(det.get("height", 1.0)), 1.0)
-                    motion_values.append((0.45 * dx + 0.8 * dy + 1.1 * dh) / norm)
-                prev_det = det
-            mouth_motion_score = max(0.0, min(1.0, (sum(motion_values) / max(1, len(motion_values))) * 2.5))
-
-            avg_confidence = sum(float(det.get("confidence", 0.0)) for det in window_dets) / max(1, len(window_dets))
-            avg_area = sum(
-                max(1.0, float(det.get("width", 1.0)) * float(det.get("height", 1.0)))
-                for det in window_dets
-            ) / max(1, len(window_dets))
-            pose_visibility_score = max(0.0, min(1.0, (0.6 * avg_confidence) + (0.4 * min(1.0, avg_area / 50000.0))))
-
             feature = dict((track_identity_features or {}).get(global_track_id, {}) or {})
-            face_observations = list(feature.get("face_observations", []) or [])
-            face_hits = 0
-            for observation in face_observations:
-                frame_idx = _as_int(observation.get("frame_idx"), default=-1)
-                if frame_idx in frame_indices:
-                    face_hits += 1
-            face_visibility_score = max(0.0, min(1.0, face_hits / max(1, len(frame_indices))))
 
             mapping_confidence = 0.0
             for mapping in audio_visual_mappings or []:
@@ -1831,14 +2270,16 @@ class ClyptWorker:
                 mapping_confidence = max(mapping_confidence, float(mapping.get("confidence", 0.0) or 0.0))
 
             candidate_rows.append(
-                {
-                    "visual_identity_id": global_track_id,
-                    "local_track_id": local_track_id,
-                    "mouth_motion_score": round(mouth_motion_score, 3),
-                    "pose_visibility_score": round(pose_visibility_score, 3),
-                    "face_visibility_score": round(face_visibility_score, 3),
-                    "mapping_confidence": round(mapping_confidence, 3),
-                }
+                self._extract_candidate_visual_signals(
+                    video_path=video_path,
+                    local_track_id=local_track_id,
+                    global_track_id=global_track_id,
+                    span_start_ms=span_start_ms,
+                    span_end_ms=span_end_ms,
+                    window_dets=window_dets,
+                    feature=feature,
+                    mapping_confidence=mapping_confidence,
+                )
             )
 
         candidate_rows.sort(key=lambda item: (item["visual_identity_id"], item.get("local_track_id", "")))
@@ -1847,6 +2288,7 @@ class ClyptWorker:
     def _enrich_spans_with_hard_candidates(
         self,
         *,
+        video_path: str,
         spans: list[dict],
         track_to_dets: dict[str, list[dict]],
         track_identity_features: dict[str, dict] | None,
@@ -1860,6 +2302,7 @@ class ClyptWorker:
             visible_local_track_ids = list(span_row.get("visible_local_track_ids") or [])
             if len(visible_local_track_ids) > 1:
                 span_row["hard_span_candidates"] = self._build_hard_span_candidates(
+                    video_path=video_path,
                     span=span_row,
                     track_to_dets=track_to_dets,
                     track_identity_features=track_identity_features,
@@ -4092,9 +4535,12 @@ class ClyptWorker:
         import os
         import sys
         import threading
+        import mediapipe as mp
         import nemo.collections.asr as nemo_asr
         import torch
         from insightface import model_zoo
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision as mp_vision
         from ultralytics import YOLO
         from omegaconf import open_dict
 
@@ -4126,6 +4572,12 @@ class ClyptWorker:
         # --- Load YOLOv26 ---
         print("Loading YOLO26s into GPU VRAM...")
         self.yolo_model = YOLO(YOLO_WEIGHTS_PATH)
+        self.visual_pose_model = None
+        self.visual_pose_model_device = 0 if torch.cuda.is_available() else "cpu"
+        self.face_landmarker = None
+        self.face_landmarker_model_path = MEDIAPIPE_FACE_LANDMARKER_MODEL_PATH
+        self._visual_signal_frame_provider_cache = {}
+        self._visual_signal_summary_cache = {}
 
         self.gpu_device = torch.device("cuda")
         self._face_runtime_name = "buffalo_l"
@@ -4169,6 +4621,41 @@ class ClyptWorker:
         except Exception as e:
             print(
                 "Warning: ArcFace recognizer initialization failed "
+                f"({type(e).__name__}: {e})"
+            )
+
+        try:
+            print("Loading MediaPipe Face Landmarker...")
+            base_options = mp_python.BaseOptions(
+                model_asset_path=self.face_landmarker_model_path,
+            )
+            face_landmarker_options = mp_vision.FaceLandmarkerOptions(
+                base_options=base_options,
+                running_mode=mp_vision.RunningMode.VIDEO,
+                output_face_blendshapes=True,
+                num_faces=1,
+            )
+            self.face_landmarker = mp_vision.FaceLandmarker.create_from_options(
+                face_landmarker_options
+            )
+            self._mediapipe_module = mp
+            print("MediaPipe Face Landmarker ready.")
+        except Exception as e:
+            self.face_landmarker = None
+            self._mediapipe_module = mp
+            print(
+                "Warning: MediaPipe Face Landmarker initialization failed "
+                f"({type(e).__name__}: {e})"
+            )
+
+        try:
+            print("Loading YOLO11 pose model...")
+            self.visual_pose_model = YOLO(VISUAL_POSE_WEIGHTS_PATH)
+            print("YOLO11 pose model ready.")
+        except Exception as e:
+            self.visual_pose_model = None
+            print(
+                "Warning: YOLO11 pose initialization failed "
                 f"({type(e).__name__}: {e})"
             )
         # --- Load LR-ASD ---
@@ -9136,6 +9623,7 @@ class ClyptWorker:
             local_to_global_track_id=cluster_id_remap,
         )
         enriched_active_speakers_local = self._enrich_spans_with_hard_candidates(
+            video_path=video_path,
             spans=active_speakers_local,
             track_to_dets=precluster_track_to_dets,
             track_identity_features=clustered_track_identity_features,

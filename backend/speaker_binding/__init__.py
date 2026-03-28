@@ -14,6 +14,12 @@ from .audio_visual_mapping import (
 from .assignment_engine import resolve_span_assignments
 from .mouth_motion import choose_visual_speaking_candidate
 from .project_words import project_words
+from .visual_signals import (
+    combine_visual_candidate_signals,
+    sample_span_frame_indices,
+    summarize_mouth_landmark_signal,
+    summarize_pose_signal,
+)
 from .visual_identity import build_visual_identities
 
 __all__ = [
@@ -22,11 +28,15 @@ __all__ = [
     "VisualIdentity",
     "VisualIdentityEvidenceEdge",
     "build_visual_identities",
+    "combine_visual_candidate_signals",
     "build_audio_visual_mapping_summaries",
     "choose_visual_speaking_candidate",
     "learn_audio_visual_mappings",
     "project_words",
+    "sample_span_frame_indices",
     "resolve_span_assignments",
+    "summarize_mouth_landmark_signal",
+    "summarize_pose_signal",
     "normalize_confidence",
     "normalize_ordered_unique_ids",
     "normalize_track_ids",

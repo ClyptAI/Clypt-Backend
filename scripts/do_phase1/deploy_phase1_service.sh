@@ -65,11 +65,13 @@ from backend.do_phase1_worker import (
     download_asr_model,
     download_insightface_model,
     download_lrasd_model,
+    download_visual_signal_models,
     download_yolo_model,
 )
 
 download_asr_model()
 download_yolo_model()
+download_visual_signal_models()
 download_lrasd_model()
 download_insightface_model()
 PY

@@ -4,15 +4,23 @@ from collections.abc import Iterable, Mapping
 
 
 def _score_candidate(candidate: Mapping[str, object]) -> float:
+    explicit_score = candidate.get("composite_score")
+    if explicit_score is not None:
+        return round(float(explicit_score), 3)
+
     mouth_motion_score = float(candidate.get("mouth_motion_score", 0.0) or 0.0)
     pose_visibility_score = float(candidate.get("pose_visibility_score", 0.0) or 0.0)
+    pose_stability_score = float(candidate.get("pose_stability_score", 0.0) or 0.0)
     face_visibility_score = float(candidate.get("face_visibility_score", 0.0) or 0.0)
     mapping_confidence = float(candidate.get("mapping_confidence", 0.0) or 0.0)
+    blendshape_support_score = float(candidate.get("blendshape_support_score", 0.0) or 0.0)
     return round(
-        (0.45 * mouth_motion_score)
-        + (0.2 * pose_visibility_score)
-        + (0.2 * face_visibility_score)
-        + (0.15 * mapping_confidence),
+        (0.42 * mouth_motion_score)
+        + (0.16 * pose_visibility_score)
+        + (0.12 * pose_stability_score)
+        + (0.15 * face_visibility_score)
+        + (0.10 * mapping_confidence)
+        + (0.05 * blendshape_support_score),
         3,
     )
 
