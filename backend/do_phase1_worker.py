@@ -1087,15 +1087,23 @@ class ClyptWorker:
         clusters_before_repair: int,
         visible_people_est: int,
         anchored_track_count: int,
+        collision_pair_count: int = 0,
+        collision_frame_count: int = 0,
+        collision_label_count: int = 0,
     ) -> bool:
         face_cluster_count = max(0, int(face_cluster_count))
         clusters_before_repair = max(0, int(clusters_before_repair))
         visible_people_est = max(0, int(visible_people_est))
         anchored_track_count = max(0, int(anchored_track_count))
+        collision_pair_count = max(0, int(collision_pair_count))
+        collision_frame_count = max(0, int(collision_frame_count))
+        collision_label_count = max(0, int(collision_label_count))
 
         if face_cluster_count <= 0 or clusters_before_repair <= 0:
             return False
         if anchored_track_count < max(4, face_cluster_count):
+            return False
+        if collision_pair_count > 0 or collision_frame_count > 0 or collision_label_count > 0:
             return False
 
         target_identity_count = max(face_cluster_count, visible_people_est)
@@ -7092,6 +7100,9 @@ class ClyptWorker:
             clusters_before_repair=clusters_before_repair,
             visible_people_est=visible_people_est,
             anchored_track_count=len(set(face_tids)),
+            collision_pair_count=collision_metrics_before_repair["same_identity_frame_collision_pairs"],
+            collision_frame_count=collision_metrics_before_repair["same_identity_frame_collision_frames"],
+            collision_label_count=collision_metrics_before_repair["same_identity_labels_with_collisions"],
         ):
             repair_metrics = {
                 "repaired_cluster_count": 0,
