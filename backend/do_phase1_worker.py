@@ -6948,7 +6948,8 @@ class ClyptWorker:
             }
             if strict_gpu_decode:
                 raise RuntimeError(
-                    "Strict LR-ASD GPU decode is enabled and the analysis video could not be opened with GPU decode"
+                    "Strict LR-ASD GPU decode is enabled and the analysis video could not be opened with GPU decode "
+                    f"({type(e).__name__}: {e})"
                 ) from e
             print(
                 "  Warning: could not open video for LR-ASD binding "

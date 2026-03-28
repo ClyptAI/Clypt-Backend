@@ -1986,6 +1986,42 @@ def test_open_lrasd_video_reader_strict_mode_raises_when_gpu_unavailable(monkeyp
     ]
 
 
+def test_run_lrasd_binding_strict_gpu_decode_error_includes_underlying_exception(monkeypatch, tmp_path: Path):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.lrasd_model = object()
+    worker.lrasd_loss_av = object()
+
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"video")
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"audio")
+
+    monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE_STRICT", "1")
+    monkeypatch.setattr(
+        worker,
+        "_open_lrasd_video_reader",
+        lambda path: (_ for _ in ()).throw(RuntimeError("nvdec init failed")),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Strict LR-ASD GPU decode is enabled.*RuntimeError: nvdec init failed",
+    ):
+        worker._run_lrasd_binding(
+            video_path=str(video_path),
+            audio_wav_path=str(audio_path),
+            tracks=[{"track_id": "speaker", "frame_idx": 0}],
+            words=[{"text": "hello", "start_time_ms": 0, "end_time_ms": 1000}],
+            analysis_context={
+                "analysis_video_path": str(video_path),
+                "analysis_meta": {"width": 1920, "height": 1080, "fps": 30.0},
+                "scale_x": 1.0,
+                "scale_y": 1.0,
+            },
+        )
+
+
 def test_make_lrasd_frame_provider_recovers_from_gpu_batch_failure(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
