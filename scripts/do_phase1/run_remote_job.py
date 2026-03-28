@@ -119,12 +119,16 @@ if ! pgrep -f {shlex.quote(server_pattern)} >/dev/null 2>&1; then
   nohup bash -lc 'cd {shlex.quote(REMOTE_RELAY_DIR)} && exec python3 -m http.server {REMOTE_RELAY_PORT} --bind 127.0.0.1' \\
     >/tmp/clypt_phase1_relay.log 2>&1 &
 fi
-for _ in $(seq 1 20); do
+sleep 1
+for _ in $(seq 1 30); do
   if curl -sfI {shlex.quote(remote_relay_source_url(video_id))} >/dev/null 2>&1; then
     exit 0
   fi
   sleep 1
 done
+echo "relay check failed" >&2
+pgrep -af {shlex.quote(server_pattern)} >&2 || true
+tail -n 50 /tmp/clypt_phase1_relay.log >&2 || true
 exit 1
 """
     run_remote_bash(script)
