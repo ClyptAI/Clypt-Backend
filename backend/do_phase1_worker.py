@@ -239,6 +239,7 @@ clypt_image = (
         "cmake",
         "build-essential",
         "libgl1",
+        "libgles2",
         "libglib2.0-0",
         "libsndfile1",
     )
@@ -259,6 +260,7 @@ clypt_image = (
         "onnx",
         "python_speech_features",
         "mediapipe",
+        "gdown",
         "pandas",
         "scipy",
         "tqdm",
@@ -5142,7 +5144,10 @@ class ClyptWorker:
             )
         self.body_reid_extractor = None
         try:
-            from torchreid.utils import FeatureExtractor
+            try:
+                from torchreid.reid.utils import FeatureExtractor
+            except Exception:
+                from torchreid.utils import FeatureExtractor
 
             model_name = os.getenv("CLYPT_BODY_REID_MODEL_NAME", "osnet_ain_x1_0").strip() or "osnet_ain_x1_0"
             reid_device = "cuda" if torch.cuda.is_available() else "cpu"

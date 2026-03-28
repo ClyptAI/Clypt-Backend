@@ -28,6 +28,9 @@ if [[ "$SKIP_GIT_SYNC" != "1" ]]; then
   git pull --ff-only origin "$BRANCH"
 fi
 
+apt-get update
+apt-get install -y libgles2
+
 if [[ ! -f "$REQUIREMENTS_FILE" ]]; then
   echo "Missing requirements file: $REQUIREMENTS_FILE" >&2
   exit 1

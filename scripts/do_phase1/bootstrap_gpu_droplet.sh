@@ -12,6 +12,7 @@ apt-get install -y \
   git \
   jq \
   libgl1 \
+  libgles2 \
   libglib2.0-0 \
   libsndfile1 \
   python3 \

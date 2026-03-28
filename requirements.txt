@@ -24,6 +24,7 @@ opencv-python-headless>=4.11.0
 decord>=0.6.0
 ultralytics>=8.3.0
 torchreid>=0.2.5
+gdown>=5.2.0
 omegaconf>=2.3.0
 insightface>=0.7.3
 onnxruntime-gpu>=1.22.0
