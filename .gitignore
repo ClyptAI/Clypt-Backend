@@ -19,6 +19,9 @@ __pycache__/
 *.pyo
 .venv/
 .pytest_cache/
+.env
+.env.*
+!.env.example
 .mypy_cache/
 
 # Node / frontend build artifacts

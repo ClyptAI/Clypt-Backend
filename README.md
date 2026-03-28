@@ -114,6 +114,15 @@ gcloud services enable \
   storage.googleapis.com
 ```
 
+4. Configure environment variables
+
+Copy [.env.example](/c:/Users/chess/Desktop/Clypt/Clypt-V2/.env.example) into a local untracked env file or export the vars in your shell. The full grouped reference lives in [environment-variables.md](/c:/Users/chess/Desktop/Clypt/Clypt-V2/docs/setup/environment-variables.md).
+
+For the current Senso-backed onboarding flow, the most important local vars are:
+- `SENSO_API_KEY`
+- `SENSO_CREATOR_PROFILE_PROMPT_ID`
+- `YOUTUBE_API_KEY` for richer YouTube lookup/search paths
+
 ## Deploy the DO Phase 1 Service
 
 Use the deployment runbook in [docs/deployment/do-phase1-digitalocean.md](docs/deployment/do-phase1-digitalocean.md).
