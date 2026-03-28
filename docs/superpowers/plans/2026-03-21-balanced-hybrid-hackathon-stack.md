@@ -8,6 +8,12 @@
 
 **Tech Stack:** Python 3.11, FastAPI-style extraction service, DigitalOcean GPU Droplets, Google Vertex AI / Gemini, Cloud Spanner, GCS, Next.js, Lovable, pytest
 
+## Status Update (2026-03-28)
+
+- Status: Foundational plan largely landed and is now historical.
+- Shipped outcomes: the DigitalOcean Phase 1 service, contract/storage pipeline, and remote job workflow became the base for later LR-ASD and pyannote branches.
+- Current promotion path: active speaker-follow and renderer work moved forward on `codex/lrasd-prep-pool`; this plan remains the platform baseline rather than the current feature branch plan.
+
 ---
 
 ## Planned File Map

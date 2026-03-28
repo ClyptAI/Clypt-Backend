@@ -8,6 +8,12 @@
 
 **Tech Stack:** Python, pytest, decord, Torch/CUDA, pyannote, Gemini API via `google-genai`, ffmpeg-based renderers
 
+## Status Update (2026-03-28)
+
+- Status: Implemented and became the functional base branch for current LR-ASD work.
+- Shipped outcomes: overlap-aware bindings/artifacts, local follow mode, overlap follow support, and renderer updates all landed from this plan family.
+- Current promotion path: `codex/lrasd-prep-pool` extends this branch with GPU decode/prep-pool work plus follow/debug renderer rescue rules, and that is the branch being moved to `main`.
+
 ---
 
 ## File Map

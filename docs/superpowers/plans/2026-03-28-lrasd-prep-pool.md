@@ -8,6 +8,17 @@
 
 **Tech Stack:** Python, concurrent.futures, NumPy, Torch, Decord, pytest
 
+## Status Update (2026-03-28)
+
+- Status: Implemented and deployed.
+- Shipped outcomes:
+  - LR-ASD prep-worker pool
+  - CUDA-enabled Decord / GPU decode path
+  - GPU-oriented decode/crop/preprocess pipeline
+  - drain/progress logging improvements
+  - follow/debug renderer rescue rules for lone visible boxes, dominant-vs-fragment cases, and fragment-to-full-body cross-track rescue
+- Current branch lineage: this plan is the active state of `codex/lrasd-prep-pool`, which is being promoted to `main`.
+
 ---
 
 ### Task 1: Add prep-pool helpers and configuration
