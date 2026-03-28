@@ -237,3 +237,32 @@ def test_lrasd_prep_pipeline_drain_does_not_redeliver_items_already_returned_by_
 
     assert ready_from_submit == ["job-0"]
     assert remaining == []
+
+
+def test_lrasd_prep_pipeline_snapshot_reports_oldest_pending_age():
+    release = threading.Event()
+
+    def _prepare(_spec: dict) -> str:
+        release.wait(timeout=1.0)
+        return "done"
+
+    pipeline = LrasdPrepPipeline(
+        prepare_fn=_prepare,
+        prep_workers=1,
+        queue_size=4,
+    )
+
+    try:
+        assert pipeline.submit({"job_id": "job-0"}) == []
+        time.sleep(0.05)
+        snapshot = pipeline.snapshot()
+    finally:
+        release.set()
+        pipeline.close()
+
+    assert snapshot["pending_count"] == 1
+    assert snapshot["next_submit_seq"] == 1
+    assert snapshot["next_emit_seq"] == 0
+    assert snapshot["oldest_pending_seq"] == 0
+    assert snapshot["oldest_pending_age_s"] >= 0.04
+    assert snapshot["head_future_done"] is False

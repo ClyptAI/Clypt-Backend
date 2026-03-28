@@ -7331,6 +7331,24 @@ class ClyptWorker:
         inflight_futures: list[cf.Future] = []
         infer_executor = cf.ThreadPoolExecutor(max_workers=1) if enable_lrasd_overlap else None
 
+        def _format_lrasd_pipeline_snapshot() -> str:
+            prep_snapshot = prep_pipeline.snapshot()
+            pending_bucket_sizes = {
+                int(bucket): len(items)
+                for bucket, items in sorted(pending_by_t.items())
+                if items
+            }
+            return (
+                f"prep_pending={int(prep_snapshot.get('pending_count', 0) or 0)}, "
+                f"prep_head_seq={prep_snapshot.get('oldest_pending_seq')}, "
+                f"prep_head_age_s={float(prep_snapshot.get('oldest_pending_age_s', 0.0) or 0.0):.2f}, "
+                f"prep_head_done={bool(prep_snapshot.get('head_future_done', False))}, "
+                f"next_submit_seq={int(prep_snapshot.get('next_submit_seq', 0) or 0)}, "
+                f"next_emit_seq={int(prep_snapshot.get('next_emit_seq', 0) or 0)}, "
+                f"pending_buckets={pending_bucket_sizes}, "
+                f"inflight_batches={len(inflight_futures)}"
+            )
+
         def _score_pending_batch(
             pending: list[tuple[str, list[int], int, np.ndarray, np.ndarray]],
             t_len: int,
@@ -7409,6 +7427,11 @@ class ClyptWorker:
             if not pending:
                 return
             flush_counter += 1
+            print(
+                "  LR-ASD flush: "
+                f"bucket={t_len}, pending={len(pending)}, flush_id={flush_counter}, "
+                + _format_lrasd_pipeline_snapshot()
+            )
             pending_by_t[t_len] = []
             pending_bucket_started_at.pop(t_len, None)
             pending_bucket_last_seen_chunk.pop(t_len, None)
@@ -7449,6 +7472,11 @@ class ClyptWorker:
                     oldest_age_s=oldest_age_s,
                     scan_gap=scan_gap,
                 ):
+                    print(
+                        "  LR-ASD stale bucket flush: "
+                        f"bucket={t_len}, pending={len(pending)}, oldest_age_s={oldest_age_s:.2f}, "
+                        f"scan_gap={scan_gap}, " + _format_lrasd_pipeline_snapshot()
+                    )
                     _flush_pending(t_len)
 
         try:
@@ -7468,6 +7496,11 @@ class ClyptWorker:
                         continue
                     for start in range(0, len(run), chunk_size):
                         chunk_frames = run[start:start + chunk_size]
+                        chunk_started_at = time.perf_counter()
+                        submitted_subchunks = 0
+                        chunk_face_hits = 0
+                        chunk_face_misses = 0
+                        slow_chunk_logged = False
                         chunk_counter += 1
                         _flush_stale_pending(chunk_counter)
                         if len(chunk_frames) < min_chunk_frames:
@@ -7523,6 +7556,7 @@ class ClyptWorker:
 
                             if crop is not None:
                                 face_hits += 1
+                                chunk_face_hits += 1
                                 # If we had a micro-gap, mathematically pad it using the last known face
                                 if missing_count > 0 and last_good_crop is not None:
                                     for pad_idx in range(missing_count):
@@ -7539,11 +7573,13 @@ class ClyptWorker:
                                 missing_count = 0
                             else:
                                 face_misses += 1
+                                chunk_face_misses += 1
                                 missing_count += 1
                                 # If the face is lost for more than 5 frames, it's a real break. Terminate the chunk.
                                 if missing_count > 5:
                                     if len(current_face_subchunk) >= min_chunk_frames:
                                         _submit_subchunk(tid, current_face_subchunk, current_crops)
+                                        submitted_subchunks += 1
                                     current_face_subchunk = []
                                     current_crops = []
                                     missing_count = 0
@@ -7553,6 +7589,17 @@ class ClyptWorker:
                         # Flush remainder
                         if len(current_face_subchunk) >= min_chunk_frames:
                             _submit_subchunk(tid, current_face_subchunk, current_crops)
+                            submitted_subchunks += 1
+
+                        chunk_elapsed_s = float(time.perf_counter() - chunk_started_at)
+                        if chunk_elapsed_s >= 3.0:
+                            print(
+                                "  LR-ASD slow chunk: "
+                                f"track_id={tid}, frame_span={chunk_frames[0]}-{chunk_frames[-1]}, "
+                                f"frames={len(chunk_frames)}, face_hits={chunk_face_hits}, "
+                                f"face_misses={chunk_face_misses}, submitted_subchunks={submitted_subchunks}, "
+                                f"elapsed_s={chunk_elapsed_s:.2f}, " + _format_lrasd_pipeline_snapshot()
+                            )
 
                         if chunk_counter % 40 == 0:
                             print(
@@ -7560,7 +7607,8 @@ class ClyptWorker:
                                 f"prepared={prepared_chunks}, "
                                 f"inferred={scored_chunks}, "
                                 f"track_windows={chunk_counter}/{max(total_chunks, 1)}, "
-                                f"scored_tracks={len(scored_track_ids)}"
+                                f"scored_tracks={len(scored_track_ids)}, "
+                                + _format_lrasd_pipeline_snapshot()
                             )
 
             for pending_entry in prep_pipeline.drain():

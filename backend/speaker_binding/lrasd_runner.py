@@ -191,6 +191,7 @@ class LrasdPrepPipeline:
         self._executor = ThreadPoolExecutor(max_workers=self.prep_workers)
         self._lock = threading.Lock()
         self._futures: dict[int, Future[_PreparedItem]] = {}
+        self._submitted_at: dict[int, float] = {}
         self._next_submit_seq = 0
         self._next_emit_seq = 0
         self._closed = False
@@ -227,6 +228,7 @@ class LrasdPrepPipeline:
                 raise RuntimeError("LR-ASD prep pipeline has been closed")
             seq = self._next_submit_seq
             self._next_submit_seq += 1
+            self._submitted_at[seq] = time.monotonic()
             future = self._executor.submit(self._prepare_item, seq, dict(payload))
             self._futures[seq] = future
             current_depth = len(self._futures)
@@ -246,6 +248,28 @@ class LrasdPrepPipeline:
     def drain(self) -> list[object]:
         return self._drain_ready(block=True)
 
+    def snapshot(self) -> dict[str, object]:
+        with self._lock:
+            pending_seqs = sorted(self._futures.keys())
+            oldest_pending_seq = pending_seqs[0] if pending_seqs else None
+            oldest_pending_age_s = 0.0
+            head_future_done = False
+            if oldest_pending_seq is not None:
+                oldest_pending_age_s = max(
+                    0.0,
+                    float(time.monotonic() - self._submitted_at.get(oldest_pending_seq, time.monotonic())),
+                )
+                head_future = self._futures.get(oldest_pending_seq)
+                head_future_done = bool(head_future.done()) if head_future is not None else False
+            return {
+                "pending_count": int(len(self._futures)),
+                "next_submit_seq": int(self._next_submit_seq),
+                "next_emit_seq": int(self._next_emit_seq),
+                "oldest_pending_seq": oldest_pending_seq,
+                "oldest_pending_age_s": float(oldest_pending_age_s),
+                "head_future_done": bool(head_future_done),
+            }
+
     def _drain_ready(self, *, block: bool) -> list[object]:
         ready_values: list[object] = []
         while True:
@@ -263,6 +287,7 @@ class LrasdPrepPipeline:
                 if current is not future:
                     continue
                 del self._futures[prepared_item.seq]
+                self._submitted_at.pop(prepared_item.seq, None)
                 self._next_emit_seq += 1
                 remaining_depth = len(self._futures)
                 self.metrics["lrasd_prep_queue_depth"] = int(remaining_depth)
