@@ -165,14 +165,6 @@ def schedule_diarized_spans(
             or any(bool(turn.get("overlap", False)) for turn in active_turns)
             or any(turn.get("exclusive") is False for turn in active_turns)
         )
-        discontinuity = classify_visual_discontinuity(
-            sample
-            for turn in active_turns
-            for sample in list(turn.get("visual_samples") or [])
-            if isinstance(sample, dict)
-            and int(sample.get("time_ms", start_time_ms)) >= int(start_time_ms)
-            and int(sample.get("time_ms", start_time_ms)) < int(end_time_ms)
-        )
         scheduled_span: ScheduledSpan = {
             "span_id": f"scheduled-{len(scheduled_spans)}",
             "span_type": "overlap" if is_overlap else "single",
@@ -185,7 +177,15 @@ def schedule_diarized_spans(
             "context_end_time_ms": int(end_time_ms),
             "source_turn_ids": source_turn_ids,
         }
-        if discontinuity["requires_lrasd"]:
+        discontinuity = classify_visual_discontinuity(
+            sample
+            for turn in active_turns
+            for sample in list(turn.get("visual_samples") or [])
+            if isinstance(sample, dict)
+            and int(sample.get("time_ms", start_time_ms)) >= int(start_time_ms)
+            and int(sample.get("time_ms", start_time_ms)) < int(end_time_ms)
+        )
+        if not is_overlap and discontinuity["requires_lrasd"]:
             scheduled_span["requires_lrasd"] = True
             scheduled_span["discontinuity_reasons"] = list(discontinuity["discontinuity_reasons"])
         scheduled_spans.append(scheduled_span)
