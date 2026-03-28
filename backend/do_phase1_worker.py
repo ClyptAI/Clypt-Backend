@@ -9,6 +9,9 @@ code can be imported and reused by the DigitalOcean worker path.
 import os
 import subprocess
 import time
+from dataclasses import asdict
+
+from backend.speaker_binding import build_visual_identities
 
 try:
     if os.getenv("CLYPT_ENABLE_LEGACY_SERVERLESS_SDK", "0") != "1":
@@ -8739,6 +8742,35 @@ class ClyptWorker:
         self._last_speaker_binding_metrics = speaker_metrics
         return bindings
 
+    def _remap_face_track_features_to_global_ids(
+        self,
+        face_track_features: dict[str, dict] | None,
+        track_id_remap: dict[str, str] | None,
+    ) -> dict[str, dict] | None:
+        if not isinstance(face_track_features, dict):
+            return None
+        if not track_id_remap:
+            return dict(face_track_features)
+
+        remapped: dict[str, dict] = {}
+        for face_track_id, feature in face_track_features.items():
+            if not isinstance(feature, dict):
+                continue
+            mapped_feature = dict(feature)
+            dominant_local_tid = str(feature.get("dominant_track_id", "") or "").strip()
+            if dominant_local_tid:
+                mapped_feature["dominant_track_id"] = track_id_remap.get(dominant_local_tid, dominant_local_tid)
+            associated_counts = {}
+            for track_id, count in dict(feature.get("associated_track_counts", {}) or {}).items():
+                normalized_track_id = str(track_id).strip()
+                if not normalized_track_id:
+                    continue
+                mapped_track_id = track_id_remap.get(normalized_track_id, normalized_track_id)
+                associated_counts[mapped_track_id] = associated_counts.get(mapped_track_id, 0) + int(count)
+            mapped_feature["associated_track_counts"] = associated_counts
+            remapped[str(face_track_id)] = mapped_feature
+        return remapped
+
     def _enforce_rollout_gates(self, tracking_metrics: dict | None):
         """Apply rollout gates for continuity quality before downstream steps."""
         import os
@@ -8822,6 +8854,10 @@ class ClyptWorker:
             getattr(self, "_last_track_identity_features_after_clustering", None) or track_identity_features
         )
         cluster_id_remap = getattr(self, "_last_cluster_id_map", None)
+        clustered_face_track_features = self._remap_face_track_features_to_global_ids(
+            face_track_features,
+            cluster_id_remap,
+        )
         frame_to_dets, track_to_dets = self._build_track_indexes(tracks)
         metrics["identity_track_count_after_clustering"] = len(
             {str(track.get("track_id", "")) for track in tracks if str(track.get("track_id", ""))}
@@ -8834,6 +8870,15 @@ class ClyptWorker:
             track_identity_features=clustered_track_identity_features,
         )
         metrics.update(face_metrics)
+        visual_identities = build_visual_identities(
+            tracks=tracks,
+            track_identity_features=clustered_track_identity_features,
+            face_track_features=clustered_face_track_features,
+        )
+        metrics["visual_identity_count"] = len(visual_identities)
+        metrics["visual_identity_face_track_count"] = sum(
+            len(identity.face_track_ids) for identity in visual_identities
+        )
 
         # Step 4: Speaker binding
         print("[Phase 1] Step 4/4: Running speaker binding...")
@@ -8915,6 +8960,7 @@ class ClyptWorker:
             "class_taxonomy": PHASE1_CLASS_TAXONOMY,
             "tracking_metrics": metrics,
             "tracks": tracks,
+            "visual_identities": [asdict(identity) for identity in visual_identities],
             "face_detections": face_detections,
             "person_detections": person_detections,
         }

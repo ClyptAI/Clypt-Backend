@@ -4180,6 +4180,103 @@ def test_finalize_passes_track_identity_features_to_clustering_and_ledgers(monke
     assert passed["face_tracks"] is None
 
 
+def test_finalize_emits_visual_identities_from_clustered_features(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "local-1",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        }
+    ]
+    words = [{"text": "hello", "start_time_ms": 0, "end_time_ms": 100}]
+
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(
+        worker,
+        "_build_track_indexes",
+        lambda tracks: ({0: tracks}, {str(tracks[0]["track_id"]): tracks}),
+    )
+    monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
+    monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [])
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
+
+    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+        worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
+        worker._last_track_identity_features_after_clustering = {
+            "Global_Person_0": {
+                "confidence": 0.88,
+                "embedding": [0.1, 0.2, 0.3],
+                "embedding_source": "face",
+            }
+        }
+        for track in tracks:
+            track["track_id"] = "Global_Person_0"
+        worker._last_clustering_metrics = {}
+        return tracks
+
+    monkeypatch.setattr(worker, "_cluster_tracklets", fake_cluster_tracklets)
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={
+            "track_identity_features": {
+                "local-1": {
+                    "confidence": 0.6,
+                    "embedding": [0.1, 0.2, 0.3],
+                    "embedding_source": "face",
+                }
+            },
+            "face_track_features": {
+                "face-1": {
+                    "embedding": [0.1, 0.2, 0.3],
+                    "dominant_track_id": "local-1",
+                    "associated_track_counts": {"local-1": 3},
+                }
+            },
+        },
+    )
+
+    assert result["phase_1_visual"]["visual_identities"] == [
+        {
+            "identity_id": "Global_Person_0",
+            "confidence": 0.9,
+            "track_ids": ("Global_Person_0",),
+            "face_track_ids": ("face-1",),
+            "person_track_ids": ("Global_Person_0",),
+            "evidence_edge_ids": (),
+            "metadata": {
+                "track_count": 1,
+                "person_track_count": 1,
+                "face_track_count": 1,
+                "source_counts": {
+                    "tracks": 1,
+                    "track_identity_features": 1,
+                    "face_track_features": 1,
+                },
+                "sources": ("face_track_features", "track_identity_features", "tracks"),
+            },
+        }
+    ]
+    assert result["phase_1_visual"]["tracking_metrics"]["visual_identity_count"] == 1
+
+
 def test_build_speaker_follow_bindings_absorbs_brief_midstream_blip():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
