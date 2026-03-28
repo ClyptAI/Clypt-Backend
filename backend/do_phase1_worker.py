@@ -7167,6 +7167,53 @@ class ClyptWorker:
             (analysis_context or {}).get("audio_speaker_turns")
         )
         audio_speaker_turns = [dict(turn) for turn in raw_audio_turns]
+        scheduled_hard_spans = [
+            dict(span)
+            for span in list((analysis_context or {}).get("scheduled_hard_spans") or [])
+            if isinstance(span, dict)
+        ]
+        if not scheduled_hard_spans:
+            scheduled_hard_spans = [
+                dict(span)
+                for span in list((analysis_context or {}).get("scheduled_audio_spans") or [])
+                if isinstance(span, dict)
+                and (
+                    bool(span.get("overlap", False))
+                    or bool(span.get("requires_lrasd", False))
+                    or str(span.get("span_type", "")) == "overlap"
+                )
+            ]
+        if not scheduled_hard_spans:
+            timing_sources = list(words or []) + list(audio_speaker_turns or [])
+            if timing_sources:
+                start_time_ms = min(
+                    int(source.get("start_time_ms", 0) or 0)
+                    for source in timing_sources
+                )
+                end_time_ms = max(
+                    int(source.get("end_time_ms", source.get("start_time_ms", 0)) or 0)
+                    for source in timing_sources
+                )
+                scheduled_hard_spans = [
+                    {
+                        "span_id": "scheduled-hard-fallback-0",
+                        "span_type": "single",
+                        "speaker_ids": [
+                            str(turn.get("speaker_id", "") or "")
+                            for turn in audio_speaker_turns
+                            if str(turn.get("speaker_id", "") or "")
+                        ],
+                        "speaker_id": str((audio_speaker_turns or [{}])[0].get("speaker_id", "") or ""),
+                        "overlap": False,
+                        "context_start_time_ms": int(start_time_ms),
+                        "context_end_time_ms": int(end_time_ms),
+                        "source_turn_ids": [
+                            str(turn.get("turn_id", "") or "")
+                            for turn in audio_speaker_turns
+                            if str(turn.get("turn_id", "") or "")
+                        ],
+                    }
+                ]
         track_quality_by_tid = self._build_speaker_binding_track_quality(
             track_to_dets,
             frame_width=int(binding_meta.get("width", 0) or 0) or 1,
@@ -7194,47 +7241,57 @@ class ClyptWorker:
             "  LR-ASD candidate pruning: "
             f"eligible={len(eligible_lrasd_track_ids)}/{len(track_to_dets)}"
         )
-        selected_turn_candidates, lrasd_turn_candidate_debug = self._select_lrasd_turn_topk_track_ids(
-            audio_speaker_turns=audio_speaker_turns,
+        from backend.speaker_binding.lrasd_runner import build_lrasd_span_jobs
+
+        def _rank_span_candidates(span: dict) -> list[dict]:
+            span_turn = {
+                "speaker_id": str(
+                    span.get("speaker_id")
+                    or next(iter(span.get("speaker_ids") or []), "")
+                    or ""
+                ),
+                "start_time_ms": int(span.get("start_time_ms", span.get("context_start_time_ms", 0)) or 0),
+                "end_time_ms": int(span.get("end_time_ms", span.get("context_end_time_ms", 0)) or 0),
+            }
+            return self._rank_lrasd_turn_candidates(
+                turn=span_turn,
+                eligible_track_ids=eligible_lrasd_track_ids,
+                track_to_dets=track_to_dets,
+                frame_to_dets=frame_to_dets,
+                track_quality_by_tid=track_quality_by_tid,
+                track_identity_features=track_identity_features,
+                canonical_face_boxes=canonical_face_boxes,
+                frame_width=int(binding_meta.get("width", 0) or 0) or 1,
+                frame_height=int(binding_meta.get("height", 0) or 0) or 1,
+                fps=fps,
+            )
+
+        span_jobs, lrasd_turn_candidate_debug = build_lrasd_span_jobs(
+            scheduled_hard_spans=scheduled_hard_spans,
             words=words,
-            eligible_track_ids=eligible_lrasd_track_ids,
-            track_to_dets=track_to_dets,
-            frame_to_dets=frame_to_dets,
-            track_quality_by_tid=track_quality_by_tid,
-            track_identity_features=track_identity_features,
-            canonical_face_boxes=canonical_face_boxes,
-            frame_width=int(binding_meta.get("width", 0) or 0) or 1,
-            frame_height=int(binding_meta.get("height", 0) or 0) or 1,
-            fps=fps,
+            rank_candidates_fn=_rank_span_candidates,
         )
         self._last_lrasd_turn_candidate_debug = [dict(row) for row in lrasd_turn_candidate_debug]
         selected_turn_track_union = {
             str(tid)
-            for turn_row in selected_turn_candidates
-            for tid in turn_row.get("selected_local_track_ids", []) or []
+            for job in span_jobs
+            for tid in job.get("selected_local_track_ids", []) or []
         }
-        if selected_turn_candidates:
-            self._last_speaker_binding_metrics.update(
-                {
-                    "lrasd_turn_count": int(len(selected_turn_candidates)),
-                    "lrasd_turn_topk": int(self._lrasd_topk_candidates_per_turn()),
-                    "lrasd_turn_selected_track_count": int(len(selected_turn_track_union)),
-                }
-            )
-            top_k_value = self._lrasd_topk_candidates_per_turn()
-            if top_k_value > 0:
-                print(
-                    "  LR-ASD turn top-k: "
-                    f"top_k={top_k_value}, "
-                    f"turns={len(selected_turn_candidates)}, "
-                    f"selected_tracks={len(selected_turn_track_union)}"
-                )
-            else:
-                print(
-                    "  LR-ASD turn top-k: disabled, "
-                    f"turns={len(selected_turn_candidates)}, "
-                    f"selected_tracks={len(selected_turn_track_union)}"
-                )
+        self._last_speaker_binding_metrics.update(
+            {
+                "lrasd_turn_count": int(len(span_jobs)),
+                "lrasd_turn_topk": 0,
+                "lrasd_turn_selected_track_count": int(len(selected_turn_track_union)),
+                "lrasd_span_job_count": int(len(span_jobs)),
+            }
+        )
+        print(
+            "  LR-ASD span jobs: "
+            f"jobs={len(span_jobs)}, selected_tracks={len(selected_turn_track_union)}"
+        )
+        if scheduled_hard_spans and not span_jobs:
+            print("  LR-ASD found no runnable hard-span jobs after candidate filtering.")
+            return []
         audio_feature_cache_path = binding_video_path.replace(".mp4", "_lrasd_features.npz")
         full_audio_features = self._load_or_build_lrasd_audio_features(
             audio_wav_path=audio_wav_path,
@@ -7346,32 +7403,40 @@ class ClyptWorker:
             f"max_inflight={max_inflight}"
         )
 
-        # Use speech timing to skip obviously irrelevant chunks.
-        word_frame_ranges: list[tuple[int, int]] = []
-        for w in words:
-            ws = int(w.get("start_time_ms", 0))
-            we = int(w.get("end_time_ms", ws))
-            sfi = int(round((ws / 1000.0) * fps))
-            efi = int(round((we / 1000.0) * fps))
-            if efi < sfi:
-                sfi, efi = efi, sfi
-            word_frame_ranges.append((sfi, efi))
-        word_frame_ranges.sort(key=lambda x: x[0])
+        # Use scheduled hard-span subspans to skip irrelevant chunks and reuse evidence.
+        span_frame_windows: list[dict] = []
+        for job in span_jobs:
+            start_fi = int(round((int(job.get("start_time_ms", 0) or 0) / 1000.0) * fps))
+            end_fi = int(round((int(job.get("end_time_ms", job.get("start_time_ms", 0)) or 0) / 1000.0) * fps))
+            if end_fi < start_fi:
+                start_fi, end_fi = end_fi, start_fi
+            span_frame_windows.append(
+                {
+                    "start_fi": int(start_fi),
+                    "end_fi": int(end_fi),
+                    "selected_local_track_ids": {
+                        str(tid)
+                        for tid in job.get("selected_local_track_ids", []) or []
+                        if str(tid)
+                    },
+                }
+            )
+        span_frame_windows.sort(key=lambda item: int(item["start_fi"]))
 
-        def _chunk_overlaps_words(start_fi: int, end_fi: int) -> bool:
-            for ws, we in word_frame_ranges:
-                if ws > end_fi:
+        def _chunk_overlaps_jobs(start_fi: int, end_fi: int) -> bool:
+            for window in span_frame_windows:
+                if int(window["start_fi"]) > end_fi:
                     return False
-                if we >= start_fi:
+                if int(window["end_fi"]) >= start_fi:
                     return True
             return False
 
         def _track_is_runtime_relevant(frame_list: list[int]) -> bool:
             if not frame_list:
                 return False
-            for ws, we in word_frame_ranges:
-                window_start = int(ws) - int(word_match_max_gap)
-                window_end = int(we) + int(word_match_max_gap)
+            for window in span_frame_windows:
+                window_start = int(window["start_fi"]) - int(word_match_max_gap)
+                window_end = int(window["end_fi"]) + int(word_match_max_gap)
                 for fi in frame_list:
                     if fi > window_end:
                         break
@@ -7380,7 +7445,14 @@ class ClyptWorker:
             return False
 
         def _chunk_allowed_for_turn_candidates(tid: str, start_fi: int, end_fi: int) -> bool:
-            return True
+            for window in span_frame_windows:
+                if str(tid) not in window["selected_local_track_ids"]:
+                    continue
+                if int(window["start_fi"]) > end_fi:
+                    continue
+                if int(window["end_fi"]) >= start_fi:
+                    return True
+            return False
 
         def _split_contiguous_runs(frame_list: list[int], max_gap: int) -> list[list[int]]:
             if not frame_list:
@@ -7415,7 +7487,7 @@ class ClyptWorker:
                     chunk_frames = run[start:start + chunk_size]
                     if len(chunk_frames) < min_chunk_frames:
                         continue
-                    if not _chunk_overlaps_words(chunk_frames[0], chunk_frames[-1]):
+                    if not _chunk_overlaps_jobs(chunk_frames[0], chunk_frames[-1]):
                         continue
                     if not _chunk_allowed_for_turn_candidates(tid, chunk_frames[0], chunk_frames[-1]):
                         continue
@@ -7567,7 +7639,7 @@ class ClyptWorker:
                         _flush_stale_pending(chunk_counter)
                         if len(chunk_frames) < min_chunk_frames:
                             continue
-                        if not _chunk_overlaps_words(chunk_frames[0], chunk_frames[-1]):
+                        if not _chunk_overlaps_jobs(chunk_frames[0], chunk_frames[-1]):
                             continue
                         if not _chunk_allowed_for_turn_candidates(tid, chunk_frames[0], chunk_frames[-1]):
                             continue
@@ -8821,6 +8893,7 @@ class ClyptWorker:
 
         easy_assignments: list[dict] = []
         synthetic_bindings: list[dict] = []
+        hard_spans: list[dict] = []
         has_hard_span = False
         for span in scheduled_audio_spans:
             if bool(span.get("overlap", False)):
@@ -8873,12 +8946,14 @@ class ClyptWorker:
 
             metrics["hard_spans_routed_to_lrasd"] += 1
             has_hard_span = True
+            hard_spans.append(dict(span))
 
         return {
             "metrics": metrics,
             "easy_assignments": easy_assignments,
             "synthetic_bindings": synthetic_bindings,
             "has_hard_span": has_hard_span,
+            "hard_spans": hard_spans,
         }
 
     def _run_speaker_binding_impl(
@@ -8931,6 +9006,10 @@ class ClyptWorker:
                 track_id_remap=track_id_remap,
             )
             speaker_metrics.update(easy_span_cascade["metrics"])
+            lrasd_analysis_context = dict(analysis_context or {})
+            lrasd_analysis_context["scheduled_hard_spans"] = [
+                dict(span) for span in easy_span_cascade.get("hard_spans", [])
+            ]
             if (
                 easy_span_cascade["easy_assignments"]
                 and not easy_span_cascade["has_hard_span"]
@@ -8958,7 +9037,7 @@ class ClyptWorker:
                 frame_to_dets=frame_to_dets,
                 track_to_dets=track_to_dets,
                 track_identity_features=track_identity_features,
-                analysis_context=analysis_context,
+                analysis_context=lrasd_analysis_context,
                 track_id_remap=track_id_remap,
             )
             speaker_metrics["lrasd_wallclock_s"] = round(
