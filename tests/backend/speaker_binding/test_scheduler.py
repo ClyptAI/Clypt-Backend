@@ -118,3 +118,49 @@ def test_schedule_diarized_spans_preserves_adjacent_overlap_windows():
             "source_turn_ids": ["turn-0", "turn-2"],
         },
     ]
+
+
+def test_schedule_diarized_spans_threads_discontinuity_metadata():
+    spans = schedule_diarized_spans(
+        [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 400,
+                "visual_samples": [
+                    {
+                        "time_ms": 0,
+                        "local_track_ids": ["track-a", "track-b"],
+                        "prominent_track_id": "track-a",
+                    },
+                    {
+                        "time_ms": 200,
+                        "local_track_ids": ["track-c", "track-d"],
+                        "prominent_track_id": "track-c",
+                    },
+                ],
+            },
+        ],
+        same_speaker_gap_ms=0,
+        boundary_pad_ms=0,
+    )
+
+    assert spans == [
+        {
+            "span_id": "scheduled-0",
+            "span_type": "single",
+            "speaker_ids": ["SPEAKER_00"],
+            "exclusive": True,
+            "overlap": False,
+            "start_time_ms": 0,
+            "end_time_ms": 400,
+            "context_start_time_ms": 0,
+            "context_end_time_ms": 400,
+            "source_turn_ids": ["turn-0"],
+            "requires_lrasd": True,
+            "discontinuity_reasons": [
+                "track_set_jaccard_drop",
+                "prominent_track_flip",
+            ],
+        }
+    ]

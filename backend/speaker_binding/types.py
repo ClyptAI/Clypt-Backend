@@ -30,6 +30,8 @@ class ScheduledSpan(TypedDict):
     speaker_id: NotRequired[str]
     track_id: NotRequired[str]
     priority: NotRequired[int]
+    requires_lrasd: NotRequired[bool]
+    discontinuity_reasons: NotRequired[list[str]]
 
 
 class EasySpanDecision(TypedDict):

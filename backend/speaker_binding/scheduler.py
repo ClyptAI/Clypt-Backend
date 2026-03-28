@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import Iterable
 
+from .discontinuity import classify_visual_discontinuity
 from .types import DiarizedSpan, ScheduledSpan
 
 
@@ -164,20 +165,30 @@ def schedule_diarized_spans(
             or any(bool(turn.get("overlap", False)) for turn in active_turns)
             or any(turn.get("exclusive") is False for turn in active_turns)
         )
-        scheduled_spans.append(
-            {
-                "span_id": f"scheduled-{len(scheduled_spans)}",
-                "span_type": "overlap" if is_overlap else "single",
-                "speaker_ids": speaker_ids,
-                "exclusive": not is_overlap,
-                "overlap": bool(is_overlap),
-                "start_time_ms": max(0, int(start_time_ms) - max(0, int(boundary_pad_ms))),
-                "end_time_ms": int(end_time_ms) + max(0, int(boundary_pad_ms)),
-                "context_start_time_ms": int(start_time_ms),
-                "context_end_time_ms": int(end_time_ms),
-                "source_turn_ids": source_turn_ids,
-            }
+        discontinuity = classify_visual_discontinuity(
+            sample
+            for turn in active_turns
+            for sample in list(turn.get("visual_samples") or [])
+            if isinstance(sample, dict)
+            and int(sample.get("time_ms", start_time_ms)) >= int(start_time_ms)
+            and int(sample.get("time_ms", start_time_ms)) < int(end_time_ms)
         )
+        scheduled_span: ScheduledSpan = {
+            "span_id": f"scheduled-{len(scheduled_spans)}",
+            "span_type": "overlap" if is_overlap else "single",
+            "speaker_ids": speaker_ids,
+            "exclusive": not is_overlap,
+            "overlap": bool(is_overlap),
+            "start_time_ms": max(0, int(start_time_ms) - max(0, int(boundary_pad_ms))),
+            "end_time_ms": int(end_time_ms) + max(0, int(boundary_pad_ms)),
+            "context_start_time_ms": int(start_time_ms),
+            "context_end_time_ms": int(end_time_ms),
+            "source_turn_ids": source_turn_ids,
+        }
+        if discontinuity["requires_lrasd"]:
+            scheduled_span["requires_lrasd"] = True
+            scheduled_span["discontinuity_reasons"] = list(discontinuity["discontinuity_reasons"])
+        scheduled_spans.append(scheduled_span)
 
     return scheduled_spans
 
