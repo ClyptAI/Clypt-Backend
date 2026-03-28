@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+import sys
+import types
 
+import pytest
 from backend.do_phase1_worker import ClyptWorker
 from backend.speaker_binding.visual_features import (
     TrackletReIDSample,
@@ -37,6 +40,51 @@ def _make_covisible_tracklets() -> dict[str, list[dict]]:
         "43": _make_tracklet("43", 320.0),
         "44": _make_tracklet("44", 520.0),
     }
+
+
+def _make_cluster_tracks() -> list[dict]:
+    tracks = []
+    for tid, x_center in (("face-left", 120.0), ("face-right", 520.0), ("body", 140.0)):
+        tracks.extend(
+            [
+                {
+                    "track_id": tid,
+                    "frame_idx": 0,
+                    "x_center": x_center,
+                    "y_center": 120.0,
+                    "width": 100.0,
+                    "height": 200.0,
+                    "confidence": 0.95,
+                },
+                {
+                    "track_id": tid,
+                    "frame_idx": 1,
+                    "x_center": x_center + 2.0,
+                    "y_center": 120.0,
+                    "width": 100.0,
+                    "height": 200.0,
+                    "confidence": 0.95,
+                },
+            ]
+        )
+    return tracks
+
+
+def _install_fake_sklearn(monkeypatch: pytest.MonkeyPatch) -> None:
+    sklearn_mod = types.ModuleType("sklearn")
+    cluster_mod = types.ModuleType("sklearn.cluster")
+
+    class FakeDBSCAN:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fit(self, X):
+            self.labels_ = np.arange(len(X), dtype=int)
+            return self
+
+    cluster_mod.DBSCAN = FakeDBSCAN
+    monkeypatch.setitem(sys.modules, "sklearn", sklearn_mod)
+    monkeypatch.setitem(sys.modules, "sklearn.cluster", cluster_mod)
 
 
 def test_repair_covisible_cluster_merges_splits_simultaneous_distinct_people() -> None:
@@ -109,3 +157,153 @@ def test_build_tracklet_reid_evidence_returns_centroid_and_quality() -> None:
     assert evidence.frame_indices == (11, 12, 13)
     assert evidence.centroid is not None
     assert cosine_similarity(evidence.centroid, np.asarray([1.0, 0.0, 0.0], dtype=np.float32)) > 0.98
+
+
+def test_choose_reid_attachment_label_rejects_ambiguous_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLYPT_CLUSTER_REID_ATTACH_MIN_SIM", "0.60")
+    monkeypatch.setenv("CLYPT_CLUSTER_REID_ATTACH_MARGIN", "0.05")
+
+    label = ClyptWorker._choose_reid_attachment_label(
+        track_embedding=np.asarray([0.707, 0.707], dtype=np.float32),
+        label_to_reid_centroid={
+            0: np.asarray([1.0, 0.0], dtype=np.float32),
+            1: np.asarray([0.0, 1.0], dtype=np.float32),
+        },
+    )
+
+    assert label is None
+
+
+def test_cluster_tracklets_attaches_body_tracklet_by_reid_without_signature_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_sklearn(monkeypatch)
+    worker = object.__new__(ClyptWorker)
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("signature attachment helper should not be used")
+
+    worker._choose_signature_attachment_label = _explode
+    worker._choose_signature_attachment_label_for_group = _explode
+    worker._cluster_signature_only_tracklets = _explode
+    worker._last_clustering_metrics = {}
+
+    clustered = worker._cluster_tracklets(
+        video_path="unused.mp4",
+        tracks=_make_cluster_tracks(),
+        track_identity_features={
+            "face-left": {
+                "embedding": [1.0, 0.0],
+                "embedding_source": "face",
+                "embedding_count": 1,
+                "face_embedding": [1.0, 0.0],
+                "face_embedding_count": 1,
+                "reid_embedding": [1.0, 0.0],
+                "reid_embedding_count": 1,
+                "reid_quality": 1.0,
+                "reid_frame_indices": [0, 1],
+                "face_observations": [],
+            },
+            "face-right": {
+                "embedding": [0.0, 1.0],
+                "embedding_source": "face",
+                "embedding_count": 1,
+                "face_embedding": [0.0, 1.0],
+                "face_embedding_count": 1,
+                "reid_embedding": [0.0, 1.0],
+                "reid_embedding_count": 1,
+                "reid_quality": 1.0,
+                "reid_frame_indices": [0, 1],
+                "face_observations": [],
+            },
+            "body": {
+                "embedding": [0.995, 0.005],
+                "embedding_source": "reid",
+                "embedding_count": 1,
+                "face_embedding": None,
+                "face_embedding_count": 0,
+                "reid_embedding": [0.995, 0.005],
+                "reid_embedding_count": 1,
+                "reid_quality": 0.95,
+                "reid_frame_indices": [0, 1],
+                "face_observations": [],
+            },
+        },
+        face_track_features=None,
+    )
+
+    id_map = worker._last_cluster_id_map
+    assert id_map["body"] == id_map["face-left"]
+    assert id_map["face-right"] != id_map["face-left"]
+    assert {det["track_id"] for det in clustered if det["track_id"] == id_map["face-left"]}
+
+
+def test_cluster_tracklets_leaves_ambiguous_body_tracklet_as_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_sklearn(monkeypatch)
+    worker = object.__new__(ClyptWorker)
+    monkeypatch.setenv("CLYPT_CLUSTER_REID_ATTACH_MIN_SIM", "0.60")
+    monkeypatch.setenv("CLYPT_CLUSTER_REID_ATTACH_MARGIN", "0.05")
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("signature attachment helper should not be used")
+
+    worker._choose_signature_attachment_label = _explode
+    worker._choose_signature_attachment_label_for_group = _explode
+    worker._cluster_signature_only_tracklets = _explode
+    worker._last_clustering_metrics = {}
+
+    tracks = _make_cluster_tracks()
+    for det in tracks:
+        if det["track_id"] == "body":
+            det["x_center"] = 320.0
+
+    clustered = worker._cluster_tracklets(
+        video_path="unused.mp4",
+        tracks=tracks,
+        track_identity_features={
+            "face-left": {
+                "embedding": [1.0, 0.0],
+                "embedding_source": "face",
+                "embedding_count": 1,
+                "face_embedding": [1.0, 0.0],
+                "face_embedding_count": 1,
+                "reid_embedding": [1.0, 0.0],
+                "reid_embedding_count": 1,
+                "reid_quality": 1.0,
+                "reid_frame_indices": [0, 1],
+                "face_observations": [],
+            },
+            "face-right": {
+                "embedding": [0.0, 1.0],
+                "embedding_source": "face",
+                "embedding_count": 1,
+                "face_embedding": [0.0, 1.0],
+                "face_embedding_count": 1,
+                "reid_embedding": [0.0, 1.0],
+                "reid_embedding_count": 1,
+                "reid_quality": 1.0,
+                "reid_frame_indices": [0, 1],
+                "face_observations": [],
+            },
+            "body": {
+                "embedding": [0.707, 0.707],
+                "embedding_source": "reid",
+                "embedding_count": 1,
+                "face_embedding": None,
+                "face_embedding_count": 0,
+                "reid_embedding": [0.707, 0.707],
+                "reid_embedding_count": 1,
+                "reid_quality": 0.95,
+                "reid_frame_indices": [0, 1],
+                "face_observations": [],
+            },
+        },
+        face_track_features=None,
+    )
+
+    id_map = worker._last_cluster_id_map
+    body_label = id_map["body"]
+    assert body_label not in {id_map["face-left"], id_map["face-right"]}
+    assert {det["track_id"] for det in clustered if det["track_id"] == body_label}

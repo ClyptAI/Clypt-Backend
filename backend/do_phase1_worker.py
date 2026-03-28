@@ -3428,10 +3428,34 @@ class ClyptWorker:
                     tid,
                     {
                         "face_vectors": [],
+                        "reid_vectors": [],
                         "hist_vectors": [],
                         "face_observations": [],
+                        "reid_frame_indices": set(),
+                        "reid_qualities": [],
                     },
                 )
+                face_embedding = feature.get("face_embedding")
+                if face_embedding is not None:
+                    emb_arr = np.asarray(face_embedding, dtype=np.float32)
+                    if emb_arr.size > 0:
+                        repeat = max(1, int(feature.get("face_embedding_count", feature.get("embedding_count", 1))))
+                        slot["face_vectors"].extend([emb_arr] * repeat)
+                reid_embedding = feature.get("reid_embedding")
+                if reid_embedding is not None:
+                    emb_arr = np.asarray(reid_embedding, dtype=np.float32)
+                    if emb_arr.size > 0:
+                        repeat = max(1, int(feature.get("reid_embedding_count", feature.get("embedding_count", 1))))
+                        slot["reid_vectors"].extend([emb_arr] * repeat)
+                        for frame_idx in list(feature.get("reid_frame_indices", []) or []):
+                            try:
+                                slot["reid_frame_indices"].add(int(frame_idx))
+                            except Exception:
+                                continue
+                        try:
+                            slot["reid_qualities"].append(float(feature.get("reid_quality", 0.0) or 0.0))
+                        except Exception:
+                            pass
                 embedding = feature.get("embedding")
                 if embedding is not None:
                     emb_arr = np.asarray(embedding, dtype=np.float32)
@@ -3439,16 +3463,29 @@ class ClyptWorker:
                         repeat = max(1, int(feature.get("embedding_count", 1)))
                         if str(feature.get("embedding_source", "none")) == "face":
                             slot["face_vectors"].extend([emb_arr] * repeat)
+                        elif str(feature.get("embedding_source", "none")) == "reid":
+                            slot["reid_vectors"].extend([emb_arr] * repeat)
                         elif str(feature.get("embedding_source", "none")) == "histogram":
                             slot["hist_vectors"].extend([emb_arr] * repeat)
                 slot["face_observations"].extend(feature.get("face_observations", []))
 
         finalized: dict[str, dict] = {}
         for tid, feature in merged.items():
+            face_emb = None
             if feature["face_vectors"]:
-                emb = np.mean(np.stack(feature["face_vectors"], axis=0), axis=0).astype(np.float32).tolist()
+                face_emb = np.mean(np.stack(feature["face_vectors"], axis=0), axis=0).astype(np.float32).tolist()
+            reid_emb = None
+            if feature["reid_vectors"]:
+                reid_emb = np.mean(np.stack(feature["reid_vectors"], axis=0), axis=0).astype(np.float32).tolist()
+
+            if face_emb is not None:
+                emb = face_emb
                 source = "face"
                 count = len(feature["face_vectors"])
+            elif reid_emb is not None:
+                emb = reid_emb
+                source = "reid"
+                count = len(feature["reid_vectors"])
             elif feature["hist_vectors"]:
                 emb = np.mean(np.stack(feature["hist_vectors"], axis=0), axis=0).astype(np.float32).tolist()
                 source = "histogram"
@@ -3475,6 +3512,15 @@ class ClyptWorker:
                 "embedding": emb,
                 "embedding_source": source,
                 "embedding_count": count,
+                "face_embedding": face_emb,
+                "face_embedding_count": len(feature["face_vectors"]),
+                "reid_embedding": reid_emb,
+                "reid_embedding_count": len(feature["reid_vectors"]),
+                "reid_quality": round(
+                    float(np.mean(feature["reid_qualities"])) if feature["reid_qualities"] else 0.0,
+                    3,
+                ),
+                "reid_frame_indices": sorted(int(idx) for idx in feature["reid_frame_indices"]),
                 "face_observations": deduped,
                 "face_observation_count": len(deduped),
             }
@@ -4027,11 +4073,179 @@ class ClyptWorker:
                 "embedding": emb,
                 "embedding_source": "face" if emb is not None else "none",
                 "embedding_count": len(feature["face_vectors"]),
+                "face_embedding": emb,
+                "face_embedding_count": len(feature["face_vectors"]),
+                "reid_embedding": None,
+                "reid_embedding_count": 0,
+                "reid_quality": 0.0,
+                "reid_frame_indices": [],
                 "face_observations": deduped,
                 "face_observation_count": len(deduped),
                 "face_track_ids": sorted(feature["face_track_ids"]),
             }
         return finalized
+
+    @staticmethod
+    def _body_reid_samples_per_track() -> int:
+        import os
+
+        return max(1, int(os.getenv("CLYPT_BODY_REID_SAMPLES_PER_TRACK", "6")))
+
+    @staticmethod
+    def _sample_track_detections_for_reid(dets: list[dict], *, max_samples: int) -> list[dict]:
+        if not dets:
+            return []
+        ordered = sorted(
+            [dict(det) for det in dets],
+            key=lambda det: (int(det.get("frame_idx", -1)), -float(det.get("confidence", 0.0))),
+        )
+        if len(ordered) <= max_samples:
+            return ordered
+        if max_samples == 1:
+            return [ordered[len(ordered) // 2]]
+        selected: list[dict] = []
+        seen: set[int] = set()
+        for sample_idx in range(max_samples):
+            pos = round(sample_idx * (len(ordered) - 1) / max(1, max_samples - 1))
+            det = ordered[int(pos)]
+            frame_idx = int(det.get("frame_idx", -1))
+            if frame_idx in seen:
+                continue
+            selected.append(det)
+            seen.add(frame_idx)
+        return selected or ordered[:max_samples]
+
+    @staticmethod
+    def _crop_body_reid_patch(frame_rgb, det: dict):
+        import numpy as np
+
+        if frame_rgb is None or not isinstance(det, dict):
+            return None
+        fh, fw = frame_rgb.shape[:2]
+        x1 = float(det.get("x1", det.get("x_center", 0.0) - 0.5 * det.get("width", 0.0)))
+        y1 = float(det.get("y1", det.get("y_center", 0.0) - 0.5 * det.get("height", 0.0)))
+        x2 = float(det.get("x2", x1 + det.get("width", 0.0)))
+        y2 = float(det.get("y2", y1 + det.get("height", 0.0)))
+        bw = max(1.0, x2 - x1)
+        bh = max(1.0, y2 - y1)
+        pad_x = 0.08 * bw
+        pad_y_top = 0.05 * bh
+        pad_y_bottom = 0.08 * bh
+        left = max(0, int(round(x1 - pad_x)))
+        top = max(0, int(round(y1 - pad_y_top)))
+        right = min(fw, int(round(x2 + pad_x)))
+        bottom = min(fh, int(round(y2 + pad_y_bottom)))
+        if right - left < 8 or bottom - top < 8:
+            return None
+        crop = np.asarray(frame_rgb[top:bottom, left:right]).copy()
+        if crop.size == 0:
+            return None
+        return crop
+
+    def _extract_body_reid_embedding_from_crop(self, crop_rgb):
+        import numpy as np
+
+        extractor = getattr(self, "body_reid_extractor", None)
+        if extractor is None or crop_rgb is None:
+            return None
+        try:
+            embeddings = extractor([crop_rgb])
+        except Exception:
+            return None
+        if embeddings is None:
+            return None
+        if hasattr(embeddings, "detach"):
+            embeddings = embeddings.detach().cpu().numpy()
+        emb_arr = np.asarray(embeddings, dtype=np.float32)
+        if emb_arr.ndim == 2 and emb_arr.shape[0] >= 1:
+            emb_arr = emb_arr[0]
+        emb_arr = emb_arr.reshape(-1)
+        if emb_arr.size == 0:
+            return None
+        norm = float(np.linalg.norm(emb_arr))
+        if norm <= 1e-9:
+            return None
+        return (emb_arr / norm).astype(np.float32)
+
+    def _extract_body_reid_track_identity_features(
+        self,
+        *,
+        video_path: str,
+        track_to_dets: dict[str, list[dict]],
+    ) -> dict[str, dict]:
+        from backend.speaker_binding.visual_features import (
+            TrackletReIDSample,
+            build_tracklet_reid_evidence,
+        )
+
+        if not track_to_dets or getattr(self, "body_reid_extractor", None) is None:
+            return {}
+
+        feature_map: dict[str, dict] = {}
+        max_samples = self._body_reid_samples_per_track()
+        for tid, dets in sorted(track_to_dets.items()):
+            sampled_dets = self._sample_track_detections_for_reid(dets, max_samples=max_samples)
+            samples: list[TrackletReIDSample] = []
+            for det in sampled_dets:
+                frame_idx = int(det.get("frame_idx", -1))
+                if frame_idx < 0:
+                    continue
+                frame_rgb = self._read_frame_rgb(video_path, frame_idx)
+                crop_rgb = self._crop_body_reid_patch(frame_rgb, det)
+                embedding = self._extract_body_reid_embedding_from_crop(crop_rgb)
+                if embedding is None:
+                    continue
+                samples.append(
+                    TrackletReIDSample(
+                        frame_idx=frame_idx,
+                        embedding=embedding,
+                        quality=float(det.get("confidence", 0.0) or 0.0),
+                    )
+                )
+            evidence = build_tracklet_reid_evidence(samples)
+            if evidence.centroid is None or evidence.sample_count <= 0:
+                continue
+            feature_map[str(tid)] = {
+                "embedding": evidence.centroid.astype("float32").tolist(),
+                "embedding_source": "reid",
+                "embedding_count": int(evidence.sample_count),
+                "face_observations": [],
+                "face_observation_count": 0,
+                "face_embedding": None,
+                "face_embedding_count": 0,
+                "reid_embedding": evidence.centroid.astype("float32").tolist(),
+                "reid_embedding_count": int(evidence.sample_count),
+                "reid_quality": float(evidence.quality),
+                "reid_frame_indices": list(evidence.frame_indices),
+            }
+        return feature_map
+
+    @staticmethod
+    def _choose_reid_attachment_label(
+        *,
+        track_embedding,
+        label_to_reid_centroid: dict[int, object],
+    ) -> int | None:
+        import os
+
+        from backend.speaker_binding.visual_features import cosine_similarity
+
+        min_similarity = float(os.getenv("CLYPT_CLUSTER_REID_ATTACH_MIN_SIM", "0.72"))
+        ambiguity_margin = float(os.getenv("CLYPT_CLUSTER_REID_ATTACH_MARGIN", "0.05"))
+
+        candidates: list[tuple[float, int]] = []
+        for label, centroid in sorted(label_to_reid_centroid.items()):
+            score = float(cosine_similarity(track_embedding, centroid))
+            if score < min_similarity:
+                continue
+            candidates.append((score, int(label)))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        best_score, best_label = candidates[0]
+        if len(candidates) > 1 and (best_score - candidates[1][0]) < ambiguity_margin:
+            return None
+        return int(best_label)
 
     def _extract_face_track_features_from_segments(
         self,
@@ -4687,6 +4901,24 @@ class ClyptWorker:
             self.visual_pose_model = None
             print(
                 "Warning: YOLO11 pose initialization failed "
+                f"({type(e).__name__}: {e})"
+            )
+        self.body_reid_extractor = None
+        try:
+            from torchreid.utils import FeatureExtractor
+
+            model_name = os.getenv("CLYPT_BODY_REID_MODEL_NAME", "osnet_ain_x1_0").strip() or "osnet_ain_x1_0"
+            reid_device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"Loading body ReID model ({model_name})...")
+            self.body_reid_extractor = FeatureExtractor(
+                model_name=model_name,
+                device=reid_device,
+            )
+            print("Body ReID model ready.")
+        except Exception as e:
+            self.body_reid_extractor = None
+            print(
+                "Warning: body ReID initialization failed "
                 f"({type(e).__name__}: {e})"
             )
         # --- Load LR-ASD ---
@@ -5783,6 +6015,14 @@ class ClyptWorker:
                 self._face_pipeline_segment_frames(),
             ),
         )
+        _, analysis_track_to_dets = self._build_track_indexes(analysis_tracks)
+        body_reid_identity_features = self._extract_body_reid_track_identity_features(
+            video_path=chunk_video_path,
+            track_to_dets=analysis_track_to_dets,
+        )
+        track_identity_features = self._merge_track_identity_feature_sets(
+            [track_identity_features, body_reid_identity_features]
+        )
         emb_map = {
             tid: feature.get("embedding")
             for tid, feature in track_identity_features.items()
@@ -5833,6 +6073,7 @@ class ClyptWorker:
             "track_identity_features": track_identity_features,
             "face_track_features": face_track_features,
             "face_pipeline_metrics": face_pipeline_metrics,
+            "body_reid_track_count": len(body_reid_identity_features),
             "ndjson_path": ndjson_path,
         }
 
@@ -5895,6 +6136,7 @@ class ClyptWorker:
         )
 
         tracks = []
+        analysis_tracks = []
         n_boxes = 0
         with ThreadPoolExecutor(max_workers=face_pipeline_workers) as face_pool:
             if self._face_pipeline_uses_gpu():
@@ -5982,6 +6224,7 @@ class ClyptWorker:
                         pts = obb_polys[i].reshape(-1, 2).tolist()
                         out["geometry_type"] = "obb"
                         out["polygon"] = [[float(px), float(py)] for px, py in pts]
+                    analysis_tracks.append(dict(out))
                     frame_face_dets.append(dict(out))
                     projected_out = self._scale_detection_geometry(
                         out,
@@ -6097,8 +6340,18 @@ class ClyptWorker:
             coord_scale_y=scale_y,
             segment_futures=face_segment_futures,
         )
+        _, analysis_track_to_dets = self._build_track_indexes(analysis_tracks)
+        body_reid_identity_features = self._extract_body_reid_track_identity_features(
+            video_path=tracking_video_path,
+            track_to_dets=analysis_track_to_dets,
+        )
+        track_identity_features = self._merge_track_identity_feature_sets(
+            [track_identity_features, body_reid_identity_features]
+        )
         metrics.update(face_pipeline_metrics)
         metrics["analysis_context"] = analysis_context
+        metrics["body_reid_track_count"] = len(body_reid_identity_features)
+        metrics["body_reid_enabled"] = bool(getattr(self, "body_reid_extractor", None))
         if track_identity_features:
             metrics["track_identity_features"] = track_identity_features
         if face_track_features:
@@ -6553,33 +6806,42 @@ class ClyptWorker:
         seed_label_by_tid: dict[str, int] = {}
         seed_embedding_by_tid: dict[str, np.ndarray] = {}
 
-        embeddings = {}  # track_id → 512D face embedding
-        fallback_ids = []  # track_ids using non-face fallback embeddings
+        face_embeddings = {}  # track_id -> face embedding used for face clustering
+        reid_embeddings = {}  # track_id -> body reid embedding used for non-face attachment
         face_accept_count = 0
         face_reject_lowq_count = 0
         precomputed_feature_tracklets = 0
+        body_reid_feature_tracklets = 0
 
         if track_identity_features:
             for tid in unique_ids:
                 feature = track_identity_features.get(tid)
                 if not isinstance(feature, dict):
                     continue
-                embedding = feature.get("embedding")
-                if embedding is None:
-                    continue
-                try:
-                    emb_arr = np.asarray(embedding, dtype=np.float32)
-                except Exception:
-                    continue
-                if emb_arr.size == 0:
-                    continue
-                embeddings[tid] = emb_arr
-                precomputed_feature_tracklets += 1
-                source = str(feature.get("embedding_source", "none"))
-                if source == "face":
-                    face_accept_count += max(1, int(feature.get("embedding_count", 1)))
-                else:
-                    fallback_ids.append(tid)
+                face_embedding = feature.get("face_embedding")
+                legacy_source = str(feature.get("embedding_source", "none"))
+                if face_embedding is None and legacy_source == "face":
+                    face_embedding = feature.get("embedding")
+                if face_embedding is not None:
+                    try:
+                        emb_arr = np.asarray(face_embedding, dtype=np.float32)
+                    except Exception:
+                        emb_arr = None
+                    if emb_arr is not None and emb_arr.size > 0:
+                        face_embeddings[tid] = emb_arr
+                        precomputed_feature_tracklets += 1
+                        face_accept_count += max(1, int(feature.get("face_embedding_count", feature.get("embedding_count", 1))))
+                reid_embedding = feature.get("reid_embedding")
+                if reid_embedding is None and legacy_source in {"reid", "histogram"}:
+                    reid_embedding = feature.get("embedding")
+                if reid_embedding is not None:
+                    try:
+                        emb_arr = np.asarray(reid_embedding, dtype=np.float32)
+                    except Exception:
+                        emb_arr = None
+                    if emb_arr is not None and emb_arr.size > 0:
+                        reid_embeddings[tid] = emb_arr
+                        body_reid_feature_tracklets += 1
 
         if isinstance(face_track_features, dict) and face_track_features:
             face_track_ids = sorted(
@@ -6656,7 +6918,7 @@ class ClyptWorker:
                         f"{face_track_seeded_tracklets} tracklets"
                     )
 
-        if not embeddings and not seed_label_by_tid:
+        if not face_embeddings and not seed_label_by_tid:
             print("  No usable face identity features for clustering")
             self._last_clustering_metrics = {
                 "cluster_visible_people_estimate": visible_people_est,
@@ -6674,20 +6936,19 @@ class ClyptWorker:
             )
             return tracks
 
-        if precomputed_feature_tracklets:
+        if precomputed_feature_tracklets or body_reid_feature_tracklets:
             print(
                 "  Cluster identity features: "
                 f"precomputed={precomputed_feature_tracklets}, "
+                f"body_reid={body_reid_feature_tracklets}, "
                 f"remaining={max(0, len(unique_ids) - precomputed_feature_tracklets - len(seed_label_by_tid))}"
             )
 
         for tid, emb in seed_embedding_by_tid.items():
-            if tid not in embeddings:
-                embeddings[tid] = np.asarray(emb, dtype=np.float32)
-            if tid in fallback_ids:
-                fallback_ids = [fallback_tid for fallback_tid in fallback_ids if fallback_tid != tid]
+            if tid not in face_embeddings:
+                face_embeddings[tid] = np.asarray(emb, dtype=np.float32)
 
-        if not embeddings:
+        if not face_embeddings:
             print("  No embeddings extracted, skipping clustering")
             self._last_clustering_metrics = {
                 "cluster_visible_people_estimate": visible_people_est,
@@ -6764,7 +7025,7 @@ class ClyptWorker:
             max_gap_frames = max(0, int(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_MAX_GAP_FRAMES", "48")))
             max_sig_dist = float(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_MAX_SIG_DIST", "0.18"))
             ambiguity_margin = float(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_AMBIGUITY_MARGIN", "0.08"))
-            pending_tids = [tid for tid in unique_ids if tid not in seed_label_by_tid and tid not in embeddings]
+            pending_tids = [tid for tid in unique_ids if tid not in seed_label_by_tid and tid not in face_embeddings]
             if not pending_tids or not seed_label_by_tid:
                 return 0
 
@@ -6814,7 +7075,7 @@ class ClyptWorker:
                 seed_label_by_tid[tid] = int(best_label)
                 source_embedding = seed_embedding_by_tid.get(best_seeded_tid)
                 if source_embedding is None:
-                    source_embedding = embeddings.get(best_seeded_tid)
+                    source_embedding = face_embeddings.get(best_seeded_tid)
                 if source_embedding is not None:
                     seed_embedding_by_tid[tid] = np.asarray(source_embedding, dtype=np.float32)
                 propagated += 1
@@ -6823,6 +7084,9 @@ class ClyptWorker:
         if face_track_seeded_tracklets:
             face_track_gap_propagated_tracklets = _propagate_face_identity_across_short_gaps()
             if face_track_gap_propagated_tracklets:
+                for tid, emb in seed_embedding_by_tid.items():
+                    if tid not in face_embeddings:
+                        face_embeddings[tid] = np.asarray(emb, dtype=np.float32)
                 print(
                     "  Face-track gap propagation: "
                     f"{face_track_gap_propagated_tracklets} tracklets"
@@ -6832,15 +7096,19 @@ class ClyptWorker:
         # were seeded from face tracks still need to participate in the later
         # face-cluster cleanup pass; otherwise the raw face-track labels bypass
         # the stronger merge / dedupe logic entirely.
-        tid_order_all = sorted(set(unique_ids) | set(embeddings.keys()) | set(seed_label_by_tid.keys()))
-        face_tids = [tid for tid in tid_order_all if tid in embeddings and tid not in fallback_ids]
-        hist_tids = [tid for tid in tid_order_all if tid not in face_tids]
+        tid_order_all = sorted(set(unique_ids) | set(face_embeddings.keys()) | set(seed_label_by_tid.keys()))
+        face_tids = [tid for tid in tid_order_all if tid in face_embeddings]
+        body_tids = [tid for tid in tid_order_all if tid not in face_tids]
         print(
             "  Face quality gate: "
             f"accepted={face_accept_count}, rejected_lowq={face_reject_lowq_count}, "
             f"min_det_score={float(extraction_cfg['cluster_face_min_det_score']):.2f}"
         )
-        print(f"  Face encodings: {len(face_tids)}, signature fallbacks: {len(hist_tids)}")
+        print(
+            f"  Face encodings: {len(face_tids)}, "
+            f"body_reid_candidates: {sum(1 for tid in body_tids if tid in reid_embeddings)}, "
+            f"body_singletons: {sum(1 for tid in body_tids if tid not in reid_embeddings)}"
+        )
 
         id_map: dict[str, str] = {}
         n_face_clusters = 0
@@ -6849,7 +7117,7 @@ class ClyptWorker:
 
         if face_tids:
             tid_order_face = sorted(face_tids)
-            X_face = np.array([embeddings[tid] for tid in tid_order_face], dtype=np.float32)
+            X_face = np.array([face_embeddings[tid] for tid in tid_order_face], dtype=np.float32)
 
             db = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples, metric="cosine").fit(X_face)
             labels = db.labels_.astype(int)
@@ -7015,74 +7283,67 @@ class ClyptWorker:
             n_face_clusters = len(set(labels))
             print(f"  Face clusters after refinement: {n_face_clusters}")
 
-        # Attach histogram-only tracklets to nearest face cluster by spatial signature.
-        if hist_tids:
+        # Attach non-face tracklets to face clusters by ReID only.
+        if body_tids:
             if n_face_clusters > 0:
                 face_label_by_tid = {
                     tid: int(id_map[tid].split("_")[-1])
                     for tid in sorted(set(face_tids))
                     if tid in id_map
                 }
-
-                reassigned_hist = 0
-                unattached_hist_group_count = 0
-                next_hist_label = n_face_clusters
-                hist_groups = self._cluster_signature_only_tracklets(
-                    track_ids=hist_tids,
-                    tracklets=tracklets,
-                    base_max_sig=histogram_attach_max_sig,
-                )
-                for group in hist_groups:
-                    selected_label = self._choose_signature_attachment_label_for_group(
-                        tids=group,
-                        tracklets=tracklets,
-                        face_label_by_tid=face_label_by_tid,
-                        histogram_attach_max_sig=histogram_attach_max_sig,
-                    )
-                    label_votes: dict[int, int] = {}
-                    if selected_label is None:
-                        for tid in group:
-                            best_label = self._choose_signature_attachment_label(
-                                tid=tid,
-                                tracklets=tracklets,
-                                face_label_by_tid=face_label_by_tid,
-                                histogram_attach_max_sig=histogram_attach_max_sig,
-                            )
-                            if best_label is None:
-                                continue
-                            label_votes[int(best_label)] = label_votes.get(int(best_label), 0) + 1
-                        if label_votes:
-                            ranked_votes = sorted(label_votes.items(), key=lambda item: (-item[1], item[0]))
-                            best_label, best_votes = ranked_votes[0]
-                            if len(ranked_votes) == 1 or best_votes > ranked_votes[1][1]:
-                                selected_label = int(best_label)
-                    if selected_label is None:
-                        assigned_label = int(next_hist_label)
-                        next_hist_label += 1
-                        new_globals_from_unattached_hist += 1
-                        unattached_hist_group_count += 1
-                        histogram_attach_rejections += len(group)
-                        for tid in group:
-                            id_map[tid] = f"Global_Person_{assigned_label}"
+                label_to_reid_vectors: dict[int, list[np.ndarray]] = {}
+                for tid, label in face_label_by_tid.items():
+                    embedding = reid_embeddings.get(tid)
+                    if embedding is None:
                         continue
-                    for tid in group:
-                        id_map[tid] = f"Global_Person_{int(selected_label)}"
-                        reassigned_hist += 1
-                if reassigned_hist:
-                    print(
-                        "  Histogram tracklets attached to face clusters: "
-                        f"{reassigned_hist} (max_sig={histogram_attach_max_sig:.2f})"
+                    label_to_reid_vectors.setdefault(int(label), []).append(np.asarray(embedding, dtype=np.float32))
+                label_to_reid_centroid = {
+                    int(label): np.mean(np.stack(vectors, axis=0), axis=0).astype(np.float32)
+                    for label, vectors in label_to_reid_vectors.items()
+                    if vectors
+                }
+
+                reassigned_body = 0
+                singleton_body = 0
+                next_body_label = n_face_clusters
+                for tid in sorted(body_tids):
+                    reid_embedding = reid_embeddings.get(tid)
+                    if reid_embedding is None:
+                        assigned_label = int(next_body_label)
+                        next_body_label += 1
+                        new_globals_from_unattached_hist += 1
+                        singleton_body += 1
+                        histogram_attach_rejections += 1
+                        id_map[tid] = f"Global_Person_{assigned_label}"
+                        continue
+                    selected_label = self._choose_reid_attachment_label(
+                        track_embedding=reid_embedding,
+                        label_to_reid_centroid=label_to_reid_centroid,
                     )
-                if new_globals_from_unattached_hist:
+                    if selected_label is None:
+                        assigned_label = int(next_body_label)
+                        next_body_label += 1
+                        new_globals_from_unattached_hist += 1
+                        singleton_body += 1
+                        histogram_attach_rejections += 1
+                        id_map[tid] = f"Global_Person_{assigned_label}"
+                        continue
+                    id_map[tid] = f"Global_Person_{int(selected_label)}"
+                    reassigned_body += 1
+                if reassigned_body:
                     print(
-                        "  Histogram tracklets left unattached: "
-                        f"{new_globals_from_unattached_hist} "
-                        f"({unattached_hist_group_count} groups)"
+                        "  Body ReID tracklets attached to face clusters: "
+                        f"{reassigned_body}"
+                    )
+                if singleton_body:
+                    print(
+                        "  Body-only tracklets left singleton: "
+                        f"{singleton_body}"
                     )
                 clusters_after_hist_attach = len(set(id_map.values()))
             else:
-                # Worst-case fallback: keep them deterministic and separate.
-                for i, tid in enumerate(sorted(hist_tids)):
+                # Without face-seeded globals, keep non-face tracklets deterministic and separate.
+                for i, tid in enumerate(sorted(body_tids)):
                     id_map[tid] = f"Global_Person_{i}"
                 clusters_after_hist_attach = len(set(id_map.values()))
         else:
@@ -7171,6 +7432,7 @@ class ClyptWorker:
             ),
             "covisibility_conflict_rejections": covisibility_conflict_rejections,
             "histogram_attach_rejections": histogram_attach_rejections,
+            "body_reid_feature_tracklets": body_reid_feature_tracklets,
             "face_track_raw_clusters": face_track_raw_clusters,
             "face_track_seeded_tracklets": face_track_seeded_tracklets,
             "face_track_gap_propagated_tracklets": face_track_gap_propagated_tracklets,
