@@ -4228,24 +4228,37 @@ class ClyptWorker:
     ) -> int | None:
         import os
 
-        from backend.speaker_binding.visual_features import cosine_similarity
-
         min_similarity = float(os.getenv("CLYPT_CLUSTER_REID_ATTACH_MIN_SIM", "0.72"))
         ambiguity_margin = float(os.getenv("CLYPT_CLUSTER_REID_ATTACH_MARGIN", "0.05"))
+
+        candidates = ClyptWorker._score_reid_attachment_candidates(
+            track_embedding=track_embedding,
+            label_to_reid_centroid=label_to_reid_centroid,
+        )
+        eligible_candidates = [
+            candidate for candidate in candidates if float(candidate[0]) >= min_similarity
+        ]
+        if not eligible_candidates:
+            return None
+        best_score, best_label = eligible_candidates[0]
+        if len(eligible_candidates) > 1 and (best_score - eligible_candidates[1][0]) < ambiguity_margin:
+            return None
+        return int(best_label)
+
+    @staticmethod
+    def _score_reid_attachment_candidates(
+        *,
+        track_embedding,
+        label_to_reid_centroid: dict[int, object],
+    ) -> list[tuple[float, int]]:
+        from backend.speaker_binding.visual_features import cosine_similarity
 
         candidates: list[tuple[float, int]] = []
         for label, centroid in sorted(label_to_reid_centroid.items()):
             score = float(cosine_similarity(track_embedding, centroid))
-            if score < min_similarity:
-                continue
             candidates.append((score, int(label)))
-        if not candidates:
-            return None
         candidates.sort(key=lambda item: (-item[0], item[1]))
-        best_score, best_label = candidates[0]
-        if len(candidates) > 1 and (best_score - candidates[1][0]) < ambiguity_margin:
-            return None
-        return int(best_label)
+        return candidates
 
     def _extract_face_track_features_from_segments(
         self,
@@ -6800,6 +6813,11 @@ class ClyptWorker:
         )
         covisibility_conflict_rejections = 0
         histogram_attach_rejections = 0
+        reid_attach_attempts = 0
+        reid_attach_successes = 0
+        reid_attach_ambiguous_rejections = 0
+        reid_attach_below_threshold_rejections = 0
+        reid_attach_missing_embedding_rejections = 0
         face_track_seeded_tracklets = 0
         face_track_gap_propagated_tracklets = 0
         face_track_raw_clusters = 0
@@ -7104,6 +7122,7 @@ class ClyptWorker:
             f"accepted={face_accept_count}, rejected_lowq={face_reject_lowq_count}, "
             f"min_det_score={float(extraction_cfg['cluster_face_min_det_score']):.2f}"
         )
+        reid_attach_debug = os.getenv("CLYPT_CLUSTER_REID_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
         print(
             f"  Face encodings: {len(face_tids)}, "
             f"body_reid_candidates: {sum(1 for tid in body_tids if tid in reid_embeddings)}, "
@@ -7307,6 +7326,7 @@ class ClyptWorker:
                 singleton_body = 0
                 next_body_label = n_face_clusters
                 for tid in sorted(body_tids):
+                    reid_attach_attempts += 1
                     reid_embedding = reid_embeddings.get(tid)
                     if reid_embedding is None:
                         assigned_label = int(next_body_label)
@@ -7314,8 +7334,22 @@ class ClyptWorker:
                         new_globals_from_unattached_hist += 1
                         singleton_body += 1
                         histogram_attach_rejections += 1
+                        reid_attach_missing_embedding_rejections += 1
+                        if reid_attach_debug:
+                            print(
+                                "  Body ReID attach: "
+                                f"tid={tid}, decision=singleton_no_embedding"
+                            )
                         id_map[tid] = f"Global_Person_{assigned_label}"
                         continue
+                    candidates = self._score_reid_attachment_candidates(
+                        track_embedding=reid_embedding,
+                        label_to_reid_centroid=label_to_reid_centroid,
+                    )
+                    best_score = candidates[0][0] if candidates else None
+                    best_label = candidates[0][1] if candidates else None
+                    second_score = candidates[1][0] if len(candidates) > 1 else None
+                    second_label = candidates[1][1] if len(candidates) > 1 else None
                     selected_label = self._choose_reid_attachment_label(
                         track_embedding=reid_embedding,
                         label_to_reid_centroid=label_to_reid_centroid,
@@ -7326,10 +7360,36 @@ class ClyptWorker:
                         new_globals_from_unattached_hist += 1
                         singleton_body += 1
                         histogram_attach_rejections += 1
+                        min_similarity = float(os.getenv("CLYPT_CLUSTER_REID_ATTACH_MIN_SIM", "0.72"))
+                        ambiguity_margin = float(os.getenv("CLYPT_CLUSTER_REID_ATTACH_MARGIN", "0.05"))
+                        if best_score is None or best_score < min_similarity:
+                            reid_attach_below_threshold_rejections += 1
+                            decision = "singleton_below_threshold"
+                        elif second_score is not None and (best_score - second_score) < ambiguity_margin:
+                            reid_attach_ambiguous_rejections += 1
+                            decision = "singleton_ambiguous"
+                        else:
+                            reid_attach_below_threshold_rejections += 1
+                            decision = "singleton_unmatched"
+                        if reid_attach_debug:
+                            print(
+                                "  Body ReID attach: "
+                                f"tid={tid}, best_label={best_label}, best_sim={best_score if best_score is not None else 'none'}, "
+                                f"second_label={second_label}, second_sim={second_score if second_score is not None else 'none'}, "
+                                f"decision={decision}"
+                            )
                         id_map[tid] = f"Global_Person_{assigned_label}"
                         continue
                     id_map[tid] = f"Global_Person_{int(selected_label)}"
                     reassigned_body += 1
+                    reid_attach_successes += 1
+                    if reid_attach_debug:
+                        print(
+                            "  Body ReID attach: "
+                            f"tid={tid}, best_label={best_label}, best_sim={best_score if best_score is not None else 'none'}, "
+                            f"second_label={second_label}, second_sim={second_score if second_score is not None else 'none'}, "
+                            f"decision=attach:{selected_label}"
+                        )
                 if reassigned_body:
                     print(
                         "  Body ReID tracklets attached to face clusters: "
@@ -7339,6 +7399,15 @@ class ClyptWorker:
                     print(
                         "  Body-only tracklets left singleton: "
                         f"{singleton_body}"
+                    )
+                if reid_attach_attempts:
+                    print(
+                        "  Body ReID attach summary: "
+                        f"attempts={reid_attach_attempts}, "
+                        f"attached={reid_attach_successes}, "
+                        f"ambiguous={reid_attach_ambiguous_rejections}, "
+                        f"below_threshold={reid_attach_below_threshold_rejections}, "
+                        f"missing_embedding={reid_attach_missing_embedding_rejections}"
                     )
                 clusters_after_hist_attach = len(set(id_map.values()))
             else:
@@ -7433,6 +7502,11 @@ class ClyptWorker:
             "covisibility_conflict_rejections": covisibility_conflict_rejections,
             "histogram_attach_rejections": histogram_attach_rejections,
             "body_reid_feature_tracklets": body_reid_feature_tracklets,
+            "reid_attach_attempts": reid_attach_attempts,
+            "reid_attach_successes": reid_attach_successes,
+            "reid_attach_ambiguous_rejections": reid_attach_ambiguous_rejections,
+            "reid_attach_below_threshold_rejections": reid_attach_below_threshold_rejections,
+            "reid_attach_missing_embedding_rejections": reid_attach_missing_embedding_rejections,
             "face_track_raw_clusters": face_track_raw_clusters,
             "face_track_seeded_tracklets": face_track_seeded_tracklets,
             "face_track_gap_propagated_tracklets": face_track_gap_propagated_tracklets,
