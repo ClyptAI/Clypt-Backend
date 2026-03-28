@@ -40,6 +40,17 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r "$REQUIREMENTS_FILE"
 
 if [[ "$BUILD_CUDA_DECORD" == "1" ]]; then
+  CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+  CUDACXX_BIN="${CUDACXX_BIN:-$CUDA_HOME/bin/nvcc}"
+  if [[ ! -x "$CUDACXX_BIN" ]]; then
+    echo "Expected CUDA compiler at $CUDACXX_BIN" >&2
+    exit 1
+  fi
+  export CUDA_HOME
+  export CUDA_TOOLKIT_ROOT_DIR="$CUDA_HOME"
+  export CUDAToolkit_ROOT="$CUDA_HOME"
+  export CUDACXX="$CUDACXX_BIN"
+  export PATH="$CUDA_HOME/bin:$PATH"
   apt-get update
   apt-get install -y \
     build-essential \
@@ -57,7 +68,12 @@ if [[ "$BUILD_CUDA_DECORD" == "1" ]]; then
   pushd /tmp/decord-src >/dev/null
   mkdir -p build
   pushd build >/dev/null
-  cmake .. -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+  cmake .. \
+    -DUSE_CUDA=ON \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CUDA_COMPILER="$CUDACXX_BIN" \
+    -DCUDAToolkit_ROOT="$CUDA_HOME" \
+    -DCUDA_TOOLKIT_ROOT_DIR="$CUDA_HOME"
   make -j"$(nproc)"
   popd >/dev/null
   pushd python >/dev/null
