@@ -2107,6 +2107,15 @@ class ClyptWorker:
         return max(0.0, min(1.0, requested))
 
     @staticmethod
+    def _lrasd_topk_candidates_per_turn() -> int:
+        raw = os.getenv("CLYPT_LRASD_TOPK_PER_TURN", "4").strip()
+        try:
+            requested = int(raw)
+        except Exception:
+            requested = 4
+        return max(1, min(8, requested))
+
+    @staticmethod
     def _audio_diarization_config() -> dict:
         """Return the env-driven pyannote diarization config surface."""
         enabled_raw = os.getenv("CLYPT_AUDIO_DIARIZATION_ENABLE", "0").strip().lower()
@@ -6283,12 +6292,315 @@ class ClyptWorker:
 
         return eligible_track_ids, debug_meta
 
+    def _rank_lrasd_turn_candidates(
+        self,
+        *,
+        turn: dict,
+        eligible_track_ids: set[str],
+        track_to_dets: dict[str, list[dict]],
+        frame_to_dets: dict[int, list[dict]],
+        track_quality_by_tid: dict[str, dict],
+        canonical_face_boxes: dict[tuple[str, int], tuple],
+        frame_width: int,
+        frame_height: int,
+        fps: float,
+    ) -> list[dict]:
+        import numpy as np
+
+        start_time_ms = int(turn.get("start_time_ms", 0) or 0)
+        end_time_ms = int(turn.get("end_time_ms", start_time_ms) or start_time_ms)
+        if end_time_ms < start_time_ms:
+            start_time_ms, end_time_ms = end_time_ms, start_time_ms
+        start_fi = int(round((start_time_ms / 1000.0) * fps))
+        end_fi = int(round((end_time_ms / 1000.0) * fps))
+        if end_fi < start_fi:
+            start_fi, end_fi = end_fi, start_fi
+        turn_frame_count = max(1, end_fi - start_fi + 1)
+
+        ranked: list[dict] = []
+        for tid in sorted(eligible_track_ids or set()):
+            valid_dets = [
+                det for det in (track_to_dets.get(str(tid), []) or [])
+                if start_fi <= int(det.get("frame_idx", -1)) <= end_fi
+                and float(det.get("width", 0.0)) > 1e-6
+                and float(det.get("height", 0.0)) > 1e-6
+            ]
+            if not valid_dets:
+                continue
+
+            overlap_frames = sorted({int(det["frame_idx"]) for det in valid_dets})
+            speech_overlap_ratio = float(len(overlap_frames) / max(1, turn_frame_count))
+            median_area_norm = float(
+                np.median(
+                    [
+                        (float(det.get("width", 0.0)) * float(det.get("height", 0.0)))
+                        / max(1.0, float(frame_width * frame_height))
+                        for det in valid_dets
+                    ]
+                )
+            )
+            prominence = max(0.0, min(1.0, median_area_norm / 0.12))
+            track_quality = float(
+                (track_quality_by_tid.get(str(tid), {}) or {}).get("track_quality", 0.0) or 0.0
+            )
+
+            body_priors: list[float] = []
+            hard_rejects = 0
+            for det in valid_dets:
+                body_meta = self._score_speaker_binding_body_candidate(
+                    det=det,
+                    frame_dets=frame_to_dets.get(int(det.get("frame_idx", -1)), [det]),
+                    frame_width=frame_width,
+                    frame_height=frame_height,
+                    track_quality=track_quality,
+                    motion_rank=0.0,
+                )
+                body_priors.append(float(body_meta.get("body_prior", 0.0) or 0.0))
+                if bool(body_meta.get("hard_reject", False)):
+                    hard_rejects += 1
+            mean_body_prior = float(np.mean(body_priors)) if body_priors else 0.0
+            body_track_quality = max(
+                0.0,
+                min(1.0, (0.70 * track_quality) + (0.30 * mean_body_prior)),
+            )
+
+            face_present_frames = [
+                fi for fi in overlap_frames
+                if (str(tid), int(fi)) in canonical_face_boxes
+            ]
+            face_coverage = float(len(face_present_frames) / max(1, len(overlap_frames)))
+            longest_face_run = 0
+            current_run = 0
+            previous_fi = None
+            for fi in face_present_frames:
+                if previous_fi is not None and fi == previous_fi + 1:
+                    current_run += 1
+                else:
+                    current_run = 1
+                longest_face_run = max(longest_face_run, current_run)
+                previous_fi = fi
+            face_continuity = float(longest_face_run / max(1, len(overlap_frames)))
+
+            rank_score = (
+                0.38 * speech_overlap_ratio
+                + 0.24 * body_track_quality
+                + 0.20 * prominence
+                + 0.10 * face_coverage
+                + 0.08 * face_continuity
+            )
+
+            ranked.append(
+                {
+                    "local_track_id": str(tid),
+                    "speech_overlap_frames": int(len(overlap_frames)),
+                    "speech_overlap_ratio": float(speech_overlap_ratio),
+                    "track_quality": float(track_quality),
+                    "mean_body_prior": float(mean_body_prior),
+                    "body_track_quality": float(body_track_quality),
+                    "median_area_norm": float(median_area_norm),
+                    "prominence": float(prominence),
+                    "face_coverage": float(face_coverage),
+                    "face_continuity": float(face_continuity),
+                    "hard_reject_ratio": float(hard_rejects / max(1, len(valid_dets))),
+                    "rank_score": float(rank_score),
+                }
+            )
+
+        ranked.sort(
+            key=lambda item: (
+                float(item["rank_score"]),
+                float(item["speech_overlap_ratio"]),
+                float(item["body_track_quality"]),
+                float(item["prominence"]),
+                float(item["face_coverage"]),
+                str(item["local_track_id"]),
+            ),
+            reverse=True,
+        )
+        return ranked
+
+    def _select_lrasd_turn_topk_track_ids(
+        self,
+        *,
+        audio_speaker_turns: list[dict],
+        words: list[dict],
+        eligible_track_ids: set[str],
+        track_to_dets: dict[str, list[dict]],
+        frame_to_dets: dict[int, list[dict]],
+        track_quality_by_tid: dict[str, dict],
+        canonical_face_boxes: dict[tuple[str, int], tuple],
+        frame_width: int,
+        frame_height: int,
+        fps: float,
+    ) -> tuple[list[dict], list[dict]]:
+        top_k = self._lrasd_topk_candidates_per_turn()
+        selected_turns: list[dict] = []
+        debug_rows: list[dict] = []
+        normalized_turns: list[dict] = []
+        for turn in audio_speaker_turns or []:
+            start_time_ms = int(turn.get("start_time_ms", 0) or 0)
+            end_time_ms = int(turn.get("end_time_ms", start_time_ms) or start_time_ms)
+            if end_time_ms < start_time_ms:
+                start_time_ms, end_time_ms = end_time_ms, start_time_ms
+            if end_time_ms <= start_time_ms:
+                continue
+            normalized_turns.append(
+                {
+                    **dict(turn),
+                    "start_time_ms": int(start_time_ms),
+                    "end_time_ms": int(end_time_ms),
+                }
+            )
+
+        def _merged_word_spans_for_turn(turn_row: dict) -> list[tuple[int, int]]:
+            spans: list[tuple[int, int]] = []
+            turn_start = int(turn_row["start_time_ms"])
+            turn_end = int(turn_row["end_time_ms"])
+            for word in words or []:
+                word_start = int(word.get("start_time_ms", 0) or 0)
+                word_end = int(word.get("end_time_ms", word_start) or word_start)
+                if word_end < word_start:
+                    word_start, word_end = word_end, word_start
+                start_ms = max(turn_start, word_start)
+                end_ms = min(turn_end, word_end)
+                if end_ms <= start_ms:
+                    continue
+                spans.append((int(start_ms), int(end_ms)))
+            spans.sort()
+            if not spans:
+                return []
+            merged: list[list[int]] = [[spans[0][0], spans[0][1]]]
+            for start_ms, end_ms in spans[1:]:
+                if start_ms <= merged[-1][1] + 250:
+                    merged[-1][1] = max(merged[-1][1], end_ms)
+                else:
+                    merged.append([start_ms, end_ms])
+            return [(int(start_ms), int(end_ms)) for start_ms, end_ms in merged]
+
+        for turn in normalized_turns:
+            for span_start_ms, span_end_ms in _merged_word_spans_for_turn(turn):
+                subturn = {
+                    **dict(turn),
+                    "start_time_ms": int(span_start_ms),
+                    "end_time_ms": int(span_end_ms),
+                }
+                ranked = self._rank_lrasd_turn_candidates(
+                    turn=subturn,
+                    eligible_track_ids=eligible_track_ids,
+                    track_to_dets=track_to_dets,
+                    frame_to_dets=frame_to_dets,
+                    track_quality_by_tid=track_quality_by_tid,
+                    canonical_face_boxes=canonical_face_boxes,
+                    frame_width=frame_width,
+                    frame_height=frame_height,
+                    fps=fps,
+                )
+                if not ranked:
+                    continue
+
+                overlap_active_count = sum(
+                    1
+                    for peer_turn in normalized_turns
+                    if int(peer_turn["start_time_ms"]) < int(span_end_ms)
+                    and int(peer_turn["end_time_ms"]) > int(span_start_ms)
+                )
+                start_fi = int(round((span_start_ms / 1000.0) * fps))
+                end_fi = int(round((span_end_ms / 1000.0) * fps))
+                if end_fi < start_fi:
+                    start_fi, end_fi = end_fi, start_fi
+
+                selected_track_ids = [
+                    str(candidate["local_track_id"])
+                    for candidate in (
+                        ranked
+                        if overlap_active_count > 1
+                        else ranked[:top_k]
+                    )
+                ]
+                selected_turns.append(
+                    {
+                        "speaker_id": str(turn.get("speaker_id", "") or ""),
+                        "start_time_ms": int(span_start_ms),
+                        "end_time_ms": int(span_end_ms),
+                        "start_frame_idx": int(start_fi),
+                        "end_frame_idx": int(end_fi),
+                        "selected_local_track_ids": selected_track_ids,
+                        "overlap_active_count": int(overlap_active_count),
+                    }
+                )
+                debug_rows.append(
+                    {
+                        "speaker_id": str(turn.get("speaker_id", "") or ""),
+                        "start_time_ms": int(span_start_ms),
+                        "end_time_ms": int(span_end_ms),
+                        "top_k": int(top_k),
+                        "overlap_active_count": int(overlap_active_count),
+                        "selected_local_track_ids": list(selected_track_ids),
+                        "candidates": [dict(candidate) for candidate in ranked],
+                    }
+                )
+
+        selected_turns.sort(
+            key=lambda item: (
+                int(item.get("start_frame_idx", 0)),
+                int(item.get("end_frame_idx", 0)),
+                str(item.get("speaker_id", "")),
+            )
+        )
+        debug_rows.sort(
+            key=lambda item: (
+                int(item.get("start_time_ms", 0)),
+                int(item.get("end_time_ms", 0)),
+                str(item.get("speaker_id", "")),
+            )
+        )
+        return selected_turns, debug_rows
+
     @staticmethod
-    def _make_lrasd_frame_provider(vr):
+    def _open_lrasd_video_reader(video_path: str):
+        import os
+        from decord import VideoReader, cpu
+
+        gpu_decode_enabled = str(os.getenv("CLYPT_LRASD_GPU_DECODE", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        gpu_decode_strict = str(os.getenv("CLYPT_LRASD_GPU_DECODE_STRICT", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if gpu_decode_enabled:
+            try:
+                from decord import gpu
+
+                return VideoReader(video_path, ctx=gpu(0)), "gpu"
+            except Exception:
+                if gpu_decode_strict:
+                    raise
+        return VideoReader(video_path, ctx=cpu(0)), "cpu"
+
+    @staticmethod
+    def _make_lrasd_frame_provider(vr, fallback_factory=None):
+        import os
+
         frame_cache: dict[int, object] = {}
-        total_frames = len(vr)
+        active_reader = vr
+        total_frames = len(active_reader)
+        fallback_used = False
+        fallback_attempted = False
+        gpu_decode_strict = str(os.getenv("CLYPT_LRASD_GPU_DECODE_STRICT", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         def _get_frame(frame_idx: int):
+            nonlocal active_reader, total_frames, fallback_used, fallback_attempted
             if frame_idx in frame_cache:
                 return frame_cache[frame_idx]
             if frame_idx < 0 or frame_idx >= total_frames:
@@ -6299,11 +6611,30 @@ class ClyptWorker:
             missing_indices = [fi for fi in fetch_indices if fi not in frame_cache]
             if missing_indices:
                 try:
-                    batch = vr.get_batch(missing_indices).asnumpy()
+                    batch = active_reader.get_batch(missing_indices).asnumpy()
                     for idx, frame_data in zip(missing_indices, batch):
                         frame_cache[idx] = frame_data
                 except Exception:
-                    frame_cache[frame_idx] = None
+                    if gpu_decode_strict:
+                        raise
+                    if (not fallback_attempted) and fallback_factory is not None:
+                        fallback_attempted = True
+                        try:
+                            fallback_reader = fallback_factory()
+                            active_reader = fallback_reader
+                            total_frames = len(active_reader)
+                            fallback_used = True
+                            retry_end = min(frame_idx + 16, total_frames)
+                            retry_indices = list(range(frame_idx, retry_end))
+                            missing_indices = [fi for fi in retry_indices if fi not in frame_cache]
+                            if missing_indices:
+                                batch = active_reader.get_batch(missing_indices).asnumpy()
+                                for idx, frame_data in zip(missing_indices, batch):
+                                    frame_cache[idx] = frame_data
+                        except Exception:
+                            frame_cache[frame_idx] = None
+                    else:
+                        frame_cache[frame_idx] = None
 
             if len(frame_cache) > 192:
                 stale_keys = [k for k in frame_cache.keys() if k < frame_idx - 32]
@@ -6317,7 +6648,7 @@ class ClyptWorker:
 
         return _get_frame
 
-    def _prepare_lrasd_visual_crop(
+    def _extract_lrasd_visual_crop_region(
         self,
         frame,
         *,
@@ -6325,9 +6656,7 @@ class ClyptWorker:
         y1,
         x2,
         y2,
-        output_size=(112, 112),
     ):
-        import cv2
         import numpy as np
 
         if frame is None:
@@ -6349,51 +6678,226 @@ class ClyptWorker:
         crop = frame[top:bottom, left:right]
         if crop is None or crop.size == 0:
             return None
+        return np.ascontiguousarray(crop)
+
+    def _prepare_lrasd_visual_batch(
+        self,
+        crops: list,
+        *,
+        bucket_length: int,
+        output_size=(112, 112),
+    ):
+        import cv2
+        import numpy as np
+
+        valid_crops = [np.ascontiguousarray(crop) for crop in (crops or []) if crop is not None and getattr(crop, "size", 0) > 0]
+        if not valid_crops:
+            return None
+
+        target_w, target_h = int(output_size[0]), int(output_size[1])
+        bucket_length = max(len(valid_crops), int(bucket_length))
 
         if str(os.getenv("CLYPT_LRASD_GPU_PREPROCESS", "0")).strip().lower() in {"1", "true", "yes", "on"}:
             try:
                 import torch
                 import torch.nn.functional as F
 
-                target_w, target_h = int(output_size[0]), int(output_size[1])
                 device = str(getattr(self, "gpu_device", "cpu") or "cpu")
-                crop_np = np.ascontiguousarray(crop)
-                crop_t = torch.from_numpy(crop_np).to(device=device, dtype=torch.float32)
-                if crop_t.ndim == 2:
-                    crop_t = crop_t.unsqueeze(0).unsqueeze(0)
-                else:
-                    crop_t = crop_t.permute(2, 0, 1).unsqueeze(0)
+                max_h = max(int(crop.shape[0]) for crop in valid_crops)
+                max_w = max(int(crop.shape[1]) for crop in valid_crops)
+                batch_np = np.empty((len(valid_crops), max_h, max_w, 3), dtype=np.float32)
+
+                for idx, crop in enumerate(valid_crops):
+                    crop_np = np.asarray(crop)
+                    if crop_np.ndim == 2:
+                        crop_np = crop_np[:, :, None]
+                    if crop_np.shape[2] == 1:
+                        crop_np = np.repeat(crop_np, 3, axis=2)
+                    elif crop_np.shape[2] == 2:
+                        crop_np = np.concatenate([crop_np, crop_np[:, :, 1:2]], axis=2)
+                    elif crop_np.shape[2] > 3:
+                        crop_np = crop_np[:, :, :3]
+                    crop_np = crop_np.astype(np.float32, copy=False)
+                    h, w = crop_np.shape[:2]
+                    batch_np[idx, :h, :w, :] = crop_np
+                    if h < max_h:
+                        batch_np[idx, h:max_h, :w, :] = crop_np[h - 1 : h, :, :]
+                    if w < max_w:
+                        batch_np[idx, :, w:max_w, :] = batch_np[idx, :, w - 1 : w, :]
+
+                batch_t = torch.from_numpy(batch_np).permute(0, 3, 1, 2).to(device=device, dtype=torch.float32)
                 resized_t = F.interpolate(
-                    crop_t,
+                    batch_t,
                     size=(target_h, target_w),
                     mode="bilinear",
                     align_corners=False,
                 )
-                if resized_t.shape[1] >= 3:
-                    rgb = resized_t[:, :3, :, :]
-                    grayscale_t = (
-                        (0.2989 * rgb[:, 0:1, :, :])
-                        + (0.5870 * rgb[:, 1:2, :, :])
-                        + (0.1140 * rgb[:, 2:3, :, :])
-                    )
-                else:
-                    grayscale_t = resized_t[:, :1, :, :]
-                return (
-                    grayscale_t.squeeze(0)
-                    .squeeze(0)
-                    .clamp(0, 255)
-                    .to(device="cpu", dtype=torch.uint8)
-                    .numpy()
-                )
+                rgb = resized_t[:, :3, :, :]
+                prepared_t = (
+                    (0.2989 * rgb[:, 0, :, :])
+                    + (0.5870 * rgb[:, 1, :, :])
+                    + (0.1140 * rgb[:, 2, :, :])
+                ).clamp(0, 255)
+                if prepared_t.shape[0] < bucket_length:
+                    pad = prepared_t[-1:].expand(bucket_length - prepared_t.shape[0], -1, -1).clone()
+                    prepared_t = torch.cat([prepared_t, pad], dim=0)
+                return prepared_t
             except Exception:
                 pass
 
-        resized = cv2.resize(crop, tuple(output_size), interpolation=cv2.INTER_LINEAR)
-        if resized.ndim == 2:
-            grayscale = resized
-        else:
-            grayscale = cv2.cvtColor(resized, cv2.COLOR_RGB2GRAY)
-        return grayscale.astype("uint8", copy=False)
+        prepared_np = []
+        for crop in valid_crops:
+            resized = cv2.resize(crop, tuple(output_size), interpolation=cv2.INTER_LINEAR)
+            if resized.ndim == 2:
+                grayscale = resized
+            else:
+                grayscale = cv2.cvtColor(resized, cv2.COLOR_RGB2GRAY)
+            prepared_np.append(grayscale.astype("uint8", copy=False))
+        batch_np = np.stack(prepared_np, axis=0)
+        if batch_np.shape[0] < bucket_length:
+            batch_np = np.pad(
+                batch_np,
+                ((0, bucket_length - batch_np.shape[0]), (0, 0), (0, 0)),
+                mode="edge",
+            )
+        return batch_np
+
+    def _prepare_lrasd_visual_crop(
+        self,
+        frame,
+        *,
+        x1,
+        y1,
+        x2,
+        y2,
+        output_size=(112, 112),
+    ):
+        crop = self._extract_lrasd_visual_crop_region(
+            frame,
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+        )
+        if crop is None:
+            return None
+        batch = self._prepare_lrasd_visual_batch([crop], bucket_length=1, output_size=output_size)
+        if batch is None:
+            return None
+        try:
+            import torch
+
+            if isinstance(batch, torch.Tensor):
+                return batch[0].to(device="cpu", dtype=torch.uint8).numpy()
+        except Exception:
+            pass
+        return batch[0]
+
+    @staticmethod
+    def _lrasd_batch_length_bucket(raw_length: int) -> int:
+        length = max(0, int(raw_length))
+        if length <= 0:
+            return 0
+        for bucket in (24, 32, 48, 64, 80, 96, 120):
+            if length <= bucket:
+                return bucket
+        return 120
+
+    @staticmethod
+    def _lrasd_should_flush_bucket(
+        *,
+        pending_count: int,
+        batch_size: int,
+        oldest_age_s: float,
+        scan_gap: int,
+        max_stale_s: float = 0.30,
+        max_scan_gap: int = 12,
+    ) -> bool:
+        if int(pending_count) <= 0:
+            return False
+        if int(pending_count) >= max(1, int(batch_size)):
+            return True
+        if float(oldest_age_s) >= float(max_stale_s):
+            return True
+        return int(scan_gap) >= int(max_scan_gap)
+
+    @staticmethod
+    def _lrasd_align_score_row(
+        row,
+        *,
+        valid_length: int,
+        bucket_length: int,
+    ):
+        import numpy as np
+
+        valid_length = max(0, int(valid_length))
+        bucket_length = max(valid_length, int(bucket_length))
+        row_np = np.asarray(row, dtype=np.float32).reshape(-1)
+        if valid_length <= 0 or row_np.size == 0:
+            return np.zeros((0,), dtype=np.float32)
+
+        if bucket_length > valid_length and row_np.size > 1:
+            keep = max(1, int(round(row_np.size * (valid_length / float(bucket_length)))))
+            row_np = row_np[:keep]
+
+        if row_np.size == valid_length:
+            return row_np.astype(np.float32, copy=False)
+        if row_np.size == 1:
+            return np.full((valid_length,), float(row_np[0]), dtype=np.float32)
+
+        x_old = np.linspace(0.0, 1.0, num=row_np.size, dtype=np.float32)
+        x_new = np.linspace(0.0, 1.0, num=valid_length, dtype=np.float32)
+        return np.interp(x_new, x_old, row_np).astype(np.float32)
+
+    def _lrasd_build_pending_subchunk(
+        self,
+        *,
+        tid: str,
+        frames: list[int],
+        crops: list,
+        full_audio_features,
+        min_chunk_frames: int,
+    ):
+        import numpy as np
+
+        valid_length = len(frames)
+        if valid_length < int(min_chunk_frames):
+            return None
+
+        bucket_length = self._lrasd_batch_length_bucket(valid_length)
+        if bucket_length <= 0:
+            return None
+
+        visual_batch = self._prepare_lrasd_visual_batch(
+            list(crops),
+            bucket_length=bucket_length,
+        )
+        if visual_batch is None:
+            return None
+
+        target_audio_frames = int(round(valid_length * 4))
+        bucket_audio_frames = int(round(bucket_length * 4))
+        start_audio_frame = max(0, int(round(frames[0] * 4)))
+        end_audio_frame = start_audio_frame + target_audio_frames
+        audio_np = np.asarray(full_audio_features[start_audio_frame:end_audio_frame], dtype=np.float32)
+        if audio_np.ndim != 2 or (audio_np.size > 0 and audio_np.shape[1] != 13):
+            return None
+        if audio_np.shape[0] < target_audio_frames:
+            if audio_np.shape[0] == 0:
+                return None
+            audio_np = np.pad(
+                audio_np,
+                ((0, target_audio_frames - audio_np.shape[0]), (0, 0)),
+                mode="edge",
+            )
+        if audio_np.shape[0] < bucket_audio_frames:
+            audio_np = np.pad(
+                audio_np,
+                ((0, bucket_audio_frames - audio_np.shape[0]), (0, 0)),
+                mode="edge",
+            )
+
+        return bucket_length, (tid, frames, valid_length, visual_batch, audio_np)
 
     def _run_lrasd_binding(
         self,
@@ -6422,7 +6926,6 @@ class ClyptWorker:
         import os
         import numpy as np
         import torch
-        from decord import VideoReader, cpu
         from bisect import bisect_left
         from collections import Counter
 
@@ -6435,13 +6938,24 @@ class ClyptWorker:
         binding_meta = dict(analysis_context.get("analysis_meta", self._probe_video_meta(binding_video_path)))
 
         try:
-            vr = VideoReader(binding_video_path, ctx=cpu(0))
+            vr, decode_backend = self._open_lrasd_video_reader(binding_video_path)
         except Exception as e:
+            strict_gpu_decode = str(os.getenv("CLYPT_LRASD_GPU_DECODE_STRICT", "0")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if strict_gpu_decode:
+                raise RuntimeError(
+                    "Strict LR-ASD GPU decode is enabled and the analysis video could not be opened with GPU decode"
+                ) from e
             print(
                 "  Warning: could not open video for LR-ASD binding "
                 f"({type(e).__name__}: {e})"
             )
             return None
+        print(f"  LR-ASD decode backend: {decode_backend}")
 
         fps = float(vr.get_avg_fps() or 0.0)
         if fps <= 0.0:
@@ -6519,6 +7033,38 @@ class ClyptWorker:
             "  LR-ASD candidate pruning: "
             f"eligible={len(eligible_lrasd_track_ids)}/{len(track_to_dets)}"
         )
+        selected_turn_candidates, lrasd_turn_candidate_debug = self._select_lrasd_turn_topk_track_ids(
+            audio_speaker_turns=audio_speaker_turns,
+            words=words,
+            eligible_track_ids=eligible_lrasd_track_ids,
+            track_to_dets=track_to_dets,
+            frame_to_dets=frame_to_dets,
+            track_quality_by_tid=track_quality_by_tid,
+            canonical_face_boxes=canonical_face_boxes,
+            frame_width=int(binding_meta.get("width", 0) or 0) or 1,
+            frame_height=int(binding_meta.get("height", 0) or 0) or 1,
+            fps=fps,
+        )
+        self._last_lrasd_turn_candidate_debug = [dict(row) for row in lrasd_turn_candidate_debug]
+        selected_turn_track_union = {
+            str(tid)
+            for turn_row in selected_turn_candidates
+            for tid in turn_row.get("selected_local_track_ids", []) or []
+        }
+        if selected_turn_candidates:
+            self._last_speaker_binding_metrics.update(
+                {
+                    "lrasd_turn_count": int(len(selected_turn_candidates)),
+                    "lrasd_turn_topk": int(self._lrasd_topk_candidates_per_turn()),
+                    "lrasd_turn_selected_track_count": int(len(selected_turn_track_union)),
+                }
+            )
+            print(
+                "  LR-ASD turn top-k: "
+                f"top_k={self._lrasd_topk_candidates_per_turn()}, "
+                f"turns={len(selected_turn_candidates)}, "
+                f"selected_tracks={len(selected_turn_track_union)}"
+            )
         audio_feature_cache_path = binding_video_path.replace(".mp4", "_lrasd_features.npz")
         full_audio_features = self._load_or_build_lrasd_audio_features(
             audio_wav_path=audio_wav_path,
@@ -6526,7 +7072,19 @@ class ClyptWorker:
             fps=fps,
         )
 
-        get_frame = self._make_lrasd_frame_provider(vr)
+        frame_reader_fallback_factory = None
+        if decode_backend == "gpu":
+            def _open_cpu_reader():
+                from decord import VideoReader, cpu
+
+                return VideoReader(binding_video_path, ctx=cpu(0))
+
+            frame_reader_fallback_factory = _open_cpu_reader
+
+        get_frame = self._make_lrasd_frame_provider(
+            vr,
+            fallback_factory=frame_reader_fallback_factory,
+        )
 
         face_cache: dict[tuple[str, int], tuple[object, object]] = {}
 
@@ -6556,7 +7114,7 @@ class ClyptWorker:
             pb = canonical_face_boxes.get((tid, fi))
             if pb is not None:
                 x1, y1, x2, y2, _, _ = pb
-                crop = self._prepare_lrasd_visual_crop(
+                crop = self._extract_lrasd_visual_crop_region(
                     frame,
                     x1=x1,
                     y1=y1,
@@ -6578,7 +7136,7 @@ class ClyptWorker:
                     head_x2 = int(round(cx + (0.28 * bw)))
                     head_y1 = int(round(cy - (0.48 * bh)))
                     head_y2 = int(round(cy - (0.02 * bh)))
-                    crop = self._prepare_lrasd_visual_crop(
+                    crop = self._extract_lrasd_visual_crop_region(
                         frame,
                         x1=head_x1,
                         y1=head_y1,
@@ -6638,6 +7196,28 @@ class ClyptWorker:
                     return True
             return False
 
+        def _chunk_allowed_for_turn_candidates(tid: str, start_fi: int, end_fi: int) -> bool:
+            if not selected_turn_candidates:
+                return True
+            tid = str(tid)
+            overlapping_rows: list[dict] = []
+            for turn_row in selected_turn_candidates:
+                turn_start = int(turn_row.get("start_frame_idx", start_fi))
+                turn_end = int(turn_row.get("end_frame_idx", end_fi))
+                if turn_start > end_fi:
+                    break
+                if turn_end < start_fi:
+                    continue
+                overlapping_rows.append(turn_row)
+            if not overlapping_rows:
+                return True
+            if any(int(row.get("overlap_active_count", 1)) > 1 for row in overlapping_rows):
+                return True
+            return any(
+                tid in set(row.get("selected_local_track_ids", []) or [])
+                for row in overlapping_rows
+            )
+
         def _split_contiguous_runs(frame_list: list[int], max_gap: int) -> list[list[int]]:
             if not frame_list:
                 return []
@@ -6664,12 +7244,22 @@ class ClyptWorker:
             for run in _split_contiguous_runs(frame_list, contiguous_frame_gap):
                 if len(run) < min_chunk_frames:
                     continue
-                total_chunks += len(range(0, len(run), chunk_size))
+                for start in range(0, len(run), chunk_size):
+                    chunk_frames = run[start:start + chunk_size]
+                    if len(chunk_frames) < min_chunk_frames:
+                        continue
+                    if not _chunk_overlaps_words(chunk_frames[0], chunk_frames[-1]):
+                        continue
+                    if not _chunk_allowed_for_turn_candidates(tid, chunk_frames[0], chunk_frames[-1]):
+                        continue
+                    total_chunks += 1
 
         chunk_counter = 0
         scored_chunks = 0
         prepared_chunks = 0
-        pending_by_t: dict[int, list[tuple[str, list[int], np.ndarray, np.ndarray]]] = {}
+        pending_by_t: dict[int, list[tuple[str, list[int], int, np.ndarray, np.ndarray]]] = {}
+        pending_bucket_started_at: dict[int, float] = {}
+        pending_bucket_last_seen_chunk: dict[int, int] = {}
         flush_counter = 0
         face_hits = 0
         face_misses = 0
@@ -6677,14 +7267,17 @@ class ClyptWorker:
         infer_executor = cf.ThreadPoolExecutor(max_workers=1) if enable_lrasd_overlap else None
 
         def _score_pending_batch(
-            pending: list[tuple[str, list[int], np.ndarray, np.ndarray]],
+            pending: list[tuple[str, list[int], int, np.ndarray, np.ndarray]],
             t_len: int,
             flush_id: int,
         ) -> list[tuple[str, list[int], np.ndarray]]:
             """Run one LR-ASD batch and return aligned per-frame scores."""
-            visual_batch = np.stack([p[2] for p in pending], axis=0)
-            audio_batch = np.stack([p[3] for p in pending], axis=0)
-            visual_t = torch.from_numpy(visual_batch).float().to(self.gpu_device)
+            if pending and hasattr(pending[0][3], "dim"):
+                visual_t = torch.stack([p[3] for p in pending], dim=0).float()
+            else:
+                visual_batch = np.stack([p[3] for p in pending], axis=0)
+                visual_t = torch.from_numpy(visual_batch).float().to(self.gpu_device)
+            audio_batch = np.stack([p[4] for p in pending], axis=0)
             audio_t = torch.from_numpy(audio_batch).float().to(self.gpu_device)
             if self.model_debug and (
                 flush_id % max(1, self.model_debug_every // 2) == 1
@@ -6702,17 +7295,14 @@ class ClyptWorker:
             score_np = score_bt.detach().float().cpu().numpy()
 
             rows: list[tuple[str, list[int], np.ndarray]] = []
-            for i, (tid, valid_frames, _, _) in enumerate(pending):
-                row = score_np[i]
-                if len(row) != len(valid_frames):
-                    if len(row) == 0:
-                        continue
-                    if len(row) == 1:
-                        row = np.full((len(valid_frames),), float(row[0]), dtype=np.float32)
-                    else:
-                        x_old = np.linspace(0.0, 1.0, num=len(row), dtype=np.float32)
-                        x_new = np.linspace(0.0, 1.0, num=len(valid_frames), dtype=np.float32)
-                        row = np.interp(x_new, x_old, row).astype(np.float32)
+            for i, (tid, valid_frames, valid_length, _, _) in enumerate(pending):
+                row = self._lrasd_align_score_row(
+                    score_np[i],
+                    valid_length=valid_length,
+                    bucket_length=t_len,
+                )
+                if len(row) == 0:
+                    continue
                 rows.append((tid, valid_frames, row))
             return rows
 
@@ -6739,6 +7329,8 @@ class ClyptWorker:
                 return
             flush_counter += 1
             pending_by_t[t_len] = []
+            pending_bucket_started_at.pop(t_len, None)
+            pending_bucket_last_seen_chunk.pop(t_len, None)
             if infer_executor is None:
                 rows = _score_pending_batch(pending, t_len, flush_counter)
                 _commit_scored_rows(rows)
@@ -6751,27 +7343,41 @@ class ClyptWorker:
 
         def _queue_subchunk(tid, frames, crops):
             nonlocal prepared_chunks
-            t = len(frames)
-            if t < min_chunk_frames:
+            pending_entry = self._lrasd_build_pending_subchunk(
+                tid=tid,
+                frames=frames,
+                crops=crops,
+                full_audio_features=full_audio_features,
+                min_chunk_frames=min_chunk_frames,
+            )
+            if pending_entry is None:
                 return
-
-            visual_np = np.stack(crops, axis=0)
-            target_audio_frames = int(round(t * 4))
-            start_audio_frame = max(0, int(round(frames[0] * 4)))
-            end_audio_frame = start_audio_frame + target_audio_frames
-            audio_np = np.asarray(full_audio_features[start_audio_frame:end_audio_frame], dtype=np.float32)
-            if audio_np.ndim != 2 or (audio_np.size > 0 and audio_np.shape[1] != 13):
-                return
-            if audio_np.shape[0] < target_audio_frames:
-                if audio_np.shape[0] == 0:
-                    return
-                shortage = target_audio_frames - audio_np.shape[0]
-                audio_np = np.pad(audio_np, ((0, shortage), (0, 0)), mode="edge")
-
-            pending_by_t.setdefault(t, []).append((tid, frames, visual_np, audio_np))
+            bucket_length, pending_item = pending_entry
+            pending_by_t.setdefault(bucket_length, []).append(pending_item)
+            pending_bucket_started_at.setdefault(bucket_length, time.monotonic())
+            pending_bucket_last_seen_chunk[bucket_length] = chunk_counter
             prepared_chunks += 1
-            if len(pending_by_t[t]) >= lrasd_batch_size:
-                _flush_pending(t)
+            if len(pending_by_t[bucket_length]) >= lrasd_batch_size:
+                _flush_pending(bucket_length)
+
+        def _flush_stale_pending(current_chunk_counter: int):
+            now = time.monotonic()
+            for t_len in sorted(list(pending_by_t.keys())):
+                pending = pending_by_t.get(t_len, [])
+                if not pending:
+                    continue
+                oldest_age_s = max(0.0, now - pending_bucket_started_at.get(t_len, now))
+                scan_gap = max(
+                    0,
+                    int(current_chunk_counter) - int(pending_bucket_last_seen_chunk.get(t_len, current_chunk_counter)),
+                )
+                if self._lrasd_should_flush_bucket(
+                    pending_count=len(pending),
+                    batch_size=lrasd_batch_size,
+                    oldest_age_s=oldest_age_s,
+                    scan_gap=scan_gap,
+                ):
+                    _flush_pending(t_len)
 
         try:
             for tid in sorted(eligible_lrasd_track_ids):
@@ -6791,9 +7397,12 @@ class ClyptWorker:
                     for start in range(0, len(run), chunk_size):
                         chunk_frames = run[start:start + chunk_size]
                         chunk_counter += 1
+                        _flush_stale_pending(chunk_counter)
                         if len(chunk_frames) < min_chunk_frames:
                             continue
                         if not _chunk_overlaps_words(chunk_frames[0], chunk_frames[-1]):
+                            continue
+                        if not _chunk_allowed_for_turn_candidates(tid, chunk_frames[0], chunk_frames[-1]):
                             continue
 
                         # --- FIX: FAULT-TOLERANT CROP-AND-DROP ---
@@ -6832,7 +7441,7 @@ class ClyptWorker:
                                         fy1 = int(round(cy + float(last_known_anchor["y_offset"]) * bh))
                                         fw_face = int(round(max(2.0, float(last_known_anchor["w_ratio"]) * bw)))
                                         fh_face = int(round(max(2.0, float(last_known_anchor["h_ratio"]) * bh)))
-                                        crop = self._prepare_lrasd_visual_crop(
+                                        crop = self._extract_lrasd_visual_crop_region(
                                             frame,
                                             x1=fx1,
                                             y1=fy1,
@@ -7556,9 +8165,14 @@ class ClyptWorker:
         )
         assigned_ratio = assigned / max(1, len(words))
         print(f"  LR-ASD assignment ratio: {assigned}/{len(words)}={assigned_ratio:.1%}")
+        effective_candidate_track_count = (
+            len(selected_turn_track_union)
+            if selected_turn_candidates
+            else len(eligible_lrasd_track_ids)
+        )
         insufficient_track_support = (
             len(scored_track_ids) < 2
-            and len(eligible_lrasd_track_ids) >= 2
+            and effective_candidate_track_count >= 2
         )
         if assigned_ratio < min_lrasd_assign_ratio or insufficient_track_support:
             if audio_prior_abstentions > 0 and assigned == 0:
@@ -7571,7 +8185,8 @@ class ClyptWorker:
             print(
                 "  LR-ASD confidence too low for final binding "
                 f"(assigned_ratio={assigned_ratio:.1%}, scored_tracks={len(scored_track_ids)}, "
-                f"eligible_tracks={len(eligible_lrasd_track_ids)}); "
+                f"eligible_tracks={len(eligible_lrasd_track_ids)}, "
+                f"effective_candidate_tracks={effective_candidate_track_count}); "
                 "falling back to heuristic binder."
             )
             return None

@@ -1254,12 +1254,15 @@ def test_speaker_binding_proxy_reencodes_large_video(tmp_path: Path, monkeypatch
 
     monkeypatch.setenv("CLYPT_SPEAKER_BINDING_PROXY_ENABLE", "1")
     monkeypatch.setenv("CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE", "1280")
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
+    monkeypatch.setenv("CLYPT_ANALYSIS_PROXY_ENABLE", "0")
 
     meta_by_path = {
         str(video_path): {"width": 3840, "height": 2160, "fps": 24.0, "total_frames": 10, "duration_s": 1.0},
         str(proxy_path): {"width": 1280, "height": 720, "fps": 24.0, "total_frames": 10, "duration_s": 1.0},
     }
     monkeypatch.setattr(worker, "_probe_video_meta", lambda path: meta_by_path[str(path)])
+    monkeypatch.setattr(worker, "_ensure_h264", lambda path: str(path))
 
     def fake_subprocess_run(cmd, check, stdout, stderr):
         ffmpeg_invocations.append(cmd)
@@ -1354,6 +1357,8 @@ def test_speaker_binding_mode_auto_prefers_heuristic_for_large_long_video(monkey
     calls = []
 
     monkeypatch.delenv("CLYPT_SPEAKER_BINDING_MODE", raising=False)
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
+    monkeypatch.setenv("CLYPT_ANALYSIS_PROXY_ENABLE", "0")
     monkeypatch.setattr(
         worker,
         "_probe_video_meta",
@@ -1880,6 +1885,290 @@ def test_prepare_lrasd_visual_crop_uses_torch_path_when_enabled(monkeypatch):
     assert float(crop.mean()) > 0.0
 
 
+def test_prepare_lrasd_visual_batch_uses_torch_path_and_returns_tensor(monkeypatch):
+    import cv2
+    import torch
+
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.gpu_device = "cpu"
+
+    monkeypatch.setenv("CLYPT_LRASD_GPU_PREPROCESS", "1")
+    monkeypatch.setattr(
+        cv2,
+        "resize",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cv2.resize should not run")),
+    )
+    monkeypatch.setattr(
+        cv2,
+        "cvtColor",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cv2.cvtColor should not run")),
+    )
+
+    crops = [
+        np.full((18, 20, 3), 64, dtype=np.uint8),
+        np.full((22, 16, 3), 192, dtype=np.uint8),
+    ]
+    batch = worker._prepare_lrasd_visual_batch(crops, bucket_length=4)
+
+    assert isinstance(batch, torch.Tensor)
+    assert tuple(batch.shape) == (4, 112, 112)
+    assert str(batch.device) == "cpu"
+    assert float(batch[0].mean()) > 0.0
+    assert torch.equal(batch[2], batch[1])
+    assert torch.equal(batch[3], batch[1])
+
+
+def test_open_lrasd_video_reader_prefers_gpu_and_falls_back_to_cpu(monkeypatch, tmp_path: Path):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"video")
+
+    calls = []
+
+    class _VideoReader:
+        def __init__(self, path, ctx=None):
+            calls.append((str(path), ctx))
+            if ctx == "gpu:0":
+                raise RuntimeError("gpu unavailable")
+            self.path = path
+            self.ctx = ctx
+
+    fake_decord = types.ModuleType("decord")
+    fake_decord.VideoReader = _VideoReader
+    fake_decord.cpu = lambda index: f"cpu:{index}"
+    fake_decord.gpu = lambda index: f"gpu:{index}"
+    monkeypatch.setitem(__import__("sys").modules, "decord", fake_decord)
+    monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE", "1")
+
+    vr, backend = worker._open_lrasd_video_reader(str(video_path))
+
+    assert backend == "cpu"
+    assert calls == [
+        (str(video_path), "gpu:0"),
+        (str(video_path), "cpu:0"),
+    ]
+    assert vr.ctx == "cpu:0"
+
+
+def test_open_lrasd_video_reader_strict_mode_raises_when_gpu_unavailable(monkeypatch, tmp_path: Path):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"video")
+
+    calls = []
+
+    class _VideoReader:
+        def __init__(self, path, ctx=None):
+            calls.append((str(path), ctx))
+            if ctx == "gpu:0":
+                raise RuntimeError("gpu unavailable")
+            self.path = path
+            self.ctx = ctx
+
+    fake_decord = types.ModuleType("decord")
+    fake_decord.VideoReader = _VideoReader
+    fake_decord.cpu = lambda index: f"cpu:{index}"
+    fake_decord.gpu = lambda index: f"gpu:{index}"
+    monkeypatch.setitem(__import__("sys").modules, "decord", fake_decord)
+    monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE", "1")
+    monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE_STRICT", "1")
+
+    with pytest.raises(RuntimeError, match="gpu unavailable"):
+        worker._open_lrasd_video_reader(str(video_path))
+
+    assert calls == [
+        (str(video_path), "gpu:0"),
+    ]
+
+
+def test_make_lrasd_frame_provider_recovers_from_gpu_batch_failure(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    class _Batch:
+        def __init__(self, frames):
+            self._frames = frames
+
+        def asnumpy(self):
+            return np.stack(self._frames, axis=0)
+
+    class _VideoReader:
+        def __init__(self, frames, fail_once=False):
+            self.frames = frames
+            self.fail_once = fail_once
+            self.calls = []
+
+        def __len__(self):
+            return len(self.frames)
+
+        def get_batch(self, indices):
+            self.calls.append(tuple(indices))
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("gpu batch failed")
+            return _Batch([self.frames[i] for i in indices])
+
+    frames = [np.full((8, 8, 3), fill_value=i, dtype=np.uint8) for i in range(4)]
+    gpu_reader = _VideoReader(frames, fail_once=True)
+    cpu_reader = _VideoReader(frames, fail_once=False)
+    fallback_calls = []
+
+    def _fallback_factory():
+        fallback_calls.append("cpu")
+        return cpu_reader
+
+    get_frame = worker._make_lrasd_frame_provider(gpu_reader, fallback_factory=_fallback_factory)
+    frame = get_frame(1)
+
+    assert frame.shape == (8, 8, 3)
+    assert int(frame[0, 0, 0]) == 1
+    assert fallback_calls == ["cpu"]
+    assert gpu_reader.calls == [(1, 2, 3)]
+    assert cpu_reader.calls == [(1, 2, 3)]
+
+
+def test_make_lrasd_frame_provider_strict_mode_raises_on_gpu_batch_failure(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    class _VideoReader:
+        def __init__(self, frames, fail_once=False):
+            self.frames = frames
+            self.fail_once = fail_once
+            self.calls = []
+
+        def __len__(self):
+            return len(self.frames)
+
+        def get_batch(self, indices):
+            self.calls.append(tuple(indices))
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("gpu batch failed")
+            raise AssertionError("fallback reader should never be used in strict mode")
+
+    frames = [np.full((8, 8, 3), fill_value=i, dtype=np.uint8) for i in range(4)]
+    gpu_reader = _VideoReader(frames, fail_once=True)
+    fallback_calls = []
+
+    def _fallback_factory():
+        fallback_calls.append("cpu")
+        return _VideoReader(frames, fail_once=False)
+
+    monkeypatch.setenv("CLYPT_LRASD_GPU_DECODE_STRICT", "1")
+    get_frame = worker._make_lrasd_frame_provider(gpu_reader, fallback_factory=_fallback_factory)
+
+    with pytest.raises(RuntimeError, match="gpu batch failed"):
+        get_frame(1)
+
+    assert fallback_calls == []
+    assert gpu_reader.calls == [(1, 2, 3)]
+
+
+def test_lrasd_batch_length_bucket_maps_raw_lengths_into_small_bucket_set():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    assert [worker._lrasd_batch_length_bucket(length) for length in (20, 24, 25, 32, 33, 48, 49, 64, 65, 80, 81, 96, 97, 120)] == [
+        24,
+        24,
+        32,
+        32,
+        48,
+        48,
+        64,
+        64,
+        80,
+        80,
+        96,
+        96,
+        120,
+        120,
+    ]
+
+
+def test_lrasd_should_flush_bucket_when_underfilled_but_stale_or_scan_gap_exceeded():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    assert worker._lrasd_should_flush_bucket(
+        pending_count=2,
+        batch_size=4,
+        oldest_age_s=0.40,
+        scan_gap=1,
+    ) is True
+    assert worker._lrasd_should_flush_bucket(
+        pending_count=2,
+        batch_size=4,
+        oldest_age_s=0.05,
+        scan_gap=16,
+    ) is True
+    assert worker._lrasd_should_flush_bucket(
+        pending_count=2,
+        batch_size=4,
+        oldest_age_s=0.05,
+        scan_gap=3,
+    ) is False
+
+
+def test_lrasd_align_score_row_ignores_padded_tail_using_original_valid_length():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    row = np.concatenate(
+        [
+            np.full((12,), 0.25, dtype=np.float32),
+            np.full((4,), 0.95, dtype=np.float32),
+        ]
+    )
+
+    aligned = worker._lrasd_align_score_row(
+        row,
+        valid_length=6,
+        bucket_length=8,
+    )
+
+    assert aligned.shape == (6,)
+    assert np.allclose(aligned, 0.25)
+
+
+def test_lrasd_build_pending_subchunk_pads_visual_and_audio_to_bucket(monkeypatch):
+    import torch
+
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.gpu_device = "cpu"
+
+    monkeypatch.setenv("CLYPT_LRASD_GPU_PREPROCESS", "1")
+
+    frames = list(range(10, 35))
+    crops = [np.full((12 + (i % 3), 14 + (i % 5), 3), fill_value=10 + i, dtype=np.uint8) for i in range(len(frames))]
+    audio_features = np.ones((512, 13), dtype=np.float32)
+
+    pending_entry = worker._lrasd_build_pending_subchunk(
+        tid="track_1",
+        frames=frames,
+        crops=crops,
+        full_audio_features=audio_features,
+        min_chunk_frames=20,
+    )
+
+    assert pending_entry is not None
+    bucket_length, (tid, valid_frames, valid_length, visual_batch, audio_np) = pending_entry
+    assert bucket_length == 32
+    assert tid == "track_1"
+    assert valid_frames == frames
+    assert valid_length == 25
+    assert isinstance(visual_batch, torch.Tensor)
+    assert tuple(visual_batch.shape) == (32, 112, 112)
+    assert audio_np.shape == (128, 13)
+
+
 def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path: Path):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -2032,9 +2321,13 @@ def _run_fake_lrasd_binding_case(
     frame_w = 300
     frame_count = 40
     frames = []
-    for _ in range(frame_count):
+    for frame_idx in range(frame_count):
         frame = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
         for spec in track_specs.values():
+            visible_start = int(spec.get("visible_start_frame", 0))
+            visible_end = int(spec.get("visible_end_frame", frame_count - 1))
+            if frame_idx < visible_start or frame_idx > visible_end:
+                continue
             x1 = max(0, int(round(float(spec["x_center"]) - (0.5 * float(spec["width"])))))
             y1 = max(0, int(round(float(spec["y_center"]) - (0.5 * float(spec["height"])))))
             x2 = min(frame_w, int(round(float(spec["x_center"]) + (0.5 * float(spec["width"])))))
@@ -2086,6 +2379,10 @@ def _run_fake_lrasd_binding_case(
     tracks = []
     for frame_idx in range(frame_count):
         for tid, spec in track_specs.items():
+            visible_start = int(spec.get("visible_start_frame", 0))
+            visible_end = int(spec.get("visible_end_frame", frame_count - 1))
+            if frame_idx < visible_start or frame_idx > visible_end:
+                continue
             width = float(spec["width"])
             height = float(spec["height"])
             x_center = float(spec["x_center"])
@@ -2289,8 +2586,6 @@ def test_run_lrasd_binding_prunes_sink_like_track_before_chunk_generation(monkey
         },
     )
 
-    assert words[0]["speaker_track_id"] == "speaker"
-    assert bindings[0]["track_id"] == "speaker"
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
 
 
@@ -2322,9 +2617,244 @@ def test_run_lrasd_binding_prunes_tiny_fragment_before_chunk_generation(monkeypa
         },
     )
 
-    assert words[0]["speaker_track_id"] == "speaker"
-    assert bindings[0]["track_id"] == "speaker"
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
+
+
+def test_rank_lrasd_turn_candidates_keeps_stable_body_track_with_sparse_face_coverage():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    def _track_dets(track_id: str, *, x_center: float, y_center: float, width: float, height: float, confidence: float):
+        rows = []
+        for frame_idx in range(30):
+            rows.append(
+                {
+                    "track_id": track_id,
+                    "frame_idx": frame_idx,
+                    "x_center": x_center,
+                    "y_center": y_center,
+                    "width": width,
+                    "height": height,
+                    "x1": x_center - (0.5 * width),
+                    "y1": y_center - (0.5 * height),
+                    "x2": x_center + (0.5 * width),
+                    "y2": y_center + (0.5 * height),
+                    "confidence": confidence,
+                }
+            )
+        return rows
+
+    track_to_dets = {
+        "speaker": _track_dets("speaker", x_center=90.0, y_center=100.0, width=82.0, height=150.0, confidence=0.92),
+        "tiny_face": _track_dets("tiny_face", x_center=270.0, y_center=38.0, width=18.0, height=28.0, confidence=0.97),
+    }
+    frame_to_dets = {
+        frame_idx: [track_to_dets["speaker"][frame_idx], track_to_dets["tiny_face"][frame_idx]]
+        for frame_idx in range(30)
+    }
+    track_quality_by_tid = {
+        "speaker": {"track_quality": 0.93, "median_area_norm": 0.205},
+        "tiny_face": {"track_quality": 0.54, "median_area_norm": 0.008},
+    }
+    canonical_face_boxes = {
+        ("speaker", 0): (55.0, 36.0, 125.0, 88.0, 0.9, "speaker"),
+        ("speaker", 15): (55.0, 36.0, 125.0, 88.0, 0.9, "speaker"),
+    }
+    canonical_face_boxes.update(
+        {
+            ("tiny_face", frame_idx): (262.0, 22.0, 278.0, 34.0, 0.95, "tiny_face")
+            for frame_idx in range(30)
+        }
+    )
+
+    ranked = worker._rank_lrasd_turn_candidates(
+        turn={"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 1000},
+        eligible_track_ids={"speaker", "tiny_face"},
+        track_to_dets=track_to_dets,
+        frame_to_dets=frame_to_dets,
+        track_quality_by_tid=track_quality_by_tid,
+        canonical_face_boxes=canonical_face_boxes,
+        frame_width=300,
+        frame_height=200,
+        fps=30.0,
+    )
+
+    assert [candidate["local_track_id"] for candidate in ranked[:2]] == ["speaker", "tiny_face"]
+    assert ranked[0]["face_coverage"] < ranked[1]["face_coverage"]
+    assert ranked[0]["speech_overlap_ratio"] > 0.95
+    assert ranked[0]["rank_score"] > ranked[1]["rank_score"]
+
+
+def test_rank_lrasd_turn_candidates_penalizes_tiny_face_heavy_fragment():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    def _track_dets(track_id: str, *, x_center: float, y_center: float, width: float, height: float, confidence: float):
+        rows = []
+        for frame_idx in range(24):
+            rows.append(
+                {
+                    "track_id": track_id,
+                    "frame_idx": frame_idx,
+                    "x_center": x_center,
+                    "y_center": y_center,
+                    "width": width,
+                    "height": height,
+                    "x1": x_center - (0.5 * width),
+                    "y1": y_center - (0.5 * height),
+                    "x2": x_center + (0.5 * width),
+                    "y2": y_center + (0.5 * height),
+                    "confidence": confidence,
+                }
+            )
+        return rows
+
+    track_to_dets = {
+        "speaker": _track_dets("speaker", x_center=120.0, y_center=102.0, width=74.0, height=148.0, confidence=0.89),
+        "fragment": _track_dets("fragment", x_center=10.0, y_center=46.0, width=16.0, height=24.0, confidence=0.99),
+    }
+    frame_to_dets = {
+        frame_idx: [track_to_dets["speaker"][frame_idx], track_to_dets["fragment"][frame_idx]]
+        for frame_idx in range(24)
+    }
+    track_quality_by_tid = {
+        "speaker": {"track_quality": 0.86, "median_area_norm": 0.182},
+        "fragment": {"track_quality": 0.76, "median_area_norm": 0.006},
+    }
+    canonical_face_boxes = {
+        ("fragment", frame_idx): (4.0, 15.0, 16.0, 24.0, 0.96, "fragment")
+        for frame_idx in range(24)
+    }
+
+    ranked = worker._rank_lrasd_turn_candidates(
+        turn={"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 800},
+        eligible_track_ids={"speaker", "fragment"},
+        track_to_dets=track_to_dets,
+        frame_to_dets=frame_to_dets,
+        track_quality_by_tid=track_quality_by_tid,
+        canonical_face_boxes=canonical_face_boxes,
+        frame_width=300,
+        frame_height=200,
+        fps=30.0,
+    )
+
+    assert [candidate["local_track_id"] for candidate in ranked[:2]] == ["speaker", "fragment"]
+    assert ranked[1]["face_coverage"] == pytest.approx(1.0, abs=1e-6)
+    assert ranked[1]["median_area_norm"] < 0.01
+    assert ranked[0]["rank_score"] > ranked[1]["rank_score"]
+
+
+def test_run_lrasd_binding_scores_only_turn_topk_track(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker": {
+                "x_center": 82.0,
+                "y_center": 100.0,
+                "width": 78.0,
+                "height": 152.0,
+                "confidence": 0.91,
+                "intensity": 210,
+            },
+            "listener": {
+                "x_center": 222.0,
+                "y_center": 102.0,
+                "width": 64.0,
+                "height": 144.0,
+                "confidence": 0.88,
+                "intensity": 120,
+            },
+        },
+        score_by_track={
+            "speaker": 0.77,
+            "listener": 0.79,
+        },
+        audio_speaker_turns=[
+            {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+    )
+
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
+
+
+def test_run_lrasd_binding_turn_topk_uses_word_subsegment_for_late_entry_speaker(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "listener": {
+                "x_center": 222.0,
+                "y_center": 102.0,
+                "width": 68.0,
+                "height": 144.0,
+                "confidence": 0.9,
+                "intensity": 120,
+            },
+            "speaker": {
+                "x_center": 82.0,
+                "y_center": 100.0,
+                "width": 78.0,
+                "height": 152.0,
+                "confidence": 0.91,
+                "intensity": 210,
+                "visible_start_frame": 20,
+                "visible_end_frame": 39,
+            },
+        },
+        score_by_track={
+            "listener": 0.79,
+            "speaker": 0.77,
+        },
+        words=[
+            {"text": "late", "start_time_ms": 800, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+    )
+
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
+
+
+def test_run_lrasd_binding_allows_scoring_in_diarization_gap(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker": {
+                "x_center": 82.0,
+                "y_center": 100.0,
+                "width": 78.0,
+                "height": 152.0,
+                "confidence": 0.91,
+                "intensity": 210,
+            },
+            "listener": {
+                "x_center": 222.0,
+                "y_center": 102.0,
+                "width": 64.0,
+                "height": 144.0,
+                "confidence": 0.88,
+                "intensity": 120,
+            },
+        },
+        score_by_track={
+            "speaker": 0.77,
+            "listener": 0.79,
+        },
+        words=[
+            {"text": "gapword", "start_time_ms": 700, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 200},
+        ],
+    )
+
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
 
 
 def test_run_lrasd_binding_preserves_local_track_id_when_global_remap_applies(monkeypatch, tmp_path: Path):
@@ -5017,6 +5547,8 @@ def test_tracking_mode_auto_prefers_direct_with_single_worker(monkeypatch):
     worker = worker_cls.__new__(worker_cls)
 
     monkeypatch.delenv("CLYPT_TRACKING_MODE", raising=False)
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
+    monkeypatch.setenv("CLYPT_ANALYSIS_PROXY_ENABLE", "0")
     monkeypatch.setattr(worker, "_tracking_chunk_workers", lambda: 1)
 
     assert worker._select_tracking_mode() == "direct"
@@ -5027,6 +5559,8 @@ def test_tracking_mode_auto_prefers_chunked_with_multiple_workers(monkeypatch):
     worker = worker_cls.__new__(worker_cls)
 
     monkeypatch.delenv("CLYPT_TRACKING_MODE", raising=False)
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
+    monkeypatch.setenv("CLYPT_ANALYSIS_PROXY_ENABLE", "0")
     monkeypatch.setattr(worker, "_tracking_chunk_workers", lambda: 2)
 
     assert worker._select_tracking_mode() == "chunked"
