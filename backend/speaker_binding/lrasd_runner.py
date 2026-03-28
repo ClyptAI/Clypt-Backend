@@ -248,6 +248,9 @@ class LrasdPrepPipeline:
     def drain(self) -> list[object]:
         return self._drain_ready(block=True)
 
+    def poll(self) -> list[object]:
+        return self._drain_ready(block=False)
+
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             pending_seqs = sorted(self._futures.keys())

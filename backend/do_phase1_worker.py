@@ -7439,6 +7439,10 @@ class ClyptWorker:
             if len(pending_by_t[int(bucket_length)]) >= lrasd_batch_size:
                 _flush_pending(int(bucket_length))
 
+        def _poll_prepared_entries():
+            for pending_entry in prep_pipeline.poll():
+                _queue_prepared_entry(pending_entry)
+
         def _flush_pending(t_len: int):
             nonlocal flush_counter
             pending = pending_by_t.get(t_len, [])
@@ -7525,6 +7529,7 @@ class ClyptWorker:
                         chunk_aborted_early = False
                         slow_chunk_logged = False
                         chunk_counter += 1
+                        _poll_prepared_entries()
                         _flush_stale_pending(chunk_counter)
                         if len(chunk_frames) < min_chunk_frames:
                             continue
@@ -7616,6 +7621,8 @@ class ClyptWorker:
                                     last_known_anchor = None
 
                             chunk_frames_processed += 1
+                            if chunk_frames_processed % 8 == 0:
+                                _poll_prepared_entries()
                             if self._lrasd_should_abort_chunk_early(
                                 frames_processed=chunk_frames_processed,
                                 face_hits=chunk_face_hits,
@@ -7626,6 +7633,7 @@ class ClyptWorker:
                                 break
 
                         # Flush remainder
+                        _poll_prepared_entries()
                         if len(current_face_subchunk) >= min_chunk_frames:
                             _submit_subchunk(tid, current_face_subchunk, current_crops)
                             submitted_subchunks += 1

@@ -266,3 +266,23 @@ def test_lrasd_prep_pipeline_snapshot_reports_oldest_pending_age():
     assert snapshot["oldest_pending_seq"] == 0
     assert snapshot["oldest_pending_age_s"] >= 0.04
     assert snapshot["head_future_done"] is False
+
+
+def test_lrasd_prep_pipeline_poll_drains_ready_head_without_new_submit():
+    pipeline = LrasdPrepPipeline(
+        prepare_fn=lambda spec: (time.sleep(spec["delay_s"]), spec["job_id"])[1],
+        prep_workers=1,
+        queue_size=4,
+    )
+
+    try:
+        assert pipeline.submit({"job_id": "job-0", "delay_s": 0.03}) == []
+        time.sleep(0.06)
+
+        assert pipeline.poll() == ["job-0"]
+        snapshot = pipeline.snapshot()
+    finally:
+        pipeline.close()
+
+    assert snapshot["pending_count"] == 0
+    assert snapshot["next_emit_seq"] == 1
