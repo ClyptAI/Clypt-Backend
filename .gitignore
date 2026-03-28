@@ -8,6 +8,10 @@
 .superpowers/
 .understand-anything/
 .tmp/
+.codex-temp/
+.tmp-lock-check*/
+.pytest-tmp/
+.pytest-tmp-worker/
 
 # Python
 __pycache__/
@@ -38,6 +42,7 @@ backend/.parallel_runs/
 clypt-render-engine/out/
 clypt-render-engine/public/video.mp4
 clypt-render-engine/src/remotion_payloads_array.json
+clypt-render-engine/
 
 # Logs
 *.log

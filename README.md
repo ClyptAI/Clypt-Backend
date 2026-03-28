@@ -122,22 +122,24 @@ The short version on the droplet is:
 
 ```bash
 sudo REPO_DIR=/opt/clypt-phase1/repo \
-  BRANCH=codex/balanced-hybrid-phase1-contract \
   ENV_FILE=/etc/clypt-phase1/do-phase1.env \
   REQUIREMENTS_FILE=requirements-do-phase1.txt \
   bash scripts/do_phase1/deploy_phase1_service.sh
 ```
+
+Set `BRANCH=...` only when you intentionally want the deploy script to check out a different branch before installing.
 
 This installs the dedicated Phase 1 dependency bundle, pre-caches the active models, and starts:
 - `clypt-phase1-api.service`
 - `clypt-phase1-worker.service`
 
 Restart notes that are worth keeping in mind:
-- Preferred provisioning target is `atl1 + gpu-h200x1-141gb + gpu-h100x1-base` (`NVIDIA AI/ML Ready`).
-- If `atl1` is capacity-blocked, the last known good fallback we actually deployed was `nyc2` with the same `H200 + AI/ML Ready` shape.
+- Use the current DigitalOcean `NVIDIA AI/ML Ready` image for GPU droplets unless you have a reason to manage drivers yourself.
+- Re-check GPU size and region availability immediately before provisioning; the previously used `atl1` / `nyc2` H200 shape may not always be available.
 - Repo path on droplet: `/opt/clypt-phase1/repo`
 - Env file on droplet: `/etc/clypt-phase1/do-phase1.env`
 - GCP service account path on droplet: `/etc/clypt-phase1/gcp-sa.json`
+- Optional YouTube cookies file on droplet: `/etc/clypt-phase1/youtube-cookies.txt`
 - Recommended worker settings for current Phase 1 evals: `DO_PHASE1_WORKER_CONCURRENCY=3`, `DO_PHASE1_GPU_SLOTS=1`
 
 ## Run Phase 1 Against a Video URL

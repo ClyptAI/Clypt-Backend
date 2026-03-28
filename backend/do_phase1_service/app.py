@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
 
+from backend.do_phase1_service.extract import execute_asr_only
 from backend.do_phase1_service.jobs import create_job, get_job
 from backend.do_phase1_service.models import JobCreatePayload
 from backend.do_phase1_service.state_store import SQLiteJobStore
@@ -15,6 +18,7 @@ from backend.do_phase1_service.state_store import SQLiteJobStore
 DEFAULT_STATE_ROOT = Path(os.getenv("DO_PHASE1_STATE_ROOT", "/var/lib/clypt/do_phase1_service"))
 DEFAULT_DB_PATH = Path(os.getenv("DO_PHASE1_DB_PATH", str(DEFAULT_STATE_ROOT / "jobs.db")))
 DEFAULT_OUTPUT_ROOT = Path(os.getenv("DO_PHASE1_OUTPUT_ROOT", str(DEFAULT_STATE_ROOT / "workdir")))
+DEFAULT_RELAY_ROOT = Path(os.getenv("DO_PHASE1_RELAY_ROOT", str(DEFAULT_STATE_ROOT / "relay_uploads")))
 
 
 def create_app(*, store: SQLiteJobStore | None = None, output_root: str | Path | None = None) -> FastAPI:
@@ -24,6 +28,7 @@ def create_app(*, store: SQLiteJobStore | None = None, output_root: str | Path |
     app.state.store = store
     app.state.db_path = DEFAULT_DB_PATH
     app.state.output_root = output_root
+    app.state.relay_root = DEFAULT_RELAY_ROOT
 
     def _store() -> SQLiteJobStore:
         if app.state.store is None:
@@ -33,6 +38,29 @@ def create_app(*, store: SQLiteJobStore | None = None, output_root: str | Path |
     def _output_root() -> Path:
         app.state.output_root.mkdir(parents=True, exist_ok=True)
         return app.state.output_root
+
+    def _relay_root() -> Path:
+        app.state.relay_root.mkdir(parents=True, exist_ok=True)
+        return app.state.relay_root
+
+    @app.post("/asr")
+    async def post_asr(file: UploadFile = File(...)) -> dict:
+        suffix = Path(file.filename or "audio.wav").suffix or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_path = tmp.name
+            try:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+            finally:
+                await file.close()
+        try:
+            words = execute_asr_only(tmp_path)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+        return {"words": words, "word_count": len(words)}
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -49,6 +77,31 @@ def create_app(*, store: SQLiteJobStore | None = None, output_root: str | Path |
     def post_jobs(payload: JobCreatePayload) -> dict:
         job = create_job(_store(), payload)
         return job.model_dump(mode="json")
+
+    @app.post("/relay-uploads", status_code=201)
+    async def post_relay_upload(
+        file: UploadFile = File(...),
+        original_source_url: str | None = Form(default=None),
+    ) -> dict:
+        suffix = Path(file.filename or "relay.mp4").suffix or ".mp4"
+        relay_path = _relay_root() / f"relay_{uuid4().hex}{suffix}"
+        size_bytes = 0
+        try:
+            with relay_path.open("wb") as fh:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    size_bytes += len(chunk)
+        finally:
+            await file.close()
+        return {
+            "source_url": relay_path.resolve().as_uri(),
+            "path": str(relay_path.resolve()),
+            "size_bytes": size_bytes,
+            "original_source_url": original_source_url,
+        }
 
     @app.get("/jobs/{job_id}")
     def get_job_status(job_id: str) -> dict:

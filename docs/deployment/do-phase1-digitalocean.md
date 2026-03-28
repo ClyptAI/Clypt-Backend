@@ -5,20 +5,17 @@ This is the active deployment path for Phase 1 extraction.
 ## Current DO Facts To Verify Before Provisioning
 
 - Project: `Clypt-V2`
-- Droplet name: `clypt-phase1-gpu-1`
+- Droplet name: `clypt-phase1-gpu-2`
 - SSH key name: `clypt-do-phase1`
 - SSH key id: `55082300`
-- Preferred region: `atl1`
-- Preferred GPU size slug: `gpu-h200x1-141gb`
-- Preferred image slug: `gpu-h100x1-base`
-- Image name in DO UI: `NVIDIA AI/ML Ready`
-- Last known good fallback region after explicit confirmation: `nyc2`
-- Last known good deployed droplet shape: `nyc2 + gpu-h200x1-141gb + gpu-h100x1-base`
+- Preferred image name in DO UI: `NVIDIA AI/ML Ready`
+- Last known good region after explicit confirmation: `nyc2`
+- Last known good deployed shape: `nyc2 + gpu-h200x1-141gb + gpu-h100x1-base`
 
 Important:
-- Do **not** silently fall back to another region, another GPU type, or plain Ubuntu.
-- Re-check GPU availability immediately before creating the droplet. `atl1` may be temporarily out of GPU capacity.
-- If `atl1` is blocked and you intentionally fall back, use `nyc2` with the exact same `H200 + NVIDIA AI/ML Ready` shape.
+- Re-check GPU availability and current price immediately before creating the droplet.
+- Prefer the DigitalOcean `NVIDIA AI/ML Ready` image so drivers and CUDA tooling are already in place.
+- Treat the exact region / size slug below as examples to verify, not timeless constants.
 
 ## Preflight Checks
 
@@ -55,10 +52,10 @@ doctl compute ssh-key list --output json | jq -r '
 
 ## Create the Droplet
 
-Only run this after the preflight checks confirm the exact target shape is available:
+Only run this after the preflight checks confirm the target shape you want is available:
 
 ```bash
-doctl compute droplet create clypt-phase1-gpu-1 \
+doctl compute droplet create clypt-phase1-gpu-2 \
   --project-id b306872c-0eb7-4c6f-9658-32188ac4a642 \
   --region atl1 \
   --size gpu-h200x1-141gb \
@@ -77,6 +74,16 @@ Get the repo onto the droplet at `/opt/clypt-phase1/repo`, then run:
 ```bash
 sudo bash scripts/do_phase1/bootstrap_gpu_droplet.sh
 ```
+
+## Optional: Use the GPU Scratch Disk for Job Workspace
+
+DigitalOcean documents that many GPU droplets expose a non-persistent scratch disk intended for staging workloads. If your droplet has one, consider mounting it at `/scratch` and using it for `DO_PHASE1_OUTPUT_ROOT` while keeping SQLite state on the persistent boot disk.
+
+Suggested split:
+- `DO_PHASE1_STATE_ROOT=/var/lib/clypt/do_phase1_service`
+- `DO_PHASE1_DB_PATH=/var/lib/clypt/do_phase1_service/jobs.db`
+- `DO_PHASE1_OUTPUT_ROOT=/scratch/clypt-phase1/workdir`
+- `DO_PHASE1_LOG_ROOT=/scratch/clypt-phase1/workdir/logs`
 
 ## Wire Secrets and Env
 
@@ -103,9 +110,14 @@ Minimum env values to fill in:
 - `GCS_BUCKET`
 - `GOOGLE_CLOUD_PROJECT`
 
+If YouTube starts requiring sign-in or anti-bot confirmation for some URLs, also set:
+- `YTDLP_COOKIES_FILE=/etc/clypt-phase1/youtube-cookies.txt`
+
+That file should be a Netscape-format cookies export from a browser profile that can open the target video.
+
 Recommended starting values:
 - `DO_REGION=atl1` (or `nyc2` only when explicitly choosing the fallback region)
-- `DO_PHASE1_WORKER_ID=clypt-phase1-gpu-1`
+- `DO_PHASE1_WORKER_ID=clypt-phase1-gpu-2`
 - `DO_PHASE1_WORKER_CONCURRENCY=3`
 - `DO_PHASE1_GPU_SLOTS=1`
 - `CLYPT_SPEAKER_BINDING_MODE=auto`
@@ -145,11 +157,12 @@ From the droplet repo checkout:
 
 ```bash
 sudo REPO_DIR=/opt/clypt-phase1/repo \
-  BRANCH=codex/balanced-hybrid-phase1-contract \
   ENV_FILE=/etc/clypt-phase1/do-phase1.env \
   REQUIREMENTS_FILE=requirements-do-phase1.txt \
   bash scripts/do_phase1/deploy_phase1_service.sh
 ```
+
+Set `BRANCH=...` only when you intentionally want the deploy script to switch branches before installing.
 
 If you synced a working tree without `.git`, add:
 

@@ -37,7 +37,7 @@ SPANNER_DATABASE = "clypt-graph-db-v2"
 GEMINI_LOCATION = "global"
 GEMINI_MODEL = "gemini-3.1-pro-preview"
 
-MIN_SCORE = 85
+MIN_SCORE = 75
 FALLBACK_TOP_N = 3
 SPEAKER_GAP_MERGE_MS = 1500
 MAX_CLIPS_OUTPUT = 10
@@ -45,11 +45,11 @@ NMS_OVERLAP_THRESHOLD = 0.5
 
 # Sliding window config
 WINDOW_MIN_NODES = 3
-WINDOW_MAX_NODES = 8
+WINDOW_MAX_NODES = 10
 WINDOW_STEP = 2
 
 # Pre-filter: only send top N windows by mechanism score to Gemini
-PREFILTER_TOP_N = 40
+PREFILTER_TOP_N = 80
 
 # Async scoring: max concurrent Gemini calls
 MAX_CONCURRENT_SCORING = 5
@@ -95,7 +95,7 @@ Evaluation:
 
 Strict Constraints:
 recommended_start_ms MUST exactly match the start_time_ms of the first node you select.
-recommended_end_ms MUST exactly match the end_time_ms of the last node you select.
+recommended_end_ms must land on the end of the last complete sentence spoken within your selected nodes. If the last node ends mid-sentence or mid-phrase, pull recommended_end_ms back to the timestamp of the last word of the previous complete sentence. Never end the clip mid-phrase.
 Your justification must state the specific content_mechanisms scores and vocal_delivery that drove your decision."""
 
 

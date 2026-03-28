@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from pathlib import Path
 
@@ -61,6 +62,23 @@ logging.basicConfig(
 log = logging.getLogger("phase_4")
 # Suppress Spanner SDK internal metrics export errors (missing instance_id in Cloud Monitoring)
 logging.getLogger("opentelemetry.sdk.metrics._internal.export").setLevel(logging.CRITICAL)
+
+
+def resolve_video_gcs_uri() -> str:
+    env_override = os.getenv("VIDEO_GCS_URI", "").strip()
+    if env_override:
+        return env_override
+    for path in (VISUAL_PATH, AUDIO_PATH):
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        uri = str(payload.get("video_gcs_uri", "") or "").strip()
+        if uri:
+            return uri
+    return VIDEO_GCS_URI
 
 
 # ──────────────────────────────────────────────
@@ -340,6 +358,7 @@ def main():
     with open(AUDIO_PATH) as f:
         audio = json.load(f)
     log.info(f"  Audio ledger loaded ({AUDIO_PATH})")
+    video_gcs_uri = resolve_video_gcs_uri()
 
     # ── UUID generation & mapping ──
     log.info("Assigning UUIDs to nodes…")
@@ -393,7 +412,7 @@ def main():
     embedding_col = "embedding"
     candidate_node_values = {
         "node_id": lambda ctx: ctx["node_id"],
-        "video_uri": lambda ctx: VIDEO_GCS_URI,
+        "video_uri": lambda ctx: video_gcs_uri,
         "start_time_ms": lambda ctx: ctx["start_ms"],
         "end_time_ms": lambda ctx: ctx["end_ms"],
         "transcript_text": lambda ctx: ctx["node"].get("transcript_segment", ""),

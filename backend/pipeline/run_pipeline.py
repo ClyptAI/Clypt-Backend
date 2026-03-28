@@ -25,8 +25,51 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PIPELINE_DIR = ROOT / "pipeline"
 RENDER_DIR = ROOT.parent / "remotion-render"
+VIDEOS_LIBRARY_DIR = ROOT / "videos"
+
+# Defaults — overridden by --video-id or VIDEO_ID env var
 DOWNLOADS_DIR = ROOT / "downloads"
 OUTPUTS_DIR = ROOT / "outputs"
+
+
+def _apply_video_id(video_id: str):
+    """Activate a named library video for phases 2-5.
+
+    Phase modules all hardcode ROOT/outputs as their input/output directory.
+    Rather than patching each module, we copy the Phase 1 ledgers from the
+    library into the standard location so every phase just works.
+    Outputs from phases 2-5 are also written back into the library folder.
+    """
+    global DOWNLOADS_DIR, OUTPUTS_DIR
+    video_dir = VIDEOS_LIBRARY_DIR / video_id
+    lib_outputs = video_dir / "outputs"
+    lib_downloads = video_dir / "downloads"
+
+    if not lib_outputs.exists():
+        log.error("Video ID '%s' not found in library (%s). Run phase_1_transcript_fast first.", video_id, lib_outputs)
+        sys.exit(1)
+
+    DOWNLOADS_DIR = lib_downloads
+    OUTPUTS_DIR = lib_outputs
+
+    # Copy Phase 1 ledgers into the standard outputs/ location so phase modules find them
+    std_outputs = ROOT / "outputs"
+    std_outputs.mkdir(exist_ok=True)
+    for fname in ("phase_1_audio.json", "phase_1_visual.json"):
+        src = lib_outputs / fname
+        if src.exists():
+            shutil.copy2(src, std_outputs / fname)
+
+    # Copy video into standard downloads/ so reencode + Remotion find it
+    std_downloads = ROOT / "downloads"
+    std_downloads.mkdir(exist_ok=True)
+    lib_video = lib_downloads / "video.mp4"
+    if lib_video.exists():
+        shutil.copy2(lib_video, std_downloads / "video.mp4")
+
+    # Patch GCS URI so phase modules resolve the right video
+    os.environ["VIDEO_GCS_URI"] = f"gs://clypt-storage-v2/videos/{video_id}/video.mp4"
+    log.info("Activated video '%s' from library → %s", video_id, video_dir)
 FFMPEG_REENCODE_CRF = os.getenv("FFMPEG_REENCODE_CRF", "15")
 FFMPEG_REENCODE_PRESET = os.getenv("FFMPEG_REENCODE_PRESET", "slow")
 REMOTION_CRF = os.getenv("REMOTION_CRF", "16")
@@ -34,6 +77,8 @@ REMOTION_X264_PRESET = os.getenv("REMOTION_X264_PRESET", "slow")
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +118,7 @@ def reencode_video():
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", str(video_path),
+            "-r", "24",
             "-c:v", "libx264", "-preset", FFMPEG_REENCODE_PRESET, "-crf", FFMPEG_REENCODE_CRF,
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
@@ -98,9 +144,14 @@ def setup_render_engine():
     The payload JSON uses a symlink since it's small and loaded via require().
     """
 
-    video_src = DOWNLOADS_DIR / "video.mp4"
+    # Video: prefer standard downloads/, fall back to active library folder
+    video_src = ROOT / "downloads" / "video.mp4"
+    if not video_src.exists():
+        video_id = os.getenv("VIDEO_ID", "").strip()
+        if video_id:
+            video_src = VIDEOS_LIBRARY_DIR / video_id / "downloads" / "video.mp4"
     video_dst = RENDER_DIR / "public" / "video.mp4"
-    payload_src = OUTPUTS_DIR / "remotion_payloads_array.json"
+    payload_src = ROOT / "outputs" / "remotion_payloads_array.json"
     payload_dst = RENDER_DIR / "src" / "remotion_payloads_array.json"
 
     if not video_src.exists():
@@ -114,6 +165,7 @@ def setup_render_engine():
         )
 
     # ── Video: hard link (instant, no extra disk) with copy fallback ──
+    video_dst.parent.mkdir(parents=True, exist_ok=True)
     if video_dst.is_symlink() or video_dst.exists():
         video_dst.unlink()
     try:
@@ -123,12 +175,11 @@ def setup_render_engine():
         shutil.copy2(video_src, video_dst)
         log.info(f"Copied {video_dst.name} ← {video_src}")
 
-    # ── Payload JSON: symlink is fine (loaded via require, not served) ──
+    # ── Payload JSON: copy (symlinks require Developer Mode on Windows) ──
     if payload_dst.is_symlink() or payload_dst.exists():
         payload_dst.unlink()
-    rel = os.path.relpath(payload_src, payload_dst.parent)
-    payload_dst.symlink_to(rel)
-    log.info(f"Symlinked {payload_dst.name} → {rel}")
+    shutil.copy2(payload_src, payload_dst)
+    log.info(f"Copied {payload_dst.name} ← {payload_src}")
 
 
 def run_fetch_tracking():
@@ -139,8 +190,9 @@ def run_fetch_tracking():
         return
 
     log.info("Fetching tracking data from GCS…")
+    node = "node.exe" if sys.platform == "win32" else "node"
     subprocess.run(
-        ["node", str(script)],
+        [node, str(script)],
         check=True,
         cwd=str(RENDER_DIR),
     )
@@ -151,7 +203,7 @@ def run_remotion_render():
     """Render each Remotion composition to an MP4."""
     import json
 
-    payload_path = OUTPUTS_DIR / "remotion_payloads_array.json"
+    payload_path = ROOT / "outputs" / "remotion_payloads_array.json"
     if not payload_path.exists():
         log.error("No remotion_payloads_array.json found — cannot render")
         return
@@ -172,9 +224,10 @@ def run_remotion_render():
             out_file = out_dir / f"clip-{i + 1}.mp4"
 
         log.info(f"Rendering {comp_id} → {out_file.name}")
+        npx = "npx.cmd" if sys.platform == "win32" else "npx"
         subprocess.run(
             [
-                "npx",
+                npx,
                 "remotion",
                 "render",
                 comp_id,
@@ -192,6 +245,44 @@ def run_remotion_render():
     log.info(f"All {len(payloads)} clip(s) rendered to {out_dir}")
 
 
+PHASE_OUTPUTS = [
+    "phase_2a_nodes.json",
+    "phase_2b_narrative_edges.json",
+    "phase_3_embeddings.json",
+    "phase_4_store_graph.json",
+    "remotion_payloads_array.json",
+]
+
+
+def _save_video_outputs(video_id: str):
+    """Copy phase 2-5 JSONs and rendered clips into the video's library folder."""
+    video_dir = VIDEOS_LIBRARY_DIR / video_id
+    lib_outputs = video_dir / "outputs"
+    lib_clips = video_dir / "clips"
+    lib_outputs.mkdir(parents=True, exist_ok=True)
+
+    std_outputs = ROOT / "outputs"
+    copied_json = 0
+    for fname in PHASE_OUTPUTS:
+        src = std_outputs / fname
+        if src.exists():
+            shutil.copy2(src, lib_outputs / fname)
+            log.info("Saved %s → %s", fname, lib_outputs)
+            copied_json += 1
+
+    render_out = RENDER_DIR / "out"
+    if render_out.exists():
+        clips = list(render_out.glob("clip*.mp4"))
+        if clips:
+            lib_clips.mkdir(parents=True, exist_ok=True)
+            for clip in clips:
+                shutil.copy2(clip, lib_clips / clip.name)
+                log.info("Saved clip %s → %s", clip.name, lib_clips)
+            log.info("Saved %d clip(s) to %s", len(clips), lib_clips)
+
+    log.info("Outputs for '%s' saved: %d JSON(s), clips in %s", video_id, copied_json, lib_clips)
+
+
 PHASE_ORDER = ["1", "2a", "2b", "3", "4", "5", "render"]
 
 
@@ -204,6 +295,19 @@ def _phase_enabled(phase: str, start_from: str) -> bool:
 
 def main():
     banner("CLYPT PIPELINE ORCHESTRATOR")
+
+    # --video-id ID  or  VIDEO_ID=ID env var
+    args = sys.argv[1:]
+    video_id: str | None = None
+    if "--video-id" in args:
+        idx = args.index("--video-id")
+        if idx + 1 >= len(args):
+            log.error("--video-id requires a value")
+            sys.exit(1)
+        video_id = args[idx + 1]
+    video_id = video_id or os.getenv("VIDEO_ID", "").strip() or None
+    if video_id:
+        _apply_video_id(video_id)
 
     # START_FROM=2a python run_pipeline.py  →  skips phase 1 + ffmpeg re-encode
     start_from = os.getenv("START_FROM", "1").lower().strip()
@@ -234,7 +338,7 @@ def main():
         )
 
     # ── FFmpeg Re-encode ──
-    if _phase_enabled("1", start_from):
+    if _phase_enabled("2a", start_from):
         banner("RE-ENCODING VIDEO (FFmpeg)")
         reencode_video()
 
@@ -269,6 +373,11 @@ def main():
         setup_render_engine()
         run_fetch_tracking()
         run_remotion_render()
+
+    # ── Save outputs to video library folder ──
+    if video_id:
+        banner(f"SAVING OUTPUTS → videos/{video_id}/")
+        _save_video_outputs(video_id)
 
     banner("PIPELINE COMPLETE")
 

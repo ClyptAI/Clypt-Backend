@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/opt/clypt-phase1/repo}"
-BRANCH="${BRANCH:-codex/balanced-hybrid-phase1-contract}"
+BRANCH="${BRANCH:-}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase1/do-phase1.env}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-requirements-do-phase1.txt}"
 SKIP_GIT_SYNC="${SKIP_GIT_SYNC:-0}"
@@ -21,6 +21,13 @@ cd "$REPO_DIR"
 if [[ "$SKIP_GIT_SYNC" != "1" ]]; then
   if [[ ! -d "$REPO_DIR/.git" ]]; then
     echo "Expected a git checkout at $REPO_DIR when SKIP_GIT_SYNC=0" >&2
+    exit 1
+  fi
+  if [[ -z "$BRANCH" ]]; then
+    BRANCH="$(git branch --show-current)"
+  fi
+  if [[ -z "$BRANCH" ]]; then
+    echo "Could not determine git branch automatically; set BRANCH explicitly." >&2
     exit 1
   fi
   git fetch origin
@@ -74,8 +81,48 @@ download_lrasd_model()
 download_insightface_model()
 PY
 
-install -D -m 0644 scripts/do_phase1/systemd/clypt-phase1-api.service /etc/systemd/system/clypt-phase1-api.service
-install -D -m 0644 scripts/do_phase1/systemd/clypt-phase1-worker.service /etc/systemd/system/clypt-phase1-worker.service
+cat >/etc/systemd/system/clypt-phase1-api.service <<EOF
+[Unit]
+Description=Clypt Phase 1 DigitalOcean API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${REPO_DIR}
+EnvironmentFile=${ENV_FILE}
+Environment=PYTHONUNBUFFERED=1
+ExecStart=${REPO_DIR}/.venv/bin/python -m uvicorn backend.do_phase1_service.app:app --host \${UVICORN_HOST} --port \${UVICORN_PORT}
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/clypt-phase1-worker.service <<EOF
+[Unit]
+Description=Clypt Phase 1 DigitalOcean Worker
+After=network-online.target clypt-phase1-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${REPO_DIR}
+EnvironmentFile=${ENV_FILE}
+Environment=PYTHONUNBUFFERED=1
+ExecStart=${REPO_DIR}/.venv/bin/python -m backend.do_phase1_service.worker
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 install -d /etc/systemd/system/clypt-phase1-worker.service.d
 cat >/etc/systemd/system/clypt-phase1-worker.service.d/10-venv-libs.conf <<EOF
 [Service]

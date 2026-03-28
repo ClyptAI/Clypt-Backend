@@ -3,12 +3,15 @@ from __future__ import annotations
 import importlib
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterator, TextIO
+from urllib.parse import urlparse
 
 import fcntl
 
@@ -70,7 +73,7 @@ def run_extraction_job(
     with _job_pipeline_workspace(job_output_dir):
         with _capture_job_logs(log_path, on_line=lambda line: _forward_progress_line(line, progress)):
             print(f"[DO Phase 1] Starting job {job_id} for {source_url}")
-            video_path, audio_path = download_media(source_url)
+            video_path, audio_path = _prepare_source_media(source_url)
             processing_started_at = time.perf_counter()
             progress("awaiting_gpu_slot", "Waiting for a GPU extraction slot", 0.08)
             with host_extraction_slot(host_lock_path or DEFAULT_HOST_LOCK_PATH):
@@ -119,6 +122,60 @@ def run_extraction_job(
     return manifest
 
 
+def _prepare_source_media(source_url: str) -> tuple[str, str]:
+    if _is_local_file_source(source_url):
+        return _materialize_relayed_local_media(source_url)
+    return download_media(source_url)
+
+
+def _is_local_file_source(source_url: str) -> bool:
+    parsed = urlparse(source_url)
+    return parsed.scheme == "file"
+
+
+def _materialize_relayed_local_media(source_url: str) -> tuple[str, str]:
+    parsed = urlparse(source_url)
+    source_path = Path(parsed.path)
+    if not source_path.exists():
+        raise RuntimeError(f"Relayed Phase 1 source does not exist on droplet: {source_path}")
+
+    download_dir = phase1_pipeline.DOWNLOAD_DIR
+    output_dir = phase1_pipeline.OUTPUT_DIR
+    download_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for stale in ("video.mp4", "video_original.mp4", "audio.m4a", "audio.webm", "audio.opus", "audio_16k.wav"):
+        candidate = download_dir / stale
+        if candidate.exists():
+            candidate.unlink()
+
+    staged_path = download_dir / source_path.name
+    shutil.copy2(source_path, staged_path)
+    video_path = phase1_pipeline.ensure_h264_local(str(staged_path))
+
+    w, h, _fps = phase1_pipeline.probe_video_stream(video_path)
+    long_edge = max(w, h)
+    if not phase1_pipeline.ALLOW_LOW_RES_VIDEO and long_edge < phase1_pipeline.YTDLP_MIN_LONG_EDGE:
+        raise RuntimeError(
+            f"Video resolution too low for 9:16 reframing: {w}x{h}. "
+            f"Set ALLOW_LOW_RES_VIDEO=1 to override."
+        )
+
+    audio_path = str(download_dir / "audio_16k.wav")
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", video_path,
+            "-ac", "1", "-ar", "16000",
+            audio_path,
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print(f"[DO Phase 1] Using relayed local media {source_path}")
+    return video_path, audio_path
+
+
 def execute_local_extraction(*, video_path: str, audio_path: str, youtube_url: str) -> dict:
     return get_local_extractor().extract(
         video_path=video_path,
@@ -136,7 +193,12 @@ class LocalDOPhase1Extractor:
         self._worker = user_cls()
         self._load_model = user_cls.load_model._get_raw_f()
         self._extract = user_cls.extract._get_raw_f()
+        self._run_asr_only = user_cls.run_asr_only._get_raw_f()
         self._loaded = False
+
+    def asr_only(self, audio_path: str) -> list[dict]:
+        self._ensure_loaded()
+        return self._run_asr_only(self._worker, Path(audio_path).read_bytes())
 
     def extract(self, *, video_path: str, audio_path: str, youtube_url: str) -> dict:
         self._ensure_loaded()
@@ -167,6 +229,10 @@ class LocalDOPhase1Extractor:
 @lru_cache(maxsize=1)
 def get_local_extractor() -> LocalDOPhase1Extractor:
     return LocalDOPhase1Extractor()
+
+
+def execute_asr_only(audio_path: str) -> list[dict]:
+    return get_local_extractor().asr_only(audio_path)
 
 
 def ensure_local_runtime_prereqs() -> None:

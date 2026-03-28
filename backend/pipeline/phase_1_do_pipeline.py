@@ -18,7 +18,9 @@ import logging
 import os
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yt_dlp
 
@@ -47,6 +49,12 @@ YTDLP_H264_PREFERRED_FORMAT = os.getenv(
 )
 YTDLP_MIN_LONG_EDGE = int(os.getenv("YTDLP_MIN_LONG_EDGE", "1080"))
 ALLOW_LOW_RES_VIDEO = os.getenv("ALLOW_LOW_RES_VIDEO", "0") == "1"
+YTDLP_COOKIES_FROM_BROWSER = os.getenv("YTDLP_COOKIES_FROM_BROWSER", "").strip()
+DO_PHASE1_LOCAL_RELAY_MODE = os.getenv("DO_PHASE1_LOCAL_RELAY_MODE", "auto").strip().lower()
+DO_PHASE1_LOCAL_RELAY_COOKIES_FROM_BROWSER = os.getenv(
+    "DO_PHASE1_LOCAL_RELAY_COOKIES_FROM_BROWSER",
+    "",
+).strip()
 
 ROOT = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = ROOT / "downloads"
@@ -469,6 +477,80 @@ def clear_detached_state():
         log.info(f"Cleared detached state → {DETACHED_STATE_PATH}")
 
 
+@contextmanager
+def _temporary_env_var(key: str, value: str | None):
+    previous = os.environ.get(key)
+    try:
+        if value in (None, ""):
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
+def _is_youtube_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return "youtube.com" in host or "youtu.be" in host
+
+
+def _should_use_local_relay(source_url: str) -> bool:
+    mode = (os.getenv("DO_PHASE1_LOCAL_RELAY_MODE", DO_PHASE1_LOCAL_RELAY_MODE) or "").strip().lower()
+    if mode in {"0", "false", "off", "disabled", "never"}:
+        return False
+    if mode in {"1", "true", "on", "always"}:
+        return True
+    return _is_youtube_url(source_url)
+
+
+def _cookie_browser_candidates(source_url: str) -> list[str]:
+    configured = (
+        os.getenv("DO_PHASE1_LOCAL_RELAY_COOKIES_FROM_BROWSER", DO_PHASE1_LOCAL_RELAY_COOKIES_FROM_BROWSER)
+        or os.getenv("YTDLP_COOKIES_FROM_BROWSER", YTDLP_COOKIES_FROM_BROWSER)
+        or ("chrome,edge" if _is_youtube_url(source_url) else "")
+    ).strip()
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for raw in configured.split(","):
+        candidate = raw.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append(candidate)
+    if not candidates:
+        candidates.append("")
+    return candidates
+
+
+async def _prepare_local_relay_source(client: DOPhase1Client, source_url: str) -> tuple[str, str]:
+    log.info("── Step 0: Local Source Relay For DigitalOcean ──")
+    last_error: Exception | None = None
+    for browser in _cookie_browser_candidates(source_url):
+        try:
+            if browser:
+                log.info("Trying local relay download with browser cookies from %s", browser)
+            else:
+                log.info("Trying local relay download without browser cookies")
+            with _temporary_env_var("YTDLP_COOKIES_FROM_BROWSER", browser):
+                local_video_path, _audio_path = download_media(source_url)
+            relay_payload = await client.upload_relay_file(local_video_path, original_source_url=source_url)
+            relay_source_url = str(relay_payload["source_url"])
+            log.info("Local relay uploaded for DO worker → %s", relay_source_url)
+            return relay_source_url, local_video_path
+        except Exception as exc:
+            last_error = exc
+            if browser:
+                log.warning("Local relay download via %s cookies failed: %s", browser, exc)
+            else:
+                log.warning("Local relay download without cookies failed: %s", exc)
+    assert last_error is not None
+    raise last_error
+
+
 def get_phase1_service_base_url() -> str:
     base_url = (
         os.getenv("DO_PHASE1_BASE_URL")
@@ -513,7 +595,7 @@ def _state_payload(*, job_id: str, source_url: str, status: str, **extra: object
     return payload
 
 
-def _load_resumable_job_id(source_url: str) -> str | None:
+def _load_resumable_state(source_url: str) -> dict | None:
     state = load_detached_state()
     if not state:
         return None
@@ -525,6 +607,23 @@ def _load_resumable_job_id(source_url: str) -> str | None:
             "Ignoring detached state for a different source URL (%s); starting a fresh Phase 1 job.",
             state.get("source_url"),
         )
+        return None
+    status = str(state.get("status", "")).strip()
+    terminal = bool(state.get("terminal"))
+    failed_statuses = {JobState.FAILED.value, str(JobState.FAILED), "failed", "JobState.FAILED"}
+    if terminal or status in failed_statuses:
+        log.info(
+            "Ignoring detached state for failed terminal job %s; starting a fresh Phase 1 job.",
+            state.get("job_id"),
+        )
+        clear_detached_state()
+        return None
+    return state
+
+
+def _load_resumable_job_id(source_url: str) -> str | None:
+    state = _load_resumable_state(source_url)
+    if state is None:
         return None
     job_id = str(state.get("job_id", "")).strip()
     if not job_id:
@@ -624,6 +723,9 @@ def _download_video_with_format_fallback(url: str) -> str:
             "no_warnings": True,
             "noprogress": False,
         }
+        browser = (os.getenv("YTDLP_COOKIES_FROM_BROWSER", YTDLP_COOKIES_FROM_BROWSER) or "").strip()
+        if browser:
+            video_opts["cookiesfrombrowser"] = (browser,)
         try:
             log.info("yt-dlp attempt %s with format selector: %s", label, format_selector)
             with yt_dlp.YoutubeDL(video_opts) as ydl:
@@ -639,25 +741,34 @@ def _download_video_with_format_fallback(url: str) -> str:
 # ──────────────────────────────────────────────
 # Step 2: Submit + poll DigitalOcean job service
 # ──────────────────────────────────────────────
-async def submit_or_resume_phase1_job(client: DOPhase1Client, source_url: str) -> str:
+async def submit_or_resume_phase1_job(client: DOPhase1Client, source_url: str) -> tuple[str, str | None]:
+    resumable_state = _load_resumable_state(source_url)
     resumable_job_id = _load_resumable_job_id(source_url)
     if resumable_job_id:
-        return resumable_job_id
+        local_video_path = str((resumable_state or {}).get("local_video_path") or "").strip() or None
+        return resumable_job_id, local_video_path
 
     runtime_controls = build_phase1_runtime_controls()
-    submission = await client.submit_job(source_url, runtime_controls=runtime_controls)
+    submitted_source_url = source_url
+    local_video_path: str | None = None
+    if _should_use_local_relay(source_url):
+        submitted_source_url, local_video_path = await _prepare_local_relay_source(client, source_url)
+
+    submission = await client.submit_job(submitted_source_url, runtime_controls=runtime_controls)
     job_id = str(submission.job_id)
     log.info("Submitted DigitalOcean Phase 1 job %s (status=%s).", job_id, submission.status)
     save_detached_state(
         _state_payload(
             job_id=job_id,
             source_url=source_url,
+            submitted_source_url=submitted_source_url,
+            local_video_path=local_video_path,
             status=str(submission.status),
             submitted_at_epoch_s=time.time(),
             runtime_controls=runtime_controls,
         )
     )
-    return job_id
+    return job_id, local_video_path
 
 
 async def wait_for_phase1_manifest(
@@ -670,6 +781,9 @@ async def wait_for_phase1_manifest(
     poll_interval_seconds = get_phase1_poll_interval_seconds()
     started_at = time.monotonic()
     runtime_controls = build_phase1_runtime_controls()
+    persisted_state = _load_resumable_state(source_url) or {}
+    submitted_source_url = persisted_state.get("submitted_source_url")
+    local_video_path = persisted_state.get("local_video_path")
 
     log.info(
         "Polling DigitalOcean Phase 1 job %s every %.1fs (timeout %.1fs).",
@@ -688,6 +802,8 @@ async def wait_for_phase1_manifest(
                 job_id=job_id,
                 source_url=source_url,
                 status=status,
+                submitted_source_url=submitted_source_url,
+                local_video_path=local_video_path,
                 manifest_uri=getattr(job, "manifest_uri", None),
                 failure=getattr(job, "failure", None),
                 runtime_controls=runtime_controls,
@@ -706,6 +822,8 @@ async def wait_for_phase1_manifest(
                     job_id=job_id,
                     source_url=source_url,
                     status=status,
+                    submitted_source_url=submitted_source_url,
+                    local_video_path=local_video_path,
                     failure=message,
                     terminal=True,
                     runtime_controls=runtime_controls,
@@ -720,6 +838,8 @@ async def wait_for_phase1_manifest(
                     job_id=job_id,
                     source_url=source_url,
                     status=status,
+                    submitted_source_url=submitted_source_url,
+                    local_video_path=local_video_path,
                     timeout_seconds=timeout_seconds,
                     resume_hint="Re-run the pipeline to resume polling this job.",
                     runtime_controls=runtime_controls,
@@ -740,13 +860,22 @@ async def wait_for_phase1_manifest(
         await asyncio.sleep(poll_interval_seconds)
 
 
-def materialize_phase1_manifest(manifest: Phase1Manifest, *, source_url: str) -> tuple[dict, dict]:
+def materialize_phase1_manifest(
+    manifest: Phase1Manifest,
+    *,
+    source_url: str,
+    local_video_path: str | None = None,
+) -> tuple[dict, dict]:
     # Compatibility bridge: later pipeline phases and Remotion still expect a
     # local download alongside the JSON ledgers, even though extraction moved to
     # DigitalOcean jobs.
     log.info("── Step 3: Local Media Acquisition For Downstream Compatibility ──")
     runtime_controls = build_phase1_runtime_controls()
-    video_path, _audio_path = download_media(source_url)
+    if local_video_path and Path(local_video_path).exists():
+        video_path = str(Path(local_video_path))
+        log.info("Reusing locally relayed source video → %s", video_path)
+    else:
+        video_path, _audio_path = download_media(source_url)
 
     phase_1_visual = enrich_visual_ledger_for_downstream(
         manifest.artifacts.visual_tracking.model_dump(mode="json"),
@@ -836,7 +965,7 @@ async def main(youtube_url: str | None = None):
 
     log.info("── Step 1: DigitalOcean Job Submission + Polling ──")
     async with build_phase1_client() as client:
-        job_id = await submit_or_resume_phase1_job(client, url)
+        job_id, local_video_path = await submit_or_resume_phase1_job(client, url)
         manifest = await wait_for_phase1_manifest(client, job_id=job_id, source_url=url)
 
     log.info(
@@ -846,7 +975,11 @@ async def main(youtube_url: str | None = None):
         manifest.artifacts.transcript.uri,
     )
 
-    phase_1_visual, phase_1_audio = materialize_phase1_manifest(manifest, source_url=url)
+    phase_1_visual, phase_1_audio = materialize_phase1_manifest(
+        manifest,
+        source_url=url,
+        local_video_path=local_video_path,
+    )
 
     # Summary
     words = phase_1_audio.get("words", [])

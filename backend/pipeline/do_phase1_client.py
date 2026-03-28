@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -92,6 +93,31 @@ class DOPhase1Client:
         response = await self._client.post("/jobs", json=payload)
         response.raise_for_status()
         return Phase1JobSubmission.model_validate(response.json())
+
+    async def upload_relay_file(
+        self,
+        file_path: str | Path,
+        *,
+        original_source_url: str | None = None,
+        timeout: float = 60.0 * 60.0,
+    ) -> dict[str, Any]:
+        file_path = Path(file_path)
+        data: dict[str, Any] = {}
+        if original_source_url:
+            data["original_source_url"] = original_source_url
+        with file_path.open("rb") as fh:
+            files = {"file": (file_path.name, fh, "video/mp4")}
+            response = await self._client.post(
+                "/relay-uploads",
+                data=data,
+                files=files,
+                timeout=timeout,
+            )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise Phase1ClientError("relay upload returned a non-object response")
+        return payload
 
     async def get_job_status(self, job_id: str) -> Phase1JobRecord:
         response = await self._client.get(f"/jobs/{job_id}")
