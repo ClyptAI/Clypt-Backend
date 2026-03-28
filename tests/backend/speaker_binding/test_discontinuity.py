@@ -135,3 +135,101 @@ def test_schedule_diarized_spans_skips_discontinuity_metadata_for_overlap_spans(
             "source_turn_ids": ["turn-0", "turn-1"],
         }
     ]
+
+
+def test_schedule_diarized_spans_ignores_malformed_visual_sample_timestamps():
+    spans = schedule_diarized_spans(
+        [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 400,
+                "visual_samples": [
+                    {
+                        "time_ms": 0,
+                        "local_track_ids": ["track-a"],
+                        "prominent_track_id": "track-a",
+                    },
+                    {
+                        "time_ms": "not-a-number",
+                        "local_track_ids": ["track-b"],
+                        "prominent_track_id": "track-b",
+                    },
+                    {
+                        "local_track_ids": ["track-c"],
+                        "prominent_track_id": "track-c",
+                    },
+                ],
+            },
+        ],
+        same_speaker_gap_ms=0,
+        boundary_pad_ms=0,
+    )
+
+    assert spans == [
+        {
+            "span_id": "scheduled-0",
+            "span_type": "single",
+            "speaker_ids": ["SPEAKER_00"],
+            "exclusive": True,
+            "overlap": False,
+            "start_time_ms": 0,
+            "end_time_ms": 400,
+            "context_start_time_ms": 0,
+            "context_end_time_ms": 400,
+            "source_turn_ids": ["turn-0"],
+        }
+    ]
+
+
+def test_schedule_diarized_spans_merges_visual_samples_across_same_speaker_micro_gaps():
+    spans = schedule_diarized_spans(
+        [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 100,
+                "visual_samples": [
+                    {
+                        "time_ms": 0,
+                        "local_track_ids": ["track-a", "track-b"],
+                        "prominent_track_id": "track-a",
+                    }
+                ],
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 108,
+                "end_time_ms": 220,
+                "visual_samples": [
+                    {
+                        "time_ms": 160,
+                        "local_track_ids": ["track-c", "track-d"],
+                        "prominent_track_id": "track-c",
+                    }
+                ],
+            },
+        ],
+        same_speaker_gap_ms=10,
+        boundary_pad_ms=0,
+    )
+
+    assert spans == [
+        {
+            "span_id": "scheduled-0",
+            "span_type": "single",
+            "speaker_ids": ["SPEAKER_00"],
+            "exclusive": True,
+            "overlap": False,
+            "start_time_ms": 0,
+            "end_time_ms": 220,
+            "context_start_time_ms": 0,
+            "context_end_time_ms": 220,
+            "source_turn_ids": ["turn-0", "turn-1"],
+            "requires_lrasd": True,
+            "discontinuity_reasons": [
+                "track_set_jaccard_drop",
+                "prominent_track_flip",
+            ],
+        }
+    ]

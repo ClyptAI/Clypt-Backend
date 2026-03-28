@@ -26,6 +26,35 @@ def _as_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
+def _parse_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_visual_samples_within_window(
+    turns: Iterable[dict] | None,
+    *,
+    start_time_ms: int,
+    end_time_ms: int,
+) -> list[dict]:
+    samples_in_window: list[dict] = []
+    for turn in turns or []:
+        for raw_sample in list(turn.get("visual_samples") or []):
+            if not isinstance(raw_sample, dict):
+                continue
+            sample_time_ms = _parse_int(raw_sample.get("time_ms"))
+            if sample_time_ms is None:
+                continue
+            if sample_time_ms < int(start_time_ms) or sample_time_ms >= int(end_time_ms):
+                continue
+            sample = dict(raw_sample)
+            sample["time_ms"] = sample_time_ms
+            samples_in_window.append(sample)
+    return samples_in_window
+
+
 def scheduler_config_from_env() -> dict[str, int]:
     """Return env-driven tuning knobs for pyannote scheduling."""
     return {
@@ -106,6 +135,10 @@ def merge_same_speaker_micro_gaps(
             source_turn_ids = list(previous_turn.get("source_turn_ids") or [previous_turn["turn_id"]])
             source_turn_ids.extend(list(turn.get("source_turn_ids") or [turn["turn_id"]]))
             previous_turn["source_turn_ids"] = source_turn_ids
+            visual_samples = list(previous_turn.get("visual_samples") or [])
+            visual_samples.extend(list(turn.get("visual_samples") or []))
+            if visual_samples:
+                previous_turn["visual_samples"] = visual_samples
             continue
         merged_turns.append(dict(turn))
     return merged_turns
@@ -178,12 +211,11 @@ def schedule_diarized_spans(
             "source_turn_ids": source_turn_ids,
         }
         discontinuity = classify_visual_discontinuity(
-            sample
-            for turn in active_turns
-            for sample in list(turn.get("visual_samples") or [])
-            if isinstance(sample, dict)
-            and int(sample.get("time_ms", start_time_ms)) >= int(start_time_ms)
-            and int(sample.get("time_ms", start_time_ms)) < int(end_time_ms)
+            _collect_visual_samples_within_window(
+                active_turns,
+                start_time_ms=int(start_time_ms),
+                end_time_ms=int(end_time_ms),
+            )
         )
         if not is_overlap and discontinuity["requires_lrasd"]:
             scheduled_span["requires_lrasd"] = True
