@@ -6448,3 +6448,89 @@ def test_build_stable_follow_bindings_preserves_sustained_turn_change():
     )
 
     assert [segment["track_id"] for segment in stabilized] == ["A", "B", "A"]
+
+
+def test_speaker_binding_package_threads_scheduled_audio_spans(monkeypatch):
+    import backend.speaker_binding as speaker_binding
+
+    monkeypatch.setenv("CLYPT_BINDING_SCHEDULER_SAME_SPEAKER_GAP_MS", "0")
+    monkeypatch.setenv("CLYPT_BINDING_SCHEDULER_BOUNDARY_PAD_MS", "0")
+
+    captured = {}
+
+    class _Worker:
+        def _run_speaker_binding_impl(self, **kwargs):
+            captured.update(kwargs)
+            return [{"track_id": "track-1"}]
+
+    result = speaker_binding.run_speaker_binding(
+        worker=_Worker(),
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[],
+        words=[],
+        analysis_context={
+            "audio_speaker_turns": [
+                {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 100},
+                {"speaker_id": "SPEAKER_01", "start_time_ms": 50, "end_time_ms": 150},
+            ]
+        },
+    )
+
+    assert result == [{"track_id": "track-1"}]
+    assert captured["analysis_context"]["audio_speaker_turns"] == [
+        {
+            "speaker_id": "SPEAKER_00",
+            "start_time_ms": 0,
+            "end_time_ms": 100,
+            "turn_id": "turn-0",
+            "exclusive": True,
+            "overlap": False,
+        },
+        {
+            "speaker_id": "SPEAKER_01",
+            "start_time_ms": 50,
+            "end_time_ms": 150,
+            "turn_id": "turn-1",
+            "exclusive": True,
+            "overlap": False,
+        },
+    ]
+    assert captured["analysis_context"]["scheduled_audio_spans"] == [
+        {
+            "span_id": "scheduled-0",
+            "span_type": "single",
+            "speaker_ids": ["SPEAKER_00"],
+            "exclusive": True,
+            "overlap": False,
+            "start_time_ms": 0,
+            "end_time_ms": 50,
+            "context_start_time_ms": 0,
+            "context_end_time_ms": 50,
+            "source_turn_ids": ["turn-0"],
+        },
+        {
+            "span_id": "scheduled-1",
+            "span_type": "overlap",
+            "speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
+            "exclusive": False,
+            "overlap": True,
+            "start_time_ms": 50,
+            "end_time_ms": 100,
+            "context_start_time_ms": 50,
+            "context_end_time_ms": 100,
+            "source_turn_ids": ["turn-0", "turn-1"],
+        },
+        {
+            "span_id": "scheduled-2",
+            "span_type": "single",
+            "speaker_ids": ["SPEAKER_01"],
+            "exclusive": True,
+            "overlap": False,
+            "start_time_ms": 100,
+            "end_time_ms": 150,
+            "context_start_time_ms": 100,
+            "context_end_time_ms": 150,
+            "source_turn_ids": ["turn-1"],
+        },
+    ]

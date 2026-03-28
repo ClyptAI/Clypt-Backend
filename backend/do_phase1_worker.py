@@ -1359,6 +1359,7 @@ class ClyptWorker:
 
             binding = {
                 "speaker_id": str(turn.get("speaker_id", "") or ""),
+                "source_turn_id": str(turn.get("turn_id", "") or ""),
                 "start_time_ms": start_time_ms,
                 "end_time_ms": end_time_ms,
                 "local_track_id": None,
@@ -1671,6 +1672,133 @@ class ClyptWorker:
             for local_track_id, global_track_id in dict(local_to_global_track_id or {}).items()
             if str(local_track_id) and str(global_track_id)
         }
+
+        if audio_speaker_turns and any(
+            isinstance(turn, dict) and turn.get("span_type")
+            for turn in audio_speaker_turns
+        ):
+            normalized_bindings: list[dict] = []
+            for binding in audio_turn_bindings or []:
+                start_time_ms = _as_int(binding.get("start_time_ms"), default=0)
+                end_time_ms = _as_int(binding.get("end_time_ms"), default=start_time_ms)
+                if end_time_ms < start_time_ms:
+                    start_time_ms, end_time_ms = end_time_ms, start_time_ms
+                if end_time_ms <= start_time_ms:
+                    continue
+                normalized_bindings.append(
+                    {
+                        **dict(binding),
+                        "speaker_id": str(binding.get("speaker_id", "") or ""),
+                        "source_turn_id": str(binding.get("source_turn_id", "") or ""),
+                        "start_time_ms": start_time_ms,
+                        "end_time_ms": end_time_ms,
+                    }
+                )
+
+            def _best_binding_for_scheduled_speaker(
+                *,
+                speaker_id: str,
+                start_time_ms: int,
+                end_time_ms: int,
+                source_turn_ids: set[str],
+            ) -> dict | None:
+                best_binding = None
+                best_overlap_ms = 0
+                candidate_bindings = normalized_bindings
+                if source_turn_ids:
+                    matched_bindings = [
+                        binding
+                        for binding in normalized_bindings
+                        if str(binding.get("source_turn_id", "") or "") in source_turn_ids
+                    ]
+                    if matched_bindings:
+                        candidate_bindings = matched_bindings
+                for binding in candidate_bindings:
+                    if str(binding.get("speaker_id", "") or "") != speaker_id:
+                        continue
+                    overlap_ms = min(end_time_ms, int(binding["end_time_ms"])) - max(start_time_ms, int(binding["start_time_ms"]))
+                    if overlap_ms <= 0:
+                        continue
+                    if overlap_ms > best_overlap_ms:
+                        best_overlap_ms = overlap_ms
+                        best_binding = binding
+                return best_binding
+
+            spans: list[dict] = []
+            for span in audio_speaker_turns:
+                if not isinstance(span, dict):
+                    continue
+                start_time_ms = _as_int(
+                    span.get("context_start_time_ms", span.get("start_time_ms")),
+                    default=0,
+                )
+                end_time_ms = _as_int(
+                    span.get("context_end_time_ms", span.get("end_time_ms")),
+                    default=start_time_ms,
+                )
+                if end_time_ms < start_time_ms:
+                    start_time_ms, end_time_ms = end_time_ms, start_time_ms
+                if end_time_ms <= start_time_ms:
+                    continue
+
+                speaker_ids = [
+                    str(speaker_id)
+                    for speaker_id in list(span.get("speaker_ids") or [])
+                    if str(speaker_id)
+                ]
+                source_turn_ids = {
+                    str(turn_id)
+                    for turn_id in list(span.get("source_turn_ids") or [])
+                    if str(turn_id)
+                }
+                visible_local_track_ids: list[str] = []
+                visible_track_ids: list[str] = []
+                offscreen_audio_speaker_ids: list[str] = []
+                confidences: list[float] = []
+
+                for speaker_id in speaker_ids:
+                    binding = _best_binding_for_scheduled_speaker(
+                        speaker_id=speaker_id,
+                        start_time_ms=start_time_ms,
+                        end_time_ms=end_time_ms,
+                        source_turn_ids=source_turn_ids,
+                    )
+                    local_track_id = None
+                    if isinstance(binding, dict):
+                        raw_local_track_id = binding.get("local_track_id") or binding.get("clean_local_track_id")
+                        if raw_local_track_id not in (None, ""):
+                            local_track_id = str(raw_local_track_id)
+                        binding_confidence = _as_float(
+                            binding.get("clean_winning_score")
+                            if binding.get("clean_local_track_id") not in (None, "")
+                            else binding.get("winning_score")
+                        )
+                        if binding_confidence is not None:
+                            confidences.append(binding_confidence)
+                    if local_track_id:
+                        if local_track_id not in visible_local_track_ids:
+                            visible_local_track_ids.append(local_track_id)
+                        global_track_id = local_to_global_track_id.get(local_track_id)
+                        if global_track_id and global_track_id not in visible_track_ids:
+                            visible_track_ids.append(global_track_id)
+                    elif speaker_id and speaker_id not in offscreen_audio_speaker_ids:
+                        offscreen_audio_speaker_ids.append(speaker_id)
+
+                spans.append(
+                    {
+                        "start_time_ms": int(start_time_ms),
+                        "end_time_ms": int(end_time_ms),
+                        "audio_speaker_ids": speaker_ids,
+                        "visible_local_track_ids": visible_local_track_ids,
+                        "visible_track_ids": visible_track_ids,
+                        "offscreen_audio_speaker_ids": offscreen_audio_speaker_ids,
+                        "overlap": bool(span.get("overlap", False)),
+                        "confidence": None if not confidences else float(sum(confidences) / len(confidences)),
+                        "decision_source": "turn_binding" if visible_local_track_ids else "audio_only",
+                    }
+                )
+
+            return spans
 
         normalized_turns: list[dict] = []
         boundaries: set[int] = set()
@@ -6919,6 +7047,7 @@ class ClyptWorker:
         """Run LR-ASD inference and map words to visual track IDs."""
         self._last_speaker_candidate_debug = []
         self._last_audio_turn_bindings = []
+        self._last_scheduled_audio_spans = []
 
         if self.lrasd_model is None or self.lrasd_loss_av is None:
             print("  LR-ASD unavailable; falling back to heuristic binder.")
@@ -7011,6 +7140,12 @@ class ClyptWorker:
             (analysis_context or {}).get("audio_speaker_turns")
         )
         audio_speaker_turns = [dict(turn) for turn in raw_audio_turns]
+        scheduled_audio_spans = [
+            dict(span)
+            for span in list((analysis_context or {}).get("scheduled_audio_spans") or [])
+            if isinstance(span, dict)
+        ]
+        active_audio_context_spans = scheduled_audio_spans or audio_speaker_turns
         track_quality_by_tid = self._build_speaker_binding_track_quality(
             track_to_dets,
             frame_width=int(binding_meta.get("width", 0) or 0) or 1,
@@ -7724,7 +7859,7 @@ class ClyptWorker:
         self._last_audio_turn_bindings = [dict(binding) for binding in audio_turn_bindings]
 
         def _active_audio_turn(word: dict) -> dict | None:
-            if not audio_speaker_turns:
+            if not active_audio_context_spans:
                 return None
             word_start_ms = int(word.get("start_time_ms", 0) or 0)
             word_end_ms = int(word.get("end_time_ms", word_start_ms) or word_start_ms)
@@ -7733,17 +7868,35 @@ class ClyptWorker:
             word_mid_ms = (word_start_ms + word_end_ms) // 2
             best_turn = None
             best_overlap_ms = 0
-            for turn in audio_speaker_turns:
-                turn_start_ms = int(turn.get("start_time_ms", 0) or 0)
-                turn_end_ms = int(turn.get("end_time_ms", turn_start_ms) or turn_start_ms)
+            for turn in active_audio_context_spans:
+                turn_start_ms = int(
+                    turn.get("context_start_time_ms", turn.get("start_time_ms", 0)) or 0
+                )
+                turn_end_ms = int(
+                    turn.get("context_end_time_ms", turn.get("end_time_ms", turn_start_ms))
+                    or turn_start_ms
+                )
                 if turn_end_ms < turn_start_ms:
                     turn_start_ms, turn_end_ms = turn_end_ms, turn_start_ms
+                speaker_ids = [
+                    str(speaker_id)
+                    for speaker_id in list(turn.get("speaker_ids") or [])
+                    if str(speaker_id)
+                ]
+                hydrated_turn = {
+                    **dict(turn),
+                    "speaker_id": str(
+                        turn.get("speaker_id")
+                        or (speaker_ids[0] if len(speaker_ids) == 1 else "")
+                        or ""
+                    ),
+                }
                 if turn_start_ms <= word_mid_ms <= turn_end_ms:
-                    return turn
+                    return hydrated_turn
                 overlap_ms = min(word_end_ms, turn_end_ms) - max(word_start_ms, turn_start_ms)
                 if overlap_ms > best_overlap_ms:
                     best_overlap_ms = overlap_ms
-                    best_turn = turn
+                    best_turn = hydrated_turn
             return best_turn if best_overlap_ms > 0 else None
 
         def _active_audio_turn_binding(
@@ -7761,7 +7914,22 @@ class ClyptWorker:
             word_mid_ms = (word_start_ms + word_end_ms) // 2
             best_binding = None
             best_overlap_ms = 0
-            for binding in audio_turn_bindings:
+            context_span = _active_audio_turn(word)
+            source_turn_ids = {
+                str(turn_id)
+                for turn_id in list((context_span or {}).get("source_turn_ids") or [])
+                if str(turn_id)
+            }
+            candidate_bindings = list(audio_turn_bindings)
+            if source_turn_ids:
+                matching_bindings = [
+                    binding
+                    for binding in audio_turn_bindings
+                    if str(binding.get("source_turn_id", "") or "") in source_turn_ids
+                ]
+                if matching_bindings:
+                    candidate_bindings = matching_bindings
+            for binding in candidate_bindings:
                 local_track_id = binding.get("local_track_id")
                 if require_local_track and local_track_id in (None, ""):
                     continue
@@ -8550,6 +8718,7 @@ class ClyptWorker:
         protected_unknown_key = "_speaker_binding_protected_unknown"
         self._last_audio_turn_bindings = []
         self._last_speaker_candidate_debug = []
+        self._last_scheduled_audio_spans = []
 
         def _restore_protected_unknowns(existing_words: list[dict]) -> bool:
             restored_any = False
@@ -8744,8 +8913,9 @@ class ClyptWorker:
         speaker_bindings_local: list[dict] = []
         speaker_follow_bindings_local: list[dict] = []
         audio_speaker_local_track_map: list[dict] = []
+        scheduled_audio_spans = list(getattr(self, "_last_scheduled_audio_spans", []) or [])
         active_speakers_local: list[dict] = self._build_active_speakers_local(
-            audio_speaker_turns=audio_speaker_turns,
+            audio_speaker_turns=scheduled_audio_spans or audio_speaker_turns,
             audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
             local_to_global_track_id=cluster_id_remap,
         )

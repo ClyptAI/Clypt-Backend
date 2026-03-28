@@ -6,19 +6,28 @@ from typing import Literal, NotRequired, TypedDict
 
 
 class DiarizedSpan(TypedDict):
+    turn_id: NotRequired[str]
     speaker_id: str
     start_time_ms: int
     end_time_ms: int
     exclusive: NotRequired[bool]
     overlap: NotRequired[bool]
     confidence: NotRequired[float]
+    source_turn_ids: NotRequired[list[str]]
 
 
 class ScheduledSpan(TypedDict):
     span_id: str
-    speaker_id: NotRequired[str]
+    span_type: Literal["single", "overlap"]
+    speaker_ids: list[str]
     start_time_ms: int
     end_time_ms: int
+    context_start_time_ms: int
+    context_end_time_ms: int
+    exclusive: bool
+    overlap: bool
+    source_turn_ids: list[str]
+    speaker_id: NotRequired[str]
     track_id: NotRequired[str]
     priority: NotRequired[int]
 
@@ -50,4 +59,3 @@ class SpanLevelAssignment(TypedDict):
     local_track_id: NotRequired[str]
     word_count: NotRequired[int]
     ambiguous: NotRequired[bool]
-
