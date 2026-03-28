@@ -1648,6 +1648,116 @@ class ClyptWorker:
         return resolved_mappings
 
     @staticmethod
+    def _binding_context_turn_pad_ms() -> int:
+        return 80
+
+    @staticmethod
+    def _binding_context_same_speaker_gap_ms() -> int:
+        return 80
+
+    @classmethod
+    def _normalize_audio_speaker_turns_for_binding_context(
+        cls,
+        audio_speaker_turns: list[dict],
+    ) -> list[dict]:
+        def _as_int(value, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return int(default)
+
+        def _merged_bool(*values):
+            present = [value for value in values if isinstance(value, bool)]
+            if not present:
+                return None
+            if False in present:
+                return False
+            return True
+
+        normalized_rows: list[dict] = []
+        for turn in audio_speaker_turns or []:
+            start_time_ms = _as_int(turn.get("start_time_ms"), default=0)
+            end_time_ms = _as_int(turn.get("end_time_ms"), default=start_time_ms)
+            if end_time_ms < start_time_ms:
+                start_time_ms, end_time_ms = end_time_ms, start_time_ms
+            if end_time_ms <= start_time_ms:
+                continue
+            normalized_rows.append(
+                {
+                    **dict(turn),
+                    "speaker_id": str(turn.get("speaker_id", "") or ""),
+                    "source_start_time_ms": int(start_time_ms),
+                    "source_end_time_ms": int(end_time_ms),
+                    "source_turn_count": 1,
+                }
+            )
+
+        normalized_rows.sort(
+            key=lambda item: (
+                int(item.get("source_start_time_ms", 0)),
+                int(item.get("source_end_time_ms", 0)),
+                str(item.get("speaker_id", "")),
+            )
+        )
+
+        merged_rows: list[dict] = []
+        merge_gap_ms = cls._binding_context_same_speaker_gap_ms()
+        for row in normalized_rows:
+            if not merged_rows:
+                merged_rows.append(dict(row))
+                continue
+            prev = merged_rows[-1]
+            prev_speaker_id = str(prev.get("speaker_id", "") or "")
+            row_speaker_id = str(row.get("speaker_id", "") or "")
+            gap_ms = int(row["source_start_time_ms"]) - int(prev["source_end_time_ms"])
+            if prev_speaker_id and prev_speaker_id == row_speaker_id and gap_ms <= merge_gap_ms:
+                prev["source_end_time_ms"] = max(
+                    int(prev["source_end_time_ms"]),
+                    int(row["source_end_time_ms"]),
+                )
+                prev["source_turn_count"] = int(prev.get("source_turn_count", 1)) + int(row.get("source_turn_count", 1))
+                merged_exclusive = _merged_bool(prev.get("exclusive"), row.get("exclusive"))
+                if merged_exclusive is None:
+                    prev.pop("exclusive", None)
+                else:
+                    prev["exclusive"] = merged_exclusive
+                merged_overlap = _merged_bool(prev.get("overlap"), row.get("overlap"))
+                if merged_overlap is None:
+                    prev.pop("overlap", None)
+                else:
+                    prev["overlap"] = merged_overlap
+                prev_confidence = prev.get("confidence")
+                row_confidence = row.get("confidence")
+                try:
+                    if prev_confidence is None:
+                        prev["confidence"] = float(row_confidence)
+                    elif row_confidence is not None:
+                        prev["confidence"] = max(float(prev_confidence), float(row_confidence))
+                except (TypeError, ValueError):
+                    pass
+                continue
+            merged_rows.append(dict(row))
+
+        pad_ms = cls._binding_context_turn_pad_ms()
+        finalized: list[dict] = []
+        for row in merged_rows:
+            padded_row = dict(row)
+            source_start_time_ms = int(row["source_start_time_ms"])
+            source_end_time_ms = int(row["source_end_time_ms"])
+            padded_row["start_time_ms"] = max(0, source_start_time_ms - pad_ms)
+            padded_row["end_time_ms"] = max(source_start_time_ms, source_end_time_ms + pad_ms)
+            finalized.append(padded_row)
+
+        finalized.sort(
+            key=lambda item: (
+                int(item.get("start_time_ms", 0)),
+                int(item.get("end_time_ms", 0)),
+                str(item.get("speaker_id", "")),
+            )
+        )
+        return finalized
+
+    @staticmethod
     def _build_active_speakers_local(
         *,
         audio_speaker_turns: list[dict],
@@ -1672,22 +1782,11 @@ class ClyptWorker:
             if str(local_track_id) and str(global_track_id)
         }
 
-        normalized_turns: list[dict] = []
+        normalized_turns = ClyptWorker._normalize_audio_speaker_turns_for_binding_context(audio_speaker_turns)
         boundaries: set[int] = set()
-        for turn in audio_speaker_turns or []:
-            start_time_ms = _as_int(turn.get("start_time_ms"), default=0)
-            end_time_ms = _as_int(turn.get("end_time_ms"), default=start_time_ms)
-            if end_time_ms < start_time_ms:
-                start_time_ms, end_time_ms = end_time_ms, start_time_ms
-            if end_time_ms <= start_time_ms:
-                continue
-            normalized_turn = {
-                **dict(turn),
-                "speaker_id": str(turn.get("speaker_id", "") or ""),
-                "start_time_ms": start_time_ms,
-                "end_time_ms": end_time_ms,
-            }
-            normalized_turns.append(normalized_turn)
+        for normalized_turn in normalized_turns:
+            start_time_ms = int(normalized_turn.get("start_time_ms", 0) or 0)
+            end_time_ms = int(normalized_turn.get("end_time_ms", start_time_ms) or start_time_ms)
             boundaries.add(start_time_ms)
             boundaries.add(end_time_ms)
 
@@ -7722,46 +7821,62 @@ class ClyptWorker:
                 local_candidate_evidence,
             )
         self._last_audio_turn_bindings = [dict(binding) for binding in audio_turn_bindings]
+        normalized_audio_turns = self._normalize_audio_speaker_turns_for_binding_context(audio_speaker_turns)
 
-        def _active_audio_turn(word: dict) -> dict | None:
-            if not audio_speaker_turns:
-                return None
+        def _word_interval(word: dict) -> tuple[int, int, int]:
             word_start_ms = int(word.get("start_time_ms", 0) or 0)
             word_end_ms = int(word.get("end_time_ms", word_start_ms) or word_start_ms)
             if word_end_ms < word_start_ms:
                 word_start_ms, word_end_ms = word_end_ms, word_start_ms
-            word_mid_ms = (word_start_ms + word_end_ms) // 2
-            best_turn = None
-            best_overlap_ms = 0
-            for turn in audio_speaker_turns:
-                turn_start_ms = int(turn.get("start_time_ms", 0) or 0)
-                turn_end_ms = int(turn.get("end_time_ms", turn_start_ms) or turn_start_ms)
-                if turn_end_ms < turn_start_ms:
-                    turn_start_ms, turn_end_ms = turn_end_ms, turn_start_ms
-                if turn_start_ms <= word_mid_ms <= turn_end_ms:
-                    return turn
-                overlap_ms = min(word_end_ms, turn_end_ms) - max(word_start_ms, turn_start_ms)
-                if overlap_ms > best_overlap_ms:
-                    best_overlap_ms = overlap_ms
-                    best_turn = turn
-            return best_turn if best_overlap_ms > 0 else None
+            return word_start_ms, word_end_ms, (word_start_ms + word_end_ms) // 2
+
+        def _active_audio_turns(word: dict) -> list[dict]:
+            if not normalized_audio_turns:
+                return []
+            word_start_ms, word_end_ms, word_mid_ms = _word_interval(word)
+            exact_matches = [
+                dict(turn)
+                for turn in normalized_audio_turns
+                if int(turn.get("start_time_ms", 0) or 0) <= word_mid_ms <= int(turn.get("end_time_ms", 0) or 0)
+            ]
+            if exact_matches:
+                return exact_matches
+            overlapping_turns = [
+                dict(turn)
+                for turn in normalized_audio_turns
+                if min(word_end_ms, int(turn.get("end_time_ms", 0) or 0))
+                - max(word_start_ms, int(turn.get("start_time_ms", 0) or 0))
+                > 0
+            ]
+            return overlapping_turns
+
+        def _active_audio_turn(word: dict) -> dict | None:
+            active_turns = _active_audio_turns(word)
+            return active_turns[0] if active_turns else None
 
         def _active_audio_turn_binding(
             word: dict,
             *,
             include_ambiguous: bool = False,
             require_local_track: bool = True,
+            speaker_id: str | None = None,
         ) -> dict | None:
             if not audio_turn_bindings:
                 return None
-            word_start_ms = int(word.get("start_time_ms", 0) or 0)
-            word_end_ms = int(word.get("end_time_ms", word_start_ms) or word_start_ms)
-            if word_end_ms < word_start_ms:
-                word_start_ms, word_end_ms = word_end_ms, word_start_ms
-            word_mid_ms = (word_start_ms + word_end_ms) // 2
+            word_start_ms, word_end_ms, word_mid_ms = _word_interval(word)
+            active_speaker_ids = {
+                str(turn.get("speaker_id", "") or "")
+                for turn in _active_audio_turns(word)
+                if str(turn.get("speaker_id", "") or "")
+            }
             best_binding = None
             best_overlap_ms = 0
             for binding in audio_turn_bindings:
+                binding_speaker_id = str(binding.get("speaker_id", "") or "")
+                if speaker_id and binding_speaker_id != speaker_id:
+                    continue
+                if active_speaker_ids and binding_speaker_id not in active_speaker_ids:
+                    continue
                 local_track_id = binding.get("local_track_id")
                 if require_local_track and local_track_id in (None, ""):
                     continue
@@ -7815,6 +7930,7 @@ class ClyptWorker:
             ambiguous: bool,
             top_margin: float | None,
         ) -> None:
+            active_turns = _active_audio_turns(word)
             active_audio_local_track_id = None
             if isinstance(debug_turn_binding, dict):
                 raw_debug_local_track_id = (
@@ -7862,6 +7978,33 @@ class ClyptWorker:
                     ],
                 }
             )
+            active_audio_speaker_ids = []
+            active_audio_local_track_ids = []
+            for turn in active_turns:
+                speaker_id = str(turn.get("speaker_id", "") or "")
+                if speaker_id and speaker_id not in active_audio_speaker_ids:
+                    active_audio_speaker_ids.append(speaker_id)
+                matched_binding = _active_audio_turn_binding(
+                    word,
+                    include_ambiguous=True,
+                    require_local_track=False,
+                    speaker_id=speaker_id,
+                )
+                if isinstance(matched_binding, dict):
+                    raw_local_track_id = (
+                        matched_binding.get("local_track_id")
+                        or matched_binding.get("clean_local_track_id")
+                    )
+                    if (
+                        str(matched_binding.get("speaker_id", "") or "") == speaker_id
+                        and raw_local_track_id not in (None, "")
+                    ):
+                        local_track_id = str(raw_local_track_id)
+                        if local_track_id not in active_audio_local_track_ids:
+                            active_audio_local_track_ids.append(local_track_id)
+            if len(active_audio_speaker_ids) > 1:
+                speaker_candidate_debug[-1]["active_audio_speaker_ids"] = active_audio_speaker_ids
+                speaker_candidate_debug[-1]["active_audio_local_track_ids"] = active_audio_local_track_ids
 
         for row in word_candidate_rows:
             w = row["word"]

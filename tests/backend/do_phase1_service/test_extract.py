@@ -4593,7 +4593,7 @@ def test_build_active_speakers_local_splits_overlap_and_marks_offscreen():
     assert spans == [
         {
             "start_time_ms": 0,
-            "end_time_ms": 500,
+            "end_time_ms": 420,
             "audio_speaker_ids": ["SPEAKER_00"],
             "visible_local_track_ids": ["local-1"],
             "visible_track_ids": ["Global_Person_0"],
@@ -4603,8 +4603,8 @@ def test_build_active_speakers_local_splits_overlap_and_marks_offscreen():
             "decision_source": "turn_binding",
         },
         {
-            "start_time_ms": 500,
-            "end_time_ms": 1000,
+            "start_time_ms": 420,
+            "end_time_ms": 1080,
             "audio_speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
             "visible_local_track_ids": ["local-1"],
             "visible_track_ids": ["Global_Person_0"],
@@ -4614,8 +4614,8 @@ def test_build_active_speakers_local_splits_overlap_and_marks_offscreen():
             "decision_source": "turn_binding",
         },
         {
-            "start_time_ms": 1000,
-            "end_time_ms": 1500,
+            "start_time_ms": 1080,
+            "end_time_ms": 1580,
             "audio_speaker_ids": ["SPEAKER_01"],
             "visible_local_track_ids": [],
             "visible_track_ids": [],
@@ -4625,6 +4625,164 @@ def test_build_active_speakers_local_splits_overlap_and_marks_offscreen():
             "decision_source": "audio_only",
         },
     ]
+
+
+def test_normalize_audio_speaker_turns_merges_tiny_same_speaker_gap_for_binding_context():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    normalized_turns = worker._normalize_audio_speaker_turns_for_binding_context(
+        [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 100,
+                "end_time_ms": 500,
+                "exclusive": True,
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 560,
+                "end_time_ms": 900,
+                "exclusive": True,
+            },
+        ]
+    )
+
+    assert normalized_turns == [
+        {
+            "speaker_id": "SPEAKER_00",
+            "start_time_ms": 20,
+            "end_time_ms": 980,
+            "exclusive": True,
+            "source_start_time_ms": 100,
+            "source_end_time_ms": 900,
+            "source_turn_count": 2,
+        }
+    ]
+
+
+def test_build_active_speakers_local_pads_turn_boundaries_for_adjacent_context():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    spans = worker._build_active_speakers_local(
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            },
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 1000,
+                "end_time_ms": 2000,
+                "exclusive": True,
+            },
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "local-0",
+                "ambiguous": False,
+                "winning_score": 0.91,
+            },
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 1000,
+                "end_time_ms": 2000,
+                "local_track_id": "local-1",
+                "ambiguous": False,
+                "winning_score": 0.89,
+            },
+        ],
+        local_to_global_track_id={
+            "local-0": "Global_Person_0",
+            "local-1": "Global_Person_1",
+        },
+    )
+
+    assert any(
+        span["audio_speaker_ids"] == ["SPEAKER_00", "SPEAKER_01"]
+        and span["visible_local_track_ids"] == ["local-0", "local-1"]
+        and span["overlap"] is True
+        and span["start_time_ms"] < 1000 < span["end_time_ms"]
+        for span in spans
+    )
+
+
+def test_run_lrasd_binding_debug_surfaces_multiple_active_speakers_near_turn_boundary(monkeypatch, tmp_path: Path):
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "speaker_local": {
+                "x_center": 78.0,
+                "y_center": 102.0,
+                "width": 72.0,
+                "height": 148.0,
+                "confidence": 0.88,
+                "intensity": 210,
+            },
+            "listener_local": {
+                "x_center": 222.0,
+                "y_center": 104.0,
+                "width": 70.0,
+                "height": 146.0,
+                "confidence": 0.87,
+                "intensity": 80,
+            },
+        },
+        score_by_track={
+            "speaker_local": 0.175,
+            "listener_local": 0.173,
+        },
+        words=[
+            {"text": "handoff", "start_time_ms": 960, "end_time_ms": 1040},
+        ],
+        audio_speaker_turns=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "exclusive": True,
+            },
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 1000,
+                "end_time_ms": 2000,
+                "exclusive": True,
+            },
+        ],
+        audio_turn_bindings=[
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 0,
+                "end_time_ms": 1000,
+                "local_track_id": "speaker_local",
+                "ambiguous": False,
+                "winning_score": 0.92,
+                "winning_margin": 0.30,
+                "support_ratio": 1.0,
+            },
+            {
+                "speaker_id": "SPEAKER_01",
+                "start_time_ms": 1000,
+                "end_time_ms": 2000,
+                "local_track_id": "listener_local",
+                "ambiguous": False,
+                "winning_score": 0.91,
+                "winning_margin": 0.28,
+                "support_ratio": 1.0,
+            },
+        ],
+    )
+
+    assert bindings == [{"track_id": "speaker_local", "start_time_ms": 960, "end_time_ms": 1040, "word_count": 1}]
+    assert worker._last_speaker_candidate_debug[0]["active_audio_speaker_ids"] == ["SPEAKER_00", "SPEAKER_01"]
+    assert worker._last_speaker_candidate_debug[0]["active_audio_local_track_ids"] == ["speaker_local", "listener_local"]
 
 
 def test_finalize_persists_overlap_artifacts_when_experiment_enabled(monkeypatch):
@@ -4755,7 +4913,7 @@ def test_finalize_persists_overlap_artifacts_when_experiment_enabled(monkeypatch
     assert result["phase_1_audio"]["active_speakers_local"] == [
         {
             "start_time_ms": 0,
-            "end_time_ms": 300,
+            "end_time_ms": 220,
             "audio_speaker_ids": ["SPEAKER_00"],
             "visible_local_track_ids": ["local-1"],
             "visible_track_ids": ["Global_Person_0"],
@@ -4765,8 +4923,8 @@ def test_finalize_persists_overlap_artifacts_when_experiment_enabled(monkeypatch
             "decision_source": "turn_binding",
         },
         {
-            "start_time_ms": 300,
-            "end_time_ms": 600,
+            "start_time_ms": 220,
+            "end_time_ms": 680,
             "audio_speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
             "visible_local_track_ids": ["local-1"],
             "visible_track_ids": ["Global_Person_0"],
@@ -4776,8 +4934,8 @@ def test_finalize_persists_overlap_artifacts_when_experiment_enabled(monkeypatch
             "decision_source": "turn_binding",
         },
         {
-            "start_time_ms": 600,
-            "end_time_ms": 800,
+            "start_time_ms": 680,
+            "end_time_ms": 880,
             "audio_speaker_ids": ["SPEAKER_01"],
             "visible_local_track_ids": [],
             "visible_track_ids": [],
