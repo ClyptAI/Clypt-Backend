@@ -129,3 +129,29 @@ def test_build_lrasd_span_jobs_reuses_contiguous_words_within_same_span():
     assert jobs[1]["start_time_ms"] == 900
     assert jobs[1]["end_time_ms"] == 1100
     assert jobs[1]["word_indices"] == [2]
+
+
+def test_build_lrasd_span_jobs_skips_spans_with_no_surviving_candidates():
+    jobs, debug_rows = build_lrasd_span_jobs(
+        scheduled_hard_spans=[
+            {
+                "span_id": "scheduled-4",
+                "span_type": "single",
+                "speaker_ids": ["SPEAKER_03"],
+                "speaker_id": "SPEAKER_03",
+                "overlap": False,
+                "context_start_time_ms": 100,
+                "context_end_time_ms": 500,
+                "source_turn_ids": ["turn-5"],
+            }
+        ],
+        words=[
+            {"text": "none", "start_time_ms": 120, "end_time_ms": 300},
+        ],
+        rank_candidates_fn=lambda span: [
+            {"local_track_id": "filtered", "candidate_survives": False, "rank_score": 0.7},
+        ],
+    )
+
+    assert jobs == []
+    assert debug_rows == []

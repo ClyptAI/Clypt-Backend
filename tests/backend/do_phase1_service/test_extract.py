@@ -2034,6 +2034,66 @@ def test_run_speaker_binding_passes_only_scheduled_hard_spans_to_lrasd(monkeypat
     assert captured["scheduled_hard_spans"][0]["source_turn_ids"] == ["turn-1"]
 
 
+def test_run_speaker_binding_preserves_caller_scheduled_hard_spans_when_cascade_has_none(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.lrasd_model = object()
+    worker.lrasd_loss_av = object()
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "lrasd")
+    monkeypatch.setattr(
+        worker,
+        "_resolve_easy_span_cascade",
+        lambda **kwargs: {
+            "metrics": {
+                "scheduled_spans_total": 0,
+                "easy_spans_resolved": 0,
+                "hard_spans_routed_to_lrasd": 0,
+                "overlap_spans_count": 0,
+            },
+            "easy_assignments": [],
+            "synthetic_bindings": [],
+            "has_hard_span": False,
+            "hard_spans": [],
+        },
+    )
+
+    captured = {}
+
+    def _fake_run_lrasd_binding(**kwargs):
+        captured["scheduled_hard_spans"] = kwargs["analysis_context"].get("scheduled_hard_spans")
+        return []
+
+    monkeypatch.setattr(worker, "_run_lrasd_binding", _fake_run_lrasd_binding)
+    monkeypatch.setattr(worker, "_run_speaker_binding_heuristic", lambda *args, **kwargs: [])
+
+    planned_hard_span = {
+        "span_id": "planned-hard-0",
+        "span_type": "overlap",
+        "speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
+        "overlap": True,
+        "context_start_time_ms": 400,
+        "context_end_time_ms": 900,
+        "source_turn_ids": ["turn-0", "turn-1"],
+    }
+
+    worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "local-1"}],
+        words=[{"text": "hard", "start_time_ms": 500, "end_time_ms": 700}],
+        frame_to_dets={},
+        track_to_dets={"local-1": [{"track_id": "local-1", "frame_idx": 0}]},
+        analysis_context={
+            "scheduled_hard_spans": [planned_hard_span],
+            "scheduled_audio_spans": [],
+            "audio_speaker_turns": [],
+        },
+    )
+
+    assert captured["scheduled_hard_spans"] == [planned_hard_span]
+
+
 def test_run_speaker_binding_delegates_to_package_entrypoint(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -2113,6 +2173,182 @@ def test_run_lrasd_binding_clears_stale_candidate_debug_on_early_return(monkeypa
 
     assert result is None
     assert worker._last_speaker_candidate_debug == []
+
+
+def test_run_lrasd_binding_does_not_fabricate_hard_span_when_none_are_scheduled(monkeypatch, tmp_path: Path):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.lrasd_model = object()
+    worker.lrasd_loss_av = object()
+    worker._last_speaker_binding_metrics = {}
+
+    video_path = tmp_path / "video.mp4"
+    audio_path = tmp_path / "audio.wav"
+    cached_features_path = tmp_path / "video_lrasd_features.npz"
+    video_path.write_bytes(b"video")
+    audio_path.write_bytes(b"audio")
+    np.savez_compressed(
+        cached_features_path,
+        audio_features=np.full((400, 13), 0.25, dtype=np.float32),
+    )
+
+    class _Batch:
+        def __init__(self, batch_frames):
+            self._frames = batch_frames
+
+        def asnumpy(self):
+            return np.stack(self._frames, axis=0)
+
+    class _VideoReader:
+        def __init__(self, path, ctx=None):
+            self._frames = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(4)]
+
+        def __len__(self):
+            return len(self._frames)
+
+        def get_avg_fps(self):
+            return 25.0
+
+        def get_batch(self, indices):
+            return _Batch([self._frames[i] for i in indices])
+
+    fake_decord = types.ModuleType("decord")
+    fake_decord.VideoReader = _VideoReader
+    fake_decord.cpu = lambda _index: object()
+    monkeypatch.setitem(sys.modules, "decord", fake_decord)
+
+    captured = {}
+
+    monkeypatch.setattr(worker, "_build_canonical_face_bbox_lookup", lambda **kwargs: {})
+    monkeypatch.setattr(worker, "_build_speaker_binding_track_quality", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        worker,
+        "_select_lrasd_eligible_track_ids",
+        lambda **kwargs: (set(), {}),
+    )
+
+    import backend.speaker_binding.lrasd_runner as lrasd_runner
+
+    original_build_lrasd_span_jobs = lrasd_runner.build_lrasd_span_jobs
+
+    def _capturing_build_lrasd_span_jobs(**kwargs):
+        captured["scheduled_hard_spans"] = kwargs["scheduled_hard_spans"]
+        return original_build_lrasd_span_jobs(**kwargs)
+
+    monkeypatch.setattr(lrasd_runner, "build_lrasd_span_jobs", _capturing_build_lrasd_span_jobs)
+
+    result = worker._run_lrasd_binding(
+        video_path=str(video_path),
+        audio_wav_path=str(audio_path),
+        tracks=[{"track_id": "local-1", "frame_idx": 0}],
+        words=[{"text": "hello", "start_time_ms": 0, "end_time_ms": 100}],
+        frame_to_dets={},
+        track_to_dets={"local-1": [{"track_id": "local-1", "frame_idx": 0}]},
+        analysis_context={
+            "analysis_video_path": str(video_path),
+            "scale_x": 1.0,
+            "scale_y": 1.0,
+            "analysis_meta": {"width": 8, "height": 8, "fps": 25.0},
+            "audio_speaker_turns": [],
+            "scheduled_audio_spans": [],
+            "scheduled_hard_spans": [],
+        },
+    )
+
+    assert captured["scheduled_hard_spans"] == []
+    assert result is None
+
+
+def test_run_lrasd_binding_returns_none_when_planned_hard_spans_have_no_runnable_jobs(monkeypatch, tmp_path: Path):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.lrasd_model = object()
+    worker.lrasd_loss_av = object()
+    worker._last_speaker_binding_metrics = {}
+
+    video_path = tmp_path / "video.mp4"
+    audio_path = tmp_path / "audio.wav"
+    cached_features_path = tmp_path / "video_lrasd_features.npz"
+    video_path.write_bytes(b"video")
+    audio_path.write_bytes(b"audio")
+    np.savez_compressed(
+        cached_features_path,
+        audio_features=np.full((400, 13), 0.25, dtype=np.float32),
+    )
+
+    class _Batch:
+        def __init__(self, batch_frames):
+            self._frames = batch_frames
+
+        def asnumpy(self):
+            return np.stack(self._frames, axis=0)
+
+    class _VideoReader:
+        def __init__(self, path, ctx=None):
+            self._frames = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(4)]
+
+        def __len__(self):
+            return len(self._frames)
+
+        def get_avg_fps(self):
+            return 25.0
+
+        def get_batch(self, indices):
+            return _Batch([self._frames[i] for i in indices])
+
+    fake_decord = types.ModuleType("decord")
+    fake_decord.VideoReader = _VideoReader
+    fake_decord.cpu = lambda _index: object()
+    monkeypatch.setitem(sys.modules, "decord", fake_decord)
+
+    monkeypatch.setattr(worker, "_build_canonical_face_bbox_lookup", lambda **kwargs: {})
+    monkeypatch.setattr(worker, "_build_speaker_binding_track_quality", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        worker,
+        "_select_lrasd_eligible_track_ids",
+        lambda **kwargs: ({"local-1"}, {}),
+    )
+
+    import backend.speaker_binding.lrasd_runner as lrasd_runner
+
+    monkeypatch.setattr(
+        lrasd_runner,
+        "build_lrasd_span_jobs",
+        lambda **kwargs: ([], []),
+    )
+
+    result = worker._run_lrasd_binding(
+        video_path=str(video_path),
+        audio_wav_path=str(audio_path),
+        tracks=[{"track_id": "local-1", "frame_idx": 0}],
+        words=[{"text": "hello", "start_time_ms": 0, "end_time_ms": 100}],
+        frame_to_dets={},
+        track_to_dets={"local-1": [{"track_id": "local-1", "frame_idx": 0}]},
+        analysis_context={
+            "analysis_video_path": str(video_path),
+            "scale_x": 1.0,
+            "scale_y": 1.0,
+            "analysis_meta": {"width": 8, "height": 8, "fps": 25.0},
+            "audio_speaker_turns": [
+                {"speaker_id": "SPEAKER_00", "turn_id": "turn-0", "start_time_ms": 0, "end_time_ms": 100}
+            ],
+            "scheduled_audio_spans": [],
+            "scheduled_hard_spans": [
+                {
+                    "span_id": "planned-hard-0",
+                    "span_type": "single",
+                    "speaker_ids": ["SPEAKER_00"],
+                    "speaker_id": "SPEAKER_00",
+                    "overlap": False,
+                    "context_start_time_ms": 0,
+                    "context_end_time_ms": 100,
+                    "source_turn_ids": ["turn-0"],
+                }
+            ],
+        },
+    )
+
+    assert result is None
 
 
 def test_build_visual_detection_ledgers_uses_canonical_face_tracks(monkeypatch):
@@ -2958,6 +3194,7 @@ def _run_fake_lrasd_binding_case(
     audio_speaker_turns: list[dict] | None = None,
     audio_turn_bindings: list[dict] | None = None,
     scheduled_audio_spans: list[dict] | None = None,
+    scheduled_hard_spans: list[dict] | None = None,
 ):
     def _frame_is_visible(spec: dict, frame_idx: int, default_end: int) -> bool:
         visible_frames = spec.get("visible_frames")
@@ -3125,6 +3362,45 @@ def _run_fake_lrasd_binding_case(
             {"text": "hello", "start_time_ms": 0, "end_time_ms": 1000},
         ]
 
+    if scheduled_hard_spans is None:
+        timing_sources = list(audio_speaker_turns or []) + list(words or [])
+        start_time_ms = min(
+            int(source.get("start_time_ms", 0) or 0)
+            for source in timing_sources
+        )
+        end_time_ms = max(
+            int(source.get("end_time_ms", source.get("start_time_ms", 0)) or 0)
+            for source in timing_sources
+        )
+        speaker_ids = [
+            str(turn.get("speaker_id", "") or "")
+            for turn in list(audio_speaker_turns or [])
+            if str(turn.get("speaker_id", "") or "")
+        ]
+        if not speaker_ids:
+            speaker_ids = ["SPEAKER_00"]
+        source_turn_ids = [
+            str(turn.get("turn_id", "") or "")
+            for turn in list(audio_speaker_turns or [])
+            if str(turn.get("turn_id", "") or "")
+        ]
+        overlap = any(
+            bool(turn.get("overlap", False)) or not bool(turn.get("exclusive", True))
+            for turn in list(audio_speaker_turns or [])
+        )
+        scheduled_hard_spans = [
+            {
+                "span_id": "test-hard-0",
+                "span_type": "overlap" if overlap else "single",
+                "speaker_ids": list(dict.fromkeys(speaker_ids)),
+                "speaker_id": speaker_ids[0],
+                "overlap": overlap,
+                "context_start_time_ms": int(start_time_ms),
+                "context_end_time_ms": int(end_time_ms),
+                "source_turn_ids": source_turn_ids,
+            }
+        ]
+
     bindings = worker._run_lrasd_binding(
         video_path=str(video_path),
         audio_wav_path=str(audio_path),
@@ -3140,6 +3416,7 @@ def _run_fake_lrasd_binding_case(
             "analysis_meta": {"width": frame_w, "height": frame_h, "fps": 30.0},
             "audio_speaker_turns": audio_speaker_turns or [],
             "scheduled_audio_spans": scheduled_audio_spans or [],
+            "scheduled_hard_spans": scheduled_hard_spans or [],
         },
         track_id_remap=track_id_remap,
     )

@@ -7183,37 +7183,6 @@ class ClyptWorker:
                     or str(span.get("span_type", "")) == "overlap"
                 )
             ]
-        if not scheduled_hard_spans:
-            timing_sources = list(words or []) + list(audio_speaker_turns or [])
-            if timing_sources:
-                start_time_ms = min(
-                    int(source.get("start_time_ms", 0) or 0)
-                    for source in timing_sources
-                )
-                end_time_ms = max(
-                    int(source.get("end_time_ms", source.get("start_time_ms", 0)) or 0)
-                    for source in timing_sources
-                )
-                scheduled_hard_spans = [
-                    {
-                        "span_id": "scheduled-hard-fallback-0",
-                        "span_type": "single",
-                        "speaker_ids": [
-                            str(turn.get("speaker_id", "") or "")
-                            for turn in audio_speaker_turns
-                            if str(turn.get("speaker_id", "") or "")
-                        ],
-                        "speaker_id": str((audio_speaker_turns or [{}])[0].get("speaker_id", "") or ""),
-                        "overlap": False,
-                        "context_start_time_ms": int(start_time_ms),
-                        "context_end_time_ms": int(end_time_ms),
-                        "source_turn_ids": [
-                            str(turn.get("turn_id", "") or "")
-                            for turn in audio_speaker_turns
-                            if str(turn.get("turn_id", "") or "")
-                        ],
-                    }
-                ]
         track_quality_by_tid = self._build_speaker_binding_track_quality(
             track_to_dets,
             frame_width=int(binding_meta.get("width", 0) or 0) or 1,
@@ -7291,7 +7260,7 @@ class ClyptWorker:
         )
         if scheduled_hard_spans and not span_jobs:
             print("  LR-ASD found no runnable hard-span jobs after candidate filtering.")
-            return []
+            return None
         audio_feature_cache_path = binding_video_path.replace(".mp4", "_lrasd_features.npz")
         full_audio_features = self._load_or_build_lrasd_audio_features(
             audio_wav_path=audio_wav_path,
@@ -9007,9 +8976,48 @@ class ClyptWorker:
             )
             speaker_metrics.update(easy_span_cascade["metrics"])
             lrasd_analysis_context = dict(analysis_context or {})
-            lrasd_analysis_context["scheduled_hard_spans"] = [
-                dict(span) for span in easy_span_cascade.get("hard_spans", [])
-            ]
+            merged_scheduled_hard_spans: list[dict] = []
+            seen_scheduled_hard_span_keys: set[tuple] = set()
+            for span in list(lrasd_analysis_context.get("scheduled_hard_spans") or []) + list(
+                easy_span_cascade.get("hard_spans", []) or []
+            ):
+                if not isinstance(span, dict):
+                    continue
+                normalized_span = dict(span)
+                span_key = (
+                    str(normalized_span.get("span_id", "") or ""),
+                    str(normalized_span.get("span_type", "") or ""),
+                    int(
+                        normalized_span.get(
+                            "context_start_time_ms",
+                            normalized_span.get("start_time_ms", 0),
+                        )
+                        or 0
+                    ),
+                    int(
+                        normalized_span.get(
+                            "context_end_time_ms",
+                            normalized_span.get("end_time_ms", 0),
+                        )
+                        or 0
+                    ),
+                    tuple(
+                        str(speaker_id)
+                        for speaker_id in list(normalized_span.get("speaker_ids") or [])
+                        if str(speaker_id or "")
+                    ),
+                    bool(normalized_span.get("overlap", False)),
+                    tuple(
+                        str(turn_id)
+                        for turn_id in list(normalized_span.get("source_turn_ids") or [])
+                        if str(turn_id or "")
+                    ),
+                )
+                if span_key in seen_scheduled_hard_span_keys:
+                    continue
+                seen_scheduled_hard_span_keys.add(span_key)
+                merged_scheduled_hard_spans.append(normalized_span)
+            lrasd_analysis_context["scheduled_hard_spans"] = merged_scheduled_hard_spans
             if (
                 easy_span_cascade["easy_assignments"]
                 and not easy_span_cascade["has_hard_span"]
