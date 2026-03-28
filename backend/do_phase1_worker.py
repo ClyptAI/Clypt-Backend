@@ -11,7 +11,7 @@ import subprocess
 import time
 from dataclasses import asdict
 
-from backend.speaker_binding import build_visual_identities
+from backend.speaker_binding import build_visual_identities, learn_audio_visual_mappings
 
 try:
     if os.getenv("CLYPT_ENABLE_LEGACY_SERVERLESS_SDK", "0") != "1":
@@ -1649,6 +1649,88 @@ class ClyptWorker:
             )
         )
         return resolved_mappings
+
+    def _build_audio_visual_mappings(
+        self,
+        *,
+        audio_speaker_turns: list[dict],
+        audio_turn_bindings: list[dict],
+        local_to_global_track_id: dict[str, str] | None = None,
+    ) -> list[dict]:
+        def _as_int(value, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return int(default)
+
+        def _as_float(value) -> float | None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        local_to_global_track_id = {
+            str(local_track_id): str(global_track_id)
+            for local_track_id, global_track_id in dict(local_to_global_track_id or {}).items()
+            if str(local_track_id) and str(global_track_id)
+        }
+        normalized_turns = self._normalize_audio_speaker_turns_for_binding_context(audio_speaker_turns)
+        normalized_bindings = [dict(binding) for binding in (audio_turn_bindings or []) if isinstance(binding, dict)]
+
+        evidence_records: list[dict] = []
+        for turn in normalized_turns:
+            speaker_id = str(turn.get("speaker_id", "") or "")
+            if not speaker_id:
+                continue
+            turn_start_ms = _as_int(turn.get("source_start_time_ms"), default=_as_int(turn.get("start_time_ms")))
+            turn_end_ms = _as_int(turn.get("source_end_time_ms"), default=_as_int(turn.get("end_time_ms"), default=turn_start_ms))
+            overlap = bool(turn.get("overlap", False)) or turn.get("exclusive") is False
+
+            best_binding = None
+            best_overlap_ms = 0
+            for binding in normalized_bindings:
+                if str(binding.get("speaker_id", "") or "") != speaker_id:
+                    continue
+                overlap_ms = min(turn_end_ms, _as_int(binding.get("end_time_ms"), default=turn_end_ms)) - max(
+                    turn_start_ms,
+                    _as_int(binding.get("start_time_ms"), default=turn_start_ms),
+                )
+                if overlap_ms <= 0:
+                    continue
+                if overlap_ms > best_overlap_ms:
+                    best_overlap_ms = overlap_ms
+                    best_binding = binding
+
+            local_track_id = ""
+            confidence = None
+            if isinstance(best_binding, dict):
+                crowded_turn = _as_int(best_binding.get("max_visible_candidates"), default=0) > 2
+                if crowded_turn and str(best_binding.get("clean_local_track_id", "") or ""):
+                    local_track_id = str(best_binding.get("clean_local_track_id", "") or "")
+                    confidence = _as_float(best_binding.get("clean_winning_score"))
+                else:
+                    local_track_id = str(best_binding.get("local_track_id", "") or "")
+                    confidence = _as_float(best_binding.get("winning_score"))
+                if bool(best_binding.get("ambiguous", False)):
+                    overlap = True
+
+            global_track_id = local_to_global_track_id.get(local_track_id, local_track_id) if local_track_id else ""
+            evidence_records.append(
+                {
+                    "audio_speaker_id": speaker_id,
+                    "visual_identity_id": global_track_id,
+                    "confidence": 0.0 if confidence is None else confidence,
+                    "support_track_ids": [global_track_id] if global_track_id else [],
+                    "overlap": overlap,
+                    "offscreen": not bool(global_track_id),
+                    "metadata": {
+                        "start_time_ms": turn_start_ms,
+                        "end_time_ms": turn_end_ms,
+                    },
+                }
+            )
+
+        return [asdict(summary) for summary in learn_audio_visual_mappings(evidence_records)]
 
     @staticmethod
     def _binding_context_turn_pad_ms() -> int:
@@ -8905,6 +8987,11 @@ class ClyptWorker:
         speaker_bindings_local: list[dict] = []
         speaker_follow_bindings_local: list[dict] = []
         audio_speaker_local_track_map: list[dict] = []
+        audio_visual_mappings: list[dict] = self._build_audio_visual_mappings(
+            audio_speaker_turns=audio_speaker_turns,
+            audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
+            local_to_global_track_id=cluster_id_remap,
+        )
         active_speakers_local: list[dict] = self._build_active_speakers_local(
             audio_speaker_turns=audio_speaker_turns,
             audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
@@ -8936,6 +9023,7 @@ class ClyptWorker:
         metrics["speaker_follow_binding_segment_count"] = len(speaker_follow_bindings)
         metrics["speaker_binding_local_segment_count"] = len(speaker_bindings_local)
         metrics["speaker_follow_binding_local_segment_count"] = len(speaker_follow_bindings_local)
+        metrics["audio_visual_mapping_count"] = len(audio_visual_mappings)
         last_binding_metrics = getattr(self, "_last_speaker_binding_metrics", None)
         if isinstance(last_binding_metrics, dict):
             metrics.update(last_binding_metrics)
@@ -8974,6 +9062,7 @@ class ClyptWorker:
             "audio_speaker_turns": audio_speaker_turns,
             "speaker_candidate_debug": getattr(self, "_last_speaker_candidate_debug", []),
             "speaker_follow_bindings": speaker_follow_bindings,
+            "audio_visual_mappings": audio_visual_mappings,
             "active_speakers_local": active_speakers_local,
             "overlap_follow_decisions": overlap_follow_decisions,
         }
