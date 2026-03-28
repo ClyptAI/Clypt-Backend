@@ -488,3 +488,42 @@ def test_download_media_tries_h264_first_then_falls_back(monkeypatch, tmp_path, 
     assert audio_path == str(subject.DOWNLOAD_DIR / "audio_16k.wav")
     assert DummyYDL.last_instance is not None
     assert DummyYDL.last_instance.opts["format"] == "fallback-any"
+
+
+def test_download_media_bypasses_ytdlp_for_direct_mp4_urls(monkeypatch, tmp_path, phase1_subject):
+    subject = phase1_subject
+    DummyYDL.last_instance = None
+    monkeypatch.setattr(subject, "DOWNLOAD_DIR", tmp_path / "downloads")
+    monkeypatch.setattr(subject, "OUTPUT_DIR", tmp_path / "outputs")
+    subject.DOWNLOAD_DIR.mkdir()
+    subject.OUTPUT_DIR.mkdir()
+    monkeypatch.setattr(subject, "ensure_h264_local", lambda path: path)
+    monkeypatch.setattr(subject, "probe_video_stream", lambda path: (1920, 1080, "30/1"))
+    monkeypatch.setattr(subject, "probe_duration_seconds", lambda path: 10.0)
+
+    direct_downloads = []
+
+    def fake_urlretrieve(url, target_path):
+        direct_downloads.append((url, str(target_path)))
+        Path(target_path).write_bytes(b"video")
+        return str(target_path), None
+
+    def fake_run(cmd, *args, **kwargs):
+        audio_out = subject.DOWNLOAD_DIR / "audio_16k.wav"
+        audio_out.write_bytes(b"audio")
+        return None
+
+    monkeypatch.setattr(subject, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr(subject, "subprocess", SimpleNamespace(run=fake_run, DEVNULL=-1))
+    monkeypatch.setattr(subject.yt_dlp, "YoutubeDL", DummyYDL)
+    monkeypatch.setattr(subject.log, "info", lambda *args, **kwargs: None)
+    monkeypatch.setattr(subject.log, "warning", lambda *args, **kwargs: None)
+
+    video_path, audio_path = subject.download_media("http://127.0.0.1:8091/2jW9lmlfiKQ.mp4")
+
+    assert video_path == str(subject.DOWNLOAD_DIR / "video.mp4")
+    assert audio_path == str(subject.DOWNLOAD_DIR / "audio_16k.wav")
+    assert direct_downloads == [
+        ("http://127.0.0.1:8091/2jW9lmlfiKQ.mp4", str(subject.DOWNLOAD_DIR / "video.mp4"))
+    ]
+    assert DummyYDL.last_instance is None
