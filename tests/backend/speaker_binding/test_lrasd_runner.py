@@ -168,10 +168,11 @@ def test_lrasd_prep_pipeline_preserves_submission_order_when_prep_finishes_out_o
     )
 
     try:
-        pipeline.submit({"job_id": "job-0", "delay_s": 0.06})
-        pipeline.submit({"job_id": "job-1", "delay_s": 0.01})
-        pipeline.submit({"job_id": "job-2", "delay_s": 0.03})
-        prepared = pipeline.drain()
+        prepared = []
+        prepared.extend(pipeline.submit({"job_id": "job-0", "delay_s": 0.06}))
+        prepared.extend(pipeline.submit({"job_id": "job-1", "delay_s": 0.01}))
+        prepared.extend(pipeline.submit({"job_id": "job-2", "delay_s": 0.03}))
+        prepared.extend(pipeline.drain())
     finally:
         pipeline.close()
 
@@ -195,10 +196,11 @@ def test_lrasd_prep_pipeline_applies_backpressure_when_queue_is_full():
     )
 
     def _submit_all():
-        pipeline.submit({"job_id": "job-0"})
-        pipeline.submit({"job_id": "job-1"})
-        pipeline.submit({"job_id": "job-2"})
+        prepared.extend(pipeline.submit({"job_id": "job-0"}))
+        prepared.extend(pipeline.submit({"job_id": "job-1"}))
+        prepared.extend(pipeline.submit({"job_id": "job-2"}))
 
+    prepared: list[str] = []
     submit_thread = threading.Thread(target=_submit_all)
     submit_thread.start()
     time.sleep(0.1)
@@ -212,9 +214,26 @@ def test_lrasd_prep_pipeline_applies_backpressure_when_queue_is_full():
     assert not submit_thread.is_alive()
 
     try:
-        prepared = pipeline.drain()
+        prepared.extend(pipeline.drain())
     finally:
         pipeline.close()
 
     assert prepared == ["job-0", "job-1", "job-2"]
     assert pipeline.metrics["lrasd_prep_queue_depth_max"] >= 1
+
+
+def test_lrasd_prep_pipeline_drain_does_not_redeliver_items_already_returned_by_submit():
+    pipeline = LrasdPrepPipeline(
+        prepare_fn=lambda spec: (time.sleep(spec["delay_s"]), spec["job_id"])[1],
+        prep_workers=2,
+        queue_size=1,
+    )
+
+    try:
+        ready_from_submit = pipeline.submit({"job_id": "job-0", "delay_s": 0.0})
+        remaining = pipeline.drain()
+    finally:
+        pipeline.close()
+
+    assert ready_from_submit == ["job-0"]
+    assert remaining == []

@@ -7703,7 +7703,7 @@ class ClyptWorker:
                                 # If the face is lost for more than 5 frames, it's a real break. Terminate the chunk.
                                 if missing_count > 5:
                                     if len(current_face_subchunk) >= min_chunk_frames:
-                                        _queue_subchunk(tid, current_face_subchunk, current_crops)
+                                        _submit_subchunk(tid, current_face_subchunk, current_crops)
                                     current_face_subchunk = []
                                     current_crops = []
                                     missing_count = 0

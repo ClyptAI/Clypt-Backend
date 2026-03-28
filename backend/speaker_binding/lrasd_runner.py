@@ -8,8 +8,6 @@ import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from collections import deque
-
 from .metrics import finalize_lrasd_pipeline_metrics, new_lrasd_pipeline_metrics
 
 
@@ -193,7 +191,6 @@ class LrasdPrepPipeline:
         self._executor = ThreadPoolExecutor(max_workers=self.prep_workers)
         self._lock = threading.Lock()
         self._futures: dict[int, Future[_PreparedItem]] = {}
-        self._ready_buffer: deque[object] = deque()
         self._next_submit_seq = 0
         self._next_emit_seq = 0
         self._closed = False
@@ -242,16 +239,12 @@ class LrasdPrepPipeline:
                 self.metrics.get("lrasd_prep_jobs_submitted", 0) or 0
             ) + 1
         ready = self._drain_ready(block=False)
-        self._ready_buffer.extend(ready)
         if len(self._futures) >= self.queue_size:
-            self._ready_buffer.extend(self._drain_ready(block=True))
+            ready.extend(self._drain_ready(block=True))
         return ready
 
     def drain(self) -> list[object]:
-        buffered = list(self._ready_buffer)
-        self._ready_buffer.clear()
-        buffered.extend(self._drain_ready(block=True))
-        return buffered
+        return self._drain_ready(block=True)
 
     def _drain_ready(self, *, block: bool) -> list[object]:
         ready_values: list[object] = []
