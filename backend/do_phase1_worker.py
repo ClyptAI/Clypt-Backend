@@ -10,6 +10,8 @@ import os
 import subprocess
 import time
 
+from backend.speaker_binding.body_support import score_body_continuity_support
+
 try:
     if os.getenv("CLYPT_ENABLE_LEGACY_SERVERLESS_SDK", "0") != "1":
         raise ImportError("Legacy serverless SDK disabled for the DO runtime path")
@@ -6430,6 +6432,7 @@ class ClyptWorker:
         track_to_dets: dict[str, list[dict]],
         frame_to_dets: dict[int, list[dict]],
         track_quality_by_tid: dict[str, dict],
+        track_identity_features: dict[str, dict] | None = None,
         canonical_face_boxes: dict[tuple[str, int], tuple],
         frame_width: int,
         frame_height: int,
@@ -6510,13 +6513,24 @@ class ClyptWorker:
                 longest_face_run = max(longest_face_run, current_run)
                 previous_fi = fi
             face_continuity = float(longest_face_run / max(1, len(overlap_frames)))
+            hard_reject_ratio = float(hard_rejects / max(1, len(valid_dets)))
+            continuity_support = score_body_continuity_support(
+                mean_body_prior=mean_body_prior,
+                track_quality=track_quality,
+                prominence=prominence,
+                visibility_continuity=speech_overlap_ratio,
+                face_coverage=face_coverage,
+                face_continuity=face_continuity,
+                hard_reject_ratio=hard_reject_ratio,
+                identity_feature=(track_identity_features or {}).get(str(tid)),
+            )
 
             rank_score = (
                 0.38 * speech_overlap_ratio
-                + 0.24 * body_track_quality
-                + 0.20 * prominence
-                + 0.10 * face_coverage
-                + 0.08 * face_continuity
+                + 0.30 * float(continuity_support["continuity_support_score"])
+                + 0.16 * body_track_quality
+                + 0.10 * prominence
+                + float(continuity_support["tie_break_bonus"])
             )
 
             ranked.append(
@@ -6531,17 +6545,23 @@ class ClyptWorker:
                     "prominence": float(prominence),
                     "face_coverage": float(face_coverage),
                     "face_continuity": float(face_continuity),
-                    "hard_reject_ratio": float(hard_rejects / max(1, len(valid_dets))),
+                    "hard_reject_ratio": float(hard_reject_ratio),
+                    "continuity_support_score": float(continuity_support["continuity_support_score"]),
+                    "candidate_survives": bool(continuity_support["candidate_survives"]),
+                    "tie_break_bonus": float(continuity_support["tie_break_bonus"]),
                     "rank_score": float(rank_score),
                 }
             )
 
         ranked.sort(
             key=lambda item: (
+                bool(item["candidate_survives"]),
                 float(item["rank_score"]),
+                float(item["continuity_support_score"]),
                 float(item["speech_overlap_ratio"]),
                 float(item["body_track_quality"]),
                 float(item["prominence"]),
+                float(item["tie_break_bonus"]),
                 float(item["face_coverage"]),
                 str(item["local_track_id"]),
             ),
@@ -6558,6 +6578,7 @@ class ClyptWorker:
         track_to_dets: dict[str, list[dict]],
         frame_to_dets: dict[int, list[dict]],
         track_quality_by_tid: dict[str, dict],
+        track_identity_features: dict[str, dict] | None = None,
         canonical_face_boxes: dict[tuple[str, int], tuple],
         frame_width: int,
         frame_height: int,
@@ -6621,6 +6642,7 @@ class ClyptWorker:
                     track_to_dets=track_to_dets,
                     frame_to_dets=frame_to_dets,
                     track_quality_by_tid=track_quality_by_tid,
+                    track_identity_features=track_identity_features,
                     canonical_face_boxes=canonical_face_boxes,
                     frame_width=frame_width,
                     frame_height=frame_height,
@@ -7180,6 +7202,7 @@ class ClyptWorker:
             track_to_dets=track_to_dets,
             frame_to_dets=frame_to_dets,
             track_quality_by_tid=track_quality_by_tid,
+            track_identity_features=track_identity_features,
             canonical_face_boxes=canonical_face_boxes,
             frame_width=int(binding_meta.get("width", 0) or 0) or 1,
             frame_height=int(binding_meta.get("height", 0) or 0) or 1,

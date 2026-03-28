@@ -2852,6 +2852,75 @@ def test_rank_lrasd_turn_candidates_penalizes_tiny_face_heavy_fragment():
     assert ranked[0]["rank_score"] > ranked[1]["rank_score"]
 
 
+def test_rank_lrasd_turn_candidates_identity_support_breaks_near_tie():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    def _track_dets(track_id: str, *, x_center: float, width: float, height: float):
+        rows = []
+        for frame_idx in range(24):
+            rows.append(
+                {
+                    "track_id": track_id,
+                    "frame_idx": frame_idx,
+                    "x_center": x_center,
+                    "y_center": 96.0,
+                    "width": width,
+                    "height": height,
+                    "x1": x_center - (0.5 * width),
+                    "y1": 96.0 - (0.5 * height),
+                    "x2": x_center + (0.5 * width),
+                    "y2": 96.0 + (0.5 * height),
+                    "confidence": 0.92,
+                }
+            )
+        return rows
+
+    track_to_dets = {
+        "stable_identity": _track_dets("stable_identity", x_center=100.0, width=70.0, height=148.0),
+        "face_only": _track_dets("face_only", x_center=210.0, width=68.0, height=144.0),
+    }
+    frame_to_dets = {
+        frame_idx: [track_to_dets["stable_identity"][frame_idx], track_to_dets["face_only"][frame_idx]]
+        for frame_idx in range(24)
+    }
+    track_quality_by_tid = {
+        "stable_identity": {"track_quality": 0.80, "median_area_norm": 0.173},
+        "face_only": {"track_quality": 0.68, "median_area_norm": 0.163},
+    }
+    canonical_face_boxes = {
+        ("stable_identity", frame_idx): (72.0, 28.0, 128.0, 78.0, 0.82, "stable_identity")
+        for frame_idx in range(8)
+    }
+    canonical_face_boxes.update(
+        {
+            ("face_only", frame_idx): (184.0, 26.0, 236.0, 78.0, 0.95, "face_only")
+            for frame_idx in range(24)
+        }
+    )
+
+    ranked = worker._rank_lrasd_turn_candidates(
+        turn={"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 800},
+        eligible_track_ids={"stable_identity", "face_only"},
+        track_to_dets=track_to_dets,
+        frame_to_dets=frame_to_dets,
+        track_quality_by_tid=track_quality_by_tid,
+        track_identity_features={
+            "stable_identity": {"embedding": [0.2, 0.4, 0.6]},
+        },
+        canonical_face_boxes=canonical_face_boxes,
+        frame_width=300,
+        frame_height=200,
+        fps=30.0,
+    )
+
+    assert [candidate["local_track_id"] for candidate in ranked[:2]] == ["stable_identity", "face_only"]
+    assert ranked[0]["face_coverage"] < ranked[1]["face_coverage"]
+    assert ranked[0]["continuity_support_score"] > ranked[1]["continuity_support_score"]
+    assert ranked[0]["tie_break_bonus"] > ranked[1]["tie_break_bonus"]
+    assert ranked[0]["candidate_survives"] is True
+
+
 def test_run_lrasd_binding_scores_all_globally_eligible_candidates_when_turn_topk_enabled(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
     worker, words, bindings = _run_fake_lrasd_binding_case(
