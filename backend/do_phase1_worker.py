@@ -6850,6 +6850,23 @@ class ClyptWorker:
         x_new = np.linspace(0.0, 1.0, num=valid_length, dtype=np.float32)
         return np.interp(x_new, x_old, row_np).astype(np.float32)
 
+    @staticmethod
+    def _lrasd_should_abort_chunk_early(
+        *,
+        frames_processed: int,
+        face_hits: int,
+        face_misses: int,
+        missing_streak: int,
+    ) -> bool:
+        min_probe_frames = max(8, int(os.getenv("CLYPT_LRASD_ZERO_FACE_ABORT_MIN_FRAMES", "24")))
+        if int(frames_processed) < min_probe_frames:
+            return False
+        if int(face_hits) > 0:
+            return False
+        if int(face_misses) < min_probe_frames:
+            return False
+        return int(missing_streak) >= min_probe_frames
+
     def _lrasd_build_pending_subchunk(
         self,
         *,
@@ -7124,11 +7141,12 @@ class ClyptWorker:
 
         face_cache: dict[tuple[str, int], tuple[object, object]] = {}
 
-        def _face_crop(tid: str, fi: int, det: dict):
+        def _face_crop(tid: str, fi: int, det: dict, *, frame=None):
             key = (tid, fi)
             if key in face_cache:
                 return face_cache[key]
-            frame = get_frame(fi)
+            if frame is None:
+                frame = get_frame(fi)
             if frame is None:
                 face_cache[key] = (None, None)
                 return face_cache[key]
@@ -7500,6 +7518,11 @@ class ClyptWorker:
                         submitted_subchunks = 0
                         chunk_face_hits = 0
                         chunk_face_misses = 0
+                        chunk_frames_processed = 0
+                        chunk_frame_fetch_s = 0.0
+                        chunk_face_crop_s = 0.0
+                        chunk_anchor_projection_s = 0.0
+                        chunk_aborted_early = False
                         slow_chunk_logged = False
                         chunk_counter += 1
                         _flush_stale_pending(chunk_counter)
@@ -7528,8 +7551,12 @@ class ClyptWorker:
                                     scale_x=binding_scale_x,
                                     scale_y=binding_scale_y,
                                 )
+                                frame_fetch_started_at = time.perf_counter()
                                 frame = get_frame(fi)
-                                crop, anchor = _face_crop(tid, fi, det)
+                                chunk_frame_fetch_s += float(time.perf_counter() - frame_fetch_started_at)
+                                face_crop_started_at = time.perf_counter()
+                                crop, anchor = _face_crop(tid, fi, det, frame=frame)
+                                chunk_face_crop_s += float(time.perf_counter() - face_crop_started_at)
 
                                 # If detector misses, project last known face anchor onto current person box.
                                 if (
@@ -7537,6 +7564,7 @@ class ClyptWorker:
                                     and last_known_anchor is not None
                                     and frame is not None
                                 ):
+                                    anchor_projection_started_at = time.perf_counter()
                                     cx = float(det.get("x_center", 0.0))
                                     cy = float(det.get("y_center", 0.0))
                                     bw = float(det.get("width", 0.0))
@@ -7553,6 +7581,7 @@ class ClyptWorker:
                                             x2=fx1 + fw_face,
                                             y2=fy1 + fh_face,
                                         )
+                                    chunk_anchor_projection_s += float(time.perf_counter() - anchor_projection_started_at)
 
                             if crop is not None:
                                 face_hits += 1
@@ -7586,6 +7615,16 @@ class ClyptWorker:
                                     last_good_crop = None
                                     last_known_anchor = None
 
+                            chunk_frames_processed += 1
+                            if self._lrasd_should_abort_chunk_early(
+                                frames_processed=chunk_frames_processed,
+                                face_hits=chunk_face_hits,
+                                face_misses=chunk_face_misses,
+                                missing_streak=missing_count,
+                            ):
+                                chunk_aborted_early = True
+                                break
+
                         # Flush remainder
                         if len(current_face_subchunk) >= min_chunk_frames:
                             _submit_subchunk(tid, current_face_subchunk, current_crops)
@@ -7598,6 +7637,11 @@ class ClyptWorker:
                                 f"track_id={tid}, frame_span={chunk_frames[0]}-{chunk_frames[-1]}, "
                                 f"frames={len(chunk_frames)}, face_hits={chunk_face_hits}, "
                                 f"face_misses={chunk_face_misses}, submitted_subchunks={submitted_subchunks}, "
+                                f"frames_processed={chunk_frames_processed}, "
+                                f"aborted_early={chunk_aborted_early}, "
+                                f"frame_fetch_s={chunk_frame_fetch_s:.2f}, "
+                                f"face_crop_s={chunk_face_crop_s:.2f}, "
+                                f"anchor_projection_s={chunk_anchor_projection_s:.2f}, "
                                 f"elapsed_s={chunk_elapsed_s:.2f}, " + _format_lrasd_pipeline_snapshot()
                             )
 

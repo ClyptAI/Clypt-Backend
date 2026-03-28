@@ -3052,6 +3052,30 @@ def test_lrasd_align_score_row_ignores_padded_tail_using_original_valid_length()
     assert np.allclose(aligned, 0.25)
 
 
+def test_lrasd_should_abort_chunk_early_for_prolonged_zero_face_chunk():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    assert worker._lrasd_should_abort_chunk_early(
+        frames_processed=24,
+        face_hits=0,
+        face_misses=24,
+        missing_streak=24,
+    ) is True
+    assert worker._lrasd_should_abort_chunk_early(
+        frames_processed=24,
+        face_hits=1,
+        face_misses=23,
+        missing_streak=23,
+    ) is False
+    assert worker._lrasd_should_abort_chunk_early(
+        frames_processed=10,
+        face_hits=0,
+        face_misses=10,
+        missing_streak=10,
+    ) is False
+
+
 def test_lrasd_build_pending_subchunk_pads_visual_and_audio_to_bucket(monkeypatch):
     import torch
 
