@@ -1,4 +1,5 @@
 import pytest
+import numpy as np
 
 from backend.speaker_binding.body_support import score_body_continuity_support
 
@@ -89,3 +90,19 @@ def test_pose_support_remains_dormant_without_explicit_opt_in():
     )
 
     assert result["pose_support_used"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_identity_embedding_numpy_array_counts_as_present():
+    result = score_body_continuity_support(
+        mean_body_prior=0.54,
+        track_quality=0.78,
+        prominence=0.32,
+        visibility_continuity=0.56,
+        face_coverage=0.18,
+        face_continuity=0.12,
+        hard_reject_ratio=0.0,
+        identity_feature={"embedding": np.asarray([0.1, 0.2, 0.3], dtype=np.float32)},
+    )
+
+    assert result["candidate_survives"] is True
+    assert result["identity_feature_signal"] == pytest.approx(1.0, abs=1e-6)

@@ -14,8 +14,20 @@ def _clamp01(value: float) -> float:
 def _identity_feature_signal(identity_feature: dict | None) -> float:
     if not isinstance(identity_feature, dict):
         return 0.0
-    if identity_feature.get("embedding"):
-        return 1.0
+    embedding = identity_feature.get("embedding")
+    if embedding is not None:
+        size = getattr(embedding, "size", None)
+        if size is not None:
+            try:
+                if int(size) > 0:
+                    return 1.0
+            except Exception:
+                pass
+        try:
+            if len(embedding) > 0:  # type: ignore[arg-type]
+                return 1.0
+        except Exception:
+            pass
     if identity_feature.get("face_observations"):
         return 0.7
     if identity_feature.get("cluster_id") not in (None, ""):
