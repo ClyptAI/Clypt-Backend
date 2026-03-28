@@ -4,7 +4,7 @@
 
 **Goal:** Build a research-grade Phase 1 speaker binding path that treats pyannote as the audio truth layer and combines face identity, person ReID, pose, and selective active-speaker inference to maximize assignment accuracy and overlap correctness.
 
-**Architecture:** Replace the current mostly word-first / LR-ASD-centric binding mindset with a span-first multimodal identity system. Pyannote supplies anonymous speaker activity and overlap structure; the visual system builds stable person identities from face embeddings, person ReID embeddings, pose support, and track continuity; a cross-modal mapping layer associates audio speakers to visual identities using clean spans only; active-speaker inference becomes a selective fallback for ambiguous spans rather than the default for every speaking region.
+**Architecture:** Replace the current mostly word-first / LR-ASD-centric binding mindset with a span-first multimodal identity system. Pyannote supplies anonymous speaker activity and overlap structure; the visual system builds stable person identities from face embeddings, person ReID embeddings, pose support, and track continuity; a cross-modal mapping layer associates audio speakers to visual identities using clean spans only; active-speaker inference becomes a selective fallback for ambiguous spans rather than the default for every speaking region. The branch is explicitly research-oriented and accuracy-first: it can be slower than the scheduler/cascade branch, but every expensive stage must be bounded, cached, and measurable.
 
 **Tech Stack:** pyannote diarization, Ultralytics tracking + pose, InsightFace face embeddings, Torchreid OSNet-AIN person embeddings, FAISS similarity search, existing Phase 1 worker/service stack, pytest.
 
@@ -52,6 +52,113 @@
 
 ---
 
+## Exact Model / Runtime Strategy
+
+### Visual tracking and person boxes
+- Keep the existing Ultralytics person tracking path as the outer tracker.
+- Default branch setting:
+  - `CLYPT_TRACKER_BACKEND=botsort_reid`
+- This branch should not replace the current tracker first. It should reuse:
+  - current local track generation
+  - current `track_to_dets` / `frame_to_dets` indexes
+  - current clustering/identity surfaces where useful
+
+### Face identity
+- Reuse the existing InsightFace runtime already loaded in `load_model()`:
+  - SCRFD detector: `det_10g.onnx`
+  - ArcFace recognizer: `w600k_r50.onnx`
+  - current cache root: `~/.insightface/models/buffalo_l`
+- Do not introduce a second face stack.
+- Treat face embeddings as the highest-precision identity anchor.
+
+### Person ReID identity
+- Add Torchreid with **OSNet-AIN** as the first body identity backbone.
+- Exact first model target:
+  - `osnet_ain_x1_0`
+- Why this exact choice:
+  - strong practical ReID baseline
+  - lighter and easier to operationalize than part-heavy research models
+  - good enough for the first max-accuracy branch before testing heavier BPBreID-class upgrades
+- Load once per worker process and cache on the worker instance.
+
+### Pose support
+- Add a dedicated Ultralytics pose model for visible-person structure.
+- First model target:
+  - YOLO11 pose small/medium, whichever is more stable on the droplet without excessive VRAM pressure
+- Pose is not a standalone speaker classifier. It is a support signal for:
+  - visibility quality
+  - occlusion confidence
+  - body-part continuity
+  - candidate survival / tie-break support
+
+### Similarity search
+- Use FAISS for nearest-neighbor lookups over:
+  - person ReID embeddings
+  - optional identity centroids
+- Keep the first FAISS integration simple:
+  - in-memory flat index for per-job work
+  - no persistent ANN service
+
+### Active-speaker fallback
+- Do **not** introduce a new LLM-based speaker truth layer.
+- Reuse the current LR-ASD path as the first fallback implementation behind a common interface.
+- Only later, if needed, experiment with a lighter fallback ASD for hard spans.
+
+### Overlap follow
+- For this research branch, overlap truth is deterministic.
+- The Gemini overlap-follow path must be treated as optional rendering/camera behavior only.
+- Core assignment truth must remain LLM-free.
+
+---
+
+## Model Placement, Caching, and Lifecycle
+
+### Worker process lifecycle
+- All heavy models should be loaded in `ClyptWorker.load_model()` and reused for the lifetime of the worker child.
+- Do not instantiate heavy models inside per-span or per-track loops.
+
+### GPU vs CPU placement
+- Keep on GPU:
+  - Parakeet ASR
+  - YOLO tracking model
+  - InsightFace detector/recognizer as currently configured
+  - LR-ASD fallback
+  - person ReID model if stable on the droplet VRAM budget
+- Keep flexible / test both:
+  - pose model on GPU first; fall back to CPU if GPU pressure becomes unacceptable
+- Keep on CPU:
+  - FAISS index construction/search unless GPU FAISS is already trivially available
+  - span scheduling
+  - mapping aggregation
+  - assignment logic
+
+### Cache roots
+- Face cache stays at:
+  - `~/.insightface/models/buffalo_l`
+- Add a dedicated cache root for research-branch visual models:
+  - `/opt/clypt-phase1/models/research`
+- Expected subdirectories:
+  - `/opt/clypt-phase1/models/research/torchreid`
+  - `/opt/clypt-phase1/models/research/ultralytics_pose`
+- The branch must fail clearly if research flags are enabled but those assets are missing.
+
+### Feature caching
+- Cache per-job derived features in the Phase 1 job workspace, not globally:
+  - person ReID embeddings per local track span
+  - pose summaries per local track span
+  - visual identity centroids
+  - audio<->visual mapping table
+- Keep cache artifacts small and typed so they can be included in debug outputs if needed.
+
+### Bounded compute rules
+- ReID and pose extraction must be span-aware and sampled, not frame-exhaustive.
+- Default strategy:
+  - sample representative frames per local track span
+  - densify only on ambiguous spans
+- Hard cap every expensive per-track/per-span routine and surface metrics when caps are hit.
+
+---
+
 ## Architecture Decisions
 
 ### 1. Pyannote owns speaker activity truth
@@ -84,6 +191,7 @@
   - rapid cuts or reaction shots make the mapping prior unsafe
   - the mapping table is weak or conflicting
   - overlap needs same-frame visible disambiguation
+- The first implementation of this fallback should reuse the current LR-ASD codepath rather than add a second active-speaker model immediately.
 
 ### 5. Multi-speaker overlap must be first-class
 - A word/span can legitimately have:
@@ -91,6 +199,18 @@
   - one visible and one off-screen speaker
   - multiple off-screen speakers
 - Preserve that truth in artifacts instead of collapsing to a single label.
+
+### 6. No LLM in the assignment truth path
+- Gemini / overlap-follow can still exist for camera behavior experiments.
+- It must not participate in deciding who the true active speakers are for words/spans on this branch.
+
+### 7. Accuracy-first does not mean unbounded work
+- Every new expensive stage needs:
+  - sampling strategy
+  - cache strategy
+  - metrics
+  - runtime guardrails
+- We are optimizing for accuracy first, but not for runaway per-job cost.
 
 ---
 
@@ -139,6 +259,10 @@ The current production/default path must remain available until this branch beat
   - face embeddings already available in worker state
   - person ReID embeddings per local track span
   - pose/body quality and visibility continuity
+- [ ] **Step 5: Add explicit feature sampling rules**
+  - representative frames per span
+  - max samples per local track
+  - denser sampling only for ambiguous tracks/spans
 - [ ] **Step 5: Implement identity clustering rules with same-frame exclusion and continuity constraints**
 - [ ] **Step 6: Persist visual identity metadata into worker analysis context / debug artifacts**
 - [ ] **Step 7: Run tests and fix edge cases**
@@ -218,6 +342,7 @@ The current production/default path must remain available until this branch beat
   - multiple visible candidates
   - weak face/ReID confidence
 - [ ] **Step 5: Reuse existing LR-ASD or a lighter ASD module behind a common fallback interface**
+- [ ] **Step 6: Add a strict routing guard so fallback is never called for clearly solved mapping-first spans**
 - [ ] **Step 6: Add metrics showing how often fallback was used and why**
 - [ ] **Step 7: Run tests and verify routing behavior**
 - [ ] **Step 8: Commit**
@@ -255,6 +380,10 @@ The current production/default path must remain available until this branch beat
   - Torchreid / OSNet-AIN
   - pose model availability
   - optional FAISS usage
+- [ ] **Step 4: Add worker-level model caching and health logging for:**
+  - ReID model load success/failure
+  - pose model load success/failure
+  - cache roots and selected model names
 - [ ] **Step 4: Ensure the old path still runs when research flags are disabled**
 - [ ] **Step 5: Run tests**
 - [ ] **Step 6: Commit**
