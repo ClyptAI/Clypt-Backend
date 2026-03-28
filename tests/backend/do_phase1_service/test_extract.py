@@ -4500,6 +4500,280 @@ def test_finalize_emits_mapping_first_span_assignments(monkeypatch):
     assert result["phase_1_visual"]["tracking_metrics"]["span_assignment_count"] == 1
 
 
+def test_finalize_projects_hard_span_visual_disambiguation_to_words(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "local-1",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        },
+        {
+            "frame_idx": 0,
+            "track_id": "local-2",
+            "x1": 210.0,
+            "y1": 20.0,
+            "x2": 310.0,
+            "y2": 220.0,
+            "x_center": 260.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.88,
+        },
+    ]
+    words = [{"text": "hello", "start_time_ms": 0, "end_time_ms": 300}]
+
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(
+        worker,
+        "_build_track_indexes",
+        lambda tracks: (
+            {0: tracks},
+            {str(track["track_id"]): [track] for track in tracks},
+        ),
+    )
+    monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
+
+    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+        worker._last_cluster_id_map = {
+            "local-1": "Global_Person_0",
+            "local-2": "Global_Person_1",
+        }
+        worker._last_track_identity_features_after_clustering = {}
+        for track in tracks:
+            track["track_id"] = worker._last_cluster_id_map[track["track_id"]]
+        worker._last_clustering_metrics = {}
+        return tracks
+
+    monkeypatch.setattr(worker, "_cluster_tracklets", fake_cluster_tracklets)
+    monkeypatch.setattr(
+        worker,
+        "_run_audio_diarization",
+        lambda audio_path: [
+            {
+                "speaker_id": "speaker-0",
+                "start_time_ms": 0,
+                "end_time_ms": 300,
+                "overlap": False,
+            }
+        ],
+    )
+
+    def fake_run_speaker_binding(*args, **kwargs):
+        worker._last_audio_turn_bindings = []
+        return []
+
+    monkeypatch.setattr(worker, "_run_speaker_binding", fake_run_speaker_binding)
+    monkeypatch.setattr(worker, "_build_audio_visual_mappings", lambda **kwargs: [])
+    monkeypatch.setattr(
+        worker,
+        "_build_active_speakers_local",
+        lambda **kwargs: [
+            {
+                "start_time_ms": 0,
+                "end_time_ms": 300,
+                "audio_speaker_ids": ["speaker-0"],
+                "visible_local_track_ids": ["local-1", "local-2"],
+                "visible_track_ids": ["Global_Person_0", "Global_Person_1"],
+                "offscreen_audio_speaker_ids": [],
+                "overlap": False,
+                "decision_source": "visual_candidates",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        worker,
+        "_enrich_spans_with_hard_candidates",
+        lambda **kwargs: [
+            {
+                "start_time_ms": 0,
+                "end_time_ms": 300,
+                "audio_speaker_ids": ["speaker-0"],
+                "visible_local_track_ids": ["local-1", "local-2"],
+                "visible_track_ids": ["Global_Person_0", "Global_Person_1"],
+                "offscreen_audio_speaker_ids": [],
+                "overlap": False,
+                "decision_source": "visual_candidates",
+                "hard_span_candidates": [
+                    {
+                        "visual_identity_id": "Global_Person_0",
+                        "mouth_motion_score": 0.92,
+                        "pose_visibility_score": 0.78,
+                        "face_visibility_score": 0.83,
+                        "mapping_confidence": 0.2,
+                    },
+                    {
+                        "visual_identity_id": "Global_Person_1",
+                        "mouth_motion_score": 0.31,
+                        "pose_visibility_score": 0.79,
+                        "face_visibility_score": 0.8,
+                        "mapping_confidence": 0.2,
+                    },
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(worker, "_run_overlap_follow_postpass", lambda **kwargs: [])
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    assert result["phase_1_audio"]["span_assignments"] == [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 300,
+            "audio_speaker_ids": ("speaker-0",),
+            "assigned_visual_identity_ids": ("Global_Person_0",),
+            "dominant_visual_identity_id": "Global_Person_0",
+            "offscreen_audio_speaker_ids": (),
+            "unresolved_audio_speaker_ids": (),
+            "require_hard_disambiguation": False,
+            "decision_source": "hard_visual_disambiguation",
+        }
+    ]
+    assert result["phase_1_audio"]["words"][0]["speaker_track_id"] == "Global_Person_0"
+    assert result["phase_1_audio"]["words"][0]["speaker_track_ids"] == ["Global_Person_0"]
+    assert result["phase_1_audio"]["words"][0]["speaker_assignment_source"] == "hard_visual_disambiguation"
+
+
+def test_finalize_projects_overlap_visible_and_offscreen_truth_without_fake_single_winner(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "local-1",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        }
+    ]
+    words = [{"text": "hello", "start_time_ms": 0, "end_time_ms": 300}]
+
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(
+        worker,
+        "_build_track_indexes",
+        lambda tracks: (
+            {0: tracks},
+            {str(track["track_id"]): [track] for track in tracks},
+        ),
+    )
+    monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
+
+    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+        worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
+        worker._last_track_identity_features_after_clustering = {}
+        for track in tracks:
+            track["track_id"] = "Global_Person_0"
+        worker._last_clustering_metrics = {}
+        return tracks
+
+    monkeypatch.setattr(worker, "_cluster_tracklets", fake_cluster_tracklets)
+    monkeypatch.setattr(
+        worker,
+        "_run_audio_diarization",
+        lambda audio_path: [
+            {"speaker_id": "speaker-0", "start_time_ms": 0, "end_time_ms": 300, "overlap": True},
+            {"speaker_id": "speaker-1", "start_time_ms": 0, "end_time_ms": 300, "overlap": True},
+        ],
+    )
+    monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        worker,
+        "_build_audio_visual_mappings",
+        lambda **kwargs: [
+            {
+                "audio_speaker_id": "speaker-0",
+                "matched_visual_identity_id": "Global_Person_0",
+                "confidence": 0.91,
+                "candidate_visual_identity_ids": ("Global_Person_0",),
+                "ambiguous": False,
+            },
+            {
+                "audio_speaker_id": "speaker-1",
+                "matched_visual_identity_id": "Global_Person_9",
+                "confidence": 0.88,
+                "candidate_visual_identity_ids": ("Global_Person_9",),
+                "ambiguous": False,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        worker,
+        "_build_active_speakers_local",
+        lambda **kwargs: [
+            {
+                "start_time_ms": 0,
+                "end_time_ms": 300,
+                "audio_speaker_ids": ["speaker-0", "speaker-1"],
+                "visible_local_track_ids": ["local-1"],
+                "visible_track_ids": ["Global_Person_0"],
+                "offscreen_audio_speaker_ids": [],
+                "overlap": True,
+                "decision_source": "pyannote_overlap",
+            }
+        ],
+    )
+    monkeypatch.setattr(worker, "_enrich_spans_with_hard_candidates", lambda spans, **kwargs: spans)
+    monkeypatch.setattr(worker, "_run_overlap_follow_postpass", lambda **kwargs: [])
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    assert result["phase_1_audio"]["span_assignments"] == [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 300,
+            "audio_speaker_ids": ("speaker-0", "speaker-1"),
+            "assigned_visual_identity_ids": ("Global_Person_0",),
+            "dominant_visual_identity_id": None,
+            "offscreen_audio_speaker_ids": ("speaker-1",),
+            "unresolved_audio_speaker_ids": (),
+            "require_hard_disambiguation": False,
+            "decision_source": "overlap_mapping",
+        }
+    ]
+    assert result["phase_1_audio"]["words"][0]["speaker_track_id"] is None
+    assert result["phase_1_audio"]["words"][0]["speaker_track_ids"] == ["Global_Person_0"]
+    assert result["phase_1_audio"]["words"][0]["offscreen_audio_speaker_ids"] == ["speaker-1"]
+    assert result["phase_1_audio"]["words"][0]["speaker_assignment_source"] == "overlap_mapping"
+
+
 def test_build_speaker_follow_bindings_absorbs_brief_midstream_blip():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)

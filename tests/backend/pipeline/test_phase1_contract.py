@@ -280,6 +280,98 @@ def test_manifest_accepts_local_clip_experiment_fields():
     assert manifest.artifacts.visual_tracking.tracks_local[0].track_id == "track_1"
 
 
+def test_manifest_accepts_max_accuracy_branch_fields():
+    payload = deepcopy(_legacy_manifest_payload())
+    payload["artifacts"]["transcript"]["words"][0].update(
+        {
+            "speaker_track_ids": ["Global_Person_0"],
+            "offscreen_audio_speaker_ids": ["SPEAKER_02"],
+            "speaker_assignment_source": "mapping",
+            "requires_hard_disambiguation": False,
+        }
+    )
+    payload["artifacts"]["transcript"]["audio_visual_mappings"] = [
+        {
+            "audio_speaker_id": "SPEAKER_00",
+            "matched_visual_identity_id": "Global_Person_0",
+            "confidence": 0.97,
+            "candidate_visual_identity_ids": ["Global_Person_0", "Global_Person_1"],
+            "evidence_edges": [
+                {
+                    "audio_speaker_id": "SPEAKER_00",
+                    "visual_identity_id": "Global_Person_0",
+                    "confidence": 0.98,
+                    "support_track_ids": ["Global_Person_0"],
+                    "evidence_kind": "clean_span",
+                    "metadata": {"start_time_ms": 0, "end_time_ms": 1000},
+                }
+            ],
+            "supporting_track_ids": ["Global_Person_0"],
+            "mapping_strategy": "clean-span-aggregation",
+            "ambiguous": False,
+            "metadata": {
+                "candidate_stats": [
+                    {
+                        "visual_identity_id": "Global_Person_0",
+                        "support_count": 1,
+                        "confidence_sum": 0.98,
+                        "average_confidence": 0.98,
+                    }
+                ],
+                "clean_evidence_count": 1,
+                "ignored_evidence_count": 0,
+                "top_score_margin": 0.98,
+            },
+        }
+    ]
+    payload["artifacts"]["transcript"]["span_assignments"] = [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 1000,
+            "audio_speaker_ids": ["SPEAKER_00"],
+            "assigned_visual_identity_ids": ["Global_Person_0"],
+            "dominant_visual_identity_id": "Global_Person_0",
+            "offscreen_audio_speaker_ids": [],
+            "unresolved_audio_speaker_ids": [],
+            "require_hard_disambiguation": False,
+            "decision_source": "mapping",
+        }
+    ]
+    payload["artifacts"]["visual_tracking"]["visual_identities"] = [
+        {
+            "identity_id": "Global_Person_0",
+            "confidence": 0.98,
+            "track_ids": ["Global_Person_0"],
+            "face_track_ids": ["face-1"],
+            "person_track_ids": ["Global_Person_0"],
+            "evidence_edge_ids": [],
+            "metadata": {
+                "track_count": 1,
+                "person_track_count": 1,
+                "face_track_count": 1,
+                "source_counts": {
+                    "tracks": 1,
+                    "track_identity_features": 1,
+                    "face_track_features": 1,
+                },
+                "sources": ["face_track_features", "track_identity_features", "tracks"],
+            },
+        }
+    ]
+
+    manifest = Phase1Manifest.model_validate(payload)
+
+    assert manifest.artifacts.transcript.words[0].speaker_track_ids == ["Global_Person_0"]
+    assert manifest.artifacts.transcript.words[0].offscreen_audio_speaker_ids == ["SPEAKER_02"]
+    assert manifest.artifacts.transcript.words[0].speaker_assignment_source == "mapping"
+    assert manifest.artifacts.transcript.words[0].requires_hard_disambiguation is False
+    assert manifest.artifacts.transcript.audio_visual_mappings[0].matched_visual_identity_id == "Global_Person_0"
+    assert manifest.artifacts.transcript.span_assignments[0].assigned_visual_identity_ids == [
+        "Global_Person_0"
+    ]
+    assert manifest.artifacts.visual_tracking.visual_identities[0].identity_id == "Global_Person_0"
+
+
 def test_manifest_accepts_overlap_artifacts():
     payload = deepcopy(_legacy_manifest_payload())
     payload["artifacts"]["transcript"]["active_speakers_local"] = [

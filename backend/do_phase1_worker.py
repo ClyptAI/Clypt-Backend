@@ -14,6 +14,7 @@ from dataclasses import asdict
 from backend.speaker_binding import (
     build_visual_identities,
     learn_audio_visual_mappings,
+    project_words,
     resolve_span_assignments,
 )
 
@@ -1735,6 +1736,139 @@ class ClyptWorker:
             )
 
         return [asdict(summary) for summary in learn_audio_visual_mappings(evidence_records)]
+
+    def _build_hard_span_candidates(
+        self,
+        *,
+        span: dict,
+        track_to_dets: dict[str, list[dict]],
+        track_identity_features: dict[str, dict] | None,
+        local_to_global_track_id: dict[str, str] | None,
+        audio_visual_mappings: list[dict],
+        fps: float,
+    ) -> list[dict]:
+        def _as_int(value, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return int(default)
+
+        local_to_global_track_id = {
+            str(local_track_id): str(global_track_id)
+            for local_track_id, global_track_id in dict(local_to_global_track_id or {}).items()
+            if str(local_track_id) and str(global_track_id)
+        }
+        active_audio_speaker_ids = {
+            str(speaker_id)
+            for speaker_id in (span.get("audio_speaker_ids") or [])
+            if str(speaker_id)
+        }
+        span_start_ms = _as_int(span.get("start_time_ms"), default=0)
+        span_end_ms = _as_int(span.get("end_time_ms"), default=span_start_ms)
+        candidate_rows: list[dict] = []
+        local_track_ids_in_window: set[str] = set(
+            str(local_track_id).strip()
+            for local_track_id in (span.get("visible_local_track_ids") or [])
+            if str(local_track_id).strip()
+        )
+        for local_track_id, dets in dict(track_to_dets or {}).items():
+            normalized_local_track_id = str(local_track_id).strip()
+            if not normalized_local_track_id:
+                continue
+            window_dets = [
+                det for det in dets
+                if span_start_ms <= int(round((float(det.get("frame_idx", 0)) / max(fps, 1e-6)) * 1000.0)) <= span_end_ms
+            ]
+            if not window_dets:
+                continue
+            local_track_ids_in_window.add(normalized_local_track_id)
+
+        for local_track_id in sorted(local_track_ids_in_window):
+            global_track_id = local_to_global_track_id.get(local_track_id, local_track_id)
+            dets = list(track_to_dets.get(local_track_id, []) or [])
+            window_dets = [
+                det for det in dets
+                if span_start_ms <= int(round((float(det.get("frame_idx", 0)) / max(fps, 1e-6)) * 1000.0)) <= span_end_ms
+            ]
+            if not window_dets:
+                continue
+
+            frame_indices = [int(det.get("frame_idx", -1)) for det in window_dets if int(det.get("frame_idx", -1)) >= 0]
+            motion_values: list[float] = []
+            prev_det = None
+            for det in window_dets:
+                if prev_det is not None:
+                    dx = abs(float(det.get("x_center", 0.0)) - float(prev_det.get("x_center", 0.0)))
+                    dy = abs(float(det.get("y_center", 0.0)) - float(prev_det.get("y_center", 0.0)))
+                    dh = abs(float(det.get("height", 0.0)) - float(prev_det.get("height", 0.0)))
+                    norm = max(float(det.get("height", 1.0)), 1.0)
+                    motion_values.append((0.45 * dx + 0.8 * dy + 1.1 * dh) / norm)
+                prev_det = det
+            mouth_motion_score = max(0.0, min(1.0, (sum(motion_values) / max(1, len(motion_values))) * 2.5))
+
+            avg_confidence = sum(float(det.get("confidence", 0.0)) for det in window_dets) / max(1, len(window_dets))
+            avg_area = sum(
+                max(1.0, float(det.get("width", 1.0)) * float(det.get("height", 1.0)))
+                for det in window_dets
+            ) / max(1, len(window_dets))
+            pose_visibility_score = max(0.0, min(1.0, (0.6 * avg_confidence) + (0.4 * min(1.0, avg_area / 50000.0))))
+
+            feature = dict((track_identity_features or {}).get(global_track_id, {}) or {})
+            face_observations = list(feature.get("face_observations", []) or [])
+            face_hits = 0
+            for observation in face_observations:
+                frame_idx = _as_int(observation.get("frame_idx"), default=-1)
+                if frame_idx in frame_indices:
+                    face_hits += 1
+            face_visibility_score = max(0.0, min(1.0, face_hits / max(1, len(frame_indices))))
+
+            mapping_confidence = 0.0
+            for mapping in audio_visual_mappings or []:
+                if str(mapping.get("matched_visual_identity_id", "") or "") != global_track_id:
+                    continue
+                if str(mapping.get("audio_speaker_id", "") or "") not in active_audio_speaker_ids:
+                    continue
+                mapping_confidence = max(mapping_confidence, float(mapping.get("confidence", 0.0) or 0.0))
+
+            candidate_rows.append(
+                {
+                    "visual_identity_id": global_track_id,
+                    "local_track_id": local_track_id,
+                    "mouth_motion_score": round(mouth_motion_score, 3),
+                    "pose_visibility_score": round(pose_visibility_score, 3),
+                    "face_visibility_score": round(face_visibility_score, 3),
+                    "mapping_confidence": round(mapping_confidence, 3),
+                }
+            )
+
+        candidate_rows.sort(key=lambda item: (item["visual_identity_id"], item.get("local_track_id", "")))
+        return candidate_rows
+
+    def _enrich_spans_with_hard_candidates(
+        self,
+        *,
+        spans: list[dict],
+        track_to_dets: dict[str, list[dict]],
+        track_identity_features: dict[str, dict] | None,
+        local_to_global_track_id: dict[str, str] | None,
+        audio_visual_mappings: list[dict],
+        fps: float,
+    ) -> list[dict]:
+        enriched_spans: list[dict] = []
+        for span in spans or []:
+            span_row = dict(span)
+            visible_local_track_ids = list(span_row.get("visible_local_track_ids") or [])
+            if len(visible_local_track_ids) > 1:
+                span_row["hard_span_candidates"] = self._build_hard_span_candidates(
+                    span=span_row,
+                    track_to_dets=track_to_dets,
+                    track_identity_features=track_identity_features,
+                    local_to_global_track_id=local_to_global_track_id,
+                    audio_visual_mappings=audio_visual_mappings,
+                    fps=fps,
+                )
+            enriched_spans.append(span_row)
+        return enriched_spans
 
     @staticmethod
     def _binding_context_turn_pad_ms() -> int:
@@ -9001,12 +9135,25 @@ class ClyptWorker:
             audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
             local_to_global_track_id=cluster_id_remap,
         )
-        span_assignments: list[dict] = resolve_span_assignments(
+        enriched_active_speakers_local = self._enrich_spans_with_hard_candidates(
             spans=active_speakers_local,
+            track_to_dets=precluster_track_to_dets,
+            track_identity_features=clustered_track_identity_features,
+            local_to_global_track_id=cluster_id_remap,
+            audio_visual_mappings=audio_visual_mappings,
+            fps=float(metrics.get("fps", 30.0) or 30.0),
+        )
+        span_assignments: list[dict] = resolve_span_assignments(
+            spans=enriched_active_speakers_local,
             mapping_summaries=audio_visual_mappings,
         )
+        projected_words = project_words(
+            words=words,
+            span_assignments=span_assignments,
+        )
+        words[:] = projected_words
         overlap_follow_decisions: list[dict] = self._run_overlap_follow_postpass(
-            active_speakers_local=active_speakers_local,
+            active_speakers_local=enriched_active_speakers_local,
             words=words,
             speaker_candidate_debug=getattr(self, "_last_speaker_candidate_debug", []),
         )
@@ -9072,7 +9219,7 @@ class ClyptWorker:
             "speaker_candidate_debug": getattr(self, "_last_speaker_candidate_debug", []),
             "speaker_follow_bindings": speaker_follow_bindings,
             "audio_visual_mappings": audio_visual_mappings,
-            "active_speakers_local": active_speakers_local,
+            "active_speakers_local": enriched_active_speakers_local,
             "span_assignments": span_assignments,
             "overlap_follow_decisions": overlap_follow_decisions,
         }

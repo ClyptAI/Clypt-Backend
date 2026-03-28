@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .mouth_motion import choose_visual_speaking_candidate
 from .identity_store import normalize_confidence, normalize_ordered_unique_ids
 
 
@@ -50,6 +51,28 @@ def _pick_best_mapping(
     if not candidates:
         return None
 
+    candidates.sort(
+        key=lambda summary: (
+            -float(summary["confidence"]),
+            summary["audio_speaker_id"],
+            summary["matched_visual_identity_id"],
+        )
+    )
+    return candidates[0]
+
+
+def _pick_mapping_for_speaker(
+    *,
+    speaker_id: str,
+    mapping_summaries: tuple[dict[str, Any], ...],
+) -> dict[str, Any] | None:
+    candidates = [
+        summary
+        for summary in mapping_summaries
+        if summary["audio_speaker_id"] == speaker_id and summary["matched_visual_identity_id"]
+    ]
+    if not candidates:
+        return None
     candidates.sort(
         key=lambda summary: (
             -float(summary["confidence"]),
@@ -116,22 +139,66 @@ def resolve_span_assignments(
         )
 
         if overlap or len(audio_speaker_ids) != 1:
+            assigned_visual_identity_ids: list[str] = []
+            derived_offscreen_audio_speaker_ids = list(offscreen_audio_speaker_ids)
+            unresolved_audio_speaker_ids: list[str] = []
+            for speaker_id in audio_speaker_ids:
+                mapping = _pick_mapping_for_speaker(
+                    speaker_id=speaker_id,
+                    mapping_summaries=active_mapping_summaries,
+                )
+                if not mapping or bool(mapping.get("ambiguous", False)):
+                    unresolved_audio_speaker_ids.append(speaker_id)
+                    continue
+                matched_visual_identity_id = _normalized_id(mapping.get("matched_visual_identity_id"))
+                if not matched_visual_identity_id:
+                    unresolved_audio_speaker_ids.append(speaker_id)
+                    continue
+                if matched_visual_identity_id in visible_track_ids:
+                    if matched_visual_identity_id not in assigned_visual_identity_ids:
+                        assigned_visual_identity_ids.append(matched_visual_identity_id)
+                else:
+                    if speaker_id not in derived_offscreen_audio_speaker_ids:
+                        derived_offscreen_audio_speaker_ids.append(speaker_id)
             assignments.append(
                 _base_result(
                     span=span,
                     audio_speaker_ids=audio_speaker_ids,
                     visible_track_ids=visible_track_ids,
-                    offscreen_audio_speaker_ids=offscreen_audio_speaker_ids,
-                    unresolved_audio_speaker_ids=audio_speaker_ids,
-                    assigned_visual_identity_ids=(),
+                    offscreen_audio_speaker_ids=tuple(derived_offscreen_audio_speaker_ids),
+                    unresolved_audio_speaker_ids=tuple(unresolved_audio_speaker_ids),
+                    assigned_visual_identity_ids=tuple(assigned_visual_identity_ids),
                     dominant_visual_identity_id=None,
-                    require_hard_disambiguation=True,
-                    decision_source="overlap",
+                    require_hard_disambiguation=bool(unresolved_audio_speaker_ids),
+                    decision_source=(
+                        "overlap_mapping"
+                        if not unresolved_audio_speaker_ids
+                        else "overlap"
+                    ),
                 )
             )
             continue
 
         if best_mapping is None or best_mapping["ambiguous"]:
+            hard_span_candidates = span.get("hard_span_candidates")
+            if hard_span_candidates:
+                hard_result = choose_visual_speaking_candidate(hard_span_candidates)
+                winner_visual_identity_id = _normalized_id(hard_result.get("winner_visual_identity_id"))
+                if winner_visual_identity_id:
+                    assignments.append(
+                        _base_result(
+                            span=span,
+                            audio_speaker_ids=audio_speaker_ids,
+                            visible_track_ids=visible_track_ids,
+                            offscreen_audio_speaker_ids=offscreen_audio_speaker_ids,
+                            unresolved_audio_speaker_ids=(),
+                            assigned_visual_identity_ids=(winner_visual_identity_id,),
+                            dominant_visual_identity_id=winner_visual_identity_id,
+                            require_hard_disambiguation=False,
+                            decision_source="hard_visual_disambiguation",
+                        )
+                    )
+                    continue
             assignments.append(
                 _base_result(
                     span=span,
@@ -224,4 +291,3 @@ def assign_span_bindings(
         mapping_summaries=mapping_summaries,
         strong_visible_mapping_threshold=strong_visible_mapping_threshold,
     )
-

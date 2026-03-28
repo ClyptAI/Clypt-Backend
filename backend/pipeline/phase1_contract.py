@@ -52,6 +52,10 @@ class Phase1Word(BaseModel):
     speaker_tag: str
     speaker_local_track_id: str | None = None
     speaker_local_tag: str | None = None
+    speaker_track_ids: list[str] = Field(default_factory=list)
+    offscreen_audio_speaker_ids: list[str] = Field(default_factory=list)
+    speaker_assignment_source: str | None = None
+    requires_hard_disambiguation: bool = False
 
     @model_validator(mode="after")
     def _check_time_order(self):
@@ -281,6 +285,63 @@ class Phase1OverlapFollowDecision(BaseModel):
         return self
 
 
+class Phase1VisualIdentityEvidenceEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audio_speaker_id: str
+    visual_identity_id: str
+    confidence: Confidence01
+    support_track_ids: list[str] = Field(default_factory=list)
+    evidence_kind: str
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class Phase1AudioVisualMappingSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audio_speaker_id: str
+    matched_visual_identity_id: str | None = None
+    confidence: Confidence01
+    candidate_visual_identity_ids: list[str] = Field(default_factory=list)
+    evidence_edges: list[Phase1VisualIdentityEvidenceEdge] = Field(default_factory=list)
+    supporting_track_ids: list[str] = Field(default_factory=list)
+    mapping_strategy: str
+    ambiguous: bool
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class Phase1SpanAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+    audio_speaker_ids: list[str] = Field(default_factory=list)
+    assigned_visual_identity_ids: list[str] = Field(default_factory=list)
+    dominant_visual_identity_id: str | None = None
+    offscreen_audio_speaker_ids: list[str] = Field(default_factory=list)
+    unresolved_audio_speaker_ids: list[str] = Field(default_factory=list)
+    require_hard_disambiguation: bool
+    decision_source: str
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("span assignment start_time_ms must be <= end_time_ms")
+        return self
+
+
+class Phase1VisualIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identity_id: str
+    confidence: Confidence01
+    track_ids: list[str] = Field(default_factory=list)
+    face_track_ids: list[str] = Field(default_factory=list)
+    person_track_ids: list[str] = Field(default_factory=list)
+    evidence_edge_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
 class Phase1TranscriptArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -296,6 +357,8 @@ class Phase1TranscriptArtifact(BaseModel):
     speaker_candidate_debug: list[Phase1SpeakerCandidateDebugEntry] = Field(default_factory=list)
     active_speakers_local: list[Phase1ActiveSpeakerLocalSpan] = Field(default_factory=list)
     overlap_follow_decisions: list[Phase1OverlapFollowDecision] = Field(default_factory=list)
+    audio_visual_mappings: list[Phase1AudioVisualMappingSummary] = Field(default_factory=list)
+    span_assignments: list[Phase1SpanAssignment] = Field(default_factory=list)
 
 
 class Phase1VisualArtifact(BaseModel):
@@ -318,6 +381,7 @@ class Phase1VisualArtifact(BaseModel):
     object_tracking: list[Phase1DetectionSegment]
     shot_changes: list[Phase1ShotChange]
     video_metadata: Phase1VideoMetadata
+    visual_identities: list[Phase1VisualIdentity] = Field(default_factory=list)
 
 
 class Phase1EventsArtifact(BaseModel):
