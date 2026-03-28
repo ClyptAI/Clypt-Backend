@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import numpy as np
+
 from backend.do_phase1_worker import ClyptWorker
+from backend.speaker_binding.visual_features import (
+    TrackletReIDSample,
+    build_tracklet_reid_evidence,
+    cosine_similarity,
+)
 
 
 def _make_tracklet(track_id: str, x_center: float, *, y_center: float = 120.0) -> list[dict]:
@@ -74,3 +81,31 @@ def test_repair_skip_is_blocked_when_collision_metrics_are_severe() -> None:
         )
         is False
     )
+
+
+def test_build_tracklet_reid_evidence_returns_centroid_and_quality() -> None:
+    evidence = build_tracklet_reid_evidence(
+        [
+            TrackletReIDSample(
+                frame_idx=11,
+                embedding=np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
+                quality=0.9,
+            ),
+            TrackletReIDSample(
+                frame_idx=13,
+                embedding=np.asarray([0.8, 0.2, 0.0], dtype=np.float32),
+                quality=0.7,
+            ),
+            TrackletReIDSample(
+                frame_idx=12,
+                embedding=np.asarray([0.9, 0.1, 0.0], dtype=np.float32),
+                quality=0.8,
+            ),
+        ]
+    )
+
+    assert evidence.sample_count == 3
+    assert evidence.quality == 0.8
+    assert evidence.frame_indices == (11, 12, 13)
+    assert evidence.centroid is not None
+    assert cosine_similarity(evidence.centroid, np.asarray([1.0, 0.0, 0.0], dtype=np.float32)) > 0.98
