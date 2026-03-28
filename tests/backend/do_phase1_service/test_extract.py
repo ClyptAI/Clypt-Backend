@@ -1329,6 +1329,35 @@ def test_speaker_binding_mode_forces_heuristic(monkeypatch):
     assert calls == ["heuristic"]
 
 
+def test_speaker_binding_mode_forces_pyannote_visual(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    calls = []
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "pyannote_visual")
+    monkeypatch.setattr(
+        worker,
+        "_run_pyannote_visual_binding",
+        lambda **kwargs: calls.append("pyannote_visual") or [],
+    )
+    monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd"))
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding_heuristic",
+        lambda *args, **kwargs: calls.append("heuristic") or [{"track_id": "t1"}],
+    )
+
+    result = worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "t1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    )
+
+    assert result == []
+    assert calls == ["pyannote_visual"]
+
+
 def test_speaker_binding_mode_forces_heuristic_clears_stale_candidate_debug(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -1788,6 +1817,19 @@ def test_shared_analysis_proxy_can_drive_tracking_and_lrasd_selection(monkeypatc
         tracks=[{"track_id": "track-1"}],
         words=[{"start_time_ms": 0, "end_time_ms": 100}],
     ) == "shared_analysis_proxy"
+
+
+def test_select_speaker_binding_mode_supports_pyannote_visual(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "pyannote_visual")
+
+    assert worker._select_speaker_binding_mode(
+        video_path="video.mp4",
+        tracks=[{"track_id": "track-1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    ) == "pyannote_visual"
 
 
 def test_make_lrasd_frame_provider_reads_and_caches(monkeypatch):

@@ -5081,7 +5081,7 @@ class ClyptWorker:
             return "lrasd"
 
         requested_mode = os.getenv("CLYPT_SPEAKER_BINDING_MODE", "auto").strip().lower()
-        if requested_mode in {"heuristic", "lrasd"}:
+        if requested_mode in {"heuristic", "lrasd", "pyannote_visual"}:
             return requested_mode
         if requested_mode == "shared_analysis_proxy":
             return requested_mode
@@ -5127,6 +5127,157 @@ class ClyptWorker:
             f"tracks={len(tracks)}, words={len(words)}"
         )
         return "lrasd"
+
+    def _build_visual_turn_candidate_evidence(
+        self,
+        *,
+        video_path: str,
+        audio_speaker_turns: list[dict],
+        track_to_dets: dict[str, list[dict]] | None,
+        track_identity_features: dict[str, dict] | None,
+        local_to_global_track_id: dict[str, str] | None,
+        fps: float,
+    ) -> list[dict]:
+        normalized_turns = self._normalize_audio_speaker_turns_for_binding_context(audio_speaker_turns)
+        if not normalized_turns:
+            return []
+
+        local_to_global_track_id = {
+            str(local_track_id): str(global_track_id)
+            for local_track_id, global_track_id in dict(local_to_global_track_id or {}).items()
+            if str(local_track_id) and str(global_track_id)
+        }
+
+        candidate_rows: list[dict] = []
+        min_support_frames = max(2, int(round(max(float(fps), 1.0) * 0.20)))
+        min_support_ratio = 0.15
+
+        for turn in normalized_turns:
+            speaker_id = str(turn.get("speaker_id", "") or "")
+            if not speaker_id:
+                continue
+            turn_start_ms = int(turn.get("start_time_ms", 0) or 0)
+            turn_end_ms = int(turn.get("end_time_ms", turn_start_ms) or turn_start_ms)
+            if turn_end_ms <= turn_start_ms:
+                continue
+
+            turn_duration_frames = max(
+                1,
+                int(round(((turn_end_ms - turn_start_ms) / 1000.0) * max(float(fps), 1.0))),
+            )
+            candidate_payloads: list[dict] = []
+            for local_track_id, dets in dict(track_to_dets or {}).items():
+                normalized_local_track_id = str(local_track_id).strip()
+                if not normalized_local_track_id:
+                    continue
+                window_dets = [
+                    det
+                    for det in dets or []
+                    if turn_start_ms <= int(round((float(det.get("frame_idx", 0)) / max(float(fps), 1e-6)) * 1000.0)) <= turn_end_ms
+                ]
+                if not window_dets:
+                    continue
+
+                support_frames = len(window_dets)
+                support_ratio = float(support_frames / max(1, turn_duration_frames))
+                if support_frames < min_support_frames and support_ratio < min_support_ratio:
+                    continue
+
+                global_track_id = local_to_global_track_id.get(normalized_local_track_id, normalized_local_track_id)
+                feature = dict(
+                    (track_identity_features or {}).get(global_track_id)
+                    or (track_identity_features or {}).get(normalized_local_track_id)
+                    or {}
+                )
+                candidate = self._extract_candidate_visual_signals(
+                    video_path=video_path,
+                    local_track_id=normalized_local_track_id,
+                    global_track_id=global_track_id,
+                    span_start_ms=turn_start_ms,
+                    span_end_ms=turn_end_ms,
+                    window_dets=window_dets,
+                    feature=feature,
+                    mapping_confidence=0.0,
+                )
+                candidate["score"] = float(candidate.get("composite_score", 0.0) or 0.0)
+                candidate["support_ratio"] = round(support_ratio, 3)
+                candidate["support_frames"] = int(support_frames)
+                candidate_payloads.append(candidate)
+
+            candidate_payloads.sort(
+                key=lambda item: (
+                    float(item.get("score", 0.0) or 0.0),
+                    float(item.get("face_visibility_score", 0.0) or 0.0),
+                    float(item.get("pose_visibility_score", 0.0) or 0.0),
+                    str(item.get("local_track_id", "") or ""),
+                ),
+                reverse=True,
+            )
+            if candidate_payloads:
+                candidate_rows.append(
+                    {
+                        "speaker_id": speaker_id,
+                        "start_time_ms": turn_start_ms,
+                        "end_time_ms": turn_end_ms,
+                        "candidates": candidate_payloads[:4],
+                    }
+                )
+
+        return candidate_rows
+
+    def _run_pyannote_visual_binding(
+        self,
+        *,
+        video_path: str,
+        tracks: list[dict],
+        analysis_context: dict | None,
+        track_to_dets: dict[str, list[dict]] | None,
+        track_identity_features: dict[str, dict] | None,
+        track_id_remap: dict[str, str] | None,
+    ) -> list[dict]:
+        audio_speaker_turns = list((analysis_context or {}).get("audio_speaker_turns") or [])
+        if not audio_speaker_turns:
+            self._last_audio_turn_bindings = []
+            self._last_speaker_binding_metrics = {
+                "speaker_binding_selected_mode": "pyannote_visual",
+                "speaker_binding_resolved_mode": "pyannote_visual",
+                "speaker_binding_fallback_used": False,
+                "pyannote_visual_turn_count": 0,
+                "pyannote_visual_candidate_interval_count": 0,
+                "pyannote_visual_binding_count": 0,
+            }
+            print("Pyannote visual binding skipped: no diarized turns available")
+            return []
+
+        fps = float((analysis_context or {}).get("fps") or self._probe_video_meta(video_path).get("fps", 30.0) or 30.0)
+        candidate_evidence = self._build_visual_turn_candidate_evidence(
+            video_path=video_path,
+            audio_speaker_turns=audio_speaker_turns,
+            track_to_dets=track_to_dets,
+            track_identity_features=track_identity_features,
+            local_to_global_track_id=track_id_remap,
+            fps=fps,
+        )
+        turn_bindings = self._bind_audio_turns_to_local_tracks(
+            self._normalize_audio_speaker_turns_for_binding_context(audio_speaker_turns),
+            candidate_evidence,
+        )
+        self._last_audio_turn_bindings = [dict(binding) for binding in turn_bindings]
+        self._last_speaker_candidate_debug = [dict(row) for row in candidate_evidence]
+        self._last_speaker_binding_metrics = {
+            "speaker_binding_selected_mode": "pyannote_visual",
+            "speaker_binding_resolved_mode": "pyannote_visual",
+            "speaker_binding_fallback_used": False,
+            "pyannote_visual_turn_count": len(audio_speaker_turns),
+            "pyannote_visual_candidate_interval_count": len(candidate_evidence),
+            "pyannote_visual_binding_count": len(turn_bindings),
+        }
+        print(
+            "Pyannote visual binding complete: "
+            f"turns={len(audio_speaker_turns)}, candidate_intervals={len(candidate_evidence)}, "
+            f"bindings={len(turn_bindings)}"
+        )
+        return []
 
     @staticmethod
     def _probe_video_meta(video_path: str) -> dict:
@@ -9399,6 +9550,21 @@ class ClyptWorker:
             "speaker_binding_resolved_mode": ("lrasd" if mode == "shared_analysis_proxy" else mode),
             "speaker_binding_fallback_used": False,
         }
+        if mode == "pyannote_visual":
+            bindings = self._run_pyannote_visual_binding(
+                video_path=video_path,
+                tracks=tracks,
+                analysis_context=analysis_context,
+                track_to_dets=track_to_dets,
+                track_identity_features=track_identity_features,
+                track_id_remap=track_id_remap,
+            )
+            self._last_speaker_binding_metrics = {
+                **getattr(self, "_last_speaker_binding_metrics", {}),
+                **speaker_metrics,
+            }
+            return bindings
+
         if mode in {"lrasd", "shared_analysis_proxy"}:
             lrasd_started_at = time.perf_counter()
             bindings = self._run_lrasd_binding(
@@ -9648,6 +9814,13 @@ class ClyptWorker:
             span_assignments=span_assignments,
         )
         words[:] = projected_words
+        binding_mode = str(metrics.get("speaker_binding_resolved_mode", "") or "")
+        if binding_mode == "pyannote_visual":
+            speaker_bindings = self._build_bindings_from_word_track_field(
+                words,
+                field_name="speaker_track_id",
+            )
+            speaker_follow_bindings = self._build_speaker_follow_bindings(speaker_bindings)
         overlap_follow_decisions: list[dict] = self._run_overlap_follow_postpass(
             active_speakers_local=enriched_active_speakers_local,
             words=words,
