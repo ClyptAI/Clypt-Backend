@@ -11,6 +11,7 @@ from .audio_visual_mapping import (
     build_audio_visual_mapping_summaries,
     learn_audio_visual_mappings,
 )
+from .assignment_engine import resolve_span_assignments
 from .visual_identity import build_visual_identities
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "build_visual_identities",
     "build_audio_visual_mapping_summaries",
     "learn_audio_visual_mappings",
+    "resolve_span_assignments",
     "normalize_confidence",
     "normalize_ordered_unique_ids",
     "normalize_track_ids",
