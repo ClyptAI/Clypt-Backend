@@ -536,6 +536,26 @@ def select_render_detections(
     return selected
 
 
+def resolve_render_binding_ids(
+    *,
+    raw_track_id: str | None,
+    follow_track_id: str | None,
+    frame_detections: list[dict],
+) -> tuple[str | None, str | None]:
+    if raw_track_id or follow_track_id:
+        return raw_track_id, follow_track_id
+
+    visible_track_ids: list[str] = []
+    for det in frame_detections:
+        track_id = str(det.get("track_id", "")).strip()
+        if track_id and track_id not in visible_track_ids:
+            visible_track_ids.append(track_id)
+    if len(visible_track_ids) == 1:
+        lone_track_id = visible_track_ids[0]
+        return lone_track_id, lone_track_id
+    return raw_track_id, follow_track_id
+
+
 def build_hud_lines(
     *,
     timestamp_ms: int,
@@ -757,9 +777,17 @@ def render_debug_video(
                 timestamp_ms,
                 available_track_ids=available_track_ids,
             )
-            active_track_ids = set(active_speaker_state["visible_track_ids"])
-
             person_detections = nearest_frame_detections(person_frame_index, frame_idx, max_delta=1)
+            raw_track_id, follow_track_id = resolve_render_binding_ids(
+                raw_track_id=raw_track_id,
+                follow_track_id=follow_track_id,
+                frame_detections=person_detections,
+            )
+            active_track_ids = set(active_speaker_state["visible_track_ids"])
+            if follow_track_id:
+                active_track_ids.add(follow_track_id)
+            if raw_track_id:
+                active_track_ids.add(raw_track_id)
             for det in select_render_detections(
                 person_detections,
                 raw_track_id=raw_track_id,

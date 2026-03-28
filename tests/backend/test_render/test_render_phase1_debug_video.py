@@ -188,3 +188,27 @@ def test_select_render_detections_uses_lone_visible_box_for_single_target_track(
     assert len(selected) == 1
     assert selected[0]["track_id"] == "track_12"
     assert selected[0]["_render_role_track_id"] == "track_2"
+
+
+def test_resolve_render_binding_ids_uses_lone_visible_track_when_local_binding_missing():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_12",
+            "frame_idx": 334,
+            "x1": 212,
+            "y1": 95,
+            "x2": 1220,
+            "y2": 1072,
+            "confidence": 0.93,
+        },
+    ]
+
+    raw_track_id, follow_track_id = mod.resolve_render_binding_ids(
+        raw_track_id=None,
+        follow_track_id=None,
+        frame_detections=frame_detections,
+    )
+
+    assert raw_track_id == "track_12"
+    assert follow_track_id == "track_12"
