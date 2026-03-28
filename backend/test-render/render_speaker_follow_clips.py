@@ -671,6 +671,19 @@ def resolve_follow_identity(
     prefer_local_track_ids: bool = False,
     frame_detections: list[dict] | None = None,
 ) -> str | None:
+    def _inferred_frame_size() -> tuple[int, int]:
+        max_x = 1.0
+        max_y = 1.0
+        for det in frame_detections or []:
+            bbox = det.get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            max_x = max(max_x, float(bbox[0]), float(bbox[2]))
+            max_y = max(max_y, float(bbox[1]), float(bbox[3]))
+        if max(max_x, max_y) <= 1.5:
+            return 1, 1
+        return max(1, int(round(max_x))), max(1, int(round(max_y)))
+
     def _single_visible_track_id() -> str | None:
         track_ids: list[str] = []
         for det in frame_detections or []:
@@ -680,6 +693,14 @@ def resolve_follow_identity(
         if len(track_ids) == 1:
             return track_ids[0]
         return None
+
+    def _dominant_visible_track_id() -> str | None:
+        frame_width, frame_height = _inferred_frame_size()
+        return _dominant_visible_track_id_when_unbound(
+            frame_detections=list(frame_detections or []),
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
 
     active_decision = overlap_follow_decision_at_ms(overlap_follow_decisions, abs_ms)
     if active_decision is not None:
@@ -694,12 +715,18 @@ def resolve_follow_identity(
         singleton_track_id = _single_visible_track_id()
         if singleton_track_id:
             return singleton_track_id
+        dominant_track_id = _dominant_visible_track_id()
+        if dominant_track_id:
+            return dominant_track_id
         if bool(active_decision.get("stay_wide")):
             return None
 
     singleton_track_id = _single_visible_track_id()
     if singleton_track_id:
         return singleton_track_id
+    dominant_track_id = _dominant_visible_track_id()
+    if dominant_track_id:
+        return dominant_track_id
 
     for binding in reversed(bindings):
         if int(binding["start_time_ms"]) == abs_ms:
@@ -943,6 +970,78 @@ def _dominant_larger_render_target(
     return larger
 
 
+def _overlap_extent_ratio(start_a: float, end_a: float, start_b: float, end_b: float) -> float:
+    overlap = max(0.0, min(end_a, end_b) - max(start_a, start_b))
+    shorter = max(1e-6, min(end_a - start_a, end_b - start_b))
+    return overlap / shorter
+
+
+def _is_fragment_like_render_target(det: dict, frame_width: int, frame_height: int) -> bool:
+    metrics = bbox_geometry_metrics(det["bbox"], frame_width, frame_height)
+    return (
+        metrics["h"] < 0.52
+        or metrics["area"] < 0.14
+        or (metrics["bottom"] > 0.84 and metrics["center_y"] > 0.62)
+    )
+
+
+def _dominant_visible_track_id_when_unbound(
+    *,
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> str | None:
+    if len(frame_detections) != 2:
+        return None
+    plausible = [det for det in frame_detections if "bbox" in det and is_plausible_render_target(det, frame_width, frame_height)]
+    if len(plausible) != 2:
+        return None
+    dominant = _dominant_larger_render_target(plausible, frame_width, frame_height)
+    if dominant is None:
+        return None
+    return str(dominant.get("track_id", "")).strip() or None
+
+
+def _rescue_follow_box_with_larger_nearby_target(
+    *,
+    track_id: str,
+    chosen: dict | None,
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> dict | None:
+    if chosen is None or not _is_fragment_like_render_target(chosen, frame_width, frame_height):
+        return None
+
+    chosen_x1, chosen_y1, chosen_x2, chosen_y2 = _bbox_in_unit_space(chosen["bbox"], frame_width, frame_height)
+    chosen_metrics = bbox_geometry_metrics(chosen["bbox"], frame_width, frame_height)
+    rescue_candidates: list[dict] = []
+    for det in frame_detections:
+        if det is chosen:
+            continue
+        if str(det.get("track_id", "")) == track_id:
+            continue
+        if "bbox" not in det or not is_plausible_render_target(det, frame_width, frame_height):
+            continue
+        metrics = bbox_geometry_metrics(det["bbox"], frame_width, frame_height)
+        if metrics["h"] < 0.55 or metrics["area"] < 0.14:
+            continue
+        if (metrics["area"] / max(1e-6, chosen_metrics["area"])) < 2.2:
+            continue
+        if (metrics["h"] / max(1e-6, chosen_metrics["h"])) < 1.3:
+            continue
+        det_x1, det_y1, det_x2, det_y2 = _bbox_in_unit_space(det["bbox"], frame_width, frame_height)
+        x_overlap = _overlap_extent_ratio(chosen_x1, chosen_x2, det_x1, det_x2)
+        y_overlap = _overlap_extent_ratio(chosen_y1, chosen_y2, det_y1, det_y2)
+        if x_overlap < 0.35 or y_overlap < 0.55:
+            continue
+        rescue_candidates.append(det)
+
+    if len(rescue_candidates) != 1:
+        return None
+    return rescue_candidates[0]
+
+
 def choose_clean_render_target(
     *,
     target_track_id: str,
@@ -975,12 +1074,20 @@ def resolve_follow_box(
 ) -> dict | None:
     if not track_id:
         return None
-    return choose_clean_render_target(
+    chosen = choose_clean_render_target(
         target_track_id=track_id,
         frame_detections=frame_detections,
         frame_width=frame_width,
         frame_height=frame_height,
     )
+    rescued = _rescue_follow_box_with_larger_nearby_target(
+        track_id=track_id,
+        chosen=chosen,
+        frame_detections=frame_detections,
+        frame_width=frame_width,
+        frame_height=frame_height,
+    )
+    return rescued or chosen
 
 
 def _detection_bbox_to_pixels(det: dict, frame_width: int, frame_height: int) -> tuple[float, float, float, float] | None:

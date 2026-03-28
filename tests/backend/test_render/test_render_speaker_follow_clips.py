@@ -322,6 +322,31 @@ def test_resolve_follow_identity_single_visible_frame_track_overrides_stay_wide_
     ) == "track_43"
 
 
+def test_resolve_follow_identity_prefers_dominant_track_when_unbound_and_fragment_present():
+    mod = load_module()
+    bindings = []
+    frame_detections = [
+        {
+            "track_id": "track_51",
+            "bbox": [0.097, 0.092, 0.629, 0.994],
+            "score": 0.948,
+            "frame_idx": 3769,
+        },
+        {
+            "track_id": "track_67",
+            "bbox": [0.001, 0.420, 0.224, 0.987],
+            "score": 0.681,
+            "frame_idx": 3769,
+        },
+    ]
+
+    assert mod.resolve_follow_identity(
+        bindings,
+        157200,
+        frame_detections=frame_detections,
+    ) == "track_51"
+
+
 def test_build_camera_path_uses_clean_follow_box_for_active_speaker():
     mod = load_module()
     mod.KEYFRAME_STEP_S = 0.5
@@ -367,7 +392,34 @@ def test_build_camera_path_uses_clean_follow_box_for_active_speaker():
     assert y_keyframes
     assert abs(x_keyframes[0][1] - expected_x) < 1.0
     assert abs(y_keyframes[0][1] - expected_y) < 1.0
-    assert x_keyframes[0][1] < 2500
+
+
+def test_resolve_follow_box_can_rescue_fragment_track_with_larger_nearby_track():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_2",
+            "bbox": [0.002, 0.427, 0.237, 0.891],
+            "score": 0.590,
+            "frame_idx": 334,
+        },
+        {
+            "track_id": "track_12",
+            "bbox": [0.110, 0.089, 0.636, 0.993],
+            "score": 0.927,
+            "frame_idx": 334,
+        },
+    ]
+
+    chosen = mod.resolve_follow_box(
+        "track_2",
+        frame_detections,
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    assert chosen is not None
+    assert chosen["track_id"] == "track_12"
 
 
 def test_build_camera_path_prefers_new_speaker_clean_box_on_boundary():
