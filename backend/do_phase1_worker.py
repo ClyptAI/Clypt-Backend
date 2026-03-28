@@ -7002,6 +7002,194 @@ class ClyptWorker:
 
         return bucket_length, (tid, frames, valid_length, visual_batch, audio_np)
 
+    @staticmethod
+    def _lrasd_prep_workers() -> int:
+        raw = os.getenv("CLYPT_LRASD_PREP_WORKERS", "4").strip()
+        try:
+            value = int(raw)
+        except Exception:
+            value = 4
+        return max(1, min(16, value))
+
+    @staticmethod
+    def _lrasd_prep_queue_limit(prep_workers: int | None = None) -> int:
+        raw = os.getenv("CLYPT_LRASD_PREP_QUEUE", "128").strip()
+        try:
+            value = int(raw)
+        except Exception:
+            value = 128
+        default_floor = max(1, int(prep_workers or 1) * 2)
+        return max(default_floor, min(512, value))
+
+    def _prepare_lrasd_chunk_pending_entries(
+        self,
+        *,
+        tid: str,
+        chunk_frames: list[int],
+        best_by_frame: dict[int, dict],
+        get_frame,
+        face_cache: dict[tuple[str, int], tuple[object, object]],
+        canonical_face_boxes: dict[tuple[str, int], tuple],
+        full_audio_features,
+        min_chunk_frames: int,
+        binding_scale_x: float,
+        binding_scale_y: float,
+    ) -> dict[str, object]:
+        pending_entries: list[tuple[int, tuple[str, list[int], int, object, object]]] = []
+        face_hits = 0
+        face_misses = 0
+
+        def _face_crop_local(local_tid: str, fi: int, det: dict):
+            key = (local_tid, fi)
+            if key in face_cache:
+                return face_cache[key]
+            frame = get_frame(fi)
+            if frame is None:
+                face_cache[key] = (None, None)
+                return face_cache[key]
+
+            def _cache_and_return(crop_val, anchor_val):
+                face_cache[key] = (crop_val, anchor_val)
+                if len(face_cache) > 768:
+                    for stale_key in list(face_cache.keys())[:192]:
+                        face_cache.pop(stale_key, None)
+                return face_cache[key]
+
+            crop = None
+            anchor = None
+            cx = float(det.get("x_center", 0.0))
+            cy = float(det.get("y_center", 0.0))
+            bw = float(det.get("width", 0.0))
+            bh = float(det.get("height", 0.0))
+            pb = canonical_face_boxes.get((local_tid, fi))
+            if pb is not None:
+                x1, y1, x2, y2, _, _ = pb
+                crop = self._extract_lrasd_visual_crop_region(
+                    frame,
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                )
+                if crop is not None and bw > 1e-6 and bh > 1e-6:
+                    anchor = {
+                        "x_offset": (float(x1) - cx) / bw,
+                        "y_offset": (float(y1) - cy) / bh,
+                        "w_ratio": float(x2 - x1) / bw,
+                        "h_ratio": float(y2 - y1) / bh,
+                    }
+
+            if crop is None and bw > 1e-6 and bh > 1e-6:
+                head_x1 = int(round(cx - (0.28 * bw)))
+                head_x2 = int(round(cx + (0.28 * bw)))
+                head_y1 = int(round(cy - (0.48 * bh)))
+                head_y2 = int(round(cy - (0.02 * bh)))
+                crop = self._extract_lrasd_visual_crop_region(
+                    frame,
+                    x1=head_x1,
+                    y1=head_y1,
+                    x2=head_x2,
+                    y2=head_y2,
+                )
+                if crop is not None:
+                    anchor = {
+                        "x_offset": (float(head_x1) - cx) / bw,
+                        "y_offset": (float(head_y1) - cy) / bh,
+                        "w_ratio": float(head_x2 - head_x1) / bw,
+                        "h_ratio": float(head_y2 - head_y1) / bh,
+                    }
+
+            return _cache_and_return(crop, anchor)
+
+        current_face_subchunk: list[int] = []
+        current_crops: list[object] = []
+        missing_count = 0
+        last_good_crop = None
+        last_known_anchor = None
+
+        for fi in chunk_frames:
+            det = best_by_frame.get(fi)
+            crop = None
+            anchor = None
+            frame = None
+            if det is not None:
+                det = self._scale_detection_geometry(
+                    det,
+                    scale_x=binding_scale_x,
+                    scale_y=binding_scale_y,
+                )
+                frame = get_frame(fi)
+                crop, anchor = _face_crop_local(tid, fi, det)
+
+                if crop is None and last_known_anchor is not None and frame is not None:
+                    cx = float(det.get("x_center", 0.0))
+                    cy = float(det.get("y_center", 0.0))
+                    bw = float(det.get("width", 0.0))
+                    bh = float(det.get("height", 0.0))
+                    if bw > 1e-6 and bh > 1e-6:
+                        fx1 = int(round(cx + float(last_known_anchor["x_offset"]) * bw))
+                        fy1 = int(round(cy + float(last_known_anchor["y_offset"]) * bh))
+                        fw_face = int(round(max(2.0, float(last_known_anchor["w_ratio"]) * bw)))
+                        fh_face = int(round(max(2.0, float(last_known_anchor["h_ratio"]) * bh)))
+                        crop = self._extract_lrasd_visual_crop_region(
+                            frame,
+                            x1=fx1,
+                            y1=fy1,
+                            x2=fx1 + fw_face,
+                            y2=fy1 + fh_face,
+                        )
+
+            if crop is not None:
+                face_hits += 1
+                if missing_count > 0 and last_good_crop is not None:
+                    for pad_idx in range(missing_count):
+                        pad_fi = fi - missing_count + pad_idx
+                        current_face_subchunk.append(pad_fi)
+                        current_crops.append(last_good_crop)
+
+                current_face_subchunk.append(fi)
+                current_crops.append(crop)
+                last_good_crop = crop
+                if anchor is not None:
+                    last_known_anchor = anchor
+                missing_count = 0
+            else:
+                face_misses += 1
+                missing_count += 1
+                if missing_count > 5:
+                    if len(current_face_subchunk) >= min_chunk_frames:
+                        pending_entry = self._lrasd_build_pending_subchunk(
+                            tid=tid,
+                            frames=current_face_subchunk,
+                            crops=current_crops,
+                            full_audio_features=full_audio_features,
+                            min_chunk_frames=min_chunk_frames,
+                        )
+                        if pending_entry is not None:
+                            pending_entries.append(pending_entry)
+                    current_face_subchunk = []
+                    current_crops = []
+                    missing_count = 0
+                    last_good_crop = None
+                    last_known_anchor = None
+
+        if len(current_face_subchunk) >= min_chunk_frames:
+            pending_entry = self._lrasd_build_pending_subchunk(
+                tid=tid,
+                frames=current_face_subchunk,
+                crops=current_crops,
+                full_audio_features=full_audio_features,
+                min_chunk_frames=min_chunk_frames,
+            )
+            if pending_entry is not None:
+                pending_entries.append(pending_entry)
+
+        return {
+            "pending_entries": pending_entries,
+            "face_hits": int(face_hits),
+            "face_misses": int(face_misses),
+        }
+
     def _run_lrasd_binding(
         self,
         video_path: str,
@@ -7027,6 +7215,7 @@ class ClyptWorker:
 
         import concurrent.futures as cf
         import os
+        import threading
         import numpy as np
         import torch
         from bisect import bisect_left
@@ -7198,73 +7387,6 @@ class ClyptWorker:
             fallback_factory=frame_reader_fallback_factory,
         )
 
-        face_cache: dict[tuple[str, int], tuple[object, object]] = {}
-
-        def _face_crop(tid: str, fi: int, det: dict):
-            key = (tid, fi)
-            if key in face_cache:
-                return face_cache[key]
-            frame = get_frame(fi)
-            if frame is None:
-                face_cache[key] = (None, None)
-                return face_cache[key]
-
-            def _cache_and_return(crop_val, anchor_val):
-                face_cache[key] = (crop_val, anchor_val)
-                if len(face_cache) > 768:
-                    for k in list(face_cache.keys())[:192]:
-                        face_cache.pop(k, None)
-                return face_cache[key]
-
-            crop = None
-            anchor = None
-            fh, fw = frame.shape[:2]
-            cx = float(det.get("x_center", 0.0))
-            cy = float(det.get("y_center", 0.0))
-            bw = float(det.get("width", 0.0))
-            bh = float(det.get("height", 0.0))
-            pb = canonical_face_boxes.get((tid, fi))
-            if pb is not None:
-                x1, y1, x2, y2, _, _ = pb
-                crop = self._extract_lrasd_visual_crop_region(
-                    frame,
-                    x1=x1,
-                    y1=y1,
-                    x2=x2,
-                    y2=y2,
-                )
-                if crop is not None:
-                    if bw > 1e-6 and bh > 1e-6:
-                        anchor = {
-                            "x_offset": (float(x1) - cx) / bw,
-                            "y_offset": (float(y1) - cy) / bh,
-                            "w_ratio": float(x2 - x1) / bw,
-                            "h_ratio": float(y2 - y1) / bh,
-                        }
-
-            if crop is None:
-                if bw > 1e-6 and bh > 1e-6:
-                    head_x1 = int(round(cx - (0.28 * bw)))
-                    head_x2 = int(round(cx + (0.28 * bw)))
-                    head_y1 = int(round(cy - (0.48 * bh)))
-                    head_y2 = int(round(cy - (0.02 * bh)))
-                    crop = self._extract_lrasd_visual_crop_region(
-                        frame,
-                        x1=head_x1,
-                        y1=head_y1,
-                        x2=head_x2,
-                        y2=head_y2,
-                    )
-                    if crop is not None:
-                        anchor = {
-                            "x_offset": (float(head_x1) - cx) / bw,
-                            "y_offset": (float(head_y1) - cy) / bh,
-                            "w_ratio": float(head_x2 - head_x1) / bw,
-                            "h_ratio": float(head_y2 - head_y1) / bh,
-                        }
-
-            return _cache_and_return(crop, anchor)
-
         asd_scores: dict[tuple[str, int], float] = {}
         scored_track_ids = set()
         chunk_size = 120
@@ -7275,6 +7397,8 @@ class ClyptWorker:
         max_inflight = max(1, min(4, int(os.getenv("CLYPT_LRASD_MAX_INFLIGHT", "4"))))
         if not enable_lrasd_overlap:
             max_inflight = 1
+        prep_workers = self._lrasd_prep_workers()
+        prep_queue_limit = self._lrasd_prep_queue_limit(prep_workers)
         contiguous_frame_gap = 4
         interpolation_gap = 5
         word_match_max_gap = 4
@@ -7285,7 +7409,7 @@ class ClyptWorker:
         print(
             "  LR-ASD pipeline: "
             f"batch_size={lrasd_batch_size}, overlap={'on' if enable_lrasd_overlap else 'off'}, "
-            f"max_inflight={max_inflight}"
+            f"max_inflight={max_inflight}, prep_workers={prep_workers}, prep_queue={prep_queue_limit}"
         )
 
         # Use speech timing to skip obviously irrelevant chunks.
@@ -7373,7 +7497,33 @@ class ClyptWorker:
         face_hits = 0
         face_misses = 0
         inflight_futures: list[cf.Future] = []
+        prep_futures: list[tuple[int, int, cf.Future]] = []
         infer_executor = cf.ThreadPoolExecutor(max_workers=1) if enable_lrasd_overlap else None
+        prep_executor = cf.ThreadPoolExecutor(max_workers=prep_workers) if prep_workers > 1 else None
+        prep_runtime_local = threading.local()
+
+        def _get_prep_runtime():
+            runtime = getattr(prep_runtime_local, "runtime", None)
+            if runtime is not None:
+                return runtime
+            local_vr, local_decode_backend = self._open_lrasd_video_reader(binding_video_path)
+            local_fallback_factory = None
+            if local_decode_backend == "gpu":
+                def _open_local_cpu_reader():
+                    from decord import VideoReader, cpu
+
+                    return VideoReader(binding_video_path, ctx=cpu(0))
+
+                local_fallback_factory = _open_local_cpu_reader
+            runtime = {
+                "get_frame": self._make_lrasd_frame_provider(
+                    local_vr,
+                    fallback_factory=local_fallback_factory,
+                ),
+                "face_cache": {},
+            }
+            prep_runtime_local.runtime = runtime
+            return runtime
 
         def _score_pending_batch(
             pending: list[tuple[str, list[int], int, np.ndarray, np.ndarray]],
@@ -7423,6 +7573,18 @@ class ClyptWorker:
                 scored_track_ids.add(tid)
                 scored_chunks += 1
 
+        def _commit_prepared_payload(payload: dict[str, object], *, chunk_idx: int):
+            nonlocal prepared_chunks, face_hits, face_misses
+            face_hits += int(payload.get("face_hits", 0) or 0)
+            face_misses += int(payload.get("face_misses", 0) or 0)
+            for bucket_length, pending_item in payload.get("pending_entries", []) or []:
+                pending_by_t.setdefault(bucket_length, []).append(pending_item)
+                pending_bucket_started_at.setdefault(bucket_length, time.monotonic())
+                pending_bucket_last_seen_chunk[bucket_length] = int(chunk_idx)
+                prepared_chunks += 1
+                if len(pending_by_t[bucket_length]) >= lrasd_batch_size:
+                    _flush_pending(bucket_length)
+
         def _drain_one(block: bool = False):
             if not inflight_futures:
                 return
@@ -7430,6 +7592,34 @@ class ClyptWorker:
                 fut = inflight_futures.pop(0)
                 rows = fut.result()
                 _commit_scored_rows(rows)
+
+        def _drain_prepared(block: bool = False):
+            nonlocal prep_futures
+            if not prep_futures:
+                return 0
+            if block:
+                done, _ = cf.wait(
+                    [future for _, _, future in prep_futures],
+                    return_when=cf.FIRST_COMPLETED,
+                )
+            else:
+                done = {
+                    future for _, _, future in prep_futures
+                    if future.done()
+                }
+                if not done:
+                    return 0
+            remaining: list[tuple[int, int, cf.Future]] = []
+            drained = 0
+            for seq_idx, chunk_idx, future in prep_futures:
+                if future in done:
+                    payload = future.result()
+                    _commit_prepared_payload(payload, chunk_idx=chunk_idx)
+                    drained += 1
+                else:
+                    remaining.append((seq_idx, chunk_idx, future))
+            prep_futures = remaining
+            return drained
 
         def _flush_pending(t_len: int):
             nonlocal flush_counter
@@ -7450,25 +7640,6 @@ class ClyptWorker:
             )
             _drain_one(block=False)
 
-        def _queue_subchunk(tid, frames, crops):
-            nonlocal prepared_chunks
-            pending_entry = self._lrasd_build_pending_subchunk(
-                tid=tid,
-                frames=frames,
-                crops=crops,
-                full_audio_features=full_audio_features,
-                min_chunk_frames=min_chunk_frames,
-            )
-            if pending_entry is None:
-                return
-            bucket_length, pending_item = pending_entry
-            pending_by_t.setdefault(bucket_length, []).append(pending_item)
-            pending_bucket_started_at.setdefault(bucket_length, time.monotonic())
-            pending_bucket_last_seen_chunk[bucket_length] = chunk_counter
-            prepared_chunks += 1
-            if len(pending_by_t[bucket_length]) >= lrasd_batch_size:
-                _flush_pending(bucket_length)
-
         def _flush_stale_pending(current_chunk_counter: int):
             now = time.monotonic()
             for t_len in sorted(list(pending_by_t.keys())):
@@ -7488,7 +7659,27 @@ class ClyptWorker:
                 ):
                     _flush_pending(t_len)
 
+        def _prepare_chunk_job(
+            tid: str,
+            chunk_frames: list[int],
+            chunk_best_by_frame: dict[int, dict],
+        ) -> dict[str, object]:
+            runtime = _get_prep_runtime()
+            return self._prepare_lrasd_chunk_pending_entries(
+                tid=tid,
+                chunk_frames=chunk_frames,
+                best_by_frame=chunk_best_by_frame,
+                get_frame=runtime["get_frame"],
+                face_cache=runtime["face_cache"],
+                canonical_face_boxes=canonical_face_boxes,
+                full_audio_features=full_audio_features,
+                min_chunk_frames=min_chunk_frames,
+                binding_scale_x=binding_scale_x,
+                binding_scale_y=binding_scale_y,
+            )
+
         try:
+            prep_seq = 0
             for tid in sorted(eligible_lrasd_track_ids):
                 dets = track_to_dets.get(tid, [])
                 best_by_frame = self._interpolate_track_detections(
@@ -7506,6 +7697,7 @@ class ClyptWorker:
                     for start in range(0, len(run), chunk_size):
                         chunk_frames = run[start:start + chunk_size]
                         chunk_counter += 1
+                        _drain_prepared(block=False)
                         _flush_stale_pending(chunk_counter)
                         if len(chunk_frames) < min_chunk_frames:
                             continue
@@ -7513,83 +7705,28 @@ class ClyptWorker:
                             continue
                         if not _chunk_allowed_for_turn_candidates(tid, chunk_frames[0], chunk_frames[-1]):
                             continue
-
-                        # --- FIX: FAULT-TOLERANT CROP-AND-DROP ---
-                        current_face_subchunk = []
-                        current_crops = []
-                        missing_count = 0
-                        last_good_crop = None
-                        last_known_anchor = None
-
-                        for fi in chunk_frames:
-                            det = best_by_frame.get(fi)
-                            crop = None
-                            anchor = None
-                            frame = None
-                            if det is not None:
-                                det = self._scale_detection_geometry(
-                                    det,
-                                    scale_x=binding_scale_x,
-                                    scale_y=binding_scale_y,
-                                )
-                                frame = get_frame(fi)
-                                crop, anchor = _face_crop(tid, fi, det)
-
-                                # If detector misses, project last known face anchor onto current person box.
-                                if (
-                                    crop is None
-                                    and last_known_anchor is not None
-                                    and frame is not None
-                                ):
-                                    cx = float(det.get("x_center", 0.0))
-                                    cy = float(det.get("y_center", 0.0))
-                                    bw = float(det.get("width", 0.0))
-                                    bh = float(det.get("height", 0.0))
-                                    if bw > 1e-6 and bh > 1e-6:
-                                        fx1 = int(round(cx + float(last_known_anchor["x_offset"]) * bw))
-                                        fy1 = int(round(cy + float(last_known_anchor["y_offset"]) * bh))
-                                        fw_face = int(round(max(2.0, float(last_known_anchor["w_ratio"]) * bw)))
-                                        fh_face = int(round(max(2.0, float(last_known_anchor["h_ratio"]) * bh)))
-                                        crop = self._extract_lrasd_visual_crop_region(
-                                            frame,
-                                            x1=fx1,
-                                            y1=fy1,
-                                            x2=fx1 + fw_face,
-                                            y2=fy1 + fh_face,
-                                        )
-
-                            if crop is not None:
-                                face_hits += 1
-                                # If we had a micro-gap, mathematically pad it using the last known face
-                                if missing_count > 0 and last_good_crop is not None:
-                                    for pad_idx in range(missing_count):
-                                        pad_fi = fi - missing_count + pad_idx
-                                        current_face_subchunk.append(pad_fi)
-                                        current_crops.append(last_good_crop)
-
-                                current_face_subchunk.append(fi)
-                                current_crops.append(crop)
-
-                                last_good_crop = crop
-                                if anchor is not None:
-                                    last_known_anchor = anchor
-                                missing_count = 0
-                            else:
-                                face_misses += 1
-                                missing_count += 1
-                                # If the face is lost for more than 5 frames, it's a real break. Terminate the chunk.
-                                if missing_count > 5:
-                                    if len(current_face_subchunk) >= min_chunk_frames:
-                                        _queue_subchunk(tid, current_face_subchunk, current_crops)
-                                    current_face_subchunk = []
-                                    current_crops = []
-                                    missing_count = 0
-                                    last_good_crop = None
-                                    last_known_anchor = None
-
-                        # Flush remainder
-                        if len(current_face_subchunk) >= min_chunk_frames:
-                            _queue_subchunk(tid, current_face_subchunk, current_crops)
+                        chunk_best_by_frame = {
+                            fi: best_by_frame[fi]
+                            for fi in chunk_frames
+                            if fi in best_by_frame
+                        }
+                        if prep_executor is None:
+                            payload = _prepare_chunk_job(tid, list(chunk_frames), chunk_best_by_frame)
+                            _commit_prepared_payload(payload, chunk_idx=chunk_counter)
+                        else:
+                            while len(prep_futures) >= prep_queue_limit:
+                                _drain_prepared(block=True)
+                                _flush_stale_pending(chunk_counter)
+                                _drain_one(block=False)
+                            prep_seq += 1
+                            future = prep_executor.submit(
+                                _prepare_chunk_job,
+                                tid,
+                                list(chunk_frames),
+                                chunk_best_by_frame,
+                            )
+                            prep_futures.append((prep_seq, chunk_counter, future))
+                            _drain_one(block=False)
 
                         if chunk_counter % 40 == 0:
                             print(
@@ -7597,14 +7734,21 @@ class ClyptWorker:
                                 f"prepared={prepared_chunks}, "
                                 f"inferred={scored_chunks}, "
                                 f"track_windows={chunk_counter}/{max(total_chunks, 1)}, "
+                                f"prep_queue_depth={len(prep_futures)}, "
                                 f"scored_tracks={len(scored_track_ids)}"
                             )
 
+            while prep_futures:
+                _drain_prepared(block=True)
+                _flush_stale_pending(chunk_counter)
+                _drain_one(block=False)
             for t_len in list(pending_by_t.keys()):
                 _flush_pending(t_len)
             while inflight_futures:
                 _drain_one(block=True)
         finally:
+            if prep_executor is not None:
+                prep_executor.shutdown(wait=True, cancel_futures=False)
             if infer_executor is not None:
                 infer_executor.shutdown(wait=True, cancel_futures=False)
 

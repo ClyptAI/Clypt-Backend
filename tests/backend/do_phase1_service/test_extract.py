@@ -2205,6 +2205,77 @@ def test_lrasd_build_pending_subchunk_pads_visual_and_audio_to_bucket(monkeypatc
     assert audio_np.shape == (128, 13)
 
 
+def test_lrasd_prep_worker_and_queue_settings_are_bounded(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_LRASD_PREP_WORKERS", raising=False)
+    monkeypatch.delenv("CLYPT_LRASD_PREP_QUEUE", raising=False)
+    assert worker._lrasd_prep_workers() == 4
+    assert worker._lrasd_prep_queue_limit(4) == 128
+
+    monkeypatch.setenv("CLYPT_LRASD_PREP_WORKERS", "99")
+    monkeypatch.setenv("CLYPT_LRASD_PREP_QUEUE", "1")
+    assert worker._lrasd_prep_workers() == 16
+    assert worker._lrasd_prep_queue_limit(16) == 32
+
+
+def test_prepare_lrasd_chunk_pending_entries_splits_on_real_face_gap(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setattr(worker, "_scale_detection_geometry", lambda det, **kwargs: det)
+
+    pending_calls = []
+
+    def fake_build_pending_subchunk(**kwargs):
+        pending_calls.append(list(kwargs["frames"]))
+        frames = list(kwargs["frames"])
+        return 24, (
+            kwargs["tid"],
+            frames,
+            len(frames),
+            np.zeros((24, 112, 112), dtype=np.uint8),
+            np.zeros((96, 13), dtype=np.float32),
+        )
+
+    monkeypatch.setattr(worker, "_lrasd_build_pending_subchunk", fake_build_pending_subchunk)
+    monkeypatch.setattr(
+        worker,
+        "_extract_lrasd_visual_crop_region",
+        lambda frame, **kwargs: np.ones((12, 12, 3), dtype=np.uint8),
+    )
+
+    chunk_frames = list(range(47))
+    best_by_frame = {
+        fi: {
+            "x_center": 20.0,
+            "y_center": 20.0,
+            "width": 10.0,
+            "height": 10.0,
+        }
+        for fi in list(range(20)) + list(range(27, 47))
+    }
+
+    payload = worker._prepare_lrasd_chunk_pending_entries(
+        tid="track_1",
+        chunk_frames=chunk_frames,
+        best_by_frame=best_by_frame,
+        get_frame=lambda fi: np.ones((32, 32, 3), dtype=np.uint8),
+        face_cache={},
+        canonical_face_boxes={},
+        full_audio_features=np.ones((512, 13), dtype=np.float32),
+        min_chunk_frames=20,
+        binding_scale_x=1.0,
+        binding_scale_y=1.0,
+    )
+
+    assert payload["face_hits"] == 40
+    assert payload["face_misses"] == 7
+    assert [len(entry[1][1]) for entry in payload["pending_entries"]] == [20, 20]
+    assert pending_calls == [list(range(20)), list(range(27, 47))]
+
+
 def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path: Path):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
