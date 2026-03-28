@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a research-grade Phase 1 speaker binding path that treats pyannote as the audio truth layer and combines face identity, person ReID, pose, and selective active-speaker inference to maximize assignment accuracy and overlap correctness.
+**Goal:** Build a research-grade Phase 1 speaker binding path that treats pyannote as the audio truth layer and combines face identity, high-accuracy person ReID, pose, and explicit visual speaking cues to maximize assignment accuracy and overlap correctness without relying on LR-ASD.
 
-**Architecture:** Replace the current mostly word-first / LR-ASD-centric binding mindset with a span-first multimodal identity system. Pyannote supplies anonymous speaker activity and overlap structure; the visual system builds stable person identities from face embeddings, person ReID embeddings, pose support, and track continuity; a cross-modal mapping layer associates audio speakers to visual identities using clean spans only; active-speaker inference becomes a selective fallback for ambiguous spans rather than the default for every speaking region. The branch is explicitly research-oriented and accuracy-first: it can be slower than the scheduler/cascade branch, but every expensive stage must be bounded, cached, and measurable.
+**Architecture:** Replace the current mostly word-first / LR-ASD-centric binding mindset with a span-first multimodal identity system. Pyannote supplies anonymous speaker activity and overlap structure; the visual system builds stable person identities from face embeddings, high-accuracy person ReID embeddings, pose support, face-landmark mouth-motion cues, and track continuity; a cross-modal mapping layer associates audio speakers to visual identities using clean spans only; hard spans are disambiguated by deterministic visual speaking evidence rather than LR-ASD. The branch is explicitly research-oriented and accuracy-first: it can be slower than the scheduler/cascade branch, but every expensive stage must be bounded, cached, and measurable.
 
-**Tech Stack:** pyannote diarization, Ultralytics tracking + pose, InsightFace face embeddings, Torchreid OSNet-AIN person embeddings, FAISS similarity search, existing Phase 1 worker/service stack, pytest.
+**Tech Stack:** pyannote diarization, Ultralytics tracking + pose, InsightFace face embeddings, high-accuracy person ReID (BPBreID-class primary path), MediaPipe face landmarks for mouth-motion features, FAISS similarity search, existing Phase 1 worker/service stack, pytest.
 
 ---
 
@@ -18,7 +18,7 @@
 - Create: `backend/speaker_binding/audio_visual_mapping.py`
   - Learn soft `audio_speaker_id -> visual_identity_id` mappings from clean spans.
 - Create: `backend/speaker_binding/assignment_engine.py`
-  - Resolve each scheduled span using mapping priors first, selective active-speaker fallback second.
+  - Resolve each scheduled span using mapping priors first, deterministic visual-speaking disambiguation second.
 - Create: `backend/speaker_binding/visual_features.py`
   - Normalize access to face embeddings, person ReID embeddings, pose/body-derived quality, and caching.
 - Create: `backend/speaker_binding/identity_store.py`
@@ -72,24 +72,33 @@
 - Treat face embeddings as the highest-precision identity anchor.
 
 ### Person ReID identity
-- Add Torchreid with **OSNet-AIN** as the first body identity backbone.
+- Use a **part-based / accuracy-first ReID path** as the primary body identity backbone.
 - Exact first model target:
+  - `BPBreID`-class integration as the primary research path
+- Practical fallback if the droplet/runtime integration proves too heavy:
   - `osnet_ain_x1_0`
-- Why this exact choice:
-  - strong practical ReID baseline
-  - lighter and easier to operationalize than part-heavy research models
-  - good enough for the first max-accuracy branch before testing heavier BPBreID-class upgrades
+- Why this direction:
+  - better occlusion robustness
+  - stronger part-aware matching under profile / partial visibility
+  - more aligned with the “accuracy over speed” goal for this branch
 - Load once per worker process and cache on the worker instance.
 
 ### Pose support
 - Add a dedicated Ultralytics pose model for visible-person structure.
 - First model target:
-  - YOLO11 pose small/medium, whichever is more stable on the droplet without excessive VRAM pressure
+  - `yolo11l-pose` if VRAM permits, otherwise `yolo11m-pose`
 - Pose is not a standalone speaker classifier. It is a support signal for:
   - visibility quality
   - occlusion confidence
   - body-part continuity
   - candidate survival / tie-break support
+
+### Face landmark speaking cues
+- Add a face-landmark / mouth-motion path for hard-span disambiguation.
+- First implementation target:
+  - MediaPipe face landmarks / face mesh style mouth aperture + lip motion summaries
+- Use this only on hard spans where mapping alone is not enough.
+- This becomes the primary same-frame “is this visible person speaking right now?” cue instead of LR-ASD.
 
 ### Similarity search
 - Use FAISS for nearest-neighbor lookups over:
@@ -99,10 +108,15 @@
   - in-memory flat index for per-job work
   - no persistent ANN service
 
-### Active-speaker fallback
+### Visual speaking disambiguation
 - Do **not** introduce a new LLM-based speaker truth layer.
-- Reuse the current LR-ASD path as the first fallback implementation behind a common interface.
-- Only later, if needed, experiment with a lighter fallback ASD for hard spans.
+- Do **not** rely on LR-ASD in this branch.
+- For hard spans, use deterministic visual-speaking evidence from:
+  - mouth-motion / lip-aperture change
+  - face visibility quality
+  - short-window pose / head stability
+  - continuity priors from neighboring spans
+- If hard-span disambiguation is still weak, preserve ambiguity or off-screen truth rather than forcing a false single visible speaker.
 
 ### Overlap follow
 - For this research branch, overlap truth is deterministic.
@@ -122,10 +136,10 @@
   - Parakeet ASR
   - YOLO tracking model
   - InsightFace detector/recognizer as currently configured
-  - LR-ASD fallback
   - person ReID model if stable on the droplet VRAM budget
 - Keep flexible / test both:
   - pose model on GPU first; fall back to CPU if GPU pressure becomes unacceptable
+  - face-landmark extraction on CPU first unless a GPU path is trivially available
 - Keep on CPU:
   - FAISS index construction/search unless GPU FAISS is already trivially available
   - span scheduling
@@ -245,6 +259,16 @@
 - If a frame is weak for face but strong for body visibility:
   - keep it for ReID and pose scoring
 
+### Mouth-motion sampling on hard spans
+- Only compute mouth-motion features for candidates in hard spans.
+- Default mouth-motion sampling window:
+  - center on the scheduled span
+  - include a short pre/post context window
+- Initial hard-span mouth-motion budget:
+  - up to **12 face-landmark frames** per candidate/span
+  - reuse already sampled face-visible frames when possible
+- Prefer temporally contiguous mini-windows over isolated single frames for mouth-motion scoring.
+
 ### Per-track / per-span caps
 - Hard caps for the first implementation:
   - Tier 1 ReID frames: `6`
@@ -282,13 +306,14 @@
 - If Tier 1 returns no usable frames:
   - mark the candidate as weak and skip to the next candidate unless the span is high priority
 - If Tier 1 and Tier 2 both fail:
-  - allow fallback ASD or audio-only off-screen assignment rather than unbounded widening
+  - allow audio-only off-screen assignment or explicit ambiguity rather than unbounded widening
 - Never keep widening indefinitely for a low-value candidate.
 
 ### Metrics to log
 - For each run, log:
   - mean sampled ReID frames per candidate/span
   - mean sampled pose frames per candidate/span
+  - mean sampled mouth-motion frames per hard candidate/span
   - percent of spans resolved at Tier 1
   - percent of spans needing densification
   - percent of candidates widened outside the span
@@ -321,14 +346,18 @@
   - good confidence from visual identity and active-speaker evidence
 - Do not let noisy overlap windows teach the mapping table.
 
-### 4. Active-speaker inference becomes selective fallback
-- The max-accuracy branch should not run LR-ASD-style scoring everywhere by default.
-- Use active-speaker inference only when:
+### 4. Visual speaking evidence is the hard-span disambiguator
+- The max-accuracy branch should not run LR-ASD-style scoring.
+- Use deterministic visual speaking evidence only when:
   - multiple visible identities plausibly match the same audio speaker
   - rapid cuts or reaction shots make the mapping prior unsafe
   - the mapping table is weak or conflicting
   - overlap needs same-frame visible disambiguation
-- The first implementation of this fallback should reuse the current LR-ASD codepath rather than add a second active-speaker model immediately.
+- Hard-span disambiguation should be based on:
+  - mouth-motion consistency over a short temporal window
+  - face visibility / face-landmark confidence
+  - pose / head stability
+  - continuity from neighboring solved spans
 
 ### 5. Multi-speaker overlap must be first-class
 - A word/span can legitimately have:
@@ -349,6 +378,13 @@
   - runtime guardrails
 - We are optimizing for accuracy first, but not for runaway per-job cost.
 
+### 8. Preserve uncertainty honestly
+- If visual speaking evidence is weak and the mapping table is weak, keep:
+  - multiple active speakers
+  - or an off-screen assignment
+  - or an explicitly ambiguous span
+- Do not force a single visible winner just because a downstream consumer would prefer one.
+
 ---
 
 ## Experiment Flags
@@ -359,8 +395,8 @@ Add flags early so the branch is safe to iterate on without destabilizing the cu
 - `CLYPT_VISUAL_FACE_ID_ENABLE=1`
 - `CLYPT_VISUAL_REID_ENABLE=1`
 - `CLYPT_VISUAL_POSE_ENABLE=1`
+- `CLYPT_VISUAL_MOUTH_MOTION_ENABLE=1`
 - `CLYPT_AV_MAPPING_ENABLE=1`
-- `CLYPT_ASD_FALLBACK_ENABLE=1`
 - `CLYPT_OVERLAP_MULTI_ASSIGN_ENABLE=1`
 - `CLYPT_BINDING_EVAL_DUMP=1`
 
@@ -390,7 +426,7 @@ The current production/default path must remain available until this branch beat
 - Test: `tests/backend/speaker_binding/test_visual_identity.py`
 
 - [ ] **Step 1: Write failing tests for merging local tracks into stable visual identities**
-- [ ] **Step 2: Write failing tests for face-dominant, ReID-fallback, and pose-supported continuity cases**
+- [ ] **Step 2: Write failing tests for face-dominant, part-ReID-supported, and pose-supported continuity cases**
 - [ ] **Step 3: Run the focused tests to confirm failure**
 - [ ] **Step 4: Implement normalized feature extraction hooks for:**
   - face embeddings already available in worker state
@@ -422,7 +458,7 @@ The current production/default path must remain available until this branch beat
   - visibility continuity
   - face anchor confidence
   - ReID support
-  - optional active-speaker confidence if present
+  - optional mouth-motion support on hard confirmed spans when available
 - [ ] **Step 6: Emit soft mappings with confidence and support diagnostics**
 - [ ] **Step 7: Run tests and refine thresholds**
 - [ ] **Step 8: Commit**
@@ -435,12 +471,12 @@ The current production/default path must remain available until this branch beat
 - Test: `tests/backend/speaker_binding/test_assignment_engine.py`
 
 - [ ] **Step 1: Write failing tests for clean single-speaker span assignment via mapping only**
-- [ ] **Step 2: Write failing tests for ambiguous spans routing to fallback active-speaker inference**
+- [ ] **Step 2: Write failing tests for ambiguous spans routing to visual-speaking disambiguation**
 - [ ] **Step 3: Write failing tests for off-screen speaker preservation**
 - [ ] **Step 4: Run the focused tests to confirm failure**
 - [ ] **Step 5: Implement decision policy:**
   - mapping-first for easy spans
-  - fallback active-speaker scorer for ambiguous spans
+  - visual-speaking disambiguation for ambiguous spans
   - preserve off-screen audio speakers explicitly
 - [ ] **Step 6: Thread visual identity IDs, local track IDs, and global track IDs through results**
 - [ ] **Step 7: Run tests and tighten decision logging**
@@ -463,26 +499,27 @@ The current production/default path must remain available until this branch beat
 - [ ] **Step 7: Run tests and verify no false single-speaker collapse remains**
 - [ ] **Step 8: Commit**
 
-### Task 6: Add a stronger active-speaker fallback path only for hard spans
+### Task 6: Add visual-speaking disambiguation for hard spans
 
 **Files:**
 - Modify: `backend/do_phase1_worker.py`
 - Modify: `backend/speaker_binding/assignment_engine.py`
+- Create: `backend/speaker_binding/mouth_motion.py`
 - Test: `tests/backend/do_phase1_service/test_extract.py`
 
-- [ ] **Step 1: Write failing tests that easy spans do not invoke fallback active-speaker scoring**
-- [ ] **Step 2: Write failing tests that hard spans still invoke the fallback path**
+- [ ] **Step 1: Write failing tests that easy spans do not invoke hard-span mouth-motion / pose disambiguation**
+- [ ] **Step 2: Write failing tests that hard spans do invoke visual-speaking disambiguation**
 - [ ] **Step 3: Run the focused tests to confirm failure**
 - [ ] **Step 4: Define hard-span routing criteria:**
   - rapid cutbacks
   - conflicting mapping priors
   - multiple visible candidates
   - weak face/ReID confidence
-- [ ] **Step 5: Reuse existing LR-ASD or a lighter ASD module behind a common fallback interface**
-- [ ] **Step 6: Add a strict routing guard so fallback is never called for clearly solved mapping-first spans**
-- [ ] **Step 6: Add metrics showing how often fallback was used and why**
-- [ ] **Step 7: Run tests and verify routing behavior**
-- [ ] **Step 8: Commit**
+- [ ] **Step 5: Implement mouth-motion / face-landmark summaries and combine them with pose visibility**
+- [ ] **Step 6: Add a strict routing guard so hard-span disambiguation is never called for clearly solved mapping-first spans**
+- [ ] **Step 7: Add metrics showing how often hard-span visual disambiguation was used and why**
+- [ ] **Step 8: Run tests and verify routing behavior**
+- [ ] **Step 9: Commit**
 
 ### Task 7: Instrument evaluation for the research branch
 
@@ -498,7 +535,7 @@ The current production/default path must remain available until this branch beat
   - overlap words with multi-speaker assignment
   - off-screen overlap preservation
   - mapping confidence distribution
-  - fallback invocation rate
+  - hard-span visual disambiguation invocation rate
   - assignment stability across adjacent words/spans
 - [ ] **Step 4: Dump evaluation metrics into artifacts and logs when enabled**
 - [ ] **Step 5: Run tests**
@@ -514,12 +551,15 @@ The current production/default path must remain available until this branch beat
 - [ ] **Step 1: Write failing tests for missing optional research dependencies producing clear errors**
 - [ ] **Step 2: Run tests to confirm failure**
 - [ ] **Step 3: Add dependency guards and actionable runtime error messages for:**
-  - Torchreid / OSNet-AIN
+  - primary high-accuracy ReID backend
+  - OSNet-AIN fallback ReID backend
   - pose model availability
   - optional FAISS usage
+  - MediaPipe face landmark availability
 - [ ] **Step 4: Add worker-level model caching and health logging for:**
   - ReID model load success/failure
   - pose model load success/failure
+  - face landmark model load success/failure
   - cache roots and selected model names
 - [ ] **Step 4: Ensure the old path still runs when research flags are disabled**
 - [ ] **Step 5: Run tests**
@@ -536,7 +576,7 @@ The current production/default path must remain available until this branch beat
 - [ ] **Step 2: Add log surfacing for:**
   - mapping table size
   - number of visual identities
-  - fallback ASD invocation count
+  - hard-span visual disambiguation count
   - overlap assignment counts
 - [ ] **Step 3: Run focused tests**
 - [ ] **Step 4: Deploy to droplet in branch-isolated mode**
@@ -561,9 +601,9 @@ For droplet comparisons, record:
 - with_scored_candidate ratio
 - overlap multi-assignment count
 - off-screen preserved count
-- fallback ASD rate
-- wall-clock speaker binding time
-- total job time
+ - hard-span visual disambiguation rate
+ - wall-clock speaker binding time
+ - total job time
 
 ---
 
@@ -575,12 +615,12 @@ The branch is a success when all of these are true:
 - Overlap windows preserve multiple speakers instead of collapsing them.
 - Off-screen speakers remain explicit instead of being forced onto visible listeners.
 - Visual identity continuity is stronger under face flicker and profile views.
-- Fallback active-speaker inference runs on a minority of spans, not the default path.
+ - Hard-span visual disambiguation runs on a minority of spans, not the default path.
 - Runtime is acceptable for a research branch even if slower than the speed-optimized branch.
 
 ## Non-Goals
 
 - Do not land this directly into production defaults.
-- Do not remove the existing LR-ASD path yet.
+- Do not delete the existing LR-ASD path from the codebase yet.
 - Do not try to solve every model-training problem in this branch.
 - Do not add LLM dependence to the core assignment truth layer.
