@@ -1473,6 +1473,69 @@ def test_speaker_binding_mode_lrasd_still_falls_back_when_primary_returns_none(m
     assert calls == ["lrasd", "heuristic"]
 
 
+def test_run_speaker_binding_delegates_to_package_entrypoint(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    observed = {}
+
+    import backend.speaker_binding as speaker_binding
+
+    def fake_entrypoint(
+        *,
+        worker,
+        video_path,
+        audio_wav_path,
+        tracks,
+        words,
+        frame_to_dets=None,
+        track_to_dets=None,
+        track_identity_features=None,
+        analysis_context=None,
+        track_id_remap=None,
+    ):
+        observed["worker"] = worker
+        observed["video_path"] = video_path
+        observed["audio_wav_path"] = audio_wav_path
+        observed["tracks"] = tracks
+        observed["words"] = words
+        observed["frame_to_dets"] = frame_to_dets
+        observed["track_to_dets"] = track_to_dets
+        observed["track_identity_features"] = track_identity_features
+        observed["analysis_context"] = analysis_context
+        observed["track_id_remap"] = track_id_remap
+        return [{"track_id": "track-from-package"}]
+
+    monkeypatch.setattr(speaker_binding, "run_speaker_binding", fake_entrypoint)
+    monkeypatch.setattr(worker, "_select_speaker_binding_mode", lambda *args, **kwargs: "heuristic")
+    monkeypatch.setattr(worker, "_run_speaker_binding_heuristic", lambda *args, **kwargs: [{"track_id": "track-legacy"}])
+
+    result = worker._run_speaker_binding(
+        "video.mp4",
+        "audio.wav",
+        tracks=[],
+        words=[],
+        frame_to_dets={},
+        track_to_dets={},
+        track_identity_features={},
+        analysis_context={"source": "test"},
+        track_id_remap={"track_old": "track_new"},
+    )
+
+    assert result == [{"track_id": "track-from-package"}]
+    assert observed == {
+        "worker": worker,
+        "video_path": "video.mp4",
+        "audio_wav_path": "audio.wav",
+        "tracks": [],
+        "words": [],
+        "frame_to_dets": {},
+        "track_to_dets": {},
+        "track_identity_features": {},
+        "analysis_context": {"source": "test"},
+        "track_id_remap": {"track_old": "track_new"},
+    }
+
+
 def test_run_lrasd_binding_clears_stale_candidate_debug_on_early_return(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)

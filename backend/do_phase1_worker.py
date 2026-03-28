@@ -8519,6 +8519,33 @@ class ClyptWorker:
         analysis_context: dict | None = None,
         track_id_remap: dict[str, str] | None = None,
     ) -> list[dict]:
+        from backend import speaker_binding as speaker_binding_package
+
+        return speaker_binding_package.run_speaker_binding(
+            worker=self,
+            video_path=video_path,
+            audio_wav_path=audio_wav_path,
+            tracks=tracks,
+            words=words,
+            frame_to_dets=frame_to_dets,
+            track_to_dets=track_to_dets,
+            track_identity_features=track_identity_features,
+            analysis_context=analysis_context,
+            track_id_remap=track_id_remap,
+        )
+
+    def _run_speaker_binding_impl(
+        self,
+        video_path: str,
+        audio_wav_path: str,
+        tracks: list[dict],
+        words: list[dict],
+        frame_to_dets: dict[int, list[dict]] | None = None,
+        track_to_dets: dict[str, list[dict]] | None = None,
+        track_identity_features: dict[str, dict] | None = None,
+        analysis_context: dict | None = None,
+        track_id_remap: dict[str, str] | None = None,
+    ) -> list[dict]:
         """Bind words to track IDs using LR-ASD, with heuristic fallback."""
         protected_unknown_key = "_speaker_binding_protected_unknown"
         self._last_audio_turn_bindings = []
