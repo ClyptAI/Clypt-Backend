@@ -377,6 +377,7 @@ class Phase1VisualArtifact(BaseModel):
     tracks_local: list[Phase1Track] = Field(default_factory=list)
     face_detections: list[Phase1DetectionSegment]
     person_detections: list[Phase1DetectionSegment]
+    pose_detections: list[Phase1DetectionSegment] = Field(default_factory=list)
     label_detections: list[Phase1DetectionSegment]
     object_tracking: list[Phase1DetectionSegment]
     shot_changes: list[Phase1ShotChange]

@@ -1908,6 +1908,31 @@ class ClyptWorker:
     def _extract_pose_signal_crop(self, frame, det: dict):
         import numpy as np
 
+        bounds = self._pose_crop_bounds(frame, det)
+        if bounds is None:
+            return None
+        left, top, right, bottom = bounds
+        crop = frame[top:bottom, left:right]
+        if crop is None or getattr(crop, "size", 0) <= 0:
+            return None
+        return np.ascontiguousarray(crop)
+
+    @staticmethod
+    def _pose_ledger_batch_size() -> int:
+        try:
+            return max(1, int(os.getenv("CLYPT_POSE_LEDGER_BATCH_SIZE", "16")))
+        except Exception:
+            return 16
+
+    @staticmethod
+    def _pose_ledger_stride() -> int:
+        try:
+            return max(1, int(os.getenv("CLYPT_POSE_LEDGER_STRIDE", "1")))
+        except Exception:
+            return 1
+
+    @staticmethod
+    def _pose_crop_bounds(frame, det: dict):
         if frame is None:
             return None
         try:
@@ -1931,10 +1956,7 @@ class ClyptWorker:
         bottom = min(frame_h, int(round(y2 + pad_y)))
         if right <= left or bottom <= top:
             return None
-        crop = frame[top:bottom, left:right]
-        if crop is None or getattr(crop, "size", 0) <= 0:
-            return None
-        return np.ascontiguousarray(crop)
+        return left, top, right, bottom
 
     def _create_face_landmarker(self):
         from mediapipe.tasks import python as mp_python
@@ -2080,6 +2102,82 @@ class ClyptWorker:
                         "shoulder_span": shoulder_span,
                     }
                 )
+        except Exception:
+            return []
+        return results
+
+    def _run_pose_detection_samples(self, samples: list[dict]) -> list[dict]:
+        import numpy as np
+
+        if not samples or getattr(self, "visual_pose_model", None) is None:
+            return []
+
+        results: list[dict] = []
+        batch_size = self._pose_ledger_batch_size()
+        try:
+            for start in range(0, len(samples), batch_size):
+                batch = samples[start : start + batch_size]
+                crops = [sample.get("crop") for sample in batch]
+                predictions = self.visual_pose_model.predict(
+                    source=crops,
+                    verbose=False,
+                    conf=0.15,
+                    device=self.visual_pose_model_device,
+                )
+                for sample, prediction in zip(batch, predictions or []):
+                    keypoints = getattr(prediction, "keypoints", None)
+                    if keypoints is None or getattr(keypoints, "data", None) is None or len(keypoints.data) == 0:
+                        continue
+                    kp = keypoints.data[0].detach().cpu().numpy()
+                    if kp.ndim != 2 or kp.shape[0] < 13:
+                        continue
+                    confs = kp[:, 2] if kp.shape[1] >= 3 else np.zeros((kp.shape[0],), dtype=np.float32)
+
+                    def _mean_conf(indices: list[int]) -> float:
+                        valid = [float(confs[idx]) for idx in indices if idx < len(confs)]
+                        return float(sum(valid) / max(1, len(valid)))
+
+                    head_visibility = _mean_conf([0, 1, 2, 3, 4])
+                    upper_body_visibility = _mean_conf([0, 1, 2, 3, 4, 5, 6, 7, 8])
+                    frontal_support = min(
+                        float(confs[5]) if 5 < len(confs) else 0.0,
+                        float(confs[6]) if 6 < len(confs) else 0.0,
+                    )
+
+                    crop_left = int(sample.get("crop_left", 0))
+                    crop_top = int(sample.get("crop_top", 0))
+                    crop_width = max(1, int(sample.get("crop_right", crop_left + 1)) - crop_left)
+                    crop_height = max(1, int(sample.get("crop_bottom", crop_top + 1)) - crop_top)
+                    frame_width = max(1, int(sample.get("frame_width", 1)))
+                    frame_height = max(1, int(sample.get("frame_height", 1)))
+
+                    normalized_keypoints: list[dict] = []
+                    for row in kp:
+                        x = float(row[0]) if len(row) >= 1 else 0.0
+                        y = float(row[1]) if len(row) >= 2 else 0.0
+                        confidence = float(row[2]) if len(row) >= 3 else 0.0
+                        normalized_keypoints.append(
+                            {
+                                "x": max(0.0, min(1.0, (crop_left + x) / frame_width)),
+                                "y": max(0.0, min(1.0, (crop_top + y) / frame_height)),
+                                "confidence": max(0.0, min(1.0, confidence)),
+                            }
+                        )
+
+                    results.append(
+                        {
+                            "frame_idx": int(sample.get("frame_idx", -1)),
+                            "track_id": str(sample.get("track_id", "") or ""),
+                            "confidence": max(
+                                0.0,
+                                min(1.0, (0.55 * upper_body_visibility) + (0.25 * head_visibility) + (0.20 * frontal_support)),
+                            ),
+                            "head_visibility": head_visibility,
+                            "upper_body_visibility": upper_body_visibility,
+                            "frontal_support": frontal_support,
+                            "keypoints": normalized_keypoints,
+                        }
+                    )
         except Exception:
             return []
         return results
@@ -4527,6 +4625,132 @@ class ClyptWorker:
             "face_detection_worker_count": 0,
         }
         return face_detections, person_detections, metrics
+
+    def _build_pose_detection_ledgers(
+        self,
+        *,
+        video_path: str,
+        track_to_dets: dict[str, list[dict]] | None = None,
+    ) -> tuple[list[dict], dict]:
+        started_at = time.perf_counter()
+        if getattr(self, "visual_pose_model", None) is None or not track_to_dets:
+            return [], {
+                "pose_detection_wallclock_s": round(time.perf_counter() - started_at, 3),
+                "pose_detection_frame_samples": 0,
+                "pose_detection_track_count": 0,
+            }
+
+        meta = self._probe_video_meta(video_path)
+        fps = float(meta.get("fps", 0.0) or 0.0) or 30.0
+        frame_width = int(meta.get("width", 0) or 0)
+        frame_height = int(meta.get("height", 0) or 0)
+        stride = self._pose_ledger_stride()
+        frame_provider = self._get_visual_signal_frame_provider(video_path)
+
+        pose_samples: list[dict] = []
+        for tid in sorted(track_to_dets.keys()):
+            dets = sorted(
+                track_to_dets.get(tid, []),
+                key=lambda det: int(det.get("frame_idx", -1)),
+            )
+            if stride > 1:
+                dets = [det for idx, det in enumerate(dets) if idx % stride == 0]
+            for det in dets:
+                frame_idx = int(det.get("frame_idx", -1))
+                if frame_idx < 0:
+                    continue
+                frame = frame_provider(frame_idx)
+                if frame is None:
+                    continue
+                bounds = self._pose_crop_bounds(frame, det)
+                if bounds is None:
+                    continue
+                crop = self._extract_pose_signal_crop(frame, det)
+                if crop is None:
+                    continue
+                crop_left, crop_top, crop_right, crop_bottom = bounds
+                pose_samples.append(
+                    {
+                        "frame_idx": frame_idx,
+                        "track_id": str(tid),
+                        "crop": crop,
+                        "crop_left": crop_left,
+                        "crop_top": crop_top,
+                        "crop_right": crop_right,
+                        "crop_bottom": crop_bottom,
+                        "frame_width": frame_width,
+                        "frame_height": frame_height,
+                        "det": det,
+                    }
+                )
+
+        inferred_rows = self._run_pose_detection_samples(pose_samples)
+        result_by_key = {
+            (str(row.get("track_id", "") or ""), int(row.get("frame_idx", -1))): row
+            for row in inferred_rows
+            if str(row.get("track_id", "") or "") and int(row.get("frame_idx", -1)) >= 0
+        }
+
+        pose_detections: list[dict] = []
+        for idx, tid in enumerate(sorted(track_to_dets.keys())):
+            ts_objs: list[dict] = []
+            dets = sorted(
+                track_to_dets.get(tid, []),
+                key=lambda det: int(det.get("frame_idx", -1)),
+            )
+            if stride > 1:
+                dets = [det for det_idx, det in enumerate(dets) if det_idx % stride == 0]
+            for det in dets:
+                frame_idx = int(det.get("frame_idx", -1))
+                row = result_by_key.get((str(tid), frame_idx))
+                if row is None:
+                    continue
+                ts_objs.append(
+                    {
+                        "time_ms": int(round((frame_idx / max(1e-6, fps)) * 1000.0)),
+                        "bounding_box": self._normalize_bbox(
+                            float(det.get("x1", 0.0)),
+                            float(det.get("y1", 0.0)),
+                            float(det.get("x2", 1.0)),
+                            float(det.get("y2", 1.0)),
+                            frame_width,
+                            frame_height,
+                        ),
+                        "track_id": str(tid),
+                        "confidence": float(row.get("confidence", 0.0) or 0.0),
+                        "source": "pose_detector",
+                        "provenance": {
+                            "head_visibility": float(row.get("head_visibility", 0.0) or 0.0),
+                            "upper_body_visibility": float(row.get("upper_body_visibility", 0.0) or 0.0),
+                            "frontal_support": float(row.get("frontal_support", 0.0) or 0.0),
+                            "keypoints": list(row.get("keypoints", []) or []),
+                            "pose_model": "yolo11l-pose",
+                        },
+                    }
+                )
+            if not ts_objs:
+                continue
+            pose_detections.append(
+                {
+                    "confidence": float(
+                        sum(float(obj.get("confidence", 0.0)) for obj in ts_objs) / max(1, len(ts_objs))
+                    ),
+                    "segment_start_ms": int(ts_objs[0]["time_ms"]),
+                    "segment_end_ms": int(ts_objs[-1]["time_ms"]),
+                    "person_track_index": idx,
+                    "track_id": str(tid),
+                    "source": "pose_detector",
+                    "provenance": {"pose_model": "yolo11l-pose"},
+                    "timestamped_objects": ts_objs,
+                }
+            )
+
+        metrics = {
+            "pose_detection_wallclock_s": round(time.perf_counter() - started_at, 3),
+            "pose_detection_frame_samples": len(pose_samples),
+            "pose_detection_track_count": len(pose_detections),
+        }
+        return pose_detections, metrics
 
     @staticmethod
     def _interpolate_track_detections(dets: list[dict], max_gap: int = 5) -> dict[int, dict]:
@@ -10131,6 +10355,11 @@ class ClyptWorker:
             track_identity_features=clustered_track_identity_features,
         )
         metrics.update(face_metrics)
+        pose_detections, pose_metrics = self._build_pose_detection_ledgers(
+            video_path=video_path,
+            track_to_dets=track_to_dets,
+        )
+        metrics.update(pose_metrics)
         visual_identities = build_visual_identities(
             tracks=tracks,
             track_identity_features=clustered_track_identity_features,
@@ -10264,6 +10493,7 @@ class ClyptWorker:
             "visual_identities": [asdict(identity) for identity in visual_identities],
             "face_detections": face_detections,
             "person_detections": person_detections,
+            "pose_detections": pose_detections,
         }
         if self._local_clip_bindings_enabled():
             phase_1_visual["tracks_local"] = [dict(track) for track in precluster_tracks]

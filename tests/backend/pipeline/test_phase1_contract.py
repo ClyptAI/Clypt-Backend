@@ -134,6 +134,34 @@ def _legacy_manifest_payload() -> dict:
                         ],
                     }
                 ],
+                "pose_detections": [
+                    {
+                        "track_id": "Global_Person_0",
+                        "person_track_index": 0,
+                        "segment_start_ms": 0,
+                        "segment_end_ms": 10000,
+                        "confidence": 0.71,
+                        "timestamped_objects": [
+                            {
+                                "time_ms": 0,
+                                "track_id": "Global_Person_0",
+                                "confidence": 0.71,
+                                "bounding_box": {
+                                    "left": 0.5085357666015625,
+                                    "top": 0.24790143613462096,
+                                    "right": 0.8199069976806641,
+                                    "bottom": 0.8884221959997106,
+                                },
+                                "source": "pose_detector",
+                                "provenance": {
+                                    "keypoints": [
+                                        {"x": 0.55, "y": 0.31, "confidence": 0.94}
+                                    ]
+                                },
+                            }
+                        ],
+                    }
+                ],
                 "label_detections": [],
                 "object_tracking": [],
                 "shot_changes": [

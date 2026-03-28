@@ -1761,6 +1761,87 @@ def test_build_visual_detection_ledgers_prefers_precomputed_face_observations(mo
     assert metrics["face_detection_track_count"] == 1
 
 
+def test_build_pose_detection_ledgers_emits_pose_segments(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.visual_pose_model = object()
+    worker.visual_pose_model_device = "cpu"
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "track-1",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        },
+        {
+            "frame_idx": 30,
+            "track_id": "track-1",
+            "x1": 20.0,
+            "y1": 30.0,
+            "x2": 120.0,
+            "y2": 230.0,
+            "x_center": 70.0,
+            "y_center": 130.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.85,
+        },
+    ]
+    track_to_dets = {"track-1": tracks}
+
+    monkeypatch.setattr(
+        worker,
+        "_probe_video_meta",
+        lambda path: {"fps": 30.0, "width": 1920, "height": 1080, "duration_s": 1.0},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_get_visual_signal_frame_provider",
+        lambda path: (lambda frame_idx: object()),
+    )
+    monkeypatch.setattr(worker, "_pose_crop_bounds", lambda frame, det: (0, 0, 64, 128))
+    monkeypatch.setattr(worker, "_extract_pose_signal_crop", lambda frame, det: {"det": det})
+    monkeypatch.setattr(
+        worker,
+        "_run_pose_detection_samples",
+        lambda samples: [
+            {
+                "frame_idx": int(sample["frame_idx"]),
+                "track_id": str(sample["track_id"]),
+                "confidence": 0.82,
+                "head_visibility": 0.9,
+                "upper_body_visibility": 0.84,
+                "frontal_support": 0.77,
+                "keypoints": [
+                    {"x": 0.11, "y": 0.22, "confidence": 0.95},
+                    {"x": 0.14, "y": 0.25, "confidence": 0.93},
+                ],
+            }
+            for sample in samples
+        ],
+    )
+
+    pose_detections, metrics = worker._build_pose_detection_ledgers(
+        video_path="video.mp4",
+        track_to_dets=track_to_dets,
+    )
+
+    assert len(pose_detections) == 1
+    assert pose_detections[0]["track_id"] == "track-1"
+    assert pose_detections[0]["timestamped_objects"][0]["source"] == "pose_detector"
+    assert pose_detections[0]["timestamped_objects"][0]["provenance"]["keypoints"]
+    assert metrics["pose_detection_track_count"] == 1
+    assert metrics["pose_detection_frame_samples"] == 2
+
+
 def test_associate_faces_to_person_dets_prefers_head_aligned_match():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -4287,8 +4368,25 @@ def test_finalize_passes_track_identity_features_to_clustering_and_ledgers(monke
         passed["ledgers"] = track_identity_features
         return [], [], {"face_detection_track_count": 0}
 
+    def fake_build_pose_detection_ledgers(
+        *,
+        video_path,
+        track_to_dets=None,
+    ):
+        passed["pose_track_to_dets"] = track_to_dets
+        return [
+            {
+                "track_id": "track-1",
+                "confidence": 0.81,
+                "segment_start_ms": 0,
+                "segment_end_ms": 1000,
+                "timestamped_objects": [],
+            }
+        ], {"pose_detection_track_count": 1}
+
     monkeypatch.setattr(worker, "_cluster_tracklets", fake_cluster_tracklets)
     monkeypatch.setattr(worker, "_build_visual_detection_ledgers", fake_build_visual_detection_ledgers)
+    monkeypatch.setattr(worker, "_build_pose_detection_ledgers", fake_build_pose_detection_ledgers)
     monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [])
     monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
 
@@ -4316,7 +4414,84 @@ def test_finalize_passes_track_identity_features_to_clustering_and_ledgers(monke
 
     assert passed["cluster"] == identity_features
     assert passed["ledgers"] == identity_features
-    assert passed["face_tracks"] is None
+    assert "track-1" in passed["pose_track_to_dets"]
+
+
+def test_finalize_emits_pose_detections_in_visual_artifact(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "track-1",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        }
+    ]
+    words = [{"text": "hello", "start_time_ms": 0, "end_time_ms": 100}]
+
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+    monkeypatch.setattr(
+        worker,
+        "_build_track_indexes",
+        lambda tracks: ({0: tracks}, {"track-1": tracks}),
+    )
+    monkeypatch.setattr(worker, "_cluster_tracklets", lambda *args, **kwargs: tracks)
+    monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda **kwargs: ([], [], {}))
+    monkeypatch.setattr(
+        worker,
+        "_build_pose_detection_ledgers",
+        lambda **kwargs: (
+            [
+                {
+                    "track_id": "track-1",
+                    "confidence": 0.88,
+                    "segment_start_ms": 0,
+                    "segment_end_ms": 0,
+                    "timestamped_objects": [
+                        {
+                            "time_ms": 0,
+                            "track_id": "track-1",
+                            "confidence": 0.88,
+                            "bounding_box": {
+                                "left": 0.1,
+                                "top": 0.2,
+                                "right": 0.3,
+                                "bottom": 0.6,
+                            },
+                            "source": "pose_detector",
+                            "provenance": {"keypoints": []},
+                        }
+                    ],
+                }
+            ],
+            {"pose_detection_track_count": 1},
+        ),
+    )
+    monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [])
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    assert result["phase_1_visual"]["pose_detections"][0]["track_id"] == "track-1"
+    assert result["phase_1_visual"]["tracking_metrics"]["pose_detection_track_count"] == 1
 
 
 def test_finalize_emits_visual_identities_from_clustered_features(monkeypatch):
