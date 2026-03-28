@@ -282,6 +282,46 @@ def test_manifest_accepts_local_clip_experiment_fields():
 
 def test_manifest_accepts_overlap_artifacts():
     payload = deepcopy(_legacy_manifest_payload())
+    payload["artifacts"]["transcript"]["word_speaker_assignments"] = [
+        {
+            "start_time_ms": 1040,
+            "end_time_ms": 1600,
+            "audio_speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
+            "visible_local_track_ids": ["track_1"],
+            "visible_track_ids": ["Global_Person_0"],
+            "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+            "dominant_visible_local_track_id": "track_1",
+            "dominant_visible_track_id": "Global_Person_0",
+            "decision_source": "turn_binding",
+            "overlap": True,
+        }
+    ]
+    payload["artifacts"]["transcript"]["speaker_assignment_spans_local"] = [
+        {
+            "start_time_ms": 400,
+            "end_time_ms": 1100,
+            "audio_speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
+            "visible_local_track_ids": ["track_1"],
+            "visible_track_ids": ["Global_Person_0"],
+            "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+            "overlap": True,
+            "confidence": 0.73,
+            "decision_source": "turn_binding",
+        }
+    ]
+    payload["artifacts"]["transcript"]["speaker_assignment_spans_global"] = [
+        {
+            "start_time_ms": 400,
+            "end_time_ms": 1100,
+            "audio_speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
+            "visible_local_track_ids": ["track_1"],
+            "visible_track_ids": ["Global_Person_0"],
+            "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+            "overlap": True,
+            "confidence": 0.73,
+            "decision_source": "turn_binding",
+        }
+    ]
     payload["artifacts"]["transcript"]["active_speakers_local"] = [
         {
             "start_time_ms": 400,
@@ -315,6 +355,13 @@ def test_manifest_accepts_overlap_artifacts():
     assert manifest.artifacts.transcript.active_speakers_local[0].audio_speaker_ids == [
         "SPEAKER_00",
         "SPEAKER_01",
+    ]
+    assert manifest.artifacts.transcript.word_speaker_assignments[0].offscreen_audio_speaker_ids == [
+        "SPEAKER_01"
+    ]
+    assert manifest.artifacts.transcript.word_speaker_assignments[0].dominant_visible_local_track_id == "track_1"
+    assert manifest.artifacts.transcript.speaker_assignment_spans_global[0].visible_track_ids == [
+        "Global_Person_0"
     ]
     assert manifest.artifacts.transcript.active_speakers_local[0].offscreen_audio_speaker_ids == [
         "SPEAKER_01"

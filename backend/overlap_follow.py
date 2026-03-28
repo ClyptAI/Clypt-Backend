@@ -45,9 +45,11 @@ def _visible_track_map(span: dict) -> dict[str, str]:
     return mapping
 
 
-def build_deterministic_overlap_follow_decisions(active_speakers_local: list[dict] | None) -> list[dict]:
+def build_deterministic_overlap_follow_decisions(
+    speaker_assignment_spans_local: list[dict] | None,
+) -> list[dict]:
     decisions: list[dict] = []
-    for span in active_speakers_local or []:
+    for span in speaker_assignment_spans_local or []:
         if not bool(span.get("overlap", False)):
             continue
         visible_local_track_ids = [
@@ -118,12 +120,12 @@ def _candidate_debug_for_span(speaker_candidate_debug: list[dict] | None, span: 
 
 
 def _neighbor_context(
-    active_speakers_local: list[dict] | None,
+    speaker_assignment_spans_local: list[dict] | None,
     *,
     overlap_index: int,
 ) -> tuple[dict | None, dict | None]:
-    overlap_spans = [span for span in (active_speakers_local or []) if bool(span.get("overlap", False))]
-    all_spans = list(active_speakers_local or [])
+    overlap_spans = [span for span in (speaker_assignment_spans_local or []) if bool(span.get("overlap", False))]
+    all_spans = list(speaker_assignment_spans_local or [])
     if overlap_index < 0 or overlap_index >= len(overlap_spans):
         return None, None
     current_span = overlap_spans[overlap_index]
@@ -266,14 +268,14 @@ def _load_gemini_client(client=None):
 
 def maybe_adjudicate_overlap_follow_decisions(
     *,
-    active_speakers_local: list[dict] | None,
+    speaker_assignment_spans_local: list[dict] | None,
     words: list[dict] | None,
     speaker_candidate_debug: list[dict] | None,
     client=None,
     model_name: str | None = None,
     enabled: bool | None = None,
 ) -> list[dict]:
-    deterministic = build_deterministic_overlap_follow_decisions(active_speakers_local)
+    deterministic = build_deterministic_overlap_follow_decisions(speaker_assignment_spans_local)
     if enabled is None:
         enabled = overlap_follow_enabled()
     if not enabled or not deterministic:
@@ -285,14 +287,14 @@ def maybe_adjudicate_overlap_follow_decisions(
         return deterministic
 
     decisions: list[dict] = []
-    overlap_spans = [span for span in (active_speakers_local or []) if bool(span.get("overlap", False))]
+    overlap_spans = [span for span in (speaker_assignment_spans_local or []) if bool(span.get("overlap", False))]
     for overlap_index, (span, fallback) in enumerate(zip(overlap_spans, deterministic)):
         if not span.get("visible_local_track_ids"):
             decisions.append(fallback)
             continue
         try:
             previous_context, next_context = _neighbor_context(
-                active_speakers_local,
+                speaker_assignment_spans_local,
                 overlap_index=overlap_index,
             )
             prompt = _build_overlap_prompt(

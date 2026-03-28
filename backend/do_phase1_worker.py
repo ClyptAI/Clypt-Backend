@@ -1930,14 +1930,14 @@ class ClyptWorker:
     def _run_overlap_follow_postpass(
         self,
         *,
-        active_speakers_local: list[dict],
+        speaker_assignment_spans_local: list[dict],
         words: list[dict],
         speaker_candidate_debug: list[dict],
     ) -> list[dict]:
         from backend.overlap_follow import maybe_adjudicate_overlap_follow_decisions
 
         return maybe_adjudicate_overlap_follow_decisions(
-            active_speakers_local=active_speakers_local,
+            speaker_assignment_spans_local=speaker_assignment_spans_local,
             words=words,
             speaker_candidate_debug=speaker_candidate_debug,
         )
@@ -9234,8 +9234,27 @@ class ClyptWorker:
             audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
             local_to_global_track_id=cluster_id_remap,
         )
-        overlap_follow_decisions: list[dict] = self._run_overlap_follow_postpass(
+        from backend.speaker_binding.project_words import (
+            build_speaker_assignment_spans,
+            project_span_assignments_to_words,
+        )
+
+        speaker_assignment_spans_local, speaker_assignment_spans_global = build_speaker_assignment_spans(
             active_speakers_local=active_speakers_local,
+            local_to_global_track_id=cluster_id_remap,
+        )
+        word_speaker_assignments = project_span_assignments_to_words(
+            words=words,
+            speaker_assignment_spans_local=speaker_assignment_spans_global,
+        )
+        if speaker_assignment_spans_local:
+            speaker_bindings = self._build_bindings_from_word_track_field(
+                words,
+                field_name="speaker_track_id",
+            )
+            speaker_follow_bindings = self._build_speaker_follow_bindings(speaker_bindings)
+        overlap_follow_decisions: list[dict] = self._run_overlap_follow_postpass(
+            speaker_assignment_spans_local=speaker_assignment_spans_local,
             words=words,
             speaker_candidate_debug=getattr(self, "_last_speaker_candidate_debug", []),
         )
@@ -9294,7 +9313,10 @@ class ClyptWorker:
             "source_audio": youtube_url,
             "words": words,
             "speaker_bindings": speaker_bindings,
+            "word_speaker_assignments": word_speaker_assignments,
             "audio_speaker_turns": audio_speaker_turns,
+            "speaker_assignment_spans_local": speaker_assignment_spans_local,
+            "speaker_assignment_spans_global": speaker_assignment_spans_global,
             "speaker_candidate_debug": getattr(self, "_last_speaker_candidate_debug", []),
             "speaker_follow_bindings": speaker_follow_bindings,
             "active_speakers_local": active_speakers_local,

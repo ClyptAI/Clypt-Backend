@@ -260,6 +260,47 @@ class Phase1ActiveSpeakerLocalSpan(BaseModel):
         return self
 
 
+class Phase1WordSpeakerAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+    audio_speaker_ids: list[str] = Field(default_factory=list)
+    visible_local_track_ids: list[str] = Field(default_factory=list)
+    visible_track_ids: list[str] = Field(default_factory=list)
+    offscreen_audio_speaker_ids: list[str] = Field(default_factory=list)
+    dominant_visible_local_track_id: str | None = None
+    dominant_visible_track_id: str | None = None
+    decision_source: str
+    overlap: bool
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("word speaker assignment start_time_ms must be <= end_time_ms")
+        return self
+
+
+class Phase1SpeakerAssignmentSpan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+    audio_speaker_ids: list[str] = Field(default_factory=list)
+    visible_local_track_ids: list[str] = Field(default_factory=list)
+    visible_track_ids: list[str] = Field(default_factory=list)
+    offscreen_audio_speaker_ids: list[str] = Field(default_factory=list)
+    overlap: bool
+    confidence: Confidence01 | None = None
+    decision_source: str
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("speaker assignment span start_time_ms must be <= end_time_ms")
+        return self
+
+
 class Phase1OverlapFollowDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -289,13 +330,28 @@ class Phase1TranscriptArtifact(BaseModel):
     video_gcs_uri: GcsUriStr
     words: list[Phase1Word]
     speaker_bindings: list[Phase1SpeakerBinding]
+    word_speaker_assignments: list[Phase1WordSpeakerAssignment] = Field(default_factory=list)
     audio_speaker_turns: list[Phase1AudioSpeakerTurn] = Field(default_factory=list)
+    speaker_assignment_spans_local: list[Phase1SpeakerAssignmentSpan] = Field(default_factory=list)
+    speaker_assignment_spans_global: list[Phase1SpeakerAssignmentSpan] = Field(default_factory=list)
     speaker_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
     speaker_follow_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
     audio_speaker_local_track_map: list[Phase1AudioSpeakerLocalTrackMapEntry] = Field(default_factory=list)
     speaker_candidate_debug: list[Phase1SpeakerCandidateDebugEntry] = Field(default_factory=list)
     active_speakers_local: list[Phase1ActiveSpeakerLocalSpan] = Field(default_factory=list)
     overlap_follow_decisions: list[Phase1OverlapFollowDecision] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_word_assignment_alignment(self):
+        if self.word_speaker_assignments and len(self.word_speaker_assignments) != len(self.words):
+            raise ValueError("word_speaker_assignments must align 1:1 with words")
+        for word, assignment in zip(self.words, self.word_speaker_assignments):
+            if (
+                int(word.start_time_ms) != int(assignment.start_time_ms)
+                or int(word.end_time_ms) != int(assignment.end_time_ms)
+            ):
+                raise ValueError("word_speaker_assignments must match word timings in order")
+        return self
 
 
 class Phase1VisualArtifact(BaseModel):
