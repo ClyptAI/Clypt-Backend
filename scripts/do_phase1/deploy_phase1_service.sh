@@ -79,6 +79,10 @@ if [[ "$BUILD_CUDA_DECORD" == "1" ]]; then
   pushd python >/dev/null
   python setup.py install
   popd >/dev/null
+  PYTHON_MM="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  DECORD_SITE_PACKAGES="$REPO_DIR/.venv/lib/python${PYTHON_MM}/site-packages/decord"
+  install -d "$DECORD_SITE_PACKAGES"
+  cp /tmp/decord-src/build/libdecord.so "$DECORD_SITE_PACKAGES/libdecord.so"
   popd >/dev/null
 fi
 
