@@ -488,3 +488,43 @@ def test_download_media_tries_h264_first_then_falls_back(monkeypatch, tmp_path, 
     assert audio_path == str(subject.DOWNLOAD_DIR / "audio_16k.wav")
     assert DummyYDL.last_instance is not None
     assert DummyYDL.last_instance.opts["format"] == "fallback-any"
+
+
+def test_download_media_bypasses_ytdlp_for_direct_mp4_urls(monkeypatch, tmp_path, phase1_subject):
+    subject = phase1_subject
+    monkeypatch.setattr(subject, "DOWNLOAD_DIR", tmp_path / "downloads")
+    monkeypatch.setattr(subject, "OUTPUT_DIR", tmp_path / "outputs")
+    subject.DOWNLOAD_DIR.mkdir()
+    subject.OUTPUT_DIR.mkdir()
+    monkeypatch.setattr(subject, "ensure_h264_local", lambda path: path)
+    monkeypatch.setattr(subject, "probe_video_stream", lambda path: (1920, 1080, "30/1"))
+
+    def fake_run(cmd, *args, **kwargs):
+        audio_out = subject.DOWNLOAD_DIR / "audio_16k.wav"
+        audio_out.write_bytes(b"audio")
+        return None
+
+    monkeypatch.setattr(subject, "subprocess", SimpleNamespace(run=fake_run, DEVNULL=-1))
+    monkeypatch.setattr(subject, "_download_video_with_format_fallback", lambda url: (_ for _ in ()).throw(AssertionError("yt-dlp path should not run")))
+    monkeypatch.setattr(subject.log, "info", lambda *args, **kwargs: None)
+
+    class FakeResponse:
+        def __init__(self):
+            self._chunks = [b"video-bytes", b""]
+
+        def read(self, _size):
+            return self._chunks.pop(0)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(subject, "urlopen", lambda url, timeout=120: FakeResponse())
+
+    video_path, audio_path = subject.download_media("http://127.0.0.1:8091/test.mp4")
+
+    assert video_path == str(subject.DOWNLOAD_DIR / "video.mp4")
+    assert Path(video_path).read_bytes() == b"video-bytes"
+    assert audio_path == str(subject.DOWNLOAD_DIR / "audio_16k.wav")
