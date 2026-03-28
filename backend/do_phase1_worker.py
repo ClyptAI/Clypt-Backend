@@ -8159,11 +8159,7 @@ class ClyptWorker:
         )
         assigned_ratio = assigned / max(1, len(words))
         print(f"  LR-ASD assignment ratio: {assigned}/{len(words)}={assigned_ratio:.1%}")
-        effective_candidate_track_count = (
-            len(selected_turn_track_union)
-            if selected_turn_candidates
-            else len(eligible_lrasd_track_ids)
-        )
+        effective_candidate_track_count = len(eligible_lrasd_track_ids)
         insufficient_track_support = (
             len(scored_track_ids) < 2
             and effective_candidate_track_count >= 2

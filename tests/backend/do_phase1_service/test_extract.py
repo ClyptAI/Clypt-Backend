@@ -2900,6 +2900,51 @@ def test_run_lrasd_binding_does_not_reduce_candidates_using_turn_subselection(mo
     assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker", "listener"}
 
 
+def test_run_lrasd_binding_uses_global_eligible_count_for_fallback_gate(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
+    worker, words, bindings = _run_fake_lrasd_binding_case(
+        monkeypatch,
+        tmp_path,
+        track_specs={
+            "listener": {
+                "x_center": 222.0,
+                "y_center": 102.0,
+                "width": 68.0,
+                "height": 144.0,
+                "confidence": 0.9,
+                "intensity": 120,
+                "visible_start_frame": 0,
+                "visible_end_frame": 19,
+            },
+            "speaker": {
+                "x_center": 82.0,
+                "y_center": 100.0,
+                "width": 78.0,
+                "height": 152.0,
+                "confidence": 0.91,
+                "intensity": 210,
+                "visible_start_frame": 20,
+                "visible_end_frame": 39,
+            },
+        },
+        score_by_track={
+            "listener": 0.79,
+            "speaker": 0.77,
+        },
+        words=[
+            {"text": "late", "start_time_ms": 800, "end_time_ms": 1000},
+        ],
+        audio_speaker_turns=[
+            {"speaker_id": "SPEAKER_00", "start_time_ms": 0, "end_time_ms": 1000},
+        ],
+    )
+
+    assert set(worker._test_lrasd_scored_local_track_ids) == {"speaker"}
+    assert worker._last_speaker_binding_metrics["lrasd_eligible_track_count"] == 2
+    assert worker._last_speaker_binding_metrics["lrasd_turn_selected_track_count"] == 1
+    assert bindings is None
+
+
 def test_run_lrasd_binding_allows_scoring_in_diarization_gap(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("CLYPT_LRASD_TOPK_PER_TURN", "1")
     worker, words, bindings = _run_fake_lrasd_binding_case(
