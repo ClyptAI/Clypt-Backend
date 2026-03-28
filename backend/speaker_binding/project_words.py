@@ -139,19 +139,37 @@ def project_span_assignments_to_words(
             word_assignments.append(assignment)
             continue
 
+        dominant_span = overlapping_spans[0][1]
+        dominant_overlap_ms = int(overlapping_spans[0][0])
+        selected_spans = [dominant_span]
+        if bool(dominant_span.get("overlap", False)):
+            selected_spans = [span for _, span in overlapping_spans]
+        else:
+            materially_tied_spans = [
+                span
+                for overlap_ms, span in overlapping_spans[1:]
+                if int(overlap_ms) == int(dominant_overlap_ms)
+            ]
+            if materially_tied_spans:
+                selected_spans = [dominant_span, *materially_tied_spans]
+
         merged_audio_speaker_ids = _ordered_unique(
-            [speaker_id for _, span in overlapping_spans for speaker_id in span["audio_speaker_ids"]]
+            [speaker_id for span in selected_spans for speaker_id in span["audio_speaker_ids"]]
         )
         merged_visible_local_track_ids = _ordered_unique(
-            [track_id for _, span in overlapping_spans for track_id in span["visible_local_track_ids"]]
+            [track_id for span in selected_spans for track_id in span["visible_local_track_ids"]]
         )
         merged_visible_track_ids = _ordered_unique(
-            [track_id for _, span in overlapping_spans for track_id in span["visible_track_ids"]]
+            [track_id for span in selected_spans for track_id in span["visible_track_ids"]]
         )
         merged_offscreen_audio_speaker_ids = _ordered_unique(
-            [speaker_id for _, span in overlapping_spans for speaker_id in span["offscreen_audio_speaker_ids"]]
+            [speaker_id for span in selected_spans for speaker_id in span["offscreen_audio_speaker_ids"]]
         )
-        dominant_span = overlapping_spans[0][1]
+
+        existing_global_track_id = str(word.get("speaker_track_id") or "") or None
+        if not merged_visible_track_ids and len(merged_visible_local_track_ids) == 1 and existing_global_track_id:
+            merged_visible_track_ids = [existing_global_track_id]
+
         if len(merged_visible_local_track_ids) == 1 and len(merged_visible_track_ids) <= 1:
             dominant_visible_local_track_id = merged_visible_local_track_ids[0]
             dominant_visible_track_id = (
@@ -179,6 +197,7 @@ def project_span_assignments_to_words(
                 "decision_source": str(dominant_span["decision_source"]),
                 "overlap": bool(
                     dominant_span.get("overlap", False)
+                    or len(selected_spans) > 1
                     or len(merged_audio_speaker_ids) > 1
                     or len(merged_visible_local_track_ids) > 1
                     or bool(merged_offscreen_audio_speaker_ids)

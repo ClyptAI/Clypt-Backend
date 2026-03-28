@@ -171,3 +171,110 @@ def test_build_speaker_assignment_spans_projects_global_visibility_without_dropp
             "decision_source": "audio_only",
         }
     ]
+
+
+def test_project_span_assignments_keeps_dominant_handoff_side_without_false_overlap_union():
+    words = [
+        {
+            "text": "handoff",
+            "start_time_ms": 90,
+            "end_time_ms": 140,
+            "speaker_track_id": "stale-global",
+            "speaker_tag": "stale-global",
+            "speaker_local_track_id": "stale-local",
+            "speaker_local_tag": "stale-local",
+        }
+    ]
+
+    assignments = project_span_assignments_to_words(
+        words=words,
+        speaker_assignment_spans_local=[
+            {
+                "start_time_ms": 0,
+                "end_time_ms": 120,
+                "audio_speaker_ids": ["SPEAKER_00"],
+                "visible_local_track_ids": ["local-1"],
+                "visible_track_ids": ["Global_Person_0"],
+                "offscreen_audio_speaker_ids": [],
+                "overlap": False,
+                "confidence": 0.91,
+                "decision_source": "turn_binding",
+            },
+            {
+                "start_time_ms": 120,
+                "end_time_ms": 220,
+                "audio_speaker_ids": ["SPEAKER_01"],
+                "visible_local_track_ids": ["local-2"],
+                "visible_track_ids": ["Global_Person_1"],
+                "offscreen_audio_speaker_ids": [],
+                "overlap": False,
+                "confidence": 0.89,
+                "decision_source": "turn_binding",
+            },
+        ],
+    )
+
+    assert assignments == [
+        {
+            "start_time_ms": 90,
+            "end_time_ms": 140,
+            "audio_speaker_ids": ["SPEAKER_00"],
+            "visible_local_track_ids": ["local-1"],
+            "visible_track_ids": ["Global_Person_0"],
+            "offscreen_audio_speaker_ids": [],
+            "dominant_visible_local_track_id": "local-1",
+            "dominant_visible_track_id": "Global_Person_0",
+            "decision_source": "turn_binding",
+            "overlap": False,
+        }
+    ]
+    assert words[0]["speaker_local_track_id"] == "local-1"
+    assert words[0]["speaker_track_id"] == "Global_Person_0"
+
+
+def test_project_span_assignments_keeps_existing_global_assignment_when_single_local_has_no_projected_global():
+    words = [
+        {
+            "text": "solo",
+            "start_time_ms": 0,
+            "end_time_ms": 100,
+            "speaker_track_id": "Global_Person_0",
+            "speaker_tag": "Global_Person_0",
+            "speaker_local_track_id": None,
+            "speaker_local_tag": "unknown",
+        }
+    ]
+
+    assignments = project_span_assignments_to_words(
+        words=words,
+        speaker_assignment_spans_local=[
+            {
+                "start_time_ms": 0,
+                "end_time_ms": 100,
+                "audio_speaker_ids": ["SPEAKER_00"],
+                "visible_local_track_ids": ["local-1"],
+                "visible_track_ids": [],
+                "offscreen_audio_speaker_ids": [],
+                "overlap": False,
+                "confidence": 0.93,
+                "decision_source": "turn_binding",
+            }
+        ],
+    )
+
+    assert assignments == [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 100,
+            "audio_speaker_ids": ["SPEAKER_00"],
+            "visible_local_track_ids": ["local-1"],
+            "visible_track_ids": ["Global_Person_0"],
+            "offscreen_audio_speaker_ids": [],
+            "dominant_visible_local_track_id": "local-1",
+            "dominant_visible_track_id": "Global_Person_0",
+            "decision_source": "turn_binding",
+            "overlap": False,
+        }
+    ]
+    assert words[0]["speaker_local_track_id"] == "local-1"
+    assert words[0]["speaker_track_id"] == "Global_Person_0"
