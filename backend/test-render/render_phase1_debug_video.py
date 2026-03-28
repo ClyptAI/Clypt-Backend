@@ -267,6 +267,12 @@ def _det_geometry_metrics(det: dict, frame_width: int, frame_height: int) -> dic
     }
 
 
+def _overlap_extent_ratio(start_a: float, end_a: float, start_b: float, end_b: float) -> float:
+    overlap = max(0.0, min(end_a, end_b) - max(start_a, start_b))
+    shorter = max(1e-6, min(end_a - start_a, end_b - start_b))
+    return overlap / shorter
+
+
 def _score_render_target_candidate(det: dict, frame_width: int, frame_height: int) -> float:
     metrics = _det_geometry_metrics(det, frame_width, frame_height)
     score = float(det.get("confidence", 0.0) or 0.0)
@@ -375,6 +381,63 @@ def _dominant_larger_track_detection(
     return larger
 
 
+def _is_fragment_like_target(det: dict, frame_width: int, frame_height: int) -> bool:
+    metrics = _det_geometry_metrics(det, frame_width, frame_height)
+    return (
+        metrics["h"] < 0.52
+        or metrics["area"] < 0.14
+        or (metrics["bottom"] > 0.84 and metrics["center_y"] > 0.62)
+    )
+
+
+def _rescue_active_track_detection(
+    *,
+    target_track_id: str,
+    chosen: dict | None,
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+) -> dict | None:
+    if chosen is None or not _is_fragment_like_target(chosen, frame_width, frame_height):
+        return None
+
+    chosen_metrics = _det_geometry_metrics(chosen, frame_width, frame_height)
+    chosen_x1 = float(chosen.get("x1", 0.0)) / max(1.0, float(frame_width))
+    chosen_x2 = float(chosen.get("x2", 0.0)) / max(1.0, float(frame_width))
+    chosen_y1 = float(chosen.get("y1", 0.0)) / max(1.0, float(frame_height))
+    chosen_y2 = float(chosen.get("y2", 0.0)) / max(1.0, float(frame_height))
+
+    rescue_candidates: list[dict] = []
+    for det in frame_detections:
+        if det is chosen:
+            continue
+        if str(det.get("track_id", "")) == target_track_id:
+            continue
+        if not _is_plausible_render_target(det, frame_width, frame_height):
+            continue
+        metrics = _det_geometry_metrics(det, frame_width, frame_height)
+        if metrics["h"] < 0.55 or metrics["area"] < 0.14:
+            continue
+        if (metrics["area"] / max(1e-6, chosen_metrics["area"])) < 2.2:
+            continue
+        if (metrics["h"] / max(1e-6, chosen_metrics["h"])) < 1.3:
+            continue
+
+        det_x1 = float(det.get("x1", 0.0)) / max(1.0, float(frame_width))
+        det_x2 = float(det.get("x2", 0.0)) / max(1.0, float(frame_width))
+        det_y1 = float(det.get("y1", 0.0)) / max(1.0, float(frame_height))
+        det_y2 = float(det.get("y2", 0.0)) / max(1.0, float(frame_height))
+        x_overlap = _overlap_extent_ratio(chosen_x1, chosen_x2, det_x1, det_x2)
+        y_overlap = _overlap_extent_ratio(chosen_y1, chosen_y2, det_y1, det_y2)
+        if x_overlap < 0.35 or y_overlap < 0.55:
+            continue
+        rescue_candidates.append(det)
+
+    if len(rescue_candidates) != 1:
+        return None
+    return rescue_candidates[0]
+
+
 def choose_clean_track_detection(
     *,
     target_track_id: str,
@@ -413,23 +476,39 @@ def select_render_detections(
     selected: list[dict] = []
     chosen_by_track_id: dict[str, dict | None] = {}
     for track_id in targeted_track_ids:
-        chosen_by_track_id[track_id] = choose_clean_track_detection(
+        chosen = choose_clean_track_detection(
             target_track_id=track_id,
             frame_detections=frame_detections,
             frame_width=frame_width,
             frame_height=frame_height,
         )
+        rescued = _rescue_active_track_detection(
+            target_track_id=track_id,
+            chosen=chosen,
+            frame_detections=frame_detections,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        chosen_by_track_id[track_id] = rescued or chosen
+
+    consumed_detection_ids: set[int] = set()
+    for track_id, chosen in chosen_by_track_id.items():
+        if chosen is None:
+            continue
+        rendered = dict(chosen)
+        if str(chosen.get("track_id", "")) != track_id:
+            rendered["_render_role_track_id"] = track_id
+        selected.append(rendered)
+        consumed_detection_ids.add(id(chosen))
 
     for det in frame_detections:
+        if id(det) in consumed_detection_ids:
+            continue
         track_id = str(det.get("track_id", ""))
         if track_id not in targeted_track_ids:
             selected.append(det)
             continue
-        chosen = chosen_by_track_id.get(track_id)
-        if chosen is None:
-            selected.append(det)
-            continue
-        if det is chosen:
+        if chosen_by_track_id.get(track_id) is None:
             selected.append(det)
     return selected
 
@@ -521,8 +600,9 @@ def draw_detection_box(
     follow_track_id: str | None,
     active_track_ids: set[str] | None = None,
 ) -> None:
+    role_track_id = str(det.get("_render_role_track_id") or det.get("track_id", ""))
     style = role_style_for_track(
-        str(det.get("track_id", "")),
+        role_track_id,
         raw_track_id=raw_track_id,
         follow_track_id=follow_track_id,
         active_track_ids=active_track_ids,
@@ -532,7 +612,10 @@ def draw_detection_box(
     x2 = int(det["x2"])
     y2 = int(det["y2"])
     cv2.rectangle(frame, (x1, y1), (x2, y2), style["color"], style["thickness"])
-    label = str(det.get("track_id", ""))
+    label = role_track_id
+    actual_track_id = str(det.get("track_id", ""))
+    if actual_track_id and actual_track_id != role_track_id:
+        label = f"{role_track_id}->{actual_track_id}"
     if style["label_suffix"]:
         label = f"{label} {style['label_suffix']}"
     cv2.putText(frame, label, (x1 + 4, max(24, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
