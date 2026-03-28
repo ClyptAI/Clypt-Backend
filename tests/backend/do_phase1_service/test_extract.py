@@ -1768,10 +1768,156 @@ def test_run_speaker_binding_routes_overlap_span_to_lrasd_even_with_easy_single_
         {"track_id": "Global_Person_0", "start_time_ms": 0, "end_time_ms": 380, "word_count": 2},
         {"track_id": "Global_Person_1", "start_time_ms": 420, "end_time_ms": 780, "word_count": 2},
     ]
+    assert worker._last_audio_turn_bindings == [
+        {
+            "speaker_id": "SPEAKER_00",
+            "source_turn_id": "turn-0",
+            "span_id": "scheduled-0",
+            "start_time_ms": 0,
+            "end_time_ms": 400,
+            "local_track_id": "local-1",
+            "track_id": "Global_Person_0",
+            "ambiguous": False,
+            "decision_source": "turn_binding",
+            "winning_score": 0.93,
+            "winning_margin": 0.24,
+            "support_ratio": 0.95,
+            "max_visible_candidates": 1,
+        },
+        {
+            "speaker_id": "SPEAKER_01",
+            "source_turn_id": "turn-1",
+            "span_id": "scheduled-1",
+            "start_time_ms": 400,
+            "end_time_ms": 800,
+            "local_track_id": "local-2",
+            "track_id": "Global_Person_1",
+            "ambiguous": True,
+            "decision_source": "turn_binding",
+            "winning_score": 0.61,
+            "winning_margin": 0.04,
+            "support_ratio": 0.68,
+            "max_visible_candidates": 2,
+        },
+    ]
     assert worker._last_speaker_binding_metrics["scheduled_spans_total"] == 2
     assert worker._last_speaker_binding_metrics["easy_spans_resolved"] == 1
     assert worker._last_speaker_binding_metrics["hard_spans_routed_to_lrasd"] == 1
     assert worker._last_speaker_binding_metrics["overlap_spans_count"] == 1
+
+
+def test_run_speaker_binding_easy_span_synthesizes_per_source_turn_ranges(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.lrasd_model = object()
+    worker.lrasd_loss_av = object()
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "lrasd")
+    monkeypatch.setattr(
+        worker,
+        "_probe_video_meta",
+        lambda path: {"width": 1280, "height": 720, "duration_s": 30.0},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_build_speaker_binding_track_quality",
+        lambda *args, **kwargs: {"local-1": {"track_quality": 0.92}},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_rank_lrasd_turn_candidates",
+        lambda **kwargs: [
+            {
+                "local_track_id": "local-1",
+                "candidate_survives": True,
+                "speech_overlap_ratio": 0.96,
+                "continuity_support_score": 0.89,
+                "rank_score": 0.94,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        worker,
+        "_run_lrasd_binding",
+        lambda **kwargs: pytest.fail("all-easy merged span should still skip LR-ASD"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding_heuristic",
+        lambda *args, **kwargs: pytest.fail("all-easy merged span should not fall back"),
+    )
+
+    words = [
+        {"text": "hello", "start_time_ms": 0, "end_time_ms": 90},
+        {"text": "world", "start_time_ms": 110, "end_time_ms": 190},
+    ]
+
+    result = worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "local-1", "frame_idx": 0, "x_center": 80.0, "y_center": 100.0, "width": 72.0, "height": 148.0, "confidence": 0.93}],
+        words=words,
+        frame_to_dets={0: [{"track_id": "local-1", "frame_idx": 0, "x_center": 80.0, "y_center": 100.0, "width": 72.0, "height": 148.0, "confidence": 0.93}]},
+        track_to_dets={"local-1": [{"track_id": "local-1", "frame_idx": 0, "x_center": 80.0, "y_center": 100.0, "width": 72.0, "height": 148.0, "confidence": 0.93}]},
+        analysis_context={
+            "audio_speaker_turns": [
+                {"speaker_id": "SPEAKER_00", "turn_id": "turn-0", "start_time_ms": 0, "end_time_ms": 100},
+                {"speaker_id": "SPEAKER_00", "turn_id": "turn-1", "start_time_ms": 105, "end_time_ms": 200},
+            ],
+            "scheduled_audio_spans": [
+                {
+                    "span_id": "scheduled-0",
+                    "span_type": "single",
+                    "speaker_ids": ["SPEAKER_00"],
+                    "speaker_id": "SPEAKER_00",
+                    "exclusive": True,
+                    "overlap": False,
+                    "start_time_ms": 0,
+                    "end_time_ms": 200,
+                    "context_start_time_ms": 0,
+                    "context_end_time_ms": 200,
+                    "source_turn_ids": ["turn-0", "turn-1"],
+                }
+            ],
+        },
+        track_id_remap={"local-1": "Global_Person_0"},
+    )
+
+    assert result == [
+        {"track_id": "Global_Person_0", "start_time_ms": 0, "end_time_ms": 190, "word_count": 2}
+    ]
+    assert worker._last_audio_turn_bindings == [
+        {
+            "speaker_id": "SPEAKER_00",
+            "source_turn_id": "turn-0",
+            "span_id": "scheduled-0",
+            "start_time_ms": 0,
+            "end_time_ms": 100,
+            "local_track_id": "local-1",
+            "track_id": "Global_Person_0",
+            "ambiguous": False,
+            "decision_source": "easy_span",
+            "winning_score": pytest.approx(0.9285, abs=1e-3),
+            "winning_margin": pytest.approx(0.94, abs=1e-3),
+            "support_ratio": pytest.approx(0.96, abs=1e-3),
+            "max_visible_candidates": 1,
+        },
+        {
+            "speaker_id": "SPEAKER_00",
+            "source_turn_id": "turn-1",
+            "span_id": "scheduled-0",
+            "start_time_ms": 105,
+            "end_time_ms": 200,
+            "local_track_id": "local-1",
+            "track_id": "Global_Person_0",
+            "ambiguous": False,
+            "decision_source": "easy_span",
+            "winning_score": pytest.approx(0.9285, abs=1e-3),
+            "winning_margin": pytest.approx(0.94, abs=1e-3),
+            "support_ratio": pytest.approx(0.96, abs=1e-3),
+            "max_visible_candidates": 1,
+        },
+    ]
 
 
 def test_run_speaker_binding_delegates_to_package_entrypoint(monkeypatch):

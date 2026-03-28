@@ -1,4 +1,4 @@
-from backend.speaker_binding.easy_span_cascade import classify_easy_span
+from backend.speaker_binding.easy_span_cascade import build_easy_span_binding_rows, classify_easy_span
 
 
 def test_classify_easy_span_accepts_dominant_single_speaker_span():
@@ -139,3 +139,62 @@ def test_classify_easy_span_rejects_winner_without_local_track_id():
 
     assert decision["decision"] == "hard"
     assert decision["reason"] == "missing_local_track"
+
+
+def test_build_easy_span_binding_rows_uses_source_turn_time_ranges():
+    rows = build_easy_span_binding_rows(
+        {
+            "span_id": "scheduled-0",
+            "speaker_ids": ["SPEAKER_00"],
+            "context_start_time_ms": 0,
+            "context_end_time_ms": 200,
+            "source_turn_ids": ["turn-0", "turn-1"],
+        },
+        {
+            "decision": "easy",
+            "speaker_id": "SPEAKER_00",
+            "local_track_id": "local-1",
+            "winning_score": 0.92,
+            "winning_margin": 0.81,
+            "support_ratio": 0.95,
+            "max_visible_candidates": 1,
+        },
+        global_track_id="Global_Person_0",
+        source_turn_ranges={
+            "turn-0": {"start_time_ms": 0, "end_time_ms": 100},
+            "turn-1": {"start_time_ms": 105, "end_time_ms": 200},
+        },
+    )
+
+    assert rows == [
+        {
+            "speaker_id": "SPEAKER_00",
+            "source_turn_id": "turn-0",
+            "span_id": "scheduled-0",
+            "start_time_ms": 0,
+            "end_time_ms": 100,
+            "local_track_id": "local-1",
+            "ambiguous": False,
+            "decision_source": "easy_span",
+            "winning_score": 0.92,
+            "winning_margin": 0.81,
+            "support_ratio": 0.95,
+            "max_visible_candidates": 1,
+            "track_id": "Global_Person_0",
+        },
+        {
+            "speaker_id": "SPEAKER_00",
+            "source_turn_id": "turn-1",
+            "span_id": "scheduled-0",
+            "start_time_ms": 105,
+            "end_time_ms": 200,
+            "local_track_id": "local-1",
+            "ambiguous": False,
+            "decision_source": "easy_span",
+            "winning_score": 0.92,
+            "winning_margin": 0.81,
+            "support_ratio": 0.95,
+            "max_visible_candidates": 1,
+            "track_id": "Global_Person_0",
+        },
+    ]

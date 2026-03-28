@@ -83,6 +83,7 @@ def build_easy_span_binding_rows(
     decision: dict | None,
     *,
     global_track_id: str | None = None,
+    source_turn_ranges: dict[str, dict] | None = None,
 ) -> list[dict]:
     span = dict(span or {})
     decision = dict(decision or {})
@@ -101,12 +102,22 @@ def build_easy_span_binding_rows(
 
     rows: list[dict] = []
     for source_turn_id in source_turn_ids:
+        turn_range = dict((source_turn_ranges or {}).get(source_turn_id) or {})
+        row_start_time_ms = int(turn_range.get("start_time_ms", start_time_ms) or start_time_ms)
+        row_end_time_ms = int(turn_range.get("end_time_ms", end_time_ms) or end_time_ms)
+        if row_end_time_ms < row_start_time_ms:
+            row_start_time_ms, row_end_time_ms = row_end_time_ms, row_start_time_ms
+        if turn_range:
+            row_start_time_ms = max(int(start_time_ms), int(row_start_time_ms))
+            row_end_time_ms = min(int(end_time_ms), int(row_end_time_ms))
+        if row_end_time_ms <= row_start_time_ms:
+            continue
         row = {
             "speaker_id": str(decision.get("speaker_id", "") or ""),
             "source_turn_id": source_turn_id,
             "span_id": str(span.get("span_id", "") or ""),
-            "start_time_ms": int(start_time_ms),
-            "end_time_ms": int(end_time_ms),
+            "start_time_ms": int(row_start_time_ms),
+            "end_time_ms": int(row_end_time_ms),
             "local_track_id": str(decision.get("local_track_id", "") or ""),
             "ambiguous": False,
             "decision_source": "easy_span",

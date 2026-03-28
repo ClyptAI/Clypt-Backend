@@ -8692,23 +8692,33 @@ class ClyptWorker:
         )
 
     @staticmethod
+    def _audio_turn_binding_identity(binding: dict) -> tuple:
+        source_turn_id = str(binding.get("source_turn_id", "") or "")
+        if source_turn_id:
+            return (
+                str(binding.get("speaker_id", "") or ""),
+                source_turn_id,
+                str(binding.get("local_track_id", "") or ""),
+            )
+        return (
+            str(binding.get("speaker_id", "") or ""),
+            str(binding.get("span_id", "") or ""),
+            int(binding.get("start_time_ms", 0) or 0),
+            int(binding.get("end_time_ms", 0) or 0),
+            str(binding.get("local_track_id", "") or ""),
+        )
+
+    @staticmethod
     def _merge_audio_turn_bindings(
         existing_bindings: list[dict] | None,
         synthetic_bindings: list[dict] | None,
     ) -> list[dict]:
         merged: list[dict] = []
         seen: set[tuple] = set()
-        for binding in list(synthetic_bindings or []) + list(existing_bindings or []):
+        for binding in list(existing_bindings or []) + list(synthetic_bindings or []):
             if not isinstance(binding, dict):
                 continue
-            key = (
-                str(binding.get("speaker_id", "") or ""),
-                str(binding.get("source_turn_id", "") or ""),
-                int(binding.get("start_time_ms", 0) or 0),
-                int(binding.get("end_time_ms", 0) or 0),
-                str(binding.get("local_track_id", "") or ""),
-                str(binding.get("decision_source", "") or ""),
-            )
+            key = ClyptWorker._audio_turn_binding_identity(binding)
             if key in seen:
                 continue
             seen.add(key)
@@ -8800,6 +8810,14 @@ class ClyptWorker:
             for local_track_id, global_track_id in dict(track_id_remap or {}).items()
             if str(local_track_id or "") and str(global_track_id or "")
         }
+        source_turn_ranges = {
+            str(turn.get("turn_id", "") or ""): {
+                "start_time_ms": int(turn.get("start_time_ms", 0) or 0),
+                "end_time_ms": int(turn.get("end_time_ms", turn.get("start_time_ms", 0)) or 0),
+            }
+            for turn in list((analysis_context or {}).get("audio_speaker_turns") or [])
+            if isinstance(turn, dict) and str(turn.get("turn_id", "") or "")
+        }
 
         easy_assignments: list[dict] = []
         synthetic_bindings: list[dict] = []
@@ -8847,6 +8865,7 @@ class ClyptWorker:
                         span,
                         decision,
                         global_track_id=global_track_id,
+                        source_turn_ranges=source_turn_ranges,
                     )
                 )
                 metrics["easy_spans_resolved"] += 1
