@@ -19,12 +19,41 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from html import unescape
+from http.cookiejar import MozillaCookieJar
 
 import httpx
+import requests
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from pipeline.audience.crowd_utils import OUTPUTS_DIR, VIDEOS_DIR
+
+_log = logging.getLogger("crowd_transcript")
+
+
+def _get_cookies_path() -> str | None:
+    """Return the path to a Netscape cookies.txt file, or None."""
+    path = str(os.getenv("YOUTUBE_COOKIES_PATH", "") or "").strip()
+    if path and Path(path).is_file():
+        return path
+    # Also check for a cookies.txt next to the repo root
+    default = Path(__file__).resolve().parents[3] / "cookies.txt"
+    if default.is_file():
+        return str(default)
+    return None
+
+
+def _build_transcript_api() -> YouTubeTranscriptApi:
+    """Build a YouTubeTranscriptApi instance with cookies if available."""
+    cookies_path = _get_cookies_path()
+    if not cookies_path:
+        return YouTubeTranscriptApi()
+    _log.info("Loading YouTube cookies from %s", cookies_path)
+    jar = MozillaCookieJar(cookies_path)
+    jar.load(ignore_discard=True, ignore_expires=True)
+    session = requests.Session()
+    session.cookies = jar  # type: ignore[assignment]
+    return YouTubeTranscriptApi(http_client=session)
 
 
 def _audio_matches_video_id(payload: dict, video_id: str) -> bool:
@@ -36,7 +65,7 @@ def _audio_matches_video_id(payload: dict, video_id: str) -> bool:
 
 
 def _synth_words_from_transcript(video_id: str) -> tuple[list[dict], dict]:
-    transcript = YouTubeTranscriptApi().fetch(video_id, languages=["en"])
+    transcript = _build_transcript_api().fetch(video_id, languages=["en"])
     words: list[dict] = []
     for snippet in transcript:
         text = str(getattr(snippet, "text", "") or "").strip()
@@ -126,7 +155,7 @@ def _words_from_caption_events(events: list[dict]) -> list[dict]:
 def _synth_words_from_ytdlp_captions(video_id: str) -> tuple[list[dict], dict]:
     """Full yt-dlp caption fallback: extract captions via yt-dlp."""
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-    ydl_opts = {
+    ydl_opts: dict = {
         "quiet": True,
         "skip_download": True,
         "no_warnings": True,
@@ -135,6 +164,9 @@ def _synth_words_from_ytdlp_captions(video_id: str) -> tuple[list[dict], dict]:
         "subtitleslangs": ["en"],
         "subtitlesformat": "json3",
     }
+    cookies_path = _get_cookies_path()
+    if cookies_path:
+        ydl_opts["cookiefile"] = cookies_path
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(youtube_url, download=False)
 
@@ -146,7 +178,14 @@ def _synth_words_from_ytdlp_captions(video_id: str) -> tuple[list[dict], dict]:
     if not track_url:
         raise RuntimeError(f"Caption track has no URL for {video_id}")
 
-    _log = logging.getLogger("crowd_transcript")
+    # Load cookies for httpx request if available
+    cookies_path = _get_cookies_path()
+    httpx_cookies = None
+    if cookies_path:
+        jar = MozillaCookieJar(cookies_path)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        httpx_cookies = {c.name: c.value for c in jar if c.value is not None}
+
     caption_data = None
     last_exc = None
     for attempt in range(4):
@@ -155,7 +194,7 @@ def _synth_words_from_ytdlp_captions(video_id: str) -> tuple[list[dict], dict]:
             _log.info("Retry %d for captions of %s (waiting %ds)", attempt, video_id, wait)
             time.sleep(wait)
         try:
-            resp = httpx.get(track_url, timeout=30.0)
+            resp = httpx.get(track_url, timeout=30.0, cookies=httpx_cookies)
             resp.raise_for_status()
             caption_data = resp.json()
             break
