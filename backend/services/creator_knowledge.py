@@ -123,6 +123,7 @@ class CreatorKnowledgeService:
         schema = {
             "creator_archetype": "string",
             "creator_summary": "string",
+            "category": "string — e.g. Podcast, Gaming, Education, Comedy, Music, Tech, Vlog, Sports, News, Fitness, Cooking, Finance, Beauty, Travel, DIY, Science, Lifestyle, Entertainment",
             "tone": "string or array of strings",
             "pacing": "string",
             "hook_style": "string",
@@ -146,6 +147,7 @@ class CreatorKnowledgeService:
             "- No markdown.\n"
             "- No prose before or after the JSON.\n"
             "- Keep recurring_topics and brand_voice concise.\n"
+            "- category must be a single short label (1-2 words) describing the content genre.\n"
             "- If evidence is weak, still fill the field with the best grounded summary.\n"
             "- dominant_mechanisms intensities must be numbers between 0 and 1.\n"
         )

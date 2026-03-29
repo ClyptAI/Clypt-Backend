@@ -66,7 +66,7 @@ export default function OnboardBrandProfile() {
         totalViews: channel.total_views_label ?? channel.totalViews ?? "",
         uploadFrequency: channel.upload_frequency_label ?? channel.uploadFrequency ?? "",
         joinedDate: channel.joined_date_label ?? channel.joinedDate ?? "",
-        category: channel.category ?? "",
+        category: channel.category || profile?.category || "",
         description: channel.description ?? "",
       }
     : mockChannelResult;
