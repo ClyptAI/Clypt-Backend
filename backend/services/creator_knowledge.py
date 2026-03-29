@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 from backend.integrations.senso_client import (
+    SensoAPIError,
     SensoClient,
     SensoContentRecord,
     SensoGenerateResponse,
     SensoSearchResponse,
 )
+
+_log = logging.getLogger("creator_knowledge")
 
 
 @dataclass(frozen=True)
@@ -58,13 +62,19 @@ class CreatorKnowledgeService:
         for document in documents:
             title = document.title.strip() or f"Untitled Creator Document {len(created) + 1}"
             namespaced_title = f"{workspace.creator_label} :: {title}"
-            record = self.client.create_raw_content(
-                title=namespaced_title,
-                summary=document.summary or None,
-                text=document.text,
-                kb_folder_node_id=workspace.kb_folder_node_id,
-            )
-            created.append(record)
+            try:
+                record = self.client.create_raw_content(
+                    title=namespaced_title,
+                    summary=document.summary or None,
+                    text=document.text,
+                    kb_folder_node_id=workspace.kb_folder_node_id,
+                )
+                created.append(record)
+            except SensoAPIError as exc:
+                if exc.status_code == 409:
+                    _log.info("Skipping duplicate content: %s", namespaced_title)
+                    continue
+                raise
         return created
 
     def build_creator_profile(
@@ -85,6 +95,7 @@ class CreatorKnowledgeService:
             content_ids=content_ids,
             max_results=max_results,
             include_answer=True,
+            require_scoped_ids=bool(content_ids),
         )
         return SensoGenerateResponse(
             generated_text=response.answer,

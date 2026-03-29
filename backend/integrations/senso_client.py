@@ -216,6 +216,7 @@ class SensoClient:
         poll_interval_s: float = 2.0,
         max_wait_s: float = 60.0,
         include_answer: bool = True,
+        require_scoped_ids: bool = True,
     ) -> SensoSearchResponse:
         deadline = time.monotonic() + max_wait_s
         last_response: SensoSearchResponse | None = None
@@ -224,7 +225,7 @@ class SensoClient:
                 query=query,
                 max_results=max_results,
                 content_ids=content_ids,
-                require_scoped_ids=True,
+                require_scoped_ids=require_scoped_ids,
                 include_answer=include_answer,
             )
             last_response = response
