@@ -2,18 +2,17 @@
 """
 Phase 2A: Content Mechanism Decomposition (Chunked Processing)
 ===============================================================
-Splits the Phase 1 audio ledger into adaptive, token-budgeted chunks
-aligned on shot boundaries. Each chunk sends the audio transcript for
-its time range, plus the GCS video, to Gemini 3.1 Pro. Gemini uses its
-own vision capabilities to analyze the video directly — the visual
-bounding-box / tracking data from Phase 1 is NOT sent here; it is
-reserved exclusively for the FFmpeg speaker-follow renderer.
+Splits the Phase 1 audio ledger into adaptive, token-budgeted chunks.
+Each chunk sends the audio transcript for its time range, plus the GCS
+video, to Gemini 3.1 Pro. Gemini uses its own vision capabilities to
+analyze the video directly — NO Phase 1 visual data (bounding boxes,
+tracks, face detections) is sent to Gemini. That data is reserved
+exclusively for the FFmpeg speaker-follow renderer.
 
 A merge pass deduplicates boundary nodes into the final output.
 
 Inputs:
   - gs://clypt-storage-v2/phase_1/video.mp4  (muxed video+audio on GCS)
-  - phase_1_visual.json   (shot_changes + video_metadata only, for chunk planning)
   - phase_1_audio.json    (transcript words, sliced per chunk)
 
 Output:
@@ -43,7 +42,6 @@ MODEL_ID = "gemini-3.1-pro-preview"
 
 ROOT = Path(__file__).resolve().parent.parent
 VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
-VISUAL_LEDGER_PATH = ROOT / "outputs" / "phase_1_visual.json"
 AUDIO_LEDGER_PATH = ROOT / "outputs" / "phase_1_audio.json"
 OUTPUT_PATH = ROOT / "outputs" / "phase_2a_nodes.json"
 CHECKPOINT_PATH = ROOT / "outputs" / "phase_2a_nodes.checkpoint.json"
@@ -72,7 +70,7 @@ def resolve_video_gcs_uri() -> str:
     env_override = os.getenv("VIDEO_GCS_URI", "").strip()
     if env_override:
         return env_override
-    for path in (VISUAL_LEDGER_PATH, AUDIO_LEDGER_PATH):
+    for path in (AUDIO_LEDGER_PATH,):
         if not path.exists():
             continue
         try:
@@ -161,73 +159,63 @@ class Chunk:
     estimated_tokens: int = 0
 
 
-def _overlaps(seg_start: int, seg_end: int, chunk_start: int, chunk_end: int) -> bool:
-    return seg_start < chunk_end and seg_end > chunk_start
-
-
-def _estimate_shot_tokens(
-    shot_start: int,
-    shot_end: int,
-    visual: dict,
+def _estimate_window_tokens(
+    window_start: int,
+    window_end: int,
     audio: dict,
 ) -> int:
-    """Estimate the token cost of one shot by measuring the serialized size of
-    the data that would be sliced for this shot's time range."""
-    dummy_chunk = Chunk(index=0, start_ms=shot_start, end_ms=shot_end)
-    sliced_vis, sliced_aud = _slice_ledger_for_chunk(dummy_chunk, visual, audio)
-    total_chars = len(json.dumps(sliced_vis)) + len(json.dumps(sliced_aud))
+    """Estimate the token cost of one time window by measuring the audio words in range."""
+    words_in_range = [
+        w for w in audio.get("words", [])
+        if window_start <= int(w.get("start_time_ms", 0)) < window_end
+    ]
+    total_chars = len(json.dumps(words_in_range))
     return total_chars // CHARS_PER_TOKEN
 
 
-def _plan_chunks(visual: dict, audio: dict) -> list[Chunk]:
-    """Group consecutive shots into chunks that fit within TEXT_TOKEN_BUDGET."""
-    shots = visual.get("shot_changes", [])
-    if not shots:
-        # Fallback: synthesize pseudo-shots from available duration.
-        duration_ms = 0
-        if isinstance(visual.get("video_metadata"), dict):
-            duration_ms = int(visual["video_metadata"].get("duration_ms", 0) or 0)
-        if duration_ms <= 0:
-            words = audio.get("words", []) if isinstance(audio, dict) else []
-            if words:
-                duration_ms = int(words[-1].get("end_time_ms", 0) or 0)
-        if duration_ms <= 0:
-            tracks = visual.get("tracks", [])
-            if tracks and isinstance(visual.get("video_metadata"), dict):
-                fps = float(visual["video_metadata"].get("fps", 25.0) or 25.0)
-                max_fi = max(int(t.get("frame_idx", 0)) for t in tracks)
-                duration_ms = int(round((max_fi / max(1e-6, fps)) * 1000.0))
-        if duration_ms <= 0:
-            duration_ms = 10_000
-        shots = []
-        start = 0
-        while start < duration_ms:
-            end = min(duration_ms, start + 10_000)
-            shots.append({"start_time_ms": start, "end_time_ms": end})
-            if end >= duration_ms:
-                break
-            start = end
+def _plan_chunks(audio: dict) -> list[Chunk]:
+    """Split the video into adaptive chunks based on audio transcript duration.
+
+    Generates fixed 10-second windows from the audio duration, then groups
+    them into token-budgeted chunks for Gemini processing.
+    """
+    words = audio.get("words", []) if isinstance(audio, dict) else []
+    duration_ms = 0
+    if words:
+        duration_ms = int(words[-1].get("end_time_ms", 0) or 0)
+    if duration_ms <= 0:
+        duration_ms = 10_000
+
+    # Generate 10-second windows
+    windows = []
+    start = 0
+    while start < duration_ms:
+        end = min(duration_ms, start + 10_000)
+        windows.append({"start_time_ms": start, "end_time_ms": end})
+        if end >= duration_ms:
+            break
+        start = end
 
     budget = TEXT_TOKEN_BUDGET - PROMPT_OVERHEAD_TOKENS
     chunks: list[Chunk] = []
-    current = Chunk(index=0, start_ms=shots[0]["start_time_ms"], end_ms=shots[0]["end_time_ms"])
+    current = Chunk(index=0, start_ms=windows[0]["start_time_ms"], end_ms=windows[0]["end_time_ms"])
 
-    for i, shot in enumerate(shots):
-        shot_tokens = _estimate_shot_tokens(
-            shot["start_time_ms"], shot["end_time_ms"], visual, audio
+    for i, window in enumerate(windows):
+        window_tokens = _estimate_window_tokens(
+            window["start_time_ms"], window["end_time_ms"], audio
         )
 
-        if current.estimated_tokens + shot_tokens > budget and current.shot_indices:
+        if current.estimated_tokens + window_tokens > budget and current.shot_indices:
             chunks.append(current)
             current = Chunk(
                 index=len(chunks),
-                start_ms=shot["start_time_ms"],
-                end_ms=shot["end_time_ms"],
+                start_ms=window["start_time_ms"],
+                end_ms=window["end_time_ms"],
             )
 
         current.shot_indices.append(i)
-        current.end_ms = shot["end_time_ms"]
-        current.estimated_tokens += shot_tokens
+        current.end_ms = window["end_time_ms"]
+        current.estimated_tokens += window_tokens
 
     if current.shot_indices:
         chunks.append(current)
@@ -239,39 +227,17 @@ def _plan_chunks(visual: dict, audio: dict) -> list[Chunk]:
 # ──────────────────────────────────────────────
 # Ledger slicing
 # ──────────────────────────────────────────────
-def _slice_ledger_for_chunk(
+def _slice_audio_for_chunk(
     chunk: Chunk,
-    visual: dict,
     audio: dict,
-) -> tuple[dict, dict]:
-    """Filter ledgers to only include data within the chunk's time range.
-
-    Only shot_changes and video_metadata are kept from the visual ledger
-    (for Gemini scene-structure context).  Bounding-box data (tracks,
-    face_detections, person_detections, object_tracking, label_detections)
-    is deliberately excluded — that data is reserved for the FFmpeg
-    speaker-follow renderer and would only waste Gemini tokens here.
-    """
-    start = chunk.start_ms
-    end = chunk.end_ms
-
-    # Keep only structural visual metadata — no bounding boxes
-    sliced_visual: dict = {
-        "shot_changes": [
-            s for s in visual.get("shot_changes", [])
-            if _overlaps(s["start_time_ms"], s["end_time_ms"], start, end)
-        ],
-        "video_metadata": visual.get("video_metadata", {}),
-    }
-
-    sliced_audio = {
+) -> dict:
+    """Filter audio transcript words to only include data within the chunk's time range."""
+    return {
         "words": [
             w for w in audio.get("words", [])
-            if start <= w["start_time_ms"] < end
+            if chunk.start_ms <= w["start_time_ms"] < chunk.end_ms
         ],
     }
-
-    return sliced_visual, sliced_audio
 
 
 # ──────────────────────────────────────────────
@@ -432,25 +398,21 @@ def main():
     log.info("PHASE 2A — Content Mechanism Decomposition (Chunked)")
     log.info("=" * 60)
 
-    # ── Load Phase 1 ledgers ──
-    log.info(f"Loading visual ledger (shot_changes + metadata only): {VISUAL_LEDGER_PATH}")
-    with open(VISUAL_LEDGER_PATH) as f:
-        visual_raw = json.load(f)
-    log.info(f"  Raw size: {VISUAL_LEDGER_PATH.stat().st_size:,} bytes (bounding boxes excluded from Gemini)")
-
+    # ── Load Phase 1 audio ledger ──
     log.info(f"Loading audio ledger: {AUDIO_LEDGER_PATH}")
     with open(AUDIO_LEDGER_PATH) as f:
         audio_raw = json.load(f)
     log.info(f"  Size: {AUDIO_LEDGER_PATH.stat().st_size:,} bytes")
+    log.info("  (Phase 1 visual data is NOT sent to Gemini — reserved for FFmpeg renderer)")
     video_gcs_uri = resolve_video_gcs_uri()
 
     # ── Plan chunks ──
-    chunks = _plan_chunks(visual_raw, audio_raw)
-    log.info(f"Chunk plan: {len(chunks)} chunks from {len(visual_raw.get('shot_changes', []))} shots")
+    chunks = _plan_chunks(audio_raw)
+    log.info(f"Chunk plan: {len(chunks)} chunks from audio transcript")
     for c in chunks:
         log.info(
             f"  Chunk {c.index}: {c.start_ms / 1000:.1f}s – {c.end_ms / 1000:.1f}s "
-            f"({len(c.shot_indices)} shots, ~{c.estimated_tokens:,} tokens)"
+            f"({len(c.shot_indices)} windows, ~{c.estimated_tokens:,} tokens)"
         )
 
     # ── Initialize Vertex AI client ──
@@ -485,14 +447,10 @@ def main():
             f"{chunk.start_ms / 1000:.1f}s – {chunk.end_ms / 1000:.1f}s"
         )
 
-        sliced_visual, sliced_audio = _slice_ledger_for_chunk(chunk, visual_raw, audio_raw)
-        shot_changes_json = json.dumps(sliced_visual.get("shot_changes", []))
+        sliced_audio = _slice_audio_for_chunk(chunk, audio_raw)
         audio_json = json.dumps(sliced_audio)
 
-        total_chars = len(shot_changes_json) + len(audio_json)
-        log.info(f"  Shot changes: {len(sliced_visual.get('shot_changes', []))} in range")
-        log.info(f"  Audio slice: {len(audio_json):,} chars")
-        log.info(f"  Total: {total_chars:,} chars (~{total_chars // 4:,} tokens)")
+        log.info(f"  Audio slice: {len(audio_json):,} chars (~{len(audio_json) // CHARS_PER_TOKEN:,} tokens)")
 
         start_s = chunk.start_ms / 1000
         end_s = chunk.end_ms / 1000
@@ -500,11 +458,9 @@ def main():
         user_prompt = (
             f"Analyze the video segment from {start_s:.1f}s to {end_s:.1f}s. "
             f"Focus ONLY on this time range. Do not produce nodes outside this window.\n\n"
-            f"Below is the audio transcript ledger filtered to this time range, plus shot change "
-            f"boundaries for scene structure. Use your own vision on the video for all visual analysis "
-            f"(facial expressions, actions, on-screen text, scene composition).\n\n"
-            f"=== SHOT CHANGES ({start_s:.1f}s – {end_s:.1f}s) ===\n"
-            f"{shot_changes_json}\n\n"
+            f"Below is the audio transcript ledger filtered to this time range. "
+            f"Use your own vision on the video for all visual analysis "
+            f"(facial expressions, actions, on-screen text, scene composition, shot transitions).\n\n"
             f"=== AUDIO LEDGER ({start_s:.1f}s – {end_s:.1f}s) ===\n"
             f"{audio_json}\n\n"
             f"Now decompose this segment into Semantic Nodes following your instructions."
