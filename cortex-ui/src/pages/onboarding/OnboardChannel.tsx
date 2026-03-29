@@ -93,19 +93,25 @@ export default function OnboardChannel() {
                   <CheckCircle2 className="w-4 h-4 text-primary shrink-0" />
                 </div>
                 <p className="text-xs text-muted-foreground font-mono mb-3">{channelData?.channel?.handle}</p>
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="flex items-center gap-1.5">
-                    <Users className="w-3.5 h-3.5 text-muted-foreground/60" />
-                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.subscriber_count_label}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <Eye className="w-3.5 h-3.5 text-muted-foreground/60" />
-                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.total_views_label}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <CalendarDays className="w-3.5 h-3.5 text-muted-foreground/60" />
-                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.joined_date_label}</span>
-                  </div>
+                <div className="flex items-center gap-4 flex-wrap">
+                  {channelData?.channel?.subscriber_count_label && channelData.channel.subscriber_count_label !== "0" && (
+                    <div className="flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5 text-muted-foreground/60" />
+                      <span className="text-xs font-mono text-foreground">{channelData.channel.subscriber_count_label}</span>
+                    </div>
+                  )}
+                  {channelData?.channel?.total_views_label && channelData.channel.total_views_label !== "0" && (
+                    <div className="flex items-center gap-1.5">
+                      <Eye className="w-3.5 h-3.5 text-muted-foreground/60" />
+                      <span className="text-xs font-mono text-foreground">{channelData.channel.total_views_label}</span>
+                    </div>
+                  )}
+                  {channelData?.channel?.joined_date_label && (
+                    <div className="flex items-center gap-1.5">
+                      <CalendarDays className="w-3.5 h-3.5 text-muted-foreground/60" />
+                      <span className="text-xs font-mono text-foreground">{channelData.channel.joined_date_label}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

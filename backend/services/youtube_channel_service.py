@@ -348,6 +348,21 @@ class YouTubeChannelService:
         ]
         subscriber_count = int(info.get("channel_follower_count", 0) or 0)
         total_views = int(info.get("view_count", 0) or 0)
+
+        # yt-dlp doesn't return channel-level total_views — estimate from fetched videos
+        if total_views == 0:
+            total_views = sum(v.views for v in [*videos, *shorts])
+
+        # Infer joined date from earliest video publish date
+        joined_date_label = ""
+        all_dates = [item.published_at for item in [*videos, *shorts] if item.published_at]
+        if all_dates:
+            try:
+                earliest = min(all_dates)
+                joined_date_label = _joined_date_label(earliest)
+            except Exception:
+                pass
+
         channel = ResolvedChannel(
             channel_id=channel_id,
             channel_name=str(info.get("channel") or info.get("uploader") or handle or channel_id),
@@ -362,7 +377,7 @@ class YouTubeChannelService:
             total_views=total_views,
             total_views_label=_format_count(total_views),
             upload_frequency_label=_upload_frequency_label(recent_items),
-            joined_date_label="",
+            joined_date_label=joined_date_label,
         )
         return ChannelResolveResult(
             channel=channel,
