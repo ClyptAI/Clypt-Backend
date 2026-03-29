@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Callable
 from backend.services.creator_knowledge import (
@@ -89,7 +91,19 @@ class CreatorOnboardingService:
 
         source_videos = self._pick_source_videos(resolved)
         self._notify(progress, "fetch_transcripts", 45, f"Collecting transcripts for {len(source_videos)} recent uploads")
-        documents = [self._build_video_document(video) for video in source_videos]
+        documents: list[CreatorVideoDocument] = []
+        _log = logging.getLogger("creator_onboarding")
+        for idx, video in enumerate(source_videos):
+            if idx > 0:
+                time.sleep(1.5)  # avoid YouTube 429 rate-limit on captions
+            try:
+                documents.append(self._build_video_document(video))
+            except Exception as exc:
+                _log.warning("Skipping video %s — transcript fetch failed: %s", video.video_id, exc)
+                continue
+
+        if not documents:
+            raise RuntimeError("Could not fetch transcripts for any videos — YouTube may be rate-limiting requests. Please try again in a minute.")
 
         self._notify(progress, "ingest_senso", 70, "Ingesting creator context into Senso")
         records = self.creator_knowledge_service.ingest_video_documents(workspace, documents)

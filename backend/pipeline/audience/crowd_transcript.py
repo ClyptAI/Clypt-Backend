@@ -6,7 +6,9 @@ Transcript loading helpers for Crowd Clip.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from pathlib import Path
 import sys
 
@@ -144,9 +146,26 @@ def _synth_words_from_ytdlp_captions(video_id: str) -> tuple[list[dict], dict]:
     if not track_url:
         raise RuntimeError(f"Caption track has no URL for {video_id}")
 
-    resp = httpx.get(track_url, timeout=30.0)
-    resp.raise_for_status()
-    caption_data = resp.json()
+    _log = logging.getLogger("crowd_transcript")
+    caption_data = None
+    last_exc = None
+    for attempt in range(4):
+        if attempt > 0:
+            wait = 2 ** attempt  # 2, 4, 8 seconds
+            _log.info("Retry %d for captions of %s (waiting %ds)", attempt, video_id, wait)
+            time.sleep(wait)
+        try:
+            resp = httpx.get(track_url, timeout=30.0)
+            resp.raise_for_status()
+            caption_data = resp.json()
+            break
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            if exc.response.status_code != 429:
+                raise
+            _log.warning("429 rate-limited fetching captions for %s", video_id)
+    if caption_data is None:
+        raise RuntimeError(f"Failed to fetch captions for {video_id} after retries: {last_exc}") from last_exc
     events = caption_data.get("events") or []
     words = _words_from_caption_events(events)
 
