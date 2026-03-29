@@ -8,6 +8,12 @@
 
 **Tech Stack:** Python, pytest, pyannote diarization turns, LR-ASD speaker scoring, existing Phase 1 contract/storage pipeline, Gemini overlap follow post-pass.
 
+## Status Update (2026-03-28)
+
+- Status: Partially implemented, then superseded for the LR-ASD mainline branch.
+- Landed pieces: turn-pruning removal, overlap artifacts, and camera-follow separation fed into `codex/overlap-speed-pass`.
+- Not adopted on the promoted LR-ASD branch: the pyannote-driven multi-speaker truth path from this plan is not the branch being moved to `main` today; it remains a historical/superseded planning thread.
+
 ---
 
 ## File Map
@@ -393,4 +399,3 @@ Record:
 - assignment ratio delta
 - whether overlap truth is now represented correctly
 - whether single-target follow still looks reasonable
-

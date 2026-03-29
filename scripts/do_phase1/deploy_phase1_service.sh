@@ -6,6 +6,7 @@ BRANCH="${BRANCH:-codex/balanced-hybrid-phase1-contract}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase1/do-phase1.env}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-requirements-do-phase1.txt}"
 SKIP_GIT_SYNC="${SKIP_GIT_SYNC:-0}"
+BUILD_CUDA_DECORD="${BUILD_CUDA_DECORD:-1}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing env file: $ENV_FILE" >&2
@@ -37,6 +38,54 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r "$REQUIREMENTS_FILE"
+
+if [[ "$BUILD_CUDA_DECORD" == "1" ]]; then
+  CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+  CUDACXX_BIN="${CUDACXX_BIN:-$CUDA_HOME/bin/nvcc}"
+  if [[ ! -x "$CUDACXX_BIN" ]]; then
+    echo "Expected CUDA compiler at $CUDACXX_BIN" >&2
+    exit 1
+  fi
+  export CUDA_HOME
+  export CUDA_TOOLKIT_ROOT_DIR="$CUDA_HOME"
+  export CUDAToolkit_ROOT="$CUDA_HOME"
+  export CUDACXX="$CUDACXX_BIN"
+  export PATH="$CUDA_HOME/bin:$PATH"
+  apt-get update
+  apt-get install -y \
+    build-essential \
+    cmake \
+    ffmpeg \
+    git \
+    libavcodec-dev \
+    libavdevice-dev \
+    libavfilter-dev \
+    libavformat-dev \
+    libavutil-dev
+  python -m pip uninstall -y decord || true
+  rm -rf /tmp/decord-src
+  git clone --recursive https://github.com/dmlc/decord.git /tmp/decord-src
+  pushd /tmp/decord-src >/dev/null
+  mkdir -p build
+  pushd build >/dev/null
+  cmake .. \
+    -DUSE_CUDA=ON \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CUDA_COMPILER="$CUDACXX_BIN" \
+    -DCUDAToolkit_ROOT="$CUDA_HOME" \
+    -DCUDA_TOOLKIT_ROOT_DIR="$CUDA_HOME"
+  make -j"$(nproc)"
+  popd >/dev/null
+  pushd python >/dev/null
+  python setup.py install
+  popd >/dev/null
+  PYTHON_MM="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  DECORD_SITE_PACKAGES="$REPO_DIR/.venv/lib/python${PYTHON_MM}/site-packages/decord"
+  install -d "$DECORD_SITE_PACKAGES"
+  cp /tmp/decord-src/build/libdecord.so "$DECORD_SITE_PACKAGES/libdecord.so"
+  popd >/dev/null
+fi
+
 # InsightFace can pull in the CPU-only onnxruntime package transitively. Keep
 # only the GPU build so CUDAExecutionProvider is available at runtime.
 python -m pip uninstall -y onnxruntime || true

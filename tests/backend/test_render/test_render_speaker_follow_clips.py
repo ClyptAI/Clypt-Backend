@@ -77,6 +77,24 @@ def make_low_overlap_same_frame_detection(track_id="Global_Person_0"):
     }
 
 
+def make_large_full_body_detection(track_id="Global_Person_0"):
+    return {
+        "track_id": track_id,
+        "bbox": [0.22, 0.08, 0.58, 0.96],
+        "score": 0.58,
+        "frame_idx": 100,
+    }
+
+
+def make_small_false_positive_detection(track_id="Global_Person_0"):
+    return {
+        "track_id": track_id,
+        "bbox": [0.66, 0.54, 0.82, 0.88],
+        "score": 0.97,
+        "frame_idx": 100,
+    }
+
+
 def make_raw_render_primary_detection(track_id="Global_Person_0"):
     return {
         "track_id": track_id,
@@ -177,6 +195,21 @@ def test_choose_clean_render_target_prefers_primary_box_over_duplicate_fragment(
     assert chosen == primary
 
 
+def test_choose_clean_render_target_prefers_dominant_larger_box_over_smaller_false_positive():
+    mod = load_module()
+    larger = make_large_full_body_detection()
+    smaller = make_small_false_positive_detection()
+
+    chosen = mod.choose_clean_render_target(
+        target_track_id="Global_Person_0",
+        frame_detections=[smaller, larger],
+        frame_width=1280,
+        frame_height=720,
+    )
+
+    assert chosen == larger
+
+
 def test_group_duplicate_render_targets_keeps_clean_primary_only():
     mod = load_module()
     primary = make_clean_body_detection()
@@ -257,6 +290,64 @@ def test_resolve_follow_identity_prefers_new_speaker_on_boundary():
     assert mod.resolve_follow_identity(bindings, 1000) == "B"
 
 
+def test_resolve_follow_identity_falls_back_to_single_visible_frame_track():
+    mod = load_module()
+    bindings = []
+    frame_detections = [make_clean_body_detection("track_43")]
+
+    assert mod.resolve_follow_identity(
+        bindings,
+        1000,
+        frame_detections=frame_detections,
+    ) == "track_43"
+
+
+def test_resolve_follow_identity_single_visible_frame_track_overrides_stay_wide_overlap():
+    mod = load_module()
+    bindings = []
+    overlap_follow_decisions = [
+        {
+            "start_time_ms": 500,
+            "end_time_ms": 1500,
+            "camera_target_track_id": None,
+            "stay_wide": True,
+        }
+    ]
+    frame_detections = [make_clean_body_detection("track_43")]
+
+    assert mod.resolve_follow_identity(
+        bindings,
+        1000,
+        overlap_follow_decisions=overlap_follow_decisions,
+        frame_detections=frame_detections,
+    ) == "track_43"
+
+
+def test_resolve_follow_identity_prefers_dominant_track_when_unbound_and_fragment_present():
+    mod = load_module()
+    bindings = []
+    frame_detections = [
+        {
+            "track_id": "track_51",
+            "bbox": [0.097, 0.092, 0.629, 0.994],
+            "score": 0.948,
+            "frame_idx": 3769,
+        },
+        {
+            "track_id": "track_67",
+            "bbox": [0.001, 0.420, 0.224, 0.987],
+            "score": 0.681,
+            "frame_idx": 3769,
+        },
+    ]
+
+    assert mod.resolve_follow_identity(
+        bindings,
+        157200,
+        frame_detections=frame_detections,
+    ) == "track_51"
+
+
 def test_build_camera_path_uses_clean_follow_box_for_active_speaker():
     mod = load_module()
     mod.KEYFRAME_STEP_S = 0.5
@@ -302,7 +393,34 @@ def test_build_camera_path_uses_clean_follow_box_for_active_speaker():
     assert y_keyframes
     assert abs(x_keyframes[0][1] - expected_x) < 1.0
     assert abs(y_keyframes[0][1] - expected_y) < 1.0
-    assert x_keyframes[0][1] < 2500
+
+
+def test_resolve_follow_box_can_rescue_fragment_track_with_larger_nearby_track():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_2",
+            "bbox": [0.002, 0.427, 0.237, 0.891],
+            "score": 0.590,
+            "frame_idx": 334,
+        },
+        {
+            "track_id": "track_12",
+            "bbox": [0.110, 0.089, 0.636, 0.993],
+            "score": 0.927,
+            "frame_idx": 334,
+        },
+    ]
+
+    chosen = mod.resolve_follow_box(
+        "track_2",
+        frame_detections,
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    assert chosen is not None
+    assert chosen["track_id"] == "track_12"
 
 
 def test_build_camera_path_prefers_new_speaker_clean_box_on_boundary():

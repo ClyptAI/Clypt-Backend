@@ -11,6 +11,11 @@ apt-get install -y \
   ffmpeg \
   git \
   jq \
+  libavcodec-dev \
+  libavdevice-dev \
+  libavfilter-dev \
+  libavformat-dev \
+  libavutil-dev \
   libgl1 \
   libglib2.0-0 \
   libsndfile1 \

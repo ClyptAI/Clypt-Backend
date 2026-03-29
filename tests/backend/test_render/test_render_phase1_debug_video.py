@@ -75,6 +75,7 @@ def test_role_style_marks_non_follow_overlap_speakers_as_active():
     assert style["thickness"] >= 3
 
 
+
 def test_select_pose_frame_index_prefers_explicit_pose_detections():
     mod = load_module()
     visual = {
@@ -146,3 +147,178 @@ def test_build_hud_lines_include_branch_summary_and_pose_source():
 
     assert "pose source: person_detections" in lines
     assert "branch outputs: visual_identities=4 mappings=2 spans=6" in lines
+
+
+def test_select_render_detections_prefers_dominant_larger_box_for_active_track():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_2",
+            "frame_idx": 10,
+            "x1": 0,
+            "y1": 520,
+            "x2": 320,
+            "y2": 1080,
+            "confidence": 0.55,
+        },
+        {
+            "track_id": "track_2",
+            "frame_idx": 10,
+            "x1": 110,
+            "y1": 85,
+            "x2": 1120,
+            "y2": 1030,
+            "confidence": 0.51,
+        },
+        {
+            "track_id": "track_9",
+            "frame_idx": 10,
+            "x1": 1200,
+            "y1": 120,
+            "x2": 1700,
+            "y2": 980,
+            "confidence": 0.88,
+        },
+    ]
+
+    selected = mod.select_render_detections(
+        frame_detections,
+        raw_track_id="track_2",
+        follow_track_id="track_2",
+        active_track_ids={"track_2"},
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    selected_track_2 = [det for det in selected if det["track_id"] == "track_2"]
+    assert len(selected_track_2) == 1
+    assert selected_track_2[0]["x1"] == 110
+    assert selected_track_2[0]["y1"] == 85
+    assert any(det["track_id"] == "track_9" for det in selected)
+
+
+def test_select_render_detections_can_rescue_active_track_with_larger_nearby_track():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_2",
+            "frame_idx": 334,
+            "x1": 4,
+            "y1": 460,
+            "x2": 454,
+            "y2": 963,
+            "confidence": 0.59,
+        },
+        {
+            "track_id": "track_12",
+            "frame_idx": 334,
+            "x1": 212,
+            "y1": 95,
+            "x2": 1220,
+            "y2": 1072,
+            "confidence": 0.93,
+        },
+    ]
+
+    selected = mod.select_render_detections(
+        frame_detections,
+        raw_track_id="track_2",
+        follow_track_id="track_2",
+        active_track_ids={"track_2"},
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["track_id"] == "track_12"
+    assert selected[0]["x1"] == 212
+    assert selected[0]["y1"] == 95
+    assert selected[0]["_render_role_track_id"] == "track_2"
+
+
+def test_select_render_detections_uses_lone_visible_box_for_single_target_track():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_12",
+            "frame_idx": 334,
+            "x1": 212,
+            "y1": 95,
+            "x2": 1220,
+            "y2": 1072,
+            "confidence": 0.93,
+        },
+    ]
+
+    selected = mod.select_render_detections(
+        frame_detections,
+        raw_track_id="track_2",
+        follow_track_id="track_2",
+        active_track_ids={"track_2"},
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["track_id"] == "track_12"
+    assert selected[0]["_render_role_track_id"] == "track_2"
+
+
+def test_resolve_render_binding_ids_uses_lone_visible_track_when_local_binding_missing():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_12",
+            "frame_idx": 334,
+            "x1": 212,
+            "y1": 95,
+            "x2": 1220,
+            "y2": 1072,
+            "confidence": 0.93,
+        },
+    ]
+
+    raw_track_id, follow_track_id = mod.resolve_render_binding_ids(
+        raw_track_id=None,
+        follow_track_id=None,
+        frame_detections=frame_detections,
+    )
+
+    assert raw_track_id == "track_12"
+    assert follow_track_id == "track_12"
+
+
+def test_resolve_render_binding_ids_prefers_dominant_box_over_fragment_when_unbound():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_51",
+            "frame_idx": 3769,
+            "x1": 187,
+            "y1": 99,
+            "x2": 1207,
+            "y2": 1073,
+            "confidence": 0.948,
+        },
+        {
+            "track_id": "track_67",
+            "frame_idx": 3769,
+            "x1": 2,
+            "y1": 454,
+            "x2": 430,
+            "y2": 1066,
+            "confidence": 0.681,
+        },
+    ]
+
+    raw_track_id, follow_track_id = mod.resolve_render_binding_ids(
+        raw_track_id=None,
+        follow_track_id=None,
+        frame_detections=frame_detections,
+        frame_width=1920,
+        frame_height=1080,
+    )
+
+    assert raw_track_id == "track_51"
+    assert follow_track_id == "track_51"
+

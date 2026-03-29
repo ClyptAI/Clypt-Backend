@@ -39,6 +39,39 @@ def test_build_deterministic_overlap_follow_decisions_stays_wide_for_multi_visib
     ]
 
 
+def test_build_deterministic_overlap_follow_decisions_follows_single_visible_track_even_with_offscreen_audio():
+    decisions = build_deterministic_overlap_follow_decisions(
+        [
+            {
+                "start_time_ms": 400,
+                "end_time_ms": 1100,
+                "audio_speaker_ids": ["SPEAKER_00", "SPEAKER_01"],
+                "visible_local_track_ids": ["track_1"],
+                "visible_track_ids": ["Global_Person_0"],
+                "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+                "overlap": True,
+                "confidence": 0.71,
+                "decision_source": "turn_binding",
+            }
+        ]
+    )
+
+    assert decisions == [
+        {
+            "start_time_ms": 400,
+            "end_time_ms": 1100,
+            "camera_target_local_track_id": "track_1",
+            "camera_target_track_id": "Global_Person_0",
+            "stay_wide": False,
+            "visible_local_track_ids": ["track_1"],
+            "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+            "decision_model": None,
+            "decision_source": "deterministic",
+            "confidence": pytest.approx(0.71, abs=1e-6),
+        }
+    ]
+
+
 def test_maybe_adjudicate_overlap_follow_decisions_uses_client_response():
     class _FakeResponse:
         text = (

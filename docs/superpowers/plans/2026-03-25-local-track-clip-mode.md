@@ -8,6 +8,12 @@
 
 **Tech Stack:** Python, pytest, existing Phase 1 worker, existing test-render pipeline, LR-ASD, YOLO/BoT-SORT stitched person tracks.
 
+## Status Update (2026-03-28)
+
+- Status: Implemented.
+- Shipped outcomes: `speaker_bindings_local`, `speaker_follow_bindings_local`, and local-track rendering/follow became part of the promoted LR-ASD path.
+- Current branch lineage: the local-track clip mode work is present on `codex/lrasd-prep-pool` and is part of the mainline branch move requested today.
+
 ---
 
 ## File Structure
