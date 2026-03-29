@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""
+Transcript loading helpers for Crowd Clip.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+
+from youtube_transcript_api import YouTubeTranscriptApi
+
+from pipeline.audience.crowd_utils import OUTPUTS_DIR, VIDEOS_DIR
+
+
+def _audio_matches_video_id(payload: dict, video_id: str) -> bool:
+    for key in ("source_audio", "source_video", "uri", "video_gcs_uri"):
+        value = str(payload.get(key, "") or "")
+        if video_id and video_id in value:
+            return True
+    return False
+
+
+def _synth_words_from_transcript(video_id: str) -> tuple[list[dict], dict]:
+    transcript = YouTubeTranscriptApi().fetch(video_id, languages=["en"])
+    words: list[dict] = []
+    for snippet in transcript:
+        text = str(getattr(snippet, "text", "") or "").strip()
+        start_s = float(getattr(snippet, "start", 0.0) or 0.0)
+        duration_s = float(getattr(snippet, "duration", 0.0) or 0.0)
+        tokens = [tok for tok in text.split() if tok]
+        if not tokens:
+            continue
+        start_ms = int(round(start_s * 1000.0))
+        duration_ms = max(1, int(round(duration_s * 1000.0)))
+        per_word = max(1, duration_ms // max(1, len(tokens)))
+        cursor = start_ms
+        for idx, token in enumerate(tokens):
+            end_ms = start_ms + duration_ms if idx == len(tokens) - 1 else cursor + per_word
+            words.append(
+                {
+                    "word": token,
+                    "start_time_ms": cursor,
+                    "end_time_ms": max(cursor + 1, end_ms),
+                    "speaker_track_id": None,
+                }
+            )
+            cursor = max(cursor + 1, end_ms)
+
+    payload = {
+        "schema_version": "crowd-clip-transcript-v1",
+        "source_audio": f"https://www.youtube.com/watch?v={video_id}",
+        "video_id": video_id,
+        "words": words,
+        "transcript_source": "youtube_transcript_api",
+    }
+    return words, payload
+
+
+def load_transcript_words(video_id: str) -> tuple[list[dict], dict]:
+    """
+    Load a transcript from a matching local Phase 1 audio ledger when possible.
+    Fall back to public YouTube transcript fetch otherwise.
+    """
+    override = str(os.getenv("CROWD_AUDIO_LEDGER_PATH", "") or "").strip()
+    candidate_paths: list[Path] = []
+    if override:
+        candidate_paths.append(Path(override))
+    candidate_paths.append(VIDEOS_DIR / video_id / "outputs" / "phase_1_audio.json")
+    candidate_paths.extend(VIDEOS_DIR.glob("*/outputs/phase_1_audio.json"))
+    candidate_paths.append(OUTPUTS_DIR / "phase_1_audio.json")
+
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if path.name == "phase_1_audio.json" and path.parent.parent.name != video_id:
+            if not _audio_matches_video_id(payload, video_id):
+                continue
+        words = payload.get("words", [])
+        if isinstance(words, list) and words:
+            payload.setdefault("transcript_source", str(path))
+            return words, payload
+
+    return _synth_words_from_transcript(video_id)
+
+
+def transcript_duration_ms(words: list[dict]) -> int:
+    if not words:
+        return 0
+    return int(max(int(w.get("end_time_ms", 0) or 0) for w in words))
+
+
+def transcript_text_in_window(words: list[dict], start_ms: int, end_ms: int) -> str:
+    tokens = [
+        str(word.get("word", "")).strip()
+        for word in words
+        if start_ms <= int(word.get("start_time_ms", 0) or 0) < end_ms
+    ]
+    return " ".join(tok for tok in tokens if tok).strip()
