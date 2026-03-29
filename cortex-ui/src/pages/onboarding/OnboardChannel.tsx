@@ -78,30 +78,30 @@ export default function OnboardChannel() {
           >
             <div className="flex items-start gap-4">
               <img
-                src={channelData?.channel?.thumbnail_url}
-                alt={channelData?.channel?.title}
+                src={channelData?.channel?.avatar_url}
+                alt={channelData?.channel?.channel_name}
                 className="w-14 h-14 rounded-full border-2 border-primary/20"
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
                   <h3 className="font-display font-bold text-foreground text-sm truncate">
-                    {channelData?.channel?.title}
+                    {channelData?.channel?.channel_name}
                   </h3>
                   <CheckCircle2 className="w-4 h-4 text-primary shrink-0" />
                 </div>
-                <p className="text-xs text-muted-foreground font-mono mb-3">{channelData?.channel?.category}</p>
+                <p className="text-xs text-muted-foreground font-mono mb-3">{channelData?.channel?.handle}</p>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="flex items-center gap-1.5">
                     <Users className="w-3.5 h-3.5 text-muted-foreground/60" />
-                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.subscriber_count}</span>
+                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.subscriber_count_label}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <Eye className="w-3.5 h-3.5 text-muted-foreground/60" />
-                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.view_count}</span>
+                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.total_views_label}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <CalendarDays className="w-3.5 h-3.5 text-muted-foreground/60" />
-                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.published_at}</span>
+                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.joined_date_label}</span>
                   </div>
                 </div>
               </div>
