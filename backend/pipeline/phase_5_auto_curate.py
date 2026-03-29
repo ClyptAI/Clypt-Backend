@@ -5,14 +5,14 @@ Phase 5 (Auto-Curator): Full-Graph Sweep & Viral Clip Detection
 Mimics OpusClip by sweeping the entire semantic graph instead of relying
 on vector search. Groups nodes into narrative chapters using edge topology,
 scores each chapter via Gemini 3.1 Pro, and outputs a ranked array of
-Remotion render payloads.
+render payloads (clip boundaries for FFmpeg speaker-follow rendering).
 
 Pipeline:
   1. Full-Graph Sweep  → pull all SemanticClipNodes chronologically
   2. Narrative Chunking → group nodes into chapters via NarrativeEdge links
   3. AI Batch Evaluator → score each chapter with Gemini ClipScoringAgent
   4. Global Ranking     → filter to 85+ (failsafe: Top 3)
-  5. Remotion Output    → remotion_payloads_array.json
+  5. Clip Output        → remotion_payloads_array.json
 """
 
 from __future__ import annotations
@@ -358,7 +358,7 @@ def main():
     log.info(f"  Final clips after NMS: {len(final_clips)}")
 
     # Step 5: Output
-    log.info("Step 5: Writing Remotion payloads…")
+    log.info("Step 5: Writing clip render payloads…")
     with open(OUTPUT_PATH, "w") as f:
         json.dump(final_clips, f, indent=2)
     log.info(f"Output saved → {OUTPUT_PATH}")

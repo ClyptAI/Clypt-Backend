@@ -4,14 +4,14 @@ Phase 5: Retrieval & Production Serving
 ========================================
 Takes a text query, embeds it via Gemini Embedding 2, performs a hybrid
 Spanner query (vector KNN anchor + 1-hop graph traversal), sends the sub-graph
-to Gemini 3.1 Pro for clip scoring, and outputs a Remotion render payload.
+to Gemini 3.1 Pro for clip scoring, and outputs a render payload.
 
 Pipeline:
   1. Embed the user query → 3072-d vector (`RETRIEVAL_QUERY`)
   2. APPROX_COSINE_DISTANCE on SemanticClipNode → anchor node
   3. Spanner Graph 1-hop traversal → context nodes
   4. ClipScoringAgent (Gemini) → optimal clip boundaries
-  5. Assemble Remotion payload → remotion_payload.json
+  5. Assemble render payload → remotion_payload.json
 """
 
 from __future__ import annotations
@@ -251,12 +251,12 @@ def score_clip(sub_graph: list[dict]) -> ClipScore:
 
 
 # ──────────────────────────────────────────────
-# Step 5: Assemble Remotion payload
+# Step 5: Assemble render payload
 # ──────────────────────────────────────────────
 def assemble_payload(
     clip: ClipScore, sub_graph: list[dict], query: str
 ) -> dict:
-    """Build a Remotion-ready payload from clip scoring output."""
+    """Build a render-ready payload from clip scoring output."""
     return {
         "video_uri": sub_graph[0].get("video_uri", ""),
         "clip_start_ms": clip.recommended_start_ms,
