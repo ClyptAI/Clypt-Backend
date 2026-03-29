@@ -52,6 +52,7 @@ CHUNK_REQUEST_DELAY_S = float(os.getenv("PHASE_2A_CHUNK_REQUEST_DELAY_S", "2.0")
 MAX_RETRIES_429 = int(os.getenv("PHASE_2A_MAX_RETRIES_429", "6"))
 BACKOFF_BASE_S = float(os.getenv("PHASE_2A_RETRY_BASE_S", "5.0"))
 BACKOFF_MAX_S = float(os.getenv("PHASE_2A_RETRY_MAX_S", "90.0"))
+TRACK_SAMPLE_MS = int(os.getenv("PHASE_2A_TRACK_SAMPLE_MS", "250") or 250)
 
 # ──────────────────────────────────────────────
 # Logging
@@ -260,12 +261,19 @@ def _slice_ledger_for_chunk(
 
     # Canonical tracks path (absolute xyxy + frame_idx).
     sliced_tracks = []
+    last_track_sample_ms: dict[str, int] = {}
     for t in visual.get("tracks", []):
         fi = int(t.get("frame_idx", -1))
         if fi < 0:
             continue
         time_ms = int(round((fi / max(1e-6, fps)) * 1000.0))
         if start <= time_ms < end:
+            track_id = str(t.get("track_id", "") or "")
+            if TRACK_SAMPLE_MS > 0 and track_id:
+                prev_time = last_track_sample_ms.get(track_id)
+                if prev_time is not None and (time_ms - prev_time) < TRACK_SAMPLE_MS:
+                    continue
+                last_track_sample_ms[track_id] = time_ms
             sliced_tracks.append(t)
     sliced_visual["tracks"] = sliced_tracks
 

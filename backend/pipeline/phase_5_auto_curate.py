@@ -56,6 +56,10 @@ MAX_CONCURRENT_SCORING = 5
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_PATH = ROOT / "outputs" / "remotion_payloads_array.json"
+LOCAL_NODES_PATH = ROOT / "outputs" / "phase_3_embeddings.json"
+LOCAL_EDGES_PATH = ROOT / "outputs" / "phase_2b_narrative_edges.json"
+LOCAL_AUDIO_PATH = ROOT / "outputs" / "phase_1_audio.json"
+DATA_SOURCE = os.getenv("PHASE_5_DATA_SOURCE", "auto").strip().lower() or "auto"
 
 # ──────────────────────────────────────────────
 # Logging
@@ -142,6 +146,154 @@ def _fetch_all_nodes() -> list[dict]:
                 "spatial_tracking_uri": row[11],
             })
     return nodes
+
+
+def _fetch_all_edges() -> list[dict]:
+    """Pull every NarrativeEdge from Spanner."""
+    client = spanner.Client(project=PROJECT_ID)
+    instance = client.instance(SPANNER_INSTANCE)
+    database = instance.database(SPANNER_DATABASE)
+
+    sql = """
+        SELECT edge_id, from_node_id, to_node_id,
+               label, narrative_classification, confidence_score
+        FROM NarrativeEdge
+    """
+    edges = []
+    with database.snapshot() as snapshot:
+        results = snapshot.execute_sql(sql)
+        for row in results:
+            edges.append({
+                "edge_id": row[0],
+                "from_node_id": row[1],
+                "to_node_id": row[2],
+                "label": row[3],
+                "narrative_classification": row[4],
+                "confidence_score": row[5],
+            })
+    return edges
+
+
+def _synth_node_id(start_time_ms: int, end_time_ms: int) -> str:
+    """Create a deterministic local node ID from time range."""
+    return f"local-{start_time_ms}-{end_time_ms}"
+
+
+def _speakers_for_range(audio_words: list[dict], start_time_ms: int, end_time_ms: int) -> list[str]:
+    """Infer speakers from audio words overlapping the given time range."""
+    speakers: list[str] = []
+    seen: set[str] = set()
+    for w in audio_words:
+        ws = int(w.get("start_time_ms", 0) or 0)
+        we = int(w.get("end_time_ms", ws) or ws)
+        if we > start_time_ms and ws < end_time_ms:
+            spk = str(w.get("speaker", "") or "").strip()
+            if spk and spk not in seen:
+                seen.add(spk)
+                speakers.append(spk)
+    return speakers
+
+
+def load_local_nodes() -> list[dict]:
+    """Load nodes from Phase 3 embeddings JSON (local file)."""
+    log.info(f"  Loading local nodes from {LOCAL_NODES_PATH}")
+    raw = json.loads(LOCAL_NODES_PATH.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raw = []
+
+    # Load audio words for speaker inference
+    audio_words: list[dict] = []
+    if LOCAL_AUDIO_PATH.exists():
+        try:
+            audio_data = json.loads(LOCAL_AUDIO_PATH.read_text(encoding="utf-8"))
+            audio_words = audio_data.get("words", []) if isinstance(audio_data, dict) else []
+        except Exception:
+            pass
+
+    nodes: list[dict] = []
+    for n in raw:
+        try:
+            start_s = float(n.get("start_time", 0.0) or 0.0)
+            end_s = float(n.get("end_time", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        start_ms = int(round(start_s * 1000.0))
+        end_ms = int(round(end_s * 1000.0))
+        if end_ms <= start_ms:
+            continue
+
+        node_id = _synth_node_id(start_ms, end_ms)
+        mechs = n.get("content_mechanisms", {})
+        if isinstance(mechs, str):
+            try:
+                mechs = json.loads(mechs)
+            except Exception:
+                mechs = {}
+
+        nodes.append({
+            "node_id": node_id,
+            "video_uri": "",
+            "start_time_ms": start_ms,
+            "end_time_ms": end_ms,
+            "transcript_text": n.get("transcript_segment", ""),
+            "visual_description": n.get("visual_description", ""),
+            "vocal_delivery": n.get("vocal_delivery", ""),
+            "speakers": _speakers_for_range(audio_words, start_ms, end_ms),
+            "objects_present": [],
+            "visual_labels": [],
+            "content_mechanisms": mechs,
+            "spatial_tracking_uri": "",
+        })
+    return nodes
+
+
+def load_local_edges(nodes: list[dict]) -> list[dict]:
+    """Load edges from Phase 2B narrative edges JSON (local file)."""
+    log.info(f"  Loading local edges from {LOCAL_EDGES_PATH}")
+    if not LOCAL_EDGES_PATH.exists():
+        log.warning(f"  Edge file not found: {LOCAL_EDGES_PATH}")
+        return []
+
+    raw = json.loads(LOCAL_EDGES_PATH.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        return []
+
+    # Build lookup: start_time (float seconds) → node_id
+    time_to_id: dict[float, str] = {}
+    for n in nodes:
+        st_s = n["start_time_ms"] / 1000.0
+        time_to_id[round(st_s, 6)] = n["node_id"]
+
+    edges: list[dict] = []
+    for e in raw:
+        from_time = e.get("from_node_start_time")
+        to_time = e.get("to_node_start_time")
+        from_id = time_to_id.get(round(float(from_time), 6), "") if from_time is not None else ""
+        to_id = time_to_id.get(round(float(to_time), 6), "") if to_time is not None else ""
+        if not from_id or not to_id:
+            continue
+        edges.append({
+            "edge_id": f"local-edge-{len(edges)}",
+            "from_node_id": from_id,
+            "to_node_id": to_id,
+            "label": e.get("edge_type", ""),
+            "narrative_classification": e.get("narrative_classification", ""),
+            "confidence_score": float(e.get("confidence_score", 0.0) or 0.0),
+        })
+    return edges
+
+
+def load_graph_inputs() -> tuple[list[dict], list[dict], str]:
+    """Dispatch between Spanner and local files based on DATA_SOURCE."""
+    if DATA_SOURCE == "local":
+        nodes = load_local_nodes()
+        edges = load_local_edges(nodes)
+        return nodes, edges, "local"
+    else:
+        # Spanner (also used for DATA_SOURCE == "auto")
+        nodes = _fetch_all_nodes()
+        edges = _fetch_all_edges()
+        return nodes, edges, "spanner"
 
 
 # ──────────────────────────────────────────────
@@ -314,10 +466,23 @@ def main():
     log.info("PHASE 5 — Auto-Curator (Full-Graph Sweep)")
     log.info("=" * 60)
 
-    # Step 1: Fetch all nodes
-    log.info("Step 1: Full-graph sweep from Spanner…")
-    nodes = _fetch_all_nodes()
-    log.info(f"  Nodes fetched: {len(nodes)}")
+    # Step 1: Load graph (Spanner or local fallback)
+    log.info("Step 1: Loading graph inputs…")
+    source_label = "unknown"
+    if DATA_SOURCE == "auto":
+        try:
+            nodes, edges, source_label = load_graph_inputs()
+        except Exception as exc:
+            log.warning(f"Spanner graph load failed, falling back to local outputs: {exc}")
+            nodes = load_local_nodes()
+            edges = load_local_edges(nodes)
+            source_label = "local-fallback"
+    else:
+        nodes, edges, source_label = load_graph_inputs()
+
+    log.info(f"  Graph source: {source_label}")
+    log.info(f"  Nodes: {len(nodes)}")
+    log.info(f"  Edges: {len(edges)}")
 
     if len(nodes) < WINDOW_MIN_NODES:
         log.error(
