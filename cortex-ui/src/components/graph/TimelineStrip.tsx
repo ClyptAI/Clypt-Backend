@@ -1,12 +1,14 @@
-import { mockNodes, type SemanticNodeData } from "@/data/mockNodes";
+import type { Node } from "@xyflow/react";
+import { type SemanticNodeData } from "@/data/mockNodes";
 
 interface TimelineStripProps {
+  nodes: Node<SemanticNodeData>[];
   selectedNodeId: string | null;
   onSelectNode: (id: string) => void;
 }
 
-export function TimelineStrip({ selectedNodeId, onSelectNode }: TimelineStripProps) {
-  const sorted = [...mockNodes].sort((a, b) => (a.data as unknown as SemanticNodeData).startTime - (b.data as unknown as SemanticNodeData).startTime);
+export function TimelineStrip({ nodes, selectedNodeId, onSelectNode }: TimelineStripProps) {
+  const sorted = [...nodes].sort((a, b) => (a.data as unknown as SemanticNodeData).startTime - (b.data as unknown as SemanticNodeData).startTime);
   const maxTime = Math.max(...sorted.map((n) => (n.data as unknown as SemanticNodeData).endTime));
 
   return (
