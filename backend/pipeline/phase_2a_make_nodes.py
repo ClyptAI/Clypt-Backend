@@ -2,15 +2,19 @@
 """
 Phase 2A: Content Mechanism Decomposition (Chunked Processing)
 ===============================================================
-Splits the Phase 1 ledgers into adaptive, token-budgeted chunks aligned
-on shot boundaries. Each chunk sends full uncompacted visual + audio data
-for its time range, plus the GCS video, to Gemini 3.1 Pro. A merge pass
-deduplicates boundary nodes into the final output.
+Splits the Phase 1 audio ledger into adaptive, token-budgeted chunks
+aligned on shot boundaries. Each chunk sends the audio transcript for
+its time range, plus the GCS video, to Gemini 3.1 Pro. Gemini uses its
+own vision capabilities to analyze the video directly — the visual
+bounding-box / tracking data from Phase 1 is NOT sent here; it is
+reserved exclusively for the FFmpeg speaker-follow renderer.
+
+A merge pass deduplicates boundary nodes into the final output.
 
 Inputs:
   - gs://clypt-storage-v2/phase_1/video.mp4  (muxed video+audio on GCS)
-  - phase_1_visual.json   (local, sliced per chunk)
-  - phase_1_audio.json    (local, sliced per chunk)
+  - phase_1_visual.json   (shot_changes + video_metadata only, for chunk planning)
+  - phase_1_audio.json    (transcript words, sliced per chunk)
 
 Output:
   - phase_2a_nodes.json    (array of Semantic Nodes)
@@ -52,7 +56,6 @@ CHUNK_REQUEST_DELAY_S = float(os.getenv("PHASE_2A_CHUNK_REQUEST_DELAY_S", "2.0")
 MAX_RETRIES_429 = int(os.getenv("PHASE_2A_MAX_RETRIES_429", "6"))
 BACKOFF_BASE_S = float(os.getenv("PHASE_2A_RETRY_BASE_S", "5.0"))
 BACKOFF_MAX_S = float(os.getenv("PHASE_2A_RETRY_MAX_S", "90.0"))
-TRACK_SAMPLE_MS = int(os.getenv("PHASE_2A_TRACK_SAMPLE_MS", "250") or 250)
 
 # ──────────────────────────────────────────────
 # Logging
@@ -84,16 +87,16 @@ def resolve_video_gcs_uri() -> str:
 # ──────────────────────────────────────────────
 # System instruction (exact prompt from spec)
 # ──────────────────────────────────────────────
-SYSTEM_INSTRUCTION = """You are an expert multimodal narrative extraction engine. Your task is to perform 'Content Mechanism Decomposition' on the provided video, using the attached deterministic audio and visual JSON ledgers as your mathematical ground truth.
+SYSTEM_INSTRUCTION = """You are an expert multimodal narrative extraction engine. Your task is to perform 'Content Mechanism Decomposition' on the provided video, using the attached audio transcript ledger as your word-level ground truth and your own vision capabilities for all visual analysis.
 
 You must deconstruct the video into a sequential array of distinct 'Semantic Nodes'. Do not summarize the video; instead, break it down into structural narrative beats.
 
 Node granularity: Each node must represent a single atomic beat — one thought, one reaction, one point. Target 6–8 seconds per node. Never create a node shorter than 4 seconds or longer than 12 seconds. Split on any meaningful shift in thought, tone, or energy — even within a single shot. Nodes will be assembled into clips by a downstream curator, so precision matters more than length. Critical boundary rule: every node must end on the last word of a complete sentence or thought — never mid-phrase, never mid-sentence. If the natural beat boundary falls mid-sentence, pull the node end_time back to the previous sentence-ending word.
 
 Instructions:
-1. Node Segmentation & Transcript Cleaning: If the audio ledger contains words, you must assemble the transcript_segment for each node strictly using those words and timestamps. Aggressively filter out STT noise — ignore non-lexical STT hallucinations (e.g., 'hmm', 'ah', 'uh', heavy breaths, or stuttered fragments). Only stitch together the mathematically verified timestamps of actual, meaningful spoken words. The start_time and end_time of your node must match the first and last word you selected from the JSON. If the audio ledger is empty (no words), you must still produce nodes based on the visual ledger data (shot changes, object tracking, labels, face detections). In this case, set transcript_segment to an empty string and anchor start_time/end_time to shot change boundaries from the visual ledger.
+1. Node Segmentation & Transcript Cleaning: If the audio ledger contains words, you must assemble the transcript_segment for each node strictly using those words and timestamps. Aggressively filter out STT noise — ignore non-lexical STT hallucinations (e.g., 'hmm', 'ah', 'uh', heavy breaths, or stuttered fragments). Only stitch together the mathematically verified timestamps of actual, meaningful spoken words. The start_time and end_time of your node must match the first and last word you selected from the JSON. If the audio ledger is empty (no words), you must still produce nodes based on your own visual analysis (shot changes, scene transitions, on-screen activity). In this case, set transcript_segment to an empty string and anchor start_time/end_time to natural visual boundaries.
 
-2. Cross-Modal Synthesis: Do not rely solely on the transcript. You must synthesize the visual actions, facial expressions, and vocal prosody from the video file with the text to resolve ambiguities (e.g., sarcastic tone vs. literal text). Use your agentic vision. Provide a brief visual_description referencing shot changes or object tracking from the visual ledger.
+2. Cross-Modal Synthesis: Do not rely solely on the transcript. You must use your own vision to synthesize the visual actions, facial expressions, and vocal prosody from the video file with the text to resolve ambiguities (e.g., sarcastic tone vs. literal text). Provide a brief visual_description based on what you directly observe in the video frames.
 
 D. Vocal Delivery: In the vocal_delivery field, describe the audio events happening in this node. Explicitly mention laughter, voice cracks, whispering, sarcastic tones, shouting, or notable background sounds. Do not put these in the transcript; describe them here.
 
@@ -241,108 +244,25 @@ def _slice_ledger_for_chunk(
     visual: dict,
     audio: dict,
 ) -> tuple[dict, dict]:
-    """Filter visual and audio ledgers to only include data within the chunk's time range."""
+    """Filter ledgers to only include data within the chunk's time range.
+
+    Only shot_changes and video_metadata are kept from the visual ledger
+    (for Gemini scene-structure context).  Bounding-box data (tracks,
+    face_detections, person_detections, object_tracking, label_detections)
+    is deliberately excluded — that data is reserved for the FFmpeg
+    speaker-follow renderer and would only waste Gemini tokens here.
+    """
     start = chunk.start_ms
     end = chunk.end_ms
 
-    sliced_visual: dict = {}
-    fps = 25.0
-    if isinstance(visual.get("video_metadata"), dict):
-        try:
-            fps = float(visual["video_metadata"].get("fps", 25.0) or 25.0)
-        except Exception:
-            fps = 25.0
-
-    sliced_visual["shot_changes"] = [
-        s for s in visual.get("shot_changes", [])
-        if _overlaps(s["start_time_ms"], s["end_time_ms"], start, end)
-    ]
-    sliced_visual["video_metadata"] = visual.get("video_metadata", {})
-
-    # Canonical tracks path (absolute xyxy + frame_idx).
-    sliced_tracks = []
-    last_track_sample_ms: dict[str, int] = {}
-    for t in visual.get("tracks", []):
-        fi = int(t.get("frame_idx", -1))
-        if fi < 0:
-            continue
-        time_ms = int(round((fi / max(1e-6, fps)) * 1000.0))
-        if start <= time_ms < end:
-            track_id = str(t.get("track_id", "") or "")
-            if TRACK_SAMPLE_MS > 0 and track_id:
-                prev_time = last_track_sample_ms.get(track_id)
-                if prev_time is not None and (time_ms - prev_time) < TRACK_SAMPLE_MS:
-                    continue
-                last_track_sample_ms[track_id] = time_ms
-            sliced_tracks.append(t)
-    sliced_visual["tracks"] = sliced_tracks
-
-    sliced_faces = []
-    for face in visual.get("face_detections", []):
-        if not _overlaps(face["segment_start_ms"], face["segment_end_ms"], start, end):
-            continue
-        filtered_ts = [
-            ts for ts in face.get("timestamped_objects", [])
-            if start <= ts["time_ms"] < end
-        ]
-        if filtered_ts:
-            sliced_faces.append({
-                "confidence": face["confidence"],
-                "segment_start_ms": face["segment_start_ms"],
-                "segment_end_ms": face["segment_end_ms"],
-                "timestamped_objects": filtered_ts,
-            })
-    sliced_visual["face_detections"] = sliced_faces
-
-    sliced_persons = []
-    for person in visual.get("person_detections", []):
-        if not _overlaps(person["segment_start_ms"], person["segment_end_ms"], start, end):
-            continue
-        filtered_ts = [
-            ts for ts in person.get("timestamped_objects", [])
-            if start <= ts["time_ms"] < end
-        ]
-        if filtered_ts:
-            sliced_persons.append({
-                "confidence": person["confidence"],
-                "segment_start_ms": person["segment_start_ms"],
-                "segment_end_ms": person["segment_end_ms"],
-                "timestamped_objects": filtered_ts,
-            })
-    sliced_visual["person_detections"] = sliced_persons
-
-    sliced_objects = []
-    for obj in visual.get("object_tracking", []):
-        if not _overlaps(obj["segment_start_ms"], obj["segment_end_ms"], start, end):
-            continue
-        filtered_frames = [
-            f for f in obj.get("frames", [])
-            if start <= f["time_ms"] < end
-        ]
-        if filtered_frames:
-            sliced_objects.append({
-                "entity": obj["entity"],
-                "confidence": obj["confidence"],
-                "segment_start_ms": obj["segment_start_ms"],
-                "segment_end_ms": obj["segment_end_ms"],
-                "frames": filtered_frames,
-            })
-    sliced_visual["object_tracking"] = sliced_objects
-
-    sliced_labels = []
-    for label in visual.get("label_detections", []):
-        filtered_segs = [
-            seg for seg in label.get("segments", [])
-            if _overlaps(seg["start_time_ms"], seg["end_time_ms"], start, end)
-        ]
-        if filtered_segs:
-            sliced_labels.append({
-                "entity": label["entity"],
-                "category_entities": label.get("category_entities", []),
-                "level": label.get("level", ""),
-                "segments": filtered_segs,
-            })
-    sliced_visual["label_detections"] = sliced_labels
+    # Keep only structural visual metadata — no bounding boxes
+    sliced_visual: dict = {
+        "shot_changes": [
+            s for s in visual.get("shot_changes", [])
+            if _overlaps(s["start_time_ms"], s["end_time_ms"], start, end)
+        ],
+        "video_metadata": visual.get("video_metadata", {}),
+    }
 
     sliced_audio = {
         "words": [
@@ -513,10 +433,10 @@ def main():
     log.info("=" * 60)
 
     # ── Load Phase 1 ledgers ──
-    log.info(f"Loading visual ledger: {VISUAL_LEDGER_PATH}")
+    log.info(f"Loading visual ledger (shot_changes + metadata only): {VISUAL_LEDGER_PATH}")
     with open(VISUAL_LEDGER_PATH) as f:
         visual_raw = json.load(f)
-    log.info(f"  Raw size: {VISUAL_LEDGER_PATH.stat().st_size:,} bytes")
+    log.info(f"  Raw size: {VISUAL_LEDGER_PATH.stat().st_size:,} bytes (bounding boxes excluded from Gemini)")
 
     log.info(f"Loading audio ledger: {AUDIO_LEDGER_PATH}")
     with open(AUDIO_LEDGER_PATH) as f:
@@ -566,11 +486,11 @@ def main():
         )
 
         sliced_visual, sliced_audio = _slice_ledger_for_chunk(chunk, visual_raw, audio_raw)
-        visual_json = json.dumps(sliced_visual)
+        shot_changes_json = json.dumps(sliced_visual.get("shot_changes", []))
         audio_json = json.dumps(sliced_audio)
 
-        total_chars = len(visual_json) + len(audio_json)
-        log.info(f"  Visual slice: {len(visual_json):,} chars")
+        total_chars = len(shot_changes_json) + len(audio_json)
+        log.info(f"  Shot changes: {len(sliced_visual.get('shot_changes', []))} in range")
         log.info(f"  Audio slice: {len(audio_json):,} chars")
         log.info(f"  Total: {total_chars:,} chars (~{total_chars // 4:,} tokens)")
 
@@ -580,9 +500,11 @@ def main():
         user_prompt = (
             f"Analyze the video segment from {start_s:.1f}s to {end_s:.1f}s. "
             f"Focus ONLY on this time range. Do not produce nodes outside this window.\n\n"
-            f"Below are the deterministic ledgers filtered to this time range.\n\n"
-            f"=== VISUAL LEDGER ({start_s:.1f}s – {end_s:.1f}s) ===\n"
-            f"{visual_json}\n\n"
+            f"Below is the audio transcript ledger filtered to this time range, plus shot change "
+            f"boundaries for scene structure. Use your own vision on the video for all visual analysis "
+            f"(facial expressions, actions, on-screen text, scene composition).\n\n"
+            f"=== SHOT CHANGES ({start_s:.1f}s – {end_s:.1f}s) ===\n"
+            f"{shot_changes_json}\n\n"
             f"=== AUDIO LEDGER ({start_s:.1f}s – {end_s:.1f}s) ===\n"
             f"{audio_json}\n\n"
             f"Now decompose this segment into Semantic Nodes following your instructions."
