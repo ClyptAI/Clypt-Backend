@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowRight, Rocket, CheckCircle2 } from "lucide-react";
@@ -13,10 +14,35 @@ const completedItems = [
   "Clip preferences configured",
 ];
 
+function formatDuration(seconds: number): string {
+  if (!seconds || seconds <= 0) return "0s";
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m === 0) return `${s}s`;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 export default function OnboardReady() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { creatorId } = (location.state as any) || {};
+  const { creatorId, recentItems } = (location.state as any) || {};
+
+  const carouselItems = useMemo(() => {
+    if (recentItems && Array.isArray(recentItems) && recentItems.length > 0) {
+      return recentItems.map((item: any, i: number) => ({
+        id: item.video_id || `item-${i}`,
+        name: item.title || "Untitled",
+        subtitle: formatDuration(item.duration_seconds ?? 0),
+        color: `hsl(0 ${60 + i * 3}% ${35 + i * 2}%)`,
+      }));
+    }
+    return mockTopShorts.map((short, i) => ({
+      id: `short-${i}`,
+      name: short.title,
+      subtitle: `${short.views} views · ${short.duration}`,
+      color: `hsl(0 ${60 + i * 3}% ${35 + i * 2}%)`,
+    }));
+  }, [recentItems]);
 
   return (
     <OnboardingLayout step={4} onBack={() => navigate("/onboard/clip-preferences")}>
@@ -55,22 +81,17 @@ export default function OnboardReady() {
           </div>
         </div>
 
-        {/* Top Shorts Carousel */}
+        {/* Scanned Videos Carousel */}
         <div className="w-full rounded-xl clypt-glass p-5 mb-8 [&_*]:text-foreground">
           <p className="text-[10px] text-muted-foreground/60 font-mono uppercase tracking-wider mb-1">
-            Your Top-Performing Shorts
+            {recentItems ? "Videos analyzed" : "Your Top-Performing Shorts"}
           </p>
           <p className="text-xs text-muted-foreground mb-4">
-            These are the clips your audience loves most.
+            {recentItems ? "These videos were used to build your creator profile." : "These are the clips your audience loves most."}
           </p>
           <ItemCarousel
             id="top-shorts-carousel"
-            items={mockTopShorts.map((short, i) => ({
-              id: `short-${i}`,
-              name: short.title,
-              subtitle: `${short.views} views · ${short.duration}`,
-              color: `hsl(0 ${60 + i * 3}% ${35 + i * 2}%)`,
-            }))}
+            items={carouselItems}
           />
         </div>
 

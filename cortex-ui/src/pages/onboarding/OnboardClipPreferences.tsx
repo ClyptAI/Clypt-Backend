@@ -15,7 +15,7 @@ import { creatorApi } from "@/lib/api";
 export default function OnboardClipPreferences() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { creatorId } = (location.state as any) || {};
+  const { creatorId, recentItems } = (location.state as any) || {};
   const [durationMin, setDurationMin] = useState(mockClipPreferences.preferredDurationRange.min);
   const [durationMax, setDurationMax] = useState(mockClipPreferences.preferredDurationRange.max);
   const [hookImportance, setHookImportance] = useState(mockClipPreferences.hookImportance * 100);
@@ -147,7 +147,7 @@ export default function OnboardClipPreferences() {
                 console.error("Failed to save preferences:", err);
               }
             }
-            navigate("/onboard/ready", { state: { creatorId } });
+            navigate("/onboard/ready", { state: { creatorId, recentItems } });
           }}
           className="w-full max-w-sm h-11 gap-2 font-display font-semibold rounded-lg text-sm"
         >

@@ -64,7 +64,7 @@ export default function OnboardAnalyzing() {
           clearInterval(poll);
           setSteps(prev => prev.map(s => ({ ...s, status: "completed" as const })));
           setTimeout(() => navigate("/onboard/brand-profile", {
-            state: { creatorId: job.profile?.creator_id, profile: job.profile, channel: passedChannel ?? job.channel }
+            state: { creatorId: job.profile?.creator_id, profile: job.profile, channel: passedChannel ?? job.channel, recentItems: job.recent_items_scanned }
           }), 1000);
         } else if (job.status === "failed") {
           clearInterval(poll);

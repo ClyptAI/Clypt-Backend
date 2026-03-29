@@ -42,7 +42,7 @@ function generateMechanismCells(intensity: number, count: number): number[] {
 export default function OnboardBrandProfile() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { creatorId, profile, channel } = (location.state as any) || {};
+  const { creatorId, profile, channel, recentItems } = (location.state as any) || {};
 
   // Map API profile to UI shape, falling back to mock data
   const brandProfile = profile
@@ -269,7 +269,7 @@ export default function OnboardBrandProfile() {
         </div>
 
         <Button
-          onClick={() => navigate("/onboard/clip-preferences", { state: { creatorId, profile, channel } })}
+          onClick={() => navigate("/onboard/clip-preferences", { state: { creatorId, profile, channel, recentItems } })}
           className="w-full max-w-sm h-11 gap-2 font-display font-semibold rounded-lg text-sm"
         >
           Looks good, continue
