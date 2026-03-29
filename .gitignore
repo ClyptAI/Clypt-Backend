@@ -38,3 +38,4 @@ backend/.parallel_runs/
 *.log
 
 .worktrees/
+cookies.txt
