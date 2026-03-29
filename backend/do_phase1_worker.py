@@ -4475,10 +4475,10 @@ class ClyptWorker:
 
     @staticmethod
     def _select_tracker_backend() -> str:
-        requested_backend = os.getenv("CLYPT_TRACKER_BACKEND", "botsort_reid").strip().lower()
-        if requested_backend in {"bytetrack", "byte_track", "byte-track"}:
+        requested_backend = os.getenv("CLYPT_TRACKER_BACKEND", "bytetrack").strip().lower()
+        if requested_backend in {"bytetrack", "byte_track", "byte-track", ""}:
             return "bytetrack"
-        if requested_backend in {"", "botsort", "botsort_reid", "bot-sort", "bot-sort-reid"}:
+        if requested_backend in {"botsort", "botsort_reid", "bot-sort", "bot-sort-reid"}:
             return "botsort_reid"
         print(
             f"  Warning: unknown CLYPT_TRACKER_BACKEND={requested_backend!r}; "

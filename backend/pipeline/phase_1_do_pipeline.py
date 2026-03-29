@@ -215,7 +215,7 @@ def build_phase1_runtime_controls() -> dict:
 
     requested_speaker_binding_mode = (os.getenv("PHASE1_SPEAKER_BINDING_MODE", "auto") or "auto").strip().lower()
     requested_tracking_mode = (os.getenv("PHASE1_TRACKING_MODE", "direct") or "direct").strip().lower()
-    requested_tracker_backend = (os.getenv("PHASE1_TRACKER_BACKEND", "botsort_reid") or "botsort_reid").strip().lower()
+    requested_tracker_backend = (os.getenv("PHASE1_TRACKER_BACKEND", "bytetrack") or "bytetrack").strip().lower()
     shared_analysis_proxy_enabled = (os.getenv("PHASE1_SHARED_ANALYSIS_PROXY", "1") or "1").strip() != "0"
     heuristic_binding_enabled_env = os.getenv("PHASE1_HEURISTIC_BINDING_ENABLED")
 
