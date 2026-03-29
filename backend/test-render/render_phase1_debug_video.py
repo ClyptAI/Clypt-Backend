@@ -120,28 +120,6 @@ def select_track_frame_index(visual: dict, *, fps: float, frame_width: int, fram
     return {}, "none"
 
 
-def select_pose_frame_index(visual: dict, *, fps: float, frame_width: int, frame_height: int) -> tuple[dict[int, list[dict]], str]:
-    pose_detections = list(visual.get("pose_detections", []))
-    if pose_detections:
-        return flatten_segmented_detections(
-            pose_detections,
-            fps=fps,
-            frame_width=frame_width,
-            frame_height=frame_height,
-            kind="pose",
-        ), "pose_detections"
-    person_detections = list(visual.get("person_detections", []))
-    if person_detections:
-        return flatten_segmented_detections(
-            person_detections,
-            fps=fps,
-            frame_width=frame_width,
-            frame_height=frame_height,
-            kind="pose",
-        ), "person_detections"
-    return {}, "none"
-
-
 def active_binding_at_ms(bindings: list[dict], timestamp_ms: int) -> str | None:
     for binding in bindings or []:
         if int(binding.get("start_time_ms", 0)) <= timestamp_ms < int(binding.get("end_time_ms", 0)):
@@ -617,10 +595,6 @@ def build_hud_lines(
     active_visible_track_ids: list[str] | None = None,
     offscreen_audio_speaker_ids: list[str] | None = None,
     overlap_active: bool = False,
-    pose_track_source: str | None = None,
-    visual_identity_count: int | None = None,
-    audio_visual_mapping_count: int | None = None,
-    span_assignment_count: int | None = None,
 ) -> list[str]:
     lines = [
         f"time: {timestamp_ms / 1000.0:07.2f}s",
@@ -636,15 +610,6 @@ def build_hud_lines(
         lines.append(f"active visible: {','.join(active_visible_track_ids)}")
     if offscreen_audio_speaker_ids:
         lines.append(f"offscreen active audio: {','.join(offscreen_audio_speaker_ids)}")
-    if pose_track_source and pose_track_source != "none":
-        lines.append(f"pose source: {pose_track_source}")
-    if visual_identity_count is not None or audio_visual_mapping_count is not None or span_assignment_count is not None:
-        lines.append(
-            "branch outputs: "
-            f"visual_identities={visual_identity_count if visual_identity_count is not None else '-'} "
-            f"mappings={audio_visual_mapping_count if audio_visual_mapping_count is not None else '-'} "
-            f"spans={span_assignment_count if span_assignment_count is not None else '-'}"
-        )
     if hybrid_debug:
         lines.extend(
             [
@@ -676,10 +641,6 @@ def draw_hud(
     active_visible_track_ids: list[str] | None = None,
     offscreen_audio_speaker_ids: list[str] | None = None,
     overlap_active: bool = False,
-    pose_track_source: str | None = None,
-    visual_identity_count: int | None = None,
-    audio_visual_mapping_count: int | None = None,
-    span_assignment_count: int | None = None,
 ) -> None:
     lines = build_hud_lines(
         timestamp_ms=timestamp_ms,
@@ -692,10 +653,6 @@ def draw_hud(
         active_visible_track_ids=active_visible_track_ids,
         offscreen_audio_speaker_ids=offscreen_audio_speaker_ids,
         overlap_active=overlap_active,
-        pose_track_source=pose_track_source,
-        visual_identity_count=visual_identity_count,
-        audio_visual_mapping_count=audio_visual_mapping_count,
-        span_assignment_count=span_assignment_count,
     )
     x = 24
     y = 42
@@ -741,18 +698,6 @@ def draw_face_box(frame, det: dict) -> None:
     x2 = int(det["x2"])
     y2 = int(det["y2"])
     cv2.rectangle(frame, (x1, y1), (x2, y2), (60, 60, 255), 1)
-
-
-def draw_pose_box(frame, det: dict) -> None:
-    x1 = int(det["x1"])
-    y1 = int(det["y1"])
-    x2 = int(det["x2"])
-    y2 = int(det["y2"])
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 191, 255), 2)
-    label = f"{str(det.get('track_id', '')).strip()} POSE".strip()
-    if label:
-        cv2.putText(frame, label, (x1 + 4, max(24, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(frame, label, (x1 + 4, max(24, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 191, 255), 2, cv2.LINE_AA)
 
 
 def mux_audio(silent_video_path: Path, source_video_path: Path, output_path: Path) -> None:
@@ -807,21 +752,12 @@ def render_debug_video(
         frame_width=frame_width,
         frame_height=frame_height,
     )
-    pose_frame_index, pose_track_source = select_pose_frame_index(
-        visual,
-        fps=fps,
-        frame_width=frame_width,
-        frame_height=frame_height,
-    )
     available_track_ids = {
         str(det.get("track_id", "")).strip()
         for detections in person_frame_index.values()
         for det in detections
         if str(det.get("track_id", "")).strip()
     }
-    visual_identity_count = len(visual.get("visual_identities", []) or [])
-    audio_visual_mapping_count = len(audio.get("audio_visual_mappings", []) or [])
-    span_assignment_count = len(audio.get("span_assignments", []) or [])
     face_frame_index = flatten_segmented_detections(
         visual.get("face_detections", []),
         fps=fps,
@@ -896,8 +832,6 @@ def render_debug_video(
                     follow_track_id=follow_track_id,
                     active_track_ids=active_track_ids,
                 )
-            for det in nearest_frame_detections(pose_frame_index, frame_idx, max_delta=1):
-                draw_pose_box(frame, det)
             for det in nearest_frame_detections(face_frame_index, frame_idx, max_delta=1):
                 draw_face_box(frame, det)
 
@@ -913,10 +847,6 @@ def render_debug_video(
                 active_visible_track_ids=active_speaker_state["visible_track_ids"],
                 offscreen_audio_speaker_ids=active_speaker_state["offscreen_audio_speaker_ids"],
                 overlap_active=bool(active_speaker_state["overlap"]),
-                pose_track_source=pose_track_source,
-                visual_identity_count=visual_identity_count,
-                audio_visual_mapping_count=audio_visual_mapping_count,
-                span_assignment_count=span_assignment_count,
             )
             writer.write(frame)
             frame_idx += 1
