@@ -58,6 +58,27 @@ export const creatorApi = {
     }),
 };
 
+// Pipeline runs
+export const pipelineApi = {
+  startRun: (videoUrl: string, creatorId?: string) =>
+    request<{ run_id: string }>("/runs", {
+      method: "POST",
+      body: JSON.stringify({ video_url: videoUrl, creator_id: creatorId }),
+    }),
+  getRunStatus: (runId: string) =>
+    request<{ run_id: string; status: string; phase: string; progress: number }>(`/runs/${runId}/status`),
+  getRun: (runId: string) =>
+    request<any>(`/runs/${runId}`),
+  getGraph: (runId: string) =>
+    request<any>(`/runs/${runId}/graph`),
+  getClips: (runId: string) =>
+    request<any>(`/runs/${runId}/clips`),
+  getArtifacts: (runId: string) =>
+    request<any>(`/runs/${runId}/artifacts`),
+  getRenderedClipUrl: (filename: string) =>
+    `${API_BASE}/rendered-clips/${filename}`,
+};
+
 // Retrieve
 export const retrieveApi = {
   retrieveClip: (runId: string, payload: any) =>
