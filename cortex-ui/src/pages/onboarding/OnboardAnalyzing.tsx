@@ -43,12 +43,18 @@ export default function OnboardAnalyzing() {
         if (cancelled) { clearInterval(poll); return; }
         const job = await onboardingApi.getAnalysisJob(job_id);
 
+        // Map backend stage names to frontend step indices
         const stageMap: Record<string, number> = {
-          metadata: 0, shorts: 1, longform: 2, patterns: 3, profile: 4,
+          resolve_channel: 0,
+          ensure_workspace: 1,
+          fetch_transcripts: 2,
+          ingest_senso: 3,
+          generate_profile: 4,
+          complete: 5,
         };
 
+        const currentIdx = stageMap[job.current_stage] ?? -1;
         setSteps(prev => prev.map((s, i) => {
-          const currentIdx = stageMap[job.stage] ?? -1;
           if (i < currentIdx) return { ...s, status: "completed" as const };
           if (i === currentIdx) return { ...s, status: "in-progress" as const };
           return s;
