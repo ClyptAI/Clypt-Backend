@@ -19,8 +19,6 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from urllib.parse import urlparse
-from urllib.request import urlopen
 
 import yt_dlp
 
@@ -573,10 +571,7 @@ def download_media(url: str) -> tuple[str, str]:
 
     # ── Video + Audio (muxed) ──
     log.info("Downloading video+audio stream…")
-    if _looks_like_direct_media_url(url):
-        video_path = _download_direct_media_url(url)
-    else:
-        video_path = _download_video_with_format_fallback(url)
+    video_path = _download_video_with_format_fallback(url)
 
     video_path = ensure_h264_local(video_path)
 
@@ -608,23 +603,6 @@ def download_media(url: str) -> tuple[str, str]:
     log.info(f"Audio saved: {audio_path} ({Path(audio_path).stat().st_size / 1e6:.1f} MB)")
 
     return video_path, audio_path
-
-
-def _looks_like_direct_media_url(url: str) -> bool:
-    parsed = urlparse(url)
-    path = (parsed.path or "").lower()
-    return path.endswith((".mp4", ".mov", ".m4v", ".webm", ".mkv"))
-
-
-def _download_direct_media_url(url: str) -> str:
-    target_path = DOWNLOAD_DIR / "video.mp4"
-    with urlopen(url, timeout=120) as response, open(target_path, "wb") as target_file:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            target_file.write(chunk)
-    return str(target_path)
 
 
 def _download_video_with_format_fallback(url: str) -> str:

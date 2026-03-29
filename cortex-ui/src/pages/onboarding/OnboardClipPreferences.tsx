@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowRight, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,9 +10,12 @@ import type { SliderValue } from "@/components/tool-ui/parameter-slider";
 import type { OptionListSelection } from "@/components/tool-ui/option-list";
 import OnboardingLayout from "@/components/onboarding/OnboardingLayout";
 import { mockClipPreferences } from "@/data/mockOnboarding";
+import { creatorApi } from "@/lib/api";
 
 export default function OnboardClipPreferences() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { creatorId } = (location.state as any) || {};
   const [durationMin, setDurationMin] = useState(mockClipPreferences.preferredDurationRange.min);
   const [durationMax, setDurationMax] = useState(mockClipPreferences.preferredDurationRange.max);
   const [hookImportance, setHookImportance] = useState(mockClipPreferences.hookImportance * 100);
@@ -129,7 +132,23 @@ export default function OnboardClipPreferences() {
         </div>
 
         <Button
-          onClick={() => navigate("/onboard/ready")}
+          onClick={async () => {
+            if (creatorId) {
+              try {
+                await creatorApi.savePreferences(creatorId, {
+                  preferred_duration_range: { min_seconds: durationMin, max_seconds: durationMax },
+                  target_platforms: Array.isArray(platforms) ? platforms : [],
+                  tone_preferences: Array.isArray(tones) ? tones : [],
+                  caption_style: autoCaptions ? "Bold, white with black outline" : "none",
+                  hook_importance: hookImportance / 100,
+                  payoff_importance: payoffImportance / 100,
+                });
+              } catch (err) {
+                console.error("Failed to save preferences:", err);
+              }
+            }
+            navigate("/onboard/ready", { state: { creatorId } });
+          }}
           className="w-full max-w-sm h-11 gap-2 font-display font-semibold rounded-lg text-sm"
         >
           Save preferences

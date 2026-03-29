@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowRight, Zap, Heart, Users, GraduationCap } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -41,7 +41,25 @@ function generateMechanismCells(intensity: number, count: number): number[] {
 
 export default function OnboardBrandProfile() {
   const navigate = useNavigate();
-  const { dominantMechanisms } = mockBrandProfile;
+  const location = useLocation();
+  const { creatorId, profile, channel } = (location.state as any) || {};
+
+  // Map API profile to UI shape, falling back to mock data
+  const brandProfile = profile
+    ? {
+        creatorArchetype: profile.creator_archetype ?? mockBrandProfile.creatorArchetype,
+        archetypeDescription: profile.archetype_description ?? mockBrandProfile.archetypeDescription,
+        dominantMechanisms: profile.dominant_mechanisms ?? mockBrandProfile.dominantMechanisms,
+        brandVoice: profile.brand_voice ?? mockBrandProfile.brandVoice,
+        hookStyle: profile.hook_style ?? mockBrandProfile.hookStyle,
+        payoffStyle: profile.payoff_style ?? mockBrandProfile.payoffStyle,
+        audienceSignature: profile.audience_signature ?? mockBrandProfile.audienceSignature,
+      }
+    : mockBrandProfile;
+
+  const channelData = channel ?? mockChannelResult;
+
+  const { dominantMechanisms } = brandProfile;
 
   const mechanismKeys = Object.keys(dominantMechanisms) as Array<
     keyof typeof dominantMechanisms
@@ -78,21 +96,21 @@ export default function OnboardBrandProfile() {
         <div className="w-full rounded-xl clypt-glass p-5 mb-4">
           <div className="flex items-center gap-4 mb-4">
             <img
-              src={mockChannelResult.avatarUrl}
-              alt={mockChannelResult.channelName}
+              src={channelData.avatarUrl}
+              alt={channelData.channelName}
               className="w-10 h-10 rounded-full border border-primary/20"
             />
             <div>
-              <h2 className="font-display text-sm font-bold text-foreground">{mockChannelResult.channelName}</h2>
-              <p className="text-xs text-muted-foreground font-mono">{mockChannelResult.category} · Joined {mockChannelResult.joinedDate}</p>
+              <h2 className="font-display text-sm font-bold text-foreground">{channelData.channelName}</h2>
+              <p className="text-xs text-muted-foreground font-mono">{channelData.category} · Joined {channelData.joinedDate}</p>
             </div>
           </div>
           <div className="grid grid-cols-4 gap-3">
             {[
-              { label: "Subscribers", value: mockChannelResult.subscriberCount },
-              { label: "Total Views", value: mockChannelResult.totalViews },
-              { label: "Uploads", value: mockChannelResult.uploadFrequency },
-              { label: "Category", value: mockChannelResult.category },
+              { label: "Subscribers", value: channelData.subscriberCount },
+              { label: "Total Views", value: channelData.totalViews },
+              { label: "Uploads", value: channelData.uploadFrequency },
+              { label: "Category", value: channelData.category },
             ].map((stat) => (
               <div key={stat.label} className="rounded-lg bg-background/40 border border-border/40 p-3 text-center">
                 <p className="text-[10px] text-muted-foreground/60 font-mono uppercase tracking-wider mb-1">{stat.label}</p>
@@ -112,10 +130,10 @@ export default function OnboardBrandProfile() {
                 Creator archetype
               </p>
               <h2 className="font-display text-lg font-bold text-primary mb-2">
-                {mockBrandProfile.creatorArchetype}
+                {brandProfile.creatorArchetype}
               </h2>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                {mockBrandProfile.archetypeDescription}
+                {brandProfile.archetypeDescription}
               </p>
             </div>
 
@@ -125,7 +143,7 @@ export default function OnboardBrandProfile() {
                 Brand voice
               </p>
               <div className="flex flex-wrap gap-2">
-                {mockBrandProfile.brandVoice.map((tag) => (
+                {brandProfile.brandVoice.map((tag) => (
                   <Badge
                     key={tag}
                     variant="secondary"
@@ -144,7 +162,7 @@ export default function OnboardBrandProfile() {
                   Hook style
                 </p>
                 <p className="text-xs text-foreground leading-relaxed">
-                  {mockBrandProfile.hookStyle}
+                  {brandProfile.hookStyle}
                 </p>
               </div>
               <div className="rounded-xl clypt-glass p-5">
@@ -152,7 +170,7 @@ export default function OnboardBrandProfile() {
                   Payoff style
                 </p>
                 <p className="text-xs text-foreground leading-relaxed">
-                  {mockBrandProfile.payoffStyle}
+                  {brandProfile.payoffStyle}
                 </p>
               </div>
             </div>
@@ -236,7 +254,7 @@ export default function OnboardBrandProfile() {
         </div>
 
         <Button
-          onClick={() => navigate("/onboard/clip-preferences")}
+          onClick={() => navigate("/onboard/clip-preferences", { state: { creatorId, profile, channel } })}
           className="w-full max-w-sm h-11 gap-2 font-display font-semibold rounded-lg text-sm"
         >
           Looks good, continue

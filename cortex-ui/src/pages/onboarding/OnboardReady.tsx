@@ -1,4 +1,4 @@
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowRight, Rocket, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,8 @@ const completedItems = [
 
 export default function OnboardReady() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { creatorId } = (location.state as any) || {};
 
   return (
     <OnboardingLayout step={4} onBack={() => navigate("/onboard/clip-preferences")}>
@@ -73,7 +75,7 @@ export default function OnboardReady() {
         </div>
 
         <Button
-          onClick={() => navigate("/")}
+          onClick={() => navigate(`/run/${creatorId || "demo"}`)}
           size="lg"
           className="w-full max-w-sm h-12 gap-2 font-display font-bold rounded-xl text-sm"
         >
