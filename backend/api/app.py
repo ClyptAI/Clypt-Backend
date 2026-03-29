@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import json
 import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from backend.api.onboarding_jobs import OnboardingJobStore
+from backend.api.pipeline_runs import PipelineRunStore
 from backend.services.creator_onboarding import CreatorOnboardingService
 from backend.services.creator_store import FileCreatorStore
 from backend.services.auth_store import (
@@ -35,6 +41,16 @@ DEFAULT_RETRIEVE_CANDIDATES_PATH = Path(
         "CLYPT_RETRIEVE_CANDIDATES_PATH",
         Path(__file__).resolve().parent.parent / "outputs" / "crowd_3_clip_candidates.json",
     )
+)
+DEFAULT_PIPELINE_RUN_STATE_ROOT = Path(
+    os.getenv("CLYPT_PIPELINE_RUN_STATE_ROOT", Path(__file__).resolve().parent.parent / "outputs" / "pipeline_runs")
+)
+DEFAULT_PIPELINE_OUTPUT_ROOT = Path(
+    os.getenv("CLYPT_PIPELINE_OUTPUT_ROOT", Path(__file__).resolve().parent.parent / "outputs")
+)
+# FFmpeg clips output directory (our renderer writes to backend/outputs/clips/)
+DEFAULT_RENDERED_CLIPS_ROOT = Path(
+    os.getenv("CLYPT_RENDERED_CLIPS_ROOT", Path(__file__).resolve().parent.parent / "outputs" / "clips")
 )
 DEFAULT_AUTH_COOKIE_NAME = str(os.getenv("CLYPT_AUTH_COOKIE_NAME", "clypt_session") or "clypt_session").strip()
 DEFAULT_AUTH_SESSION_TTL_HOURS = int(os.getenv("CLYPT_AUTH_SESSION_TTL_HOURS", "720") or 720)
@@ -90,6 +106,11 @@ class RetrieveClipRequest(BaseModel):
     preferences_override: dict[str, Any] = Field(default_factory=dict)
 
 
+class PipelineRunRequest(BaseModel):
+    video_url: str = Field(min_length=1)
+    creator_id: str | None = None
+
+
 def create_app(
     *,
     onboarding_service: CreatorOnboardingService | None = None,
@@ -98,6 +119,7 @@ def create_app(
     creator_store: FileCreatorStore | None = None,
     auth_store: FileAuthStore | None = None,
     retrieve_service: Any | None = None,
+    pipeline_run_store: PipelineRunStore | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Clypt Backend API")
     frontend_origins = [
@@ -128,6 +150,7 @@ def create_app(
     app.state.retrieve_service = retrieve_service or OutputBackedRetrieveService(
         candidates_path=DEFAULT_RETRIEVE_CANDIDATES_PATH
     )
+    app.state.pipeline_run_store = pipeline_run_store or PipelineRunStore(DEFAULT_PIPELINE_RUN_STATE_ROOT)
 
     def _job_store() -> OnboardingJobStore:
         return app.state.job_store
@@ -140,6 +163,9 @@ def create_app(
 
     def _retrieve_service():
         return app.state.retrieve_service
+
+    def _pipeline_run_store() -> PipelineRunStore:
+        return app.state.pipeline_run_store
 
     def _youtube_service() -> YouTubeChannelService:
         if app.state.youtube_service is None:
@@ -203,6 +229,7 @@ def create_app(
             "creator_store_root": str(_creator_store().root),
             "auth_state_root": str(_auth_store().root),
             "senso_enabled": bool(str(os.getenv("SENSO_API_KEY", "") or "").strip()),
+            "pipeline_run_state_root": str(_pipeline_run_store().root),
         }
 
     @app.post("/api/v1/auth/signup", status_code=status.HTTP_201_CREATED)
@@ -331,6 +358,113 @@ def create_app(
             "preferences": preferences,
         }
 
+    @app.post("/api/v1/runs")
+    def start_pipeline_run(payload: PipelineRunRequest, background_tasks: BackgroundTasks) -> dict:
+        store = _pipeline_run_store()
+        run = store.create_run(video_url=payload.video_url, creator_id=payload.creator_id)
+
+        def _run() -> None:
+            repo_root = Path(__file__).resolve().parents[2]
+            log_root = _pipeline_run_store().root / run["run_id"]
+            log_root.mkdir(parents=True, exist_ok=True)
+            stdout_path = log_root / "stdout.log"
+            stderr_path = log_root / "stderr.log"
+            try:
+                if _full_pipeline_enabled():
+                    store.mark_running(run["run_id"], phase="phase_1", progress_pct=10, detail="Starting full video pipeline run")
+                    env = os.environ.copy()
+                    with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open("w", encoding="utf-8") as stderr_file:
+                        process = subprocess.run(
+                            [sys.executable, "-m", "backend.pipeline.run_pipeline"],
+                            input=(payload.video_url.strip() + "\n"),
+                            text=True,
+                            cwd=str(repo_root),
+                            env={**env, "PYTHONPATH": str(repo_root)},
+                            stdout=stdout_file,
+                            stderr=stderr_file,
+                            check=False,
+                        )
+                    if process.returncode != 0:
+                        detail = _tail_text(stderr_path) or _tail_text(stdout_path) or f"Pipeline failed ({process.returncode})"
+                        store.mark_failed(run["run_id"], phase="pipeline", detail=detail)
+                        return
+                    summary = _build_pipeline_summary(run["run_id"], payload.video_url)
+                else:
+                    with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open("w", encoding="utf-8") as stderr_file:
+                        summary = _run_lightweight_video_analysis(
+                            run_id=run["run_id"],
+                            video_url=payload.video_url,
+                            store=store,
+                            stdout_file=stdout_file,
+                            stderr_file=stderr_file,
+                        )
+            except Exception as exc:
+                store.mark_failed(run["run_id"], phase="pipeline", detail=str(exc))
+                return
+            store.mark_succeeded(run["run_id"], summary=summary)
+
+        background_tasks.add_task(_run)
+        return {"run_id": run["run_id"], "status": run["status"], "video_url": payload.video_url}
+
+    @app.get("/api/v1/runs/{run_id}/status")
+    def get_pipeline_run_status(run_id: str) -> dict:
+        run = _pipeline_run_store().get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="pipeline run not found")
+        return run
+
+    @app.get("/api/v1/runs/{run_id}")
+    def get_pipeline_run(run_id: str) -> dict:
+        run = _pipeline_run_store().get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="pipeline run not found")
+        return {**run, "summary": run.get("summary") or _build_pipeline_summary(run_id, run.get("video_url", ""))}
+
+    @app.get("/api/v1/runs/{run_id}/graph")
+    def get_pipeline_graph(run_id: str) -> dict:
+        run = _pipeline_run_store().get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="pipeline run not found")
+        prefer_default_graph = str(((run.get("summary") or {}).get("mode") or "")).strip() == "video_url_lite"
+        nodes, edges = _select_graph_payload(run_id, prefer_default=prefer_default_graph)
+        return {"run_id": run_id, "nodes": nodes, "edges": edges}
+
+    @app.get("/api/v1/rendered-clips/{filename}")
+    def get_rendered_clip(filename: str) -> FileResponse:
+        if "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="invalid rendered clip filename")
+        path = DEFAULT_RENDERED_CLIPS_ROOT / filename
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=404, detail="rendered clip not found")
+        return FileResponse(path, media_type="video/mp4", filename=filename)
+
+    @app.get("/api/v1/runs/{run_id}/clips")
+    def get_pipeline_clips(request: Request, run_id: str) -> dict:
+        run = _pipeline_run_store().get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="pipeline run not found")
+        clips_payload = _load_json_file(_run_artifact_path(run_id, "crowd_3_clip_candidates.json")) or _load_json_file(DEFAULT_PIPELINE_OUTPUT_ROOT / "crowd_3_clip_candidates.json")
+        remotion_payloads = _load_json_file(_run_artifact_path(run_id, "crowd_remotion_payloads_array.json")) or _load_json_file(DEFAULT_PIPELINE_OUTPUT_ROOT / "crowd_remotion_payloads_array.json")
+        clips = clips_payload.get("candidates", []) if isinstance(clips_payload, dict) else (clips_payload if isinstance(clips_payload, list) else [])
+        rendered_files = _rendered_clip_files()
+        rendered_base = str(request.base_url).rstrip("/")
+        rendered_clips = [{"filename": path.name, "url": f"{rendered_base}/api/v1/rendered-clips/{path.name}", "size_bytes": path.stat().st_size} for path in rendered_files]
+        enriched_clips: list[dict[str, Any]] = []
+        for index, clip in enumerate(clips if isinstance(clips, list) else []):
+            item = dict(clip) if isinstance(clip, dict) else {"value": clip}
+            if index < len(rendered_clips):
+                item["rendered_video_url"] = rendered_clips[index]["url"]
+                item["rendered_video_filename"] = rendered_clips[index]["filename"]
+            enriched_clips.append(item)
+        return {"run_id": run_id, "clips": enriched_clips, "remotion_payloads": remotion_payloads if isinstance(remotion_payloads, list) else [], "rendered_clips": rendered_clips}
+
+    @app.get("/api/v1/runs/{run_id}/artifacts")
+    def get_pipeline_artifacts(run_id: str) -> dict:
+        run = _pipeline_run_store().get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="pipeline run not found")
+        return {"run_id": run_id, "artifacts": _artifact_inventory(run_id)}
+
     @app.post("/api/v1/runs/{run_id}/clips/retrieve")
     def retrieve_clip(run_id: str, payload: RetrieveClipRequest) -> dict:
         creator_id = payload.creator_id
@@ -366,6 +500,234 @@ def _merge_preferences(stored: dict[str, Any] | None, override: dict[str, Any] |
     for key, value in (override or {}).items():
         merged[key] = value
     return merged
+
+
+def _full_pipeline_enabled() -> bool:
+    return bool(str(os.getenv("DO_PHASE1_BASE_URL", "") or "").strip())
+
+
+def _run_artifact_root(run_id: str) -> Path:
+    return DEFAULT_PIPELINE_OUTPUT_ROOT / "pipeline_runs" / run_id
+
+
+def _run_artifact_path(run_id: str, name: str) -> Path:
+    return _run_artifact_root(run_id) / name
+
+
+def _tail_text(path: Path, max_chars: int = 2000) -> str:
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if len(text) > max_chars:
+        text = "…" + text[-max_chars:]
+    return text.strip()
+
+
+def _load_json_file(path: Path) -> Any:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _rendered_clip_files() -> list[Path]:
+    if not DEFAULT_RENDERED_CLIPS_ROOT.exists():
+        return []
+    files = sorted(DEFAULT_RENDERED_CLIPS_ROOT.glob("*.mp4"))
+    return files
+
+
+def _artifact_inventory(run_id: str) -> list[dict[str, Any]]:
+    root = _run_artifact_root(run_id)
+    if not root.exists():
+        root = DEFAULT_PIPELINE_OUTPUT_ROOT
+    items: list[dict[str, Any]] = []
+    if not root.exists():
+        return items
+    for path in sorted(root.iterdir()):
+        if path.is_file() and path.suffix in (".json", ".log", ".txt", ".csv"):
+            items.append({
+                "name": path.name,
+                "size_bytes": path.stat().st_size,
+                "suffix": path.suffix,
+            })
+    return items
+
+
+def _select_graph_payload(run_id: str, *, prefer_default: bool = False) -> tuple[list, list]:
+    candidates = [
+        _run_artifact_path(run_id, "crowd_2a_nodes.json"),
+        DEFAULT_PIPELINE_OUTPUT_ROOT / "crowd_2a_nodes.json",
+        DEFAULT_PIPELINE_OUTPUT_ROOT / "phase_2a_content_mechanism_nodes.json",
+    ]
+    if prefer_default:
+        candidates = list(reversed(candidates))
+    nodes: list = []
+    for path in candidates:
+        data = _load_json_file(path)
+        if isinstance(data, list) and data:
+            nodes = data
+            break
+        if isinstance(data, dict) and data.get("nodes"):
+            nodes = data["nodes"]
+            break
+    edge_candidates = [
+        _run_artifact_path(run_id, "crowd_2b_edges.json"),
+        DEFAULT_PIPELINE_OUTPUT_ROOT / "crowd_2b_edges.json",
+        DEFAULT_PIPELINE_OUTPUT_ROOT / "phase_2b_narrative_edges.json",
+    ]
+    if prefer_default:
+        edge_candidates = list(reversed(edge_candidates))
+    edges: list = []
+    for path in edge_candidates:
+        data = _load_json_file(path)
+        if isinstance(data, list) and data:
+            edges = data
+            break
+        if isinstance(data, dict) and data.get("edges"):
+            edges = data["edges"]
+            break
+    return nodes, edges
+
+
+def _build_pipeline_summary(run_id: str, video_url: str, prefer_default_graph: bool = False) -> dict[str, Any]:
+    nodes, edges = _select_graph_payload(run_id, prefer_default=prefer_default_graph)
+    clips_payload = _load_json_file(_run_artifact_path(run_id, "crowd_3_clip_candidates.json")) or _load_json_file(DEFAULT_PIPELINE_OUTPUT_ROOT / "crowd_3_clip_candidates.json")
+    clips = clips_payload.get("candidates", []) if isinstance(clips_payload, dict) else (clips_payload if isinstance(clips_payload, list) else [])
+    rendered = _rendered_clip_files()
+    return {
+        "video_url": video_url,
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "clip_candidate_count": len(clips) if isinstance(clips, list) else 0,
+        "rendered_clip_count": len(rendered),
+    }
+
+
+def _parse_timestamp_to_ms(token: str) -> int | None:
+    token = token.strip()
+    iso_seconds = _parse_iso8601_duration_seconds(token)
+    if iso_seconds is not None:
+        return int(iso_seconds * 1000)
+    colon_match = re.match(r"^(\d+):(\d{2}):(\d{2})(?:\.(\d+))?$", token)
+    if colon_match:
+        h, m, s = int(colon_match.group(1)), int(colon_match.group(2)), int(colon_match.group(3))
+        frac = float(f"0.{colon_match.group(4)}") if colon_match.group(4) else 0.0
+        return int((h * 3600 + m * 60 + s + frac) * 1000)
+    short_match = re.match(r"^(\d+):(\d{2})(?:\.(\d+))?$", token)
+    if short_match:
+        m, s = int(short_match.group(1)), int(short_match.group(2))
+        frac = float(f"0.{short_match.group(3)}") if short_match.group(3) else 0.0
+        return int((m * 60 + s + frac) * 1000)
+    plain_match = re.match(r"^(\d+(?:\.\d+)?)$", token)
+    if plain_match:
+        return int(float(plain_match.group(1)) * 1000)
+    return None
+
+
+def _parse_iso8601_duration_seconds(value: str) -> float | None:
+    m = re.match(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?$", value, re.IGNORECASE)
+    if not m:
+        return None
+    hours = int(m.group(1) or 0)
+    minutes = int(m.group(2) or 0)
+    seconds = float(m.group(3) or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _format_duration_label(seconds: float) -> str:
+    total = int(seconds)
+    h, remainder = divmod(total, 3600)
+    m, s = divmod(remainder, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _build_lightweight_candidates(stage1_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build clip candidates from a lightweight stage-1 analysis (e.g. YouTube comments)."""
+    candidates: list[dict[str, Any]] = []
+    comments = stage1_payload.get("comments", [])
+    for idx, comment in enumerate(comments if isinstance(comments, list) else []):
+        if not isinstance(comment, dict):
+            continue
+        text = str(comment.get("text", "") or "").strip()
+        if not text:
+            continue
+        ts_raw = comment.get("timestamp") or comment.get("time") or ""
+        start_ms = _parse_timestamp_to_ms(str(ts_raw)) if ts_raw else None
+        candidates.append({
+            "index": idx,
+            "text": text,
+            "start_ms": start_ms,
+            "source": "youtube_comment",
+        })
+    return candidates
+
+
+def _run_lightweight_video_analysis(
+    *,
+    run_id: str,
+    video_url: str,
+    store: Any,
+    stdout_file: Any,
+    stderr_file: Any,
+) -> dict[str, Any]:
+    """Lightweight analysis when no Phase 1 service is available.
+
+    Attempts to fetch public YouTube metadata (comments, description) and
+    build basic clip candidates from timestamps found in comments.
+    """
+    store.mark_running(run_id, phase="lightweight", progress_pct=10, detail="Starting lightweight video analysis")
+
+    stage1: dict[str, Any] = {"video_url": video_url, "comments": [], "description": ""}
+
+    # Try yt-dlp for metadata
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            [sys.executable, "-c", (
+                "import json, subprocess, sys; "
+                "r = subprocess.run(['yt-dlp', '--skip-download', '--dump-json', sys.argv[1]], capture_output=True, text=True, check=True); "
+                "info = json.loads(r.stdout); "
+                "comments = [{'text': c.get('text',''), 'timestamp': c.get('timestamp','')} for c in (info.get('comments') or [])[:200]]; "
+                "print(json.dumps({'description': info.get('description',''), 'title': info.get('title',''), 'comments': comments}))"
+            ), video_url],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=120,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            stage1.update(json.loads(result.stdout.strip()))
+    except Exception:
+        pass
+
+    store.mark_running(run_id, phase="lightweight", progress_pct=50, detail="Building clip candidates")
+
+    candidates = _build_lightweight_candidates(stage1)
+
+    # Persist stage-1 and candidates
+    artifact_root = _run_artifact_root(run_id)
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    (artifact_root / "lightweight_stage1.json").write_text(json.dumps(stage1, indent=2, default=str), encoding="utf-8")
+    (artifact_root / "crowd_3_clip_candidates.json").write_text(
+        json.dumps({"candidates": candidates}, indent=2, default=str), encoding="utf-8",
+    )
+
+    store.mark_running(run_id, phase="lightweight", progress_pct=90, detail="Finalizing")
+
+    return {
+        "video_url": video_url,
+        "mode": "video_url_lite",
+        "clip_candidate_count": len(candidates),
+        "node_count": 0,
+        "edge_count": 0,
+        "rendered_clip_count": 0,
+    }
 
 
 app = create_app()
