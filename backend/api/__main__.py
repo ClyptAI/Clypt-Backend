@@ -7,7 +7,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
+
 import uvicorn
+from dotenv import load_dotenv
+
+# Load .env from the repo root before anything reads os.getenv
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 from backend.api.app import create_app
 
