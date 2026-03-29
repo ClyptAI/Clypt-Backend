@@ -21,6 +21,15 @@ export default function OnboardAnalyzing() {
   const { channelId } = (location.state as any) || {};
   const [steps, setSteps] = useState<ProgressStep[]>(initialSteps);
   const [elapsed, setElapsed] = useState(0);
+  const [startTime] = useState(() => Date.now());
+
+  // Separate timer that ticks every 100ms for smooth display
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setElapsed(Date.now() - startTime);
+    }, 100);
+    return () => clearInterval(timer);
+  }, [startTime]);
 
   useEffect(() => {
     if (!channelId) { navigate("/onboard/channel"); return; }
@@ -44,7 +53,6 @@ export default function OnboardAnalyzing() {
           if (i === currentIdx) return { ...s, status: "in-progress" as const };
           return s;
         }));
-        setElapsed(e => e + 2000);
 
         if (job.status === "succeeded") {
           clearInterval(poll);

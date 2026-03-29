@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowRight, CheckCircle2, Users, Eye, CalendarDays } from "lucide-react";
+import { ArrowRight, CheckCircle2, Users, Eye, CalendarDays, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import OnboardingLayout from "@/components/onboarding/OnboardingLayout";
@@ -58,16 +58,33 @@ export default function OnboardChannel() {
             <Button
               onClick={handleSearch}
               disabled={loading || !url.trim()}
-              className="h-11 px-5 rounded-lg font-display font-semibold text-sm"
+              className="h-11 px-5 rounded-lg font-display font-semibold text-sm min-w-[80px]"
             >
               {loading ? (
-                <div className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
+                <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
                 "Find"
               )}
             </Button>
           </div>
         </div>
+
+        {/* Loading state */}
+        {loading && !found && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="w-full rounded-xl clypt-glass p-5 mb-4"
+          >
+            <div className="flex items-center gap-3">
+              <Loader2 className="w-5 h-5 text-primary animate-spin shrink-0" />
+              <div>
+                <p className="text-sm font-medium text-foreground">Looking up channel…</p>
+                <p className="text-xs text-muted-foreground mt-0.5">This may take a few seconds</p>
+              </div>
+            </div>
+          </motion.div>
+        )}
 
         {/* Channel result card */}
         {found && (
