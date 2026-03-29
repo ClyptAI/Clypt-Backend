@@ -5,21 +5,27 @@ import { ArrowRight, CheckCircle2, Users, Eye, CalendarDays } from "lucide-react
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import OnboardingLayout from "@/components/onboarding/OnboardingLayout";
-import { mockChannelResult } from "@/data/mockOnboarding";
+import { onboardingApi } from "@/lib/api";
 
 export default function OnboardChannel() {
   const navigate = useNavigate();
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [found, setFound] = useState(false);
+  const [channelData, setChannelData] = useState<any>(null);
 
-  const handleSearch = () => {
+  const handleSearch = async () => {
     if (!url.trim()) return;
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
+    try {
+      const result = await onboardingApi.resolveChannel(url);
+      setChannelData(result);
       setFound(true);
-    }, 1500);
+    } catch (err: any) {
+      console.error("Channel resolve failed:", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -72,37 +78,37 @@ export default function OnboardChannel() {
           >
             <div className="flex items-start gap-4">
               <img
-                src={mockChannelResult.avatarUrl}
-                alt={mockChannelResult.channelName}
+                src={channelData?.channel?.thumbnail_url}
+                alt={channelData?.channel?.title}
                 className="w-14 h-14 rounded-full border-2 border-primary/20"
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
                   <h3 className="font-display font-bold text-foreground text-sm truncate">
-                    {mockChannelResult.channelName}
+                    {channelData?.channel?.title}
                   </h3>
                   <CheckCircle2 className="w-4 h-4 text-primary shrink-0" />
                 </div>
-                <p className="text-xs text-muted-foreground font-mono mb-3">{mockChannelResult.category}</p>
+                <p className="text-xs text-muted-foreground font-mono mb-3">{channelData?.channel?.category}</p>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="flex items-center gap-1.5">
                     <Users className="w-3.5 h-3.5 text-muted-foreground/60" />
-                    <span className="text-xs font-mono text-foreground">{mockChannelResult.subscriberCount}</span>
+                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.subscriber_count}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <Eye className="w-3.5 h-3.5 text-muted-foreground/60" />
-                    <span className="text-xs font-mono text-foreground">{mockChannelResult.totalViews}</span>
+                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.view_count}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <CalendarDays className="w-3.5 h-3.5 text-muted-foreground/60" />
-                    <span className="text-xs font-mono text-foreground">{mockChannelResult.joinedDate}</span>
+                    <span className="text-xs font-mono text-foreground">{channelData?.channel?.published_at}</span>
                   </div>
                 </div>
               </div>
             </div>
 
             <Button
-              onClick={() => navigate("/onboard/analyzing")}
+              onClick={() => navigate("/onboard/analyzing", { state: { channelId: channelData.channel.channel_id, channel: channelData.channel } })}
               className="w-full mt-5 h-11 gap-2 font-display font-semibold rounded-lg text-sm"
             >
               Connect this channel

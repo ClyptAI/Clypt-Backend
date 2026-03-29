@@ -1,18 +1,27 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowRight, Mail, Lock, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { authApi } from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
 
 export default function Login() {
+  const navigate = useNavigate();
+  const { toast } = useToast();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: wire up auth
+    try {
+      await authApi.login(email, password);
+      navigate("/onboard/channel");
+    } catch (err: any) {
+      toast({ title: "Login failed", description: err.message, variant: "destructive" });
+    }
   };
 
   return (

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Brain } from "lucide-react";
 import OnboardingLayout from "@/components/onboarding/OnboardingLayout";
 import { ProgressTracker } from "@/components/tool-ui/progress-tracker";
 import type { ProgressStep } from "@/components/tool-ui/progress-tracker";
+import { onboardingApi } from "@/lib/api";
 
 const initialSteps: ProgressStep[] = [
   { id: "metadata", label: "Fetching channel metadata", description: "Pulling subscriber count, upload frequency, and channel info", status: "pending" },
@@ -16,38 +17,49 @@ const initialSteps: ProgressStep[] = [
 
 export default function OnboardAnalyzing() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { channelId } = (location.state as any) || {};
   const [steps, setSteps] = useState<ProgressStep[]>(initialSteps);
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    let currentStep = 0;
+    if (!channelId) { navigate("/onboard/channel"); return; }
 
-    // Start first step immediately
-    setSteps((prev) => prev.map((s, i) => (i === 0 ? { ...s, status: "in-progress" as const } : s)));
+    let cancelled = false;
 
-    const timer = setInterval(() => {
-      setElapsed((e) => e + 100);
+    (async () => {
+      const { job_id } = await onboardingApi.analyzeChannel(channelId);
 
-      setSteps((prev) => {
-        if (currentStep >= prev.length) return prev;
+      const poll = setInterval(async () => {
+        if (cancelled) { clearInterval(poll); return; }
+        const job = await onboardingApi.getAnalysisJob(job_id);
 
-        // Complete current step and start next
-        currentStep++;
-        return prev.map((s, i) => {
-          if (i < currentStep) return { ...s, status: "completed" as const };
-          if (i === currentStep) return { ...s, status: "in-progress" as const };
+        const stageMap: Record<string, number> = {
+          metadata: 0, shorts: 1, longform: 2, patterns: 3, profile: 4,
+        };
+
+        setSteps(prev => prev.map((s, i) => {
+          const currentIdx = stageMap[job.stage] ?? -1;
+          if (i < currentIdx) return { ...s, status: "completed" as const };
+          if (i === currentIdx) return { ...s, status: "in-progress" as const };
           return s;
-        });
-      });
+        }));
+        setElapsed(e => e + 2000);
 
-      if (currentStep >= initialSteps.length) {
-        clearInterval(timer);
-        setTimeout(() => navigate("/onboard/brand-profile"), 1000);
-      }
-    }, 1500);
+        if (job.status === "succeeded") {
+          clearInterval(poll);
+          setSteps(prev => prev.map(s => ({ ...s, status: "completed" as const })));
+          setTimeout(() => navigate("/onboard/brand-profile", {
+            state: { creatorId: job.profile?.creator_id, profile: job.profile, channel: job.channel }
+          }), 1000);
+        } else if (job.status === "failed") {
+          clearInterval(poll);
+        }
+      }, 2000);
+    })();
 
-    return () => clearInterval(timer);
-  }, [navigate]);
+    return () => { cancelled = true; };
+  }, [channelId, navigate]);
 
   return (
     <OnboardingLayout step={1} onBack={() => navigate("/onboard/channel")}>

@@ -4,17 +4,25 @@ import { motion } from "framer-motion";
 import { ArrowRight, Mail, Lock, User, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { authApi } from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
 
 export default function Signup() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    navigate("/onboard/channel");
+    try {
+      await authApi.signup(email, password, name);
+      navigate("/onboard/channel");
+    } catch (err: any) {
+      toast({ title: "Signup failed", description: err.message, variant: "destructive" });
+    }
   };
 
   return (
