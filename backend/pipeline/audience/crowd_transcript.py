@@ -56,6 +56,78 @@ def _build_transcript_api() -> YouTubeTranscriptApi:
     return YouTubeTranscriptApi(http_client=session)
 
 
+def _synth_words_from_watch_page(video_id: str) -> tuple[list[dict], dict]:
+    """Fetch transcript by scraping the watch page for captionTracks with cookies."""
+    import re as _re
+
+    cookies_path = _get_cookies_path()
+    if not cookies_path:
+        raise RuntimeError("No cookies available for watch-page transcript fetch")
+
+    jar = MozillaCookieJar(cookies_path)
+    jar.load(ignore_discard=True, ignore_expires=True)
+    session = requests.Session()
+    session.cookies = jar  # type: ignore[assignment]
+
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    resp = session.get(youtube_url, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }, timeout=15)
+    resp.raise_for_status()
+
+    match = _re.search(r'"captionTracks":\s*(\[.*?\])', resp.text)
+    if not match:
+        raise RuntimeError(f"No captionTracks found in watch page for {video_id}")
+
+    tracks = json.loads(match.group(1))
+    # Pick English track
+    track_url = None
+    for track in tracks:
+        lang = str(track.get("languageCode", "") or "")
+        if lang.startswith("en"):
+            track_url = track.get("baseUrl", "")
+            break
+    if not track_url:
+        track_url = tracks[0].get("baseUrl", "") if tracks else ""
+    if not track_url:
+        raise RuntimeError(f"No caption URL found in watch page for {video_id}")
+
+    # Fetch json3 format with retry on 429
+    caption_data = None
+    last_exc = None
+    for attempt in range(5):
+        if attempt > 0:
+            wait = 2 ** attempt  # 2, 4, 8, 16 seconds
+            _log.info("Watch-page retry %d for captions of %s (waiting %ds)", attempt, video_id, wait)
+            time.sleep(wait)
+        try:
+            caption_resp = session.get(track_url + "&fmt=json3", timeout=15)
+            caption_resp.raise_for_status()
+            caption_data = caption_resp.json()
+            break
+        except requests.exceptions.HTTPError as exc:
+            last_exc = exc
+            if exc.response is not None and exc.response.status_code == 429:
+                _log.warning("429 on watch-page caption fetch for %s", video_id)
+                continue
+            raise
+    if caption_data is None:
+        raise RuntimeError(f"Watch-page caption fetch failed for {video_id} after retries: {last_exc}") from last_exc
+    events = caption_data.get("events", [])
+    words = _words_from_caption_events(events)
+
+    payload = {
+        "schema_version": "crowd-clip-transcript-v1",
+        "source_audio": youtube_url,
+        "video_id": video_id,
+        "words": words,
+        "transcript_source": "watch_page_scrape",
+    }
+    _log.info("Fetched transcript for %s via watch page scrape (%d words)", video_id, len(words))
+    return words, payload
+
+
 def _audio_matches_video_id(payload: dict, video_id: str) -> bool:
     for key in ("source_audio", "source_video", "uri", "video_gcs_uri"):
         value = str(payload.get(key, "") or "")
@@ -248,8 +320,13 @@ def load_transcript_words(video_id: str) -> tuple[list[dict], dict]:
 
     try:
         return _synth_words_from_transcript(video_id)
-    except Exception:
-        return _synth_words_from_ytdlp_captions(video_id)
+    except Exception as exc1:
+        _log.debug("youtube_transcript_api failed for %s: %s", video_id, exc1)
+        try:
+            return _synth_words_from_watch_page(video_id)
+        except Exception as exc2:
+            _log.debug("watch page scrape failed for %s: %s", video_id, exc2)
+            return _synth_words_from_ytdlp_captions(video_id)
 
 
 def transcript_duration_ms(words: list[dict]) -> int:
