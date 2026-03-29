@@ -18,7 +18,7 @@ const initialSteps: ProgressStep[] = [
 export default function OnboardAnalyzing() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { channelId } = (location.state as any) || {};
+  const { channelId, channel: passedChannel } = (location.state as any) || {};
   const [steps, setSteps] = useState<ProgressStep[]>(initialSteps);
   const [elapsed, setElapsed] = useState(0);
   const [startTime] = useState(() => Date.now());
@@ -58,7 +58,7 @@ export default function OnboardAnalyzing() {
           clearInterval(poll);
           setSteps(prev => prev.map(s => ({ ...s, status: "completed" as const })));
           setTimeout(() => navigate("/onboard/brand-profile", {
-            state: { creatorId: job.profile?.creator_id, profile: job.profile, channel: job.channel }
+            state: { creatorId: job.profile?.creator_id, profile: job.profile, channel: passedChannel ?? job.channel }
           }), 1000);
         } else if (job.status === "failed") {
           clearInterval(poll);

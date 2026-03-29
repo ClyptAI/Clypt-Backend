@@ -57,7 +57,19 @@ export default function OnboardBrandProfile() {
       }
     : mockBrandProfile;
 
-  const channelData = channel ?? mockChannelResult;
+  // Map snake_case API channel data to UI shape, falling back to mock
+  const channelData = channel
+    ? {
+        channelName: channel.channel_name ?? channel.channelName ?? "",
+        avatarUrl: channel.avatar_url ?? channel.avatarUrl ?? "",
+        subscriberCount: channel.subscriber_count_label ?? channel.subscriberCount ?? "",
+        totalViews: channel.total_views_label ?? channel.totalViews ?? "",
+        uploadFrequency: channel.upload_frequency_label ?? channel.uploadFrequency ?? "",
+        joinedDate: channel.joined_date_label ?? channel.joinedDate ?? "",
+        category: channel.category ?? "",
+        description: channel.description ?? "",
+      }
+    : mockChannelResult;
 
   const { dominantMechanisms } = brandProfile;
 
@@ -98,7 +110,10 @@ export default function OnboardBrandProfile() {
             <img
               src={channelData.avatarUrl}
               alt={channelData.channelName}
-              className="w-10 h-10 rounded-full border border-primary/20"
+              className="w-10 h-10 rounded-full border border-primary/20 object-cover bg-secondary"
+              referrerPolicy="no-referrer"
+              crossOrigin="anonymous"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
             />
             <div>
               <h2 className="font-display text-sm font-bold text-foreground">{channelData.channelName}</h2>
