@@ -7065,11 +7065,11 @@ class ClyptWorker:
 
     @staticmethod
     def _lrasd_prep_workers() -> int:
-        raw = os.getenv("CLYPT_LRASD_PREP_WORKERS", "4").strip()
+        raw = os.getenv("CLYPT_LRASD_PREP_WORKERS", "16").strip()
         try:
             value = int(raw)
         except Exception:
-            value = 4
+            value = 16
         return max(1, min(16, value))
 
     @staticmethod
