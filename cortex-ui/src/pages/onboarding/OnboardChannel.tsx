@@ -80,7 +80,10 @@ export default function OnboardChannel() {
               <img
                 src={channelData?.channel?.avatar_url}
                 alt={channelData?.channel?.channel_name}
-                className="w-14 h-14 rounded-full border-2 border-primary/20"
+                className="w-14 h-14 rounded-full border-2 border-primary/20 object-cover bg-secondary"
+                referrerPolicy="no-referrer"
+                crossOrigin="anonymous"
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
