@@ -19,6 +19,7 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 import httpx
+import yt_dlp
 
 from pipeline.audience.crowd_types import CrowdComment
 from pipeline.audience.crowd_utils import OUTPUTS_DIR, extract_video_id, log_weight
@@ -67,6 +68,63 @@ def _fetch_video_resource(client: httpx.Client, api_key: str, video_id: str) -> 
     if not items:
         raise RuntimeError(f"YouTube video not found or unavailable: {video_id}")
     return items[0]
+
+
+def _seconds_to_iso8601(total_seconds: int | float | None) -> str:
+    try:
+        total = max(0, int(total_seconds or 0))
+    except Exception:
+        total = 0
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts = ["PT"]
+    if hours:
+        parts.append(f"{hours}H")
+    if minutes:
+        parts.append(f"{minutes}M")
+    if seconds or len(parts) == 1:
+        parts.append(f"{seconds}S")
+    return "".join(parts)
+
+
+def _upload_date_to_iso(value: str) -> str:
+    raw = str(value or "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return f"{raw[0:4]}-{raw[4:6]}-{raw[6:8]}T00:00:00Z"
+    return ""
+
+
+def _fetch_video_resource_fallback(youtube_url: str, video_id: str, *, reason: str) -> dict:
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "no_warnings": True,
+        "extract_flat": False,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(youtube_url, download=False)
+
+    return {
+        "id": video_id,
+        "snippet": {
+            "title": str(info.get("title", "") or ""),
+            "channelTitle": str(info.get("channel", "") or info.get("uploader", "") or ""),
+            "publishedAt": _upload_date_to_iso(str(info.get("upload_date", "") or "")),
+            "description": str(info.get("description", "") or ""),
+        },
+        "contentDetails": {
+            "duration": _seconds_to_iso8601(info.get("duration")),
+        },
+        "statistics": {
+            "viewCount": int(info.get("view_count", 0) or 0),
+            "likeCount": int(info.get("like_count", 0) or 0),
+            "commentCount": int(info.get("comment_count", 0) or 0),
+        },
+        "_fallback": {
+            "provider": "yt_dlp",
+            "reason": reason,
+        },
+    }
 
 
 def _flatten_comment_item(item: dict) -> list[CrowdComment]:
@@ -197,23 +255,39 @@ def main(youtube_url: str) -> dict:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
     api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("Crowd Clip requires YOUTUBE_API_KEY for public comments/statistics ingestion.")
-
     video_id = extract_video_id(youtube_url)
     log.info("=" * 60)
     log.info("CROWD CLIP — STAGE 1 INGEST")
     log.info("=" * 60)
     log.info("Video: %s", video_id)
 
-    with httpx.Client() as client:
-        video = _fetch_video_resource(client, api_key, video_id)
-        comments_relevance, relevance_available = _fetch_comment_threads(
-            client, api_key, video_id, order="relevance", max_pages=COMMENT_RELEVANCE_PAGES
-        )
-        comments_time, time_available = _fetch_comment_threads(
-            client, api_key, video_id, order="time", max_pages=COMMENT_TIME_PAGES
-        )
+    comments_relevance: list[CrowdComment] = []
+    comments_time: list[CrowdComment] = []
+    relevance_available = False
+    time_available = False
+    notes_extra: dict[str, str] = {}
+
+    if not api_key:
+        log.warning("No YOUTUBE_API_KEY — falling back to yt-dlp for video metadata (no comments).")
+        video = _fetch_video_resource_fallback(youtube_url, video_id, reason="no_api_key")
+        notes_extra["fallback"] = "yt-dlp used for video metadata because YOUTUBE_API_KEY was not set."
+    else:
+        try:
+            with httpx.Client() as client:
+                video = _fetch_video_resource(client, api_key, video_id)
+                comments_relevance, relevance_available = _fetch_comment_threads(
+                    client, api_key, video_id, order="relevance", max_pages=COMMENT_RELEVANCE_PAGES
+                )
+                comments_time, time_available = _fetch_comment_threads(
+                    client, api_key, video_id, order="time", max_pages=COMMENT_TIME_PAGES
+                )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                log.warning("YouTube API returned 403 — falling back to yt-dlp for video metadata.")
+                video = _fetch_video_resource_fallback(youtube_url, video_id, reason="api_403")
+                notes_extra["fallback"] = "yt-dlp used for video metadata because YouTube API returned 403."
+            else:
+                raise
 
     comments = _dedupe_comments([*comments_relevance, *comments_time])
     comments.sort(key=lambda c: (-c.like_count, c.published_at, c.comment_id))
@@ -246,6 +320,7 @@ def main(youtube_url: str) -> dict:
         "notes": {
             "retention": "Public YouTube APIs do not expose audience retention for arbitrary public videos.",
             "velocity": "This MVP stores only current totals plus lifetime average proxies. Time-series velocity needs repeated snapshots or creator analytics access.",
+            **notes_extra,
         },
         "comments": [comment.model_dump() for comment in comments],
     }

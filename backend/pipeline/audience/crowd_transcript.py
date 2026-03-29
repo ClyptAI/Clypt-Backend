@@ -16,6 +16,10 @@ if str(ROOT) not in sys.path:
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
+from html import unescape
+
+import httpx
+import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from pipeline.audience.crowd_utils import OUTPUTS_DIR, VIDEOS_DIR
@@ -65,6 +69,97 @@ def _synth_words_from_transcript(video_id: str) -> tuple[list[dict], dict]:
     return words, payload
 
 
+def _pick_caption_track(info: dict) -> dict | None:
+    """Pick the best English caption track from yt-dlp extracted info."""
+    tracks = info.get("subtitles") or {}
+    auto_tracks = info.get("automatic_captions") or {}
+
+    # Prefer manual English captions first
+    for lang_key in ("en", "en-US", "en-GB"):
+        if lang_key in tracks:
+            for fmt in tracks[lang_key]:
+                if fmt.get("ext") == "json3":
+                    return fmt
+            # Fall back to first available format
+            if tracks[lang_key]:
+                return tracks[lang_key][0]
+
+    # Then try auto-generated English captions
+    for lang_key in ("en", "en-US", "en-GB", "en-orig"):
+        if lang_key in auto_tracks:
+            for fmt in auto_tracks[lang_key]:
+                if fmt.get("ext") == "json3":
+                    return fmt
+            if auto_tracks[lang_key]:
+                return auto_tracks[lang_key][0]
+
+    return None
+
+
+def _words_from_caption_events(events: list[dict]) -> list[dict]:
+    """Convert json3 caption events into word dicts."""
+    words: list[dict] = []
+    for event in events:
+        start_ms = int(event.get("tStartMs", 0) or 0)
+        duration_ms = max(1, int(event.get("dDurationMs", 0) or 0))
+        segs = event.get("segs") or []
+        for seg in segs:
+            raw = str(seg.get("utf8", "") or "").strip()
+            if not raw or raw == "\n":
+                continue
+            text = unescape(raw)
+            offset = int(seg.get("tOffsetMs", 0) or 0)
+            word_start = start_ms + offset
+            words.append(
+                {
+                    "word": text,
+                    "start_time_ms": word_start,
+                    "end_time_ms": max(word_start + 1, word_start + duration_ms),
+                    "speaker_track_id": None,
+                }
+            )
+    return words
+
+
+def _synth_words_from_ytdlp_captions(video_id: str) -> tuple[list[dict], dict]:
+    """Full yt-dlp caption fallback: extract captions via yt-dlp."""
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "no_warnings": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["en"],
+        "subtitlesformat": "json3",
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(youtube_url, download=False)
+
+    track = _pick_caption_track(info)
+    if not track:
+        raise RuntimeError(f"No English captions found via yt-dlp for {video_id}")
+
+    track_url = track.get("url", "")
+    if not track_url:
+        raise RuntimeError(f"Caption track has no URL for {video_id}")
+
+    resp = httpx.get(track_url, timeout=30.0)
+    resp.raise_for_status()
+    caption_data = resp.json()
+    events = caption_data.get("events") or []
+    words = _words_from_caption_events(events)
+
+    payload = {
+        "schema_version": "crowd-clip-transcript-v1",
+        "source_audio": youtube_url,
+        "video_id": video_id,
+        "words": words,
+        "transcript_source": "yt_dlp_captions",
+    }
+    return words, payload
+
+
 def load_transcript_words(video_id: str) -> tuple[list[dict], dict]:
     """
     Load a transcript from a matching local Phase 1 audio ledger when possible.
@@ -93,7 +188,10 @@ def load_transcript_words(video_id: str) -> tuple[list[dict], dict]:
             payload.setdefault("transcript_source", str(path))
             return words, payload
 
-    return _synth_words_from_transcript(video_id)
+    try:
+        return _synth_words_from_transcript(video_id)
+    except Exception:
+        return _synth_words_from_ytdlp_captions(video_id)
 
 
 def transcript_duration_ms(words: list[dict]) -> int:
