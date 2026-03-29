@@ -8,6 +8,7 @@ google-genai>=1.66.0
 google-cloud-aiplatform>=1.82.0
 google-cloud-spanner>=3.49.0
 yt-dlp>=2024.12.0
+youtube-transcript-api>=1.2.2
 
 # DigitalOcean Phase 1 service
 fastapi>=0.116.0

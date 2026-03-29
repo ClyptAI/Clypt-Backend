@@ -21,10 +21,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from google import genai
+from google.genai.errors import ClientError
 from google.genai.types import HttpOptions
 from pydantic import BaseModel, Field
 
@@ -40,11 +42,16 @@ VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
 VISUAL_LEDGER_PATH = ROOT / "outputs" / "phase_1_visual.json"
 AUDIO_LEDGER_PATH = ROOT / "outputs" / "phase_1_audio.json"
 OUTPUT_PATH = ROOT / "outputs" / "phase_2a_nodes.json"
+CHECKPOINT_PATH = ROOT / "outputs" / "phase_2a_nodes.checkpoint.json"
 
 # Maximum text tokens to send per chunk. Kept deliberately low to avoid
 # exceeding Gemini's 1M-token context window once the video and prompt
 # overhead are included.
 TEXT_TOKEN_BUDGET = 200_000
+CHUNK_REQUEST_DELAY_S = float(os.getenv("PHASE_2A_CHUNK_REQUEST_DELAY_S", "2.0"))
+MAX_RETRIES_429 = int(os.getenv("PHASE_2A_MAX_RETRIES_429", "6"))
+BACKOFF_BASE_S = float(os.getenv("PHASE_2A_RETRY_BASE_S", "5.0"))
+BACKOFF_MAX_S = float(os.getenv("PHASE_2A_RETRY_MAX_S", "90.0"))
 
 # ──────────────────────────────────────────────
 # Logging
@@ -56,12 +63,31 @@ logging.basicConfig(
 )
 log = logging.getLogger("phase_2a")
 
+
+def resolve_video_gcs_uri() -> str:
+    env_override = os.getenv("VIDEO_GCS_URI", "").strip()
+    if env_override:
+        return env_override
+    for path in (VISUAL_LEDGER_PATH, AUDIO_LEDGER_PATH):
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        uri = str(payload.get("video_gcs_uri", "") or "").strip()
+        if uri:
+            return uri
+    return VIDEO_GCS_URI
+
 # ──────────────────────────────────────────────
 # System instruction (exact prompt from spec)
 # ──────────────────────────────────────────────
 SYSTEM_INSTRUCTION = """You are an expert multimodal narrative extraction engine. Your task is to perform 'Content Mechanism Decomposition' on the provided video, using the attached deterministic audio and visual JSON ledgers as your mathematical ground truth.
 
 You must deconstruct the video into a sequential array of distinct 'Semantic Nodes'. Do not summarize the video; instead, break it down into structural narrative beats.
+
+Node granularity: Each node must represent a single atomic beat — one thought, one reaction, one point. Target 6–8 seconds per node. Never create a node shorter than 4 seconds or longer than 12 seconds. Split on any meaningful shift in thought, tone, or energy — even within a single shot. Nodes will be assembled into clips by a downstream curator, so precision matters more than length. Critical boundary rule: every node must end on the last word of a complete sentence or thought — never mid-phrase, never mid-sentence. If the natural beat boundary falls mid-sentence, pull the node end_time back to the previous sentence-ending word.
 
 Instructions:
 1. Node Segmentation & Transcript Cleaning: If the audio ledger contains words, you must assemble the transcript_segment for each node strictly using those words and timestamps. Aggressively filter out STT noise — ignore non-lexical STT hallucinations (e.g., 'hmm', 'ah', 'uh', heavy breaths, or stuttered fragments). Only stitch together the mathematically verified timestamps of actual, meaningful spoken words. The start_time and end_time of your node must match the first and last word you selected from the JSON. If the audio ledger is empty (no words), you must still produce nodes based on the visual ledger data (shot changes, object tracking, labels, face detections). In this case, set transcript_segment to an empty string and anchor start_time/end_time to shot change boundaries from the visual ledger.
@@ -79,6 +105,8 @@ Emotion: Look for vulnerability, catharsis, inspiration, awe, or panic. Example:
 Social Dynamics: Look for status reversal, genuine disagreement, unexpected chemistry, or riffing. Example: A podcast guest gives an answer that completely stuns the host, causing an energy shift and a status reversal.
 
 Expertise: Look for a counterintuitive truth, casual flex, elegant simplification, or a live demo. Example: A developer elegantly explaining OAuth in a single, simple sentence that validates audience confusion.
+
+4. Confidence Score Calibration: The confidence_score field represents how likely this node is to become a viral standalone clip. Use the full range ruthlessly — most nodes should score 0.3–0.6. Reserve 0.8–1.0 for moments with a genuine hook, clear payoff, and strong content mechanism (intense humor, emotional spike, or status reversal). A node with only mild conversation or filler should score 0.2–0.4. Aim for at most 2–4 nodes above 0.75 per video. If you score more than 30% of nodes above 0.7, you are miscalibrated.
 
 Output: You must output a strictly structured JSON array of these nodes conforming to the requested schema. Ensure your content_mechanisms analysis accurately reflects the psychological and narrative weight of the moment."""
 
@@ -201,6 +229,7 @@ def _plan_chunks(visual: dict, audio: dict) -> list[Chunk]:
         chunks.append(current)
 
     return chunks
+
 
 
 # ──────────────────────────────────────────────
@@ -347,6 +376,126 @@ def _merge_nodes(all_chunk_nodes: list[list[SemanticNode]]) -> list[SemanticNode
     return merged
 
 
+MIN_NODE_DURATION_S = float(os.getenv("CLYPT_MIN_NODE_DURATION_S", "8.0"))
+
+
+def _enforce_min_duration(nodes: list[SemanticNode]) -> list[SemanticNode]:
+    """Merge any node shorter than MIN_NODE_DURATION_S into its neighbor."""
+    if not nodes:
+        return nodes
+    changed = True
+    while changed:
+        changed = False
+        out: list[SemanticNode] = []
+        i = 0
+        while i < len(nodes):
+            node = nodes[i]
+            duration = node.end_time - node.start_time
+            if duration < MIN_NODE_DURATION_S and len(nodes) > 1:
+                # Merge with whichever neighbor is shorter (prefer next, fallback prev)
+                if i + 1 < len(nodes):
+                    nxt = nodes[i + 1]
+                    merged_node = SemanticNode(
+                        start_time=node.start_time,
+                        end_time=nxt.end_time,
+                        transcript_segment=(node.transcript_segment + " " + nxt.transcript_segment).strip(),
+                        visual_description=node.visual_description,
+                        vocal_delivery=node.vocal_delivery,
+                        confidence_score=max(node.confidence_score, nxt.confidence_score),
+                        content_mechanisms=node.content_mechanisms if node.confidence_score >= nxt.confidence_score else nxt.content_mechanisms,
+                    )
+                    out.append(merged_node)
+                    i += 2
+                else:
+                    # Last node is short — merge into previous
+                    prev = out.pop()
+                    merged_node = SemanticNode(
+                        start_time=prev.start_time,
+                        end_time=node.end_time,
+                        transcript_segment=(prev.transcript_segment + " " + node.transcript_segment).strip(),
+                        visual_description=prev.visual_description,
+                        vocal_delivery=prev.vocal_delivery,
+                        confidence_score=max(prev.confidence_score, node.confidence_score),
+                        content_mechanisms=prev.content_mechanisms if prev.confidence_score >= node.confidence_score else node.content_mechanisms,
+                    )
+                    out.append(merged_node)
+                    i += 1
+                changed = True
+            else:
+                out.append(node)
+                i += 1
+        nodes = out
+    return nodes
+
+
+def _load_checkpoint() -> dict[int, list[dict]]:
+    """Load completed chunk results so reruns can resume after quota failures."""
+    if not CHECKPOINT_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(CHECKPOINT_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    chunk_results = payload.get("chunk_results", {})
+    if not isinstance(chunk_results, dict):
+        return {}
+    out: dict[int, list[dict]] = {}
+    for key, value in chunk_results.items():
+        if not isinstance(value, list):
+            continue
+        try:
+            out[int(key)] = value
+        except Exception:
+            continue
+    return out
+
+
+def _save_checkpoint(chunk_results: dict[int, list[dict]]) -> None:
+    """Persist per-chunk nodes so reruns do not restart from chunk 1."""
+    payload = {"chunk_results": {str(k): v for k, v in sorted(chunk_results.items())}}
+    CHECKPOINT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _request_nodes_with_retry(client: genai.Client, user_prompt: str, video_gcs_uri: str = VIDEO_GCS_URI) -> list[dict]:
+    """Retry Vertex generate_content on quota throttling with exponential backoff."""
+    for attempt in range(MAX_RETRIES_429 + 1):
+        try:
+            response = client.models.generate_content(
+                model=MODEL_ID,
+                contents=[
+                    genai.types.Part.from_uri(
+                        file_uri=video_gcs_uri,
+                        mime_type="video/mp4",
+                    ),
+                    user_prompt,
+                ],
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=list[SemanticNode],
+                    temperature=0.2,
+                    thinking_config=genai.types.ThinkingConfig(
+                        thinking_level="MEDIUM",
+                    ),
+                ),
+            )
+            return json.loads(response.text)
+        except ClientError as e:
+            is_quota = getattr(e, "status_code", None) == 429 or "RESOURCE_EXHAUSTED" in str(e)
+            if not is_quota or attempt >= MAX_RETRIES_429:
+                raise
+            sleep_s = min(BACKOFF_MAX_S, BACKOFF_BASE_S * (2 ** attempt))
+            log.warning(
+                "  Gemini 429 quota hit on attempt %d/%d; retrying in %.1fs",
+                attempt + 1,
+                MAX_RETRIES_429 + 1,
+                sleep_s,
+            )
+            time.sleep(sleep_s)
+
+
 # ──────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────
@@ -365,6 +514,7 @@ def main():
     with open(AUDIO_LEDGER_PATH) as f:
         audio_raw = json.load(f)
     log.info(f"  Size: {AUDIO_LEDGER_PATH.stat().st_size:,} bytes")
+    video_gcs_uri = resolve_video_gcs_uri()
 
     # ── Plan chunks ──
     chunks = _plan_chunks(visual_raw, audio_raw)
@@ -382,12 +532,25 @@ def main():
 
     client = genai.Client(http_options=HttpOptions(api_version="v1"))
     log.info(f"Model: {MODEL_ID}")
-    log.info(f"Video: {VIDEO_GCS_URI}")
+    log.info(f"Video: {video_gcs_uri}")
 
     # ── Process each chunk sequentially ──
+    checkpoint_nodes = _load_checkpoint()
+    if checkpoint_nodes:
+        log.info(f"Loaded Phase 2A checkpoint with {len(checkpoint_nodes)} completed chunks")
     all_chunk_nodes: list[list[SemanticNode]] = []
 
     for chunk in chunks:
+        if chunk.index in checkpoint_nodes:
+            restored = [SemanticNode.model_validate(n) for n in checkpoint_nodes[chunk.index]]
+            log.info("\u2500" * 50)
+            log.info(
+                f"Processing chunk {chunk.index + 1}/{len(chunks)}: "
+                f"{chunk.start_ms / 1000:.1f}s \u2013 {chunk.end_ms / 1000:.1f}s"
+            )
+            log.info(f"  Using checkpointed result ({len(restored)} nodes)")
+            all_chunk_nodes.append(restored)
+            continue
         log.info("─" * 50)
         log.info(
             f"Processing chunk {chunk.index + 1}/{len(chunks)}: "
@@ -418,30 +581,14 @@ def main():
         )
 
         log.info("  Submitting to Gemini…")
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=[
-                genai.types.Part.from_uri(
-                    file_uri=VIDEO_GCS_URI,
-                    mime_type="video/mp4",
-                ),
-                user_prompt,
-            ],
-            config=genai.types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_schema=list[SemanticNode],
-                temperature=0.2,
-                thinking_config=genai.types.ThinkingConfig(
-                    thinking_level="MEDIUM",
-                ),
-            ),
-        )
-
-        raw_nodes = json.loads(response.text)
+        raw_nodes = _request_nodes_with_retry(client, user_prompt, video_gcs_uri)
         chunk_nodes = [SemanticNode.model_validate(n) for n in raw_nodes]
         log.info(f"  Nodes from chunk: {len(chunk_nodes)}")
         all_chunk_nodes.append(chunk_nodes)
+        checkpoint_nodes[chunk.index] = [n.model_dump() for n in chunk_nodes]
+        _save_checkpoint(checkpoint_nodes)
+        if CHUNK_REQUEST_DELAY_S > 0:
+            time.sleep(CHUNK_REQUEST_DELAY_S)
 
     # ── Merge and deduplicate ──
     log.info("─" * 50)
@@ -455,6 +602,9 @@ def main():
     with open(OUTPUT_PATH, "w") as f:
         json.dump(nodes_dicts, f, indent=2)
     log.info(f"Output saved → {OUTPUT_PATH}")
+    if CHECKPOINT_PATH.exists():
+        CHECKPOINT_PATH.unlink()
+        log.info(f"Checkpoint cleared → {CHECKPOINT_PATH}")
 
     # ── Summary ──
     log.info("=" * 60)

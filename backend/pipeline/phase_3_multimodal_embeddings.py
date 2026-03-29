@@ -24,7 +24,6 @@ from pathlib import Path
 
 from google import genai
 from google.genai import types
-from google.genai.types import HttpOptions
 
 # ──────────────────────────────────────────────
 # Configuration
@@ -35,11 +34,12 @@ ROOT = Path(__file__).resolve().parent.parent
 VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
 NODES_PATH = ROOT / "outputs" / "phase_2a_nodes.json"
 OUTPUT_PATH = ROOT / "outputs" / "phase_3_embeddings.json"
+VISUAL_LEDGER_PATH = ROOT / "outputs" / "phase_1_visual.json"
+AUDIO_LEDGER_PATH = ROOT / "outputs" / "phase_1_audio.json"
 
 MODEL_ID = "gemini-embedding-2-preview"
 EMBEDDING_DIM = 3072
 TASK_TYPE = "RETRIEVAL_DOCUMENT"
-EMBEDDING_API_VERSION = "v1beta"
 MAX_SEGMENT_SEC = 120.0
 MIN_SEGMENT_SEC = 0.2
 
@@ -52,6 +52,23 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("phase_3")
+
+
+def resolve_video_gcs_uri() -> str:
+    env_override = os.getenv("VIDEO_GCS_URI", "").strip()
+    if env_override:
+        return env_override
+    for path in (VISUAL_LEDGER_PATH, AUDIO_LEDGER_PATH):
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        uri = str(payload.get("video_gcs_uri", "") or "").strip()
+        if uri:
+            return uri
+    return VIDEO_GCS_URI
 
 
 # ──────────────────────────────────────────────
@@ -109,10 +126,7 @@ def _normalize_segment(start_s: float, end_s: float) -> tuple[float, float]:
 
 
 def _make_client():
-    os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
-    os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
-    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-    return genai.Client(http_options=HttpOptions(api_version=EMBEDDING_API_VERSION))
+    return genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
 
 
 def _embed_node(
@@ -166,12 +180,13 @@ def main():
     with open(NODES_PATH) as f:
         nodes = json.load(f)
     log.info(f"  Nodes loaded: {len(nodes)}")
+    video_gcs_uri = resolve_video_gcs_uri()
 
     # ── Initialize Gemini Embedding 2 client ──
     client = _make_client()
     log.info(f"Model: {MODEL_ID}")
     log.info(f"Task type: {TASK_TYPE}")
-    log.info(f"Video: {VIDEO_GCS_URI}")
+    log.info(f"Video: {video_gcs_uri}")
     log.info(f"Embedding dimension: {EMBEDDING_DIM}")
 
     # ── Process each node ──
@@ -196,7 +211,7 @@ def main():
             fused = _embed_node(
                 client=client,
                 text_payload=text_payload,
-                video_uri=VIDEO_GCS_URI,
+                video_uri=video_gcs_uri,
                 start_s=start_s,
                 end_s=end_s,
             )
