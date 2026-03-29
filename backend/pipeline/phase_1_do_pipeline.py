@@ -605,6 +605,17 @@ def download_media(url: str) -> tuple[str, str]:
     return video_path, audio_path
 
 
+def _get_ytdlp_cookies_path() -> str | None:
+    """Return the path to a Netscape cookies.txt file for yt-dlp, or None."""
+    path = (os.getenv("YOUTUBE_COOKIES_PATH", "") or "").strip()
+    if path and Path(path).is_file():
+        return path
+    default = Path(__file__).resolve().parents[2] / "cookies.txt"
+    if default.is_file():
+        return str(default)
+    return None
+
+
 def _download_video_with_format_fallback(url: str) -> str:
     format_attempts = []
     preferred_format = (os.getenv("YTDLP_H264_PREFERRED_FORMAT", YTDLP_H264_PREFERRED_FORMAT) or "").strip()
@@ -613,6 +624,8 @@ def _download_video_with_format_fallback(url: str) -> str:
         format_attempts.append(("H.264-preferred", preferred_format))
     if fallback_format and fallback_format not in {preferred_format}:
         format_attempts.append(("fallback", fallback_format))
+
+    cookies_path = _get_ytdlp_cookies_path()
 
     last_error = None
     for label, format_selector in format_attempts:
@@ -624,6 +637,9 @@ def _download_video_with_format_fallback(url: str) -> str:
             "no_warnings": True,
             "noprogress": False,
         }
+        if cookies_path:
+            video_opts["cookiefile"] = cookies_path
+            log.info("Using cookies from %s for yt-dlp download", cookies_path)
         try:
             log.info("yt-dlp attempt %s with format selector: %s", label, format_selector)
             with yt_dlp.YoutubeDL(video_opts) as ydl:
