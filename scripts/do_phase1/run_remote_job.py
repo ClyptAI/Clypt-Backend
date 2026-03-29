@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-DROPLET_HOST = "root@162.243.100.226"
+DROPLET_HOST = "root@165.245.134.154"
 SSH_KEY_PATH = Path.home() / ".ssh" / "clypt_do_ed25519"
 REMOTE_RELAY_DIR = "/opt/clypt-phase1/relay"
 REMOTE_RELAY_PORT = 8091
