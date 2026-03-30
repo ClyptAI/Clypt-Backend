@@ -11,7 +11,7 @@ import pytest
 from backend.do_phase1_service.extract import host_extraction_lock, run_extraction_job
 from backend.do_phase1_service.extract import _forward_progress_line
 from backend.pipeline import phase_1_do_pipeline as phase1_pipeline
-from backend.do_phase1_worker import ClyptWorker
+from backend.do_phase1_worker import ClyptWorker, YOLO_MANIFEST_MODEL_NAME, YOLO_WEIGHTS_PATH
 
 
 class FakeStorage:
@@ -1199,6 +1199,73 @@ def test_face_pipeline_gpu_toggle_honors_env(monkeypatch):
     assert worker._face_pipeline_uses_gpu() is True
 
 
+def test_face_pipeline_gpu_explicitly_required_honors_env(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    monkeypatch.delenv("CLYPT_FACE_PIPELINE_GPU", raising=False)
+    assert worker_cls._face_pipeline_gpu_explicitly_required() is False
+
+    for val in ("1", "true", "YES", "On"):
+        monkeypatch.setenv("CLYPT_FACE_PIPELINE_GPU", val)
+        assert worker_cls._face_pipeline_gpu_explicitly_required() is True
+
+    monkeypatch.setenv("CLYPT_FACE_PIPELINE_GPU", "0")
+    assert worker_cls._face_pipeline_gpu_explicitly_required() is False
+
+
+def test_fail_fast_face_pipeline_gpu_noop_when_not_explicit(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    monkeypatch.delenv("CLYPT_FACE_PIPELINE_GPU", raising=False)
+    worker.face_detector = None
+    worker.face_recognizer = None
+    worker._fail_fast_face_pipeline_gpu_if_required()  # does not raise
+
+
+def test_fail_fast_face_pipeline_gpu_raises_without_cuda(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    monkeypatch.setenv("CLYPT_FACE_PIPELINE_GPU", "1")
+    worker.face_detector = object()
+    worker.face_recognizer = object()
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    with pytest.raises(RuntimeError, match="CLYPT_FACE_PIPELINE_GPU is enabled.*CUDA is not available"):
+        worker._fail_fast_face_pipeline_gpu_if_required()
+
+
+def test_fail_fast_face_pipeline_gpu_raises_without_face_models(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    monkeypatch.setenv("CLYPT_FACE_PIPELINE_GPU", "1")
+    worker.face_detector = None
+    worker.face_recognizer = object()
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: True),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    with pytest.raises(RuntimeError, match="SCRFD and/or ArcFace"):
+        worker._fail_fast_face_pipeline_gpu_if_required()
+
+
+def test_run_lrasd_binding_raises_when_models_not_loaded(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.lrasd_model = None
+    worker.lrasd_loss_av = None
+
+    with pytest.raises(RuntimeError, match="LR-ASD is not loaded"):
+        worker._run_lrasd_binding(
+            video_path="video.mp4",
+            audio_wav_path="audio.wav",
+            tracks=[{"track_id": "t1"}],
+            words=[{"start_time_ms": 0, "end_time_ms": 100}],
+        )
+
+
 def test_extract_job_isolates_phase1_pipeline_workspace_per_job(tmp_path: Path, monkeypatch):
     original_download_dir = phase1_pipeline.DOWNLOAD_DIR
     original_output_dir = phase1_pipeline.OUTPUT_DIR
@@ -1353,18 +1420,13 @@ def test_speaker_binding_mode_forces_heuristic(monkeypatch):
     assert calls == ["heuristic"]
 
 
-def test_speaker_binding_mode_forces_pyannote_visual(monkeypatch):
+def test_speaker_binding_mode_legacy_pyannote_visual_maps_to_lrasd(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
     calls = []
 
     monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "pyannote_visual")
-    monkeypatch.setattr(
-        worker,
-        "_run_pyannote_visual_binding",
-        lambda **kwargs: calls.append("pyannote_visual") or [],
-    )
-    monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd"))
+    monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd") or [{"track_id": "t1"}])
     monkeypatch.setattr(
         worker,
         "_run_speaker_binding_heuristic",
@@ -1378,8 +1440,8 @@ def test_speaker_binding_mode_forces_pyannote_visual(monkeypatch):
         words=[{"start_time_ms": 0, "end_time_ms": 100}],
     )
 
-    assert result == []
-    assert calls == ["pyannote_visual"]
+    assert result == [{"track_id": "t1"}]
+    assert calls == ["lrasd"]
 
 
 def test_speaker_binding_mode_forces_heuristic_clears_stale_candidate_debug(monkeypatch):
@@ -1404,7 +1466,8 @@ def test_speaker_binding_mode_forces_heuristic_clears_stale_candidate_debug(monk
     assert worker._last_speaker_candidate_debug == []
 
 
-def test_speaker_binding_mode_auto_prefers_heuristic_for_large_long_video(monkeypatch):
+def test_speaker_binding_mode_auto_stays_lrasd_first_for_large_long_video(monkeypatch):
+    """Wave 1: auto does not route whole jobs to heuristic; LR-ASD runs first."""
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
     calls = []
@@ -1417,11 +1480,15 @@ def test_speaker_binding_mode_auto_prefers_heuristic_for_large_long_video(monkey
         "_probe_video_meta",
         lambda path: {"width": 3840, "height": 2160, "duration_s": 392.0},
     )
-    monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd"))
+    monkeypatch.setattr(
+        worker,
+        "_run_lrasd_binding",
+        lambda **kwargs: calls.append("lrasd") or [{"track_id": "t1"}],
+    )
     monkeypatch.setattr(
         worker,
         "_run_speaker_binding_heuristic",
-        lambda *args, **kwargs: calls.append("heuristic") or [{"track_id": "t1"}],
+        lambda *args, **kwargs: calls.append("heuristic") or [{"track_id": "t_bad"}],
     )
 
     result = worker._run_speaker_binding(
@@ -1432,7 +1499,7 @@ def test_speaker_binding_mode_auto_prefers_heuristic_for_large_long_video(monkey
     )
 
     assert result == [{"track_id": "t1"}]
-    assert calls == ["heuristic"]
+    assert calls == ["lrasd"]
 
 
 def test_speaker_binding_mode_auto_prefers_lrasd_for_small_short_video(monkeypatch):
@@ -1530,17 +1597,17 @@ def test_run_lrasd_binding_clears_stale_candidate_debug_on_early_return(monkeypa
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
     worker._last_speaker_candidate_debug = [{"word": "stale"}]
-    worker.lrasd_model = None
-    worker.lrasd_loss_av = None
+    worker.lrasd_model = object()
+    worker.lrasd_loss_av = object()
 
     result = worker._run_lrasd_binding(
         video_path="video.mp4",
         audio_wav_path="audio.wav",
         tracks=[{"track_id": "t1"}],
-        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+        words=[],
     )
 
-    assert result is None
+    assert result == []
     assert worker._last_speaker_candidate_debug == []
 
 
@@ -5514,6 +5581,32 @@ def test_normalize_audio_speaker_turns_merges_tiny_same_speaker_gap_for_binding_
     ]
 
 
+def test_normalize_audio_speaker_turns_overlap_merge_is_conservative():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    normalized_turns = worker._normalize_audio_speaker_turns_for_binding_context(
+        [
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 100,
+                "end_time_ms": 500,
+                "overlap": True,
+            },
+            {
+                "speaker_id": "SPEAKER_00",
+                "start_time_ms": 560,
+                "end_time_ms": 900,
+                "overlap": False,
+            },
+        ]
+    )
+
+    assert len(normalized_turns) == 1
+    assert normalized_turns[0]["source_turn_count"] == 2
+    assert normalized_turns[0]["overlap"] is False
+
+
 def test_build_active_speakers_local_pads_turn_boundaries_for_adjacent_context():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -6628,6 +6721,163 @@ def test_choose_signature_attachment_label_for_group_requires_majority_support(m
     assert label is None
 
 
+def test_finalize_from_words_tracks_includes_shot_changes_covering_duration(monkeypatch, tmp_path):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    words = [
+        {
+            "word": "hi",
+            "start_time_ms": 0,
+            "end_time_ms": 100,
+            "speaker_track_id": None,
+            "speaker_tag": "unknown",
+            "speaker_local_track_id": None,
+            "speaker_local_tag": "unknown",
+        }
+    ]
+    tracks = [
+        {
+            "frame_idx": 0,
+            "local_frame_idx": 0,
+            "chunk_idx": 0,
+            "track_id": "t1",
+            "local_track_id": 1,
+            "class_id": 0,
+            "label": "person",
+            "confidence": 0.9,
+            "x1": 1.0,
+            "y1": 1.0,
+            "x2": 10.0,
+            "y2": 10.0,
+            "x_center": 5.0,
+            "y_center": 5.0,
+            "width": 9.0,
+            "height": 9.0,
+            "source": "test",
+            "geometry_type": "aabb",
+            "bbox_norm_xywh": {
+                "x_center": 0.1,
+                "y_center": 0.2,
+                "width": 0.3,
+                "height": 0.4,
+            },
+        }
+    ]
+    fake_shots = [
+        {"start_time_ms": 0, "end_time_ms": 4000},
+        {"start_time_ms": 4000, "end_time_ms": 12000},
+    ]
+
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda tracking_metrics: None)
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_probe_video_meta", lambda path: {"fps": 25.0, "duration_s": 12.0, "total_frames": 300})
+    monkeypatch.setattr(worker, "_editorial_shot_segments_ms", lambda video_path, duration_ms=None: list(fake_shots))
+    monkeypatch.setattr(worker, "_cluster_tracklets", lambda *args, **kwargs: tracks)
+    monkeypatch.setattr(
+        worker,
+        "_build_visual_detection_ledgers",
+        lambda **kwargs: ([], [], {"schema_pass_rate": 1.0}),
+    )
+    monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [])
+    monkeypatch.setattr(worker, "_build_speaker_follow_bindings", lambda bindings: [])
+    monkeypatch.setattr(worker, "_speaker_remap_collision_metrics", lambda words: {})
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
+    monkeypatch.setattr(worker, "_local_clip_bindings_enabled", lambda: False)
+    monkeypatch.setattr(worker, "_run_overlap_follow_postpass", lambda **kwargs: [])
+
+    result = worker._finalize_from_words_tracks(
+        video_path=str(tmp_path / "v.mp4"),
+        audio_path=str(tmp_path / "a.wav"),
+        youtube_url="https://youtube.com/watch?v=shots",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={"schema_pass_rate": 1.0},
+    )
+    sc = result["phase_1_visual"]["shot_changes"]
+    assert sc == fake_shots
+    assert sc[0]["start_time_ms"] == 0
+    assert sc[-1]["end_time_ms"] == 12000
+
+
+def test_shot_gate_rejects_cross_shot_signature_attachment_for_group():
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    # Shot 0: [0, 5000) ms @ 25fps ≈ frame 0–124; shot 1: [5000, 20000)
+    shots = [{"start_time_ms": 0, "end_time_ms": 5000}, {"start_time_ms": 5000, "end_time_ms": 20000}]
+    tracklets = {
+        "hist_early": [
+            {"frame_idx": 50, "x_center": 240.0, "y_center": 320.0, "width": 180.0, "height": 280.0, "confidence": 0.9},
+        ],
+        "face_late": [
+            {"frame_idx": 250, "x_center": 240.0, "y_center": 320.0, "width": 180.0, "height": 280.0, "confidence": 0.95},
+        ],
+    }
+    label = worker._choose_signature_attachment_label_for_group(
+        tids=["hist_early"],
+        tracklets=tracklets,
+        face_label_by_tid={"face_late": 0},
+        histogram_attach_max_sig=1.15,
+        video_fps=25.0,
+        shot_segments=shots,
+    )
+    assert label is None
+
+
+def test_hist_groups_hungarian_prefers_cross_assignment_when_cheaper_total():
+    """When each hist group matches the *other* face cluster better, global assignment beats greedy row-wise min."""
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    # Same editorial shot; spatial signatures pair h0↔face_b and h1↔face_a.
+    tracklets = {
+        "face_a": [
+            {"frame_idx": 10, "x_center": 100.0, "y_center": 200.0, "width": 80.0, "height": 160.0, "confidence": 0.95},
+        ],
+        "face_b": [
+            {"frame_idx": 10, "x_center": 400.0, "y_center": 200.0, "width": 80.0, "height": 160.0, "confidence": 0.95},
+        ],
+        "h0": [
+            {"frame_idx": 12, "x_center": 402.0, "y_center": 200.0, "width": 80.0, "height": 160.0, "confidence": 0.9},
+        ],
+        "h1": [
+            {"frame_idx": 12, "x_center": 98.0, "y_center": 200.0, "width": 80.0, "height": 160.0, "confidence": 0.9},
+        ],
+    }
+    face_label_by_tid = {"face_a": 0, "face_b": 1}
+    hist_groups = [["h0"], ["h1"]]
+    shots = [{"start_time_ms": 0, "end_time_ms": 60_000}]
+
+    picks = worker._hist_groups_hungarian_signature_assign(
+        hist_groups=hist_groups,
+        tracklets=tracklets,
+        face_label_by_tid=face_label_by_tid,
+        histogram_attach_max_sig=1.15,
+        shot_segments=shots,
+        video_fps=25.0,
+        duration_ms=60_000,
+    )
+    assert picks[0] == 1
+    assert picks[1] == 0
+
+
+def test_editorial_shot_segments_ms_single_segment_when_ffmpeg_unavailable(monkeypatch, tmp_path):
+    def _noop_scene(vp, st):
+        return None
+
+    def _stub_probe(vp):
+        return {"fps": 30.0, "duration_s": 5.0, "total_frames": 150, "width": 640, "height": 360}
+
+    monkeypatch.setattr(ClyptWorker, "_ffmpeg_scene_cut_pts_seconds", staticmethod(_noop_scene))
+    monkeypatch.setattr(ClyptWorker, "_probe_video_meta", staticmethod(_stub_probe))
+    p = tmp_path / "dummy.mp4"
+    p.write_bytes(b"")
+    segs = ClyptWorker._editorial_shot_segments_ms(str(p), duration_ms=5000)
+    assert segs == [{"start_time_ms": 0, "end_time_ms": 5000}]
+
+
 def test_merge_face_track_feature_sets_stitches_adjacent_segments_for_same_person():
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -6709,6 +6959,11 @@ def test_tracking_chunk_workers_default_to_one(monkeypatch):
     assert worker._tracking_chunk_workers() == 1
 
 
+def test_wave1_yolo_defaults_match_spec():
+    assert YOLO_WEIGHTS_PATH == "yolo26m-seg.pt"
+    assert YOLO_MANIFEST_MODEL_NAME == "yolo26m-seg"
+
+
 def test_tracking_chunk_workers_honor_env_and_clamp(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
@@ -6753,13 +7008,22 @@ def test_tracking_mode_auto_prefers_chunked_with_multiple_workers(monkeypatch):
     assert worker._select_tracking_mode() == "chunked"
 
 
-def test_tracking_backend_defaults_to_botsort_reid(monkeypatch):
+def test_tracking_backend_defaults_to_bytetrack(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
 
     monkeypatch.delenv("CLYPT_TRACKER_BACKEND", raising=False)
 
-    assert worker._select_tracker_backend() == "botsort_reid"
+    assert worker._select_tracker_backend() == "bytetrack"
+
+
+def test_tracking_backend_rejects_botsort(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_TRACKER_BACKEND", "botsort_reid")
+    with pytest.raises(ValueError, match="ByteTrack-only"):
+        worker._select_tracker_backend()
 
 
 def test_tracking_backend_accepts_bytetrack(monkeypatch):
@@ -6832,6 +7096,8 @@ def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
     worker = worker_cls.__new__(worker_cls)
     track_calls = []
 
+    monkeypatch.delenv("CLYPT_YOLO_IMGSZ", raising=False)
+
     class _Boxes:
         xyxy = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([[10, 20, 30, 40]])})()
         id = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([7])})()
@@ -6848,14 +7114,24 @@ def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
 
     monkeypatch.setattr(worker, "_ensure_h264", lambda path: path)
     monkeypatch.setattr(worker, "_probe_video_meta", lambda path: {"fps": 24.0, "total_frames": 1, "width": 1920, "height": 1080})
-    monkeypatch.setattr(worker, "_ensure_botsort_reid_yaml", lambda: "tracker.yaml")
+    monkeypatch.setattr(worker, "_ensure_bytetrack_yaml", lambda: "bytetrack.yaml")
     monkeypatch.setattr(worker, "_get_tracking_model", lambda: _Model())
+    monkeypatch.setattr(worker, "_yolo_device_arg", lambda: "cpu")
     monkeypatch.setattr(worker, "_compute_letterbox_meta", lambda *args: {})
     monkeypatch.setattr(worker, "_xyxy_abs_to_xywhn", lambda *args: (0.1, 0.2, 0.3, 0.4))
     monkeypatch.setattr(worker, "_xywhn_to_xyxy_abs", lambda *args: (10.0, 20.0, 30.0, 40.0))
     monkeypatch.setattr(worker, "_forward_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
     monkeypatch.setattr(worker, "_inverse_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
     monkeypatch.setattr(worker, "_xyxy_to_xywh", lambda *args: (20.0, 30.0, 20.0, 20.0))
+    monkeypatch.setattr(
+        worker,
+        "_extract_face_track_features_from_segments",
+        lambda **kwargs: (
+            {},
+            {},
+            {"face_pipeline_mode": "staggered", "face_pipeline_segments_processed": 0},
+        ),
+    )
 
     tracks, metrics = worker._run_tracking_direct("video.mp4")
 
@@ -6864,6 +7140,8 @@ def test_run_tracking_direct_emits_contract_compatible_tracks(monkeypatch):
     assert tracks[0]["chunk_idx"] == 0
     assert "tracking_mode" not in metrics
     assert track_calls[0]["device"] == "cpu"
+    assert track_calls[0]["tracker"] == "bytetrack.yaml"
+    assert track_calls[0]["imgsz"] == 1080
 
 
 def test_run_tracking_direct_uses_bytetrack_when_requested(monkeypatch):
@@ -6988,7 +7266,7 @@ def test_run_tracking_direct_emits_track_identity_features(monkeypatch):
 
     monkeypatch.setattr(worker, "_ensure_h264", lambda path: path)
     monkeypatch.setattr(worker, "_probe_video_meta", lambda path: {"fps": 24.0, "total_frames": 1, "width": 1920, "height": 1080})
-    monkeypatch.setattr(worker, "_ensure_botsort_reid_yaml", lambda: "tracker.yaml")
+    monkeypatch.setattr(worker, "_ensure_bytetrack_yaml", lambda: "bytetrack.yaml")
     monkeypatch.setattr(worker, "_get_tracking_model", lambda: _Model())
     monkeypatch.setattr(worker, "_compute_letterbox_meta", lambda *args: {})
     monkeypatch.setattr(worker, "_xyxy_abs_to_xywhn", lambda *args: (0.1, 0.2, 0.3, 0.4))
@@ -7044,7 +7322,7 @@ def test_run_tracking_direct_logs_face_pipeline_progress(monkeypatch, capsys):
 
     monkeypatch.setattr(worker, "_ensure_h264", lambda path: path)
     monkeypatch.setattr(worker, "_probe_video_meta", lambda path: {"fps": 24.0, "total_frames": 2, "width": 1920, "height": 1080})
-    monkeypatch.setattr(worker, "_ensure_botsort_reid_yaml", lambda: "tracker.yaml")
+    monkeypatch.setattr(worker, "_ensure_bytetrack_yaml", lambda: "bytetrack.yaml")
     monkeypatch.setattr(worker, "_get_tracking_model", lambda: _Model())
     monkeypatch.setattr(worker, "_compute_letterbox_meta", lambda *args: {})
     monkeypatch.setattr(worker, "_xyxy_abs_to_xywhn", lambda *args: (0.1, 0.2, 0.3, 0.4))
@@ -7099,7 +7377,7 @@ def test_run_tracking_direct_delays_first_face_submission_until_start_frame(monk
 
     monkeypatch.setattr(worker, "_ensure_h264", lambda path: path)
     monkeypatch.setattr(worker, "_probe_video_meta", lambda path: {"fps": 24.0, "total_frames": 2, "width": 1920, "height": 1080})
-    monkeypatch.setattr(worker, "_ensure_botsort_reid_yaml", lambda: "tracker.yaml")
+    monkeypatch.setattr(worker, "_ensure_bytetrack_yaml", lambda: "bytetrack.yaml")
     monkeypatch.setattr(worker, "_get_tracking_model", lambda: _Model())
     monkeypatch.setattr(worker, "_compute_letterbox_meta", lambda *args: {})
     monkeypatch.setattr(worker, "_xyxy_abs_to_xywhn", lambda *args: (0.1, 0.2, 0.3, 0.4))
@@ -7138,6 +7416,8 @@ def test_run_tracking_chunk_passes_explicit_yolo_device(monkeypatch, tmp_path):
     worker = worker_cls.__new__(worker_cls)
     track_calls = []
 
+    monkeypatch.delenv("CLYPT_YOLO_IMGSZ", raising=False)
+
     class _Boxes:
         xyxy = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([[10, 20, 30, 40]])})()
         id = type("TensorLike", (), {"cpu": lambda self: self, "numpy": lambda self: __import__("numpy").array([7])})()
@@ -7153,6 +7433,7 @@ def test_run_tracking_chunk_passes_explicit_yolo_device(monkeypatch, tmp_path):
             return [_Result()]
 
     monkeypatch.setattr(worker, "_compute_letterbox_meta", lambda *args: {})
+    monkeypatch.setattr(worker, "_yolo_device_arg", lambda: "cpu")
     monkeypatch.setattr(worker, "_xyxy_abs_to_xywhn", lambda *args: (0.1, 0.2, 0.3, 0.4))
     monkeypatch.setattr(worker, "_xywhn_to_xyxy_abs", lambda *args: (10.0, 20.0, 30.0, 40.0))
     monkeypatch.setattr(worker, "_forward_letterbox_xyxy", lambda *args: (10.0, 20.0, 30.0, 40.0))
@@ -7184,6 +7465,7 @@ def test_run_tracking_chunk_passes_explicit_yolo_device(monkeypatch, tmp_path):
 
     assert result["processed_frames"] == 1
     assert track_calls[0]["device"] == "cpu"
+    assert track_calls[0]["imgsz"] == 1080
 
 
 def test_host_lock_serializes_second_extraction_attempt(tmp_path: Path):

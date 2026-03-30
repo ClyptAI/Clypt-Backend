@@ -19,6 +19,8 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 import yt_dlp
 
@@ -56,6 +58,7 @@ PHASE1_RUNTIME_CONTROLS_PATH = OUTPUT_DIR / "phase_1_runtime_controls.json"
 DETACHED_STATE_PATH = OUTPUT_DIR / "phase_1_detached_state.json"
 DEFAULT_DO_PHASE1_POLL_INTERVAL_SECONDS = 10.0
 DEFAULT_DO_PHASE1_TIMEOUT_SECONDS = 60.0 * 30.0
+DIRECT_MP4_DOWNLOAD_TIMEOUT_SECONDS = 120
 PHASE1_EVAL_PROFILE_NAMES = {
     "eval",
     "evaluation",
@@ -63,6 +66,21 @@ PHASE1_EVAL_PROFILE_NAMES = {
     "podcast_framing_eval",
     "test",
 }
+
+# Matches DigitalOcean worker policy: ByteTrack only (see ClyptWorker._select_tracker_backend).
+_PHASE1_TRACKER_BACKEND_ALIASES_OK = frozenset({"bytetrack", "byte_track", "byte-track", ""})
+
+
+def _normalize_phase1_tracker_backend(raw: str | None) -> str:
+    """Return canonical ``bytetrack`` or raise with an actionable error (worker-aligned)."""
+    requested = (raw or "bytetrack").strip().lower()
+    if requested in _PHASE1_TRACKER_BACKEND_ALIASES_OK:
+        return "bytetrack"
+    raise RuntimeError(
+        "PHASE1_TRACKER_BACKEND is ByteTrack-only (set to bytetrack or leave unset); "
+        "this must match the DO Phase 1 worker, which rejects other trackers. "
+        f"Got {requested!r}."
+    )
 
 # ──────────────────────────────────────────────
 # Logging
@@ -188,19 +206,9 @@ def ensure_h264_local(video_path: str) -> str:
     return h264_path
 
 
-def _build_shot_changes(duration_ms: int, window_ms: int = 10000) -> list[dict]:
-    """Create deterministic pseudo-shot windows for downstream chunk planning."""
-    if duration_ms <= 0:
-        return [{"start_time_ms": 0, "end_time_ms": window_ms}]
-    out = []
-    start = 0
-    while start < duration_ms:
-        end = min(duration_ms, start + window_ms)
-        out.append({"start_time_ms": int(start), "end_time_ms": int(end)})
-        if end >= duration_ms:
-            break
-        start = end
-    return out
+def _single_shot_change(duration_ms: int) -> list[dict]:
+    end_ms = max(0, int(duration_ms))
+    return [{"start_time_ms": 0, "end_time_ms": end_ms}]
 
 
 def build_phase1_runtime_controls() -> dict:
@@ -215,7 +223,7 @@ def build_phase1_runtime_controls() -> dict:
 
     requested_speaker_binding_mode = (os.getenv("PHASE1_SPEAKER_BINDING_MODE", "auto") or "auto").strip().lower()
     requested_tracking_mode = (os.getenv("PHASE1_TRACKING_MODE", "direct") or "direct").strip().lower()
-    requested_tracker_backend = (os.getenv("PHASE1_TRACKER_BACKEND", "bytetrack") or "bytetrack").strip().lower()
+    requested_tracker_backend = _normalize_phase1_tracker_backend(os.getenv("PHASE1_TRACKER_BACKEND"))
     shared_analysis_proxy_enabled = (os.getenv("PHASE1_SHARED_ANALYSIS_PROXY", "1") or "1").strip() != "0"
     heuristic_binding_enabled_env = os.getenv("PHASE1_HEURISTIC_BINDING_ENABLED")
 
@@ -388,7 +396,13 @@ def enrich_visual_ledger_for_downstream(
         )
 
     enriched = dict(phase_1_visual)
-    enriched["shot_changes"] = _build_shot_changes(duration_ms=duration_ms)
+    existing_shots = phase_1_visual.get("shot_changes")
+    if isinstance(existing_shots, list) and len(existing_shots) > 0:
+        enriched["shot_changes"] = list(existing_shots)
+    else:
+        # No worker-provided editorial shot timeline is available; preserve
+        # contract shape with a single segment instead of synthetic pseudo windows.
+        enriched["shot_changes"] = _single_shot_change(duration_ms=duration_ms)
     enriched["person_detections"] = existing_person_detections or person_detections
     enriched["face_detections"] = existing_face_detections or proxy_face_detections
     enriched["proxy_face_detections"] = proxy_face_detections
@@ -540,8 +554,20 @@ def _load_resumable_job_id(source_url: str) -> str | None:
 # ──────────────────────────────────────────────
 # Step 1: Download media locally
 # ──────────────────────────────────────────────
+def _looks_like_direct_http_mp4_url(url: str) -> bool:
+    """True when *url* is http(s) with a path ending in .mp4 (skip yt-dlp)."""
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+    path = (parsed.path or "").lower()
+    return path.endswith(".mp4")
+
+
 def download_media(url: str) -> tuple[str, str]:
-    """Download video + audio via yt-dlp. Returns (video_path, audio_path)."""
+    """Download video + audio. Direct http(s) ``*.mp4`` URLs stream via urllib; others use yt-dlp."""
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -570,8 +596,20 @@ def download_media(url: str) -> tuple[str, str]:
             log.info(f"Removed stale outputs/{stale}")
 
     # ── Video + Audio (muxed) ──
-    log.info("Downloading video+audio stream…")
-    video_path = _download_video_with_format_fallback(url)
+    if _looks_like_direct_http_mp4_url(url):
+        log.info("Direct .mp4 URL; streaming download without yt-dlp…")
+        dest = DOWNLOAD_DIR / "video.mp4"
+        with urlopen(url, timeout=DIRECT_MP4_DOWNLOAD_TIMEOUT_SECONDS) as resp:
+            with open(dest, "wb") as out:
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        video_path = str(dest)
+    else:
+        log.info("Downloading video+audio stream…")
+        video_path = _download_video_with_format_fallback(url)
 
     video_path = ensure_h264_local(video_path)
 

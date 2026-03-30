@@ -103,12 +103,20 @@ MODEL_DEBUG_SECRET = modal.Secret.from_dict(
 ASR_MODEL_NAME = "nvidia/parakeet-tdt-1.1b"
 LRASD_MODEL_PATH = "/root/.cache/clypt/finetuning_TalkSet.model"
 LRASD_REPO_ROOT = "/root/lrasd"
-YOLO_WEIGHTS_PATH = "yolo26s.pt"
+YOLO_WEIGHTS_PATH = "yolo26m-seg.pt"
+YOLO_MANIFEST_MODEL_NAME = "yolo26m-seg"
 PHASE1_SCHEMA_VERSION = "2.0.0"
 PHASE1_TASK_TYPE = "person_tracking"
 PHASE1_COORDINATE_SPACE = "absolute_original_frame_xyxy"
 PHASE1_GEOMETRY_TYPE = "aabb"
 PHASE1_CLASS_TAXONOMY = {"0": "person"}
+
+
+def _configured_yolo_weights_path() -> str:
+    from backend.pipeline.phase1.config import get_phase1_config
+
+    configured = str(get_phase1_config().yolo_weights_path or "").strip()
+    return configured or YOLO_WEIGHTS_PATH
 
 
 def _cluster_extraction_config() -> dict:
@@ -139,8 +147,9 @@ def download_yolo_model():
     """Download YOLO26 weights at image build time so they're cached."""
     from ultralytics import YOLO
 
-    print("Downloading YOLO26s weights into container cache...")
-    YOLO(YOLO_WEIGHTS_PATH)
+    yolo_weights_path = _configured_yolo_weights_path()
+    print(f"Downloading {yolo_weights_path} weights into container cache...")
+    YOLO(yolo_weights_path)
 
 
 def download_lrasd_model():
@@ -698,53 +707,17 @@ class ClyptWorker:
         tracklets: dict[str, list[dict]],
         face_label_by_tid: dict[str, int],
         histogram_attach_max_sig: float,
+        video_fps: float = 25.0,
+        shot_segments: list[dict] | None = None,
     ) -> int | None:
-        import os
-
-        max_gap_frames = max(0, int(os.getenv("CLYPT_CLUSTER_ATTACH_MAX_GAP_FRAMES", "180")))
-        score_gap_weight = float(os.getenv("CLYPT_CLUSTER_ATTACH_GAP_WEIGHT", "0.35"))
-        ambiguity_margin = float(os.getenv("CLYPT_CLUSTER_ATTACH_AMBIGUITY_MARGIN", "0.05"))
-        tid_sig = self._tracklet_signature(tracklets, [tid])
-
-        candidates: list[tuple[float, float, int, int]] = []
-        labels = sorted(set(int(lbl) for lbl in face_label_by_tid.values()))
-        for label in labels:
-            cluster_tids = [cluster_tid for cluster_tid, cluster_lbl in face_label_by_tid.items() if int(cluster_lbl) == label]
-            if not cluster_tids:
-                continue
-
-            best_member = None
-            for cluster_tid in cluster_tids:
-                if not self._clusters_have_compatible_seat_signature(
-                    tracklets,
-                    [tid],
-                    [cluster_tid],
-                    max_signature_distance=histogram_attach_max_sig,
-                ):
-                    continue
-                member_sig = self._tracklet_signature(tracklets, [cluster_tid])
-                sig_dist = self._tracklet_signature_distance(tid_sig, member_sig)
-                if sig_dist > histogram_attach_max_sig:
-                    continue
-                gap_frames = self._track_boundary_gap_frames_for_tracklets(tracklets, tid, cluster_tid)
-                if gap_frames > max_gap_frames:
-                    continue
-                score = sig_dist + (
-                    score_gap_weight * (gap_frames / max(1.0, float(max_gap_frames or 1)))
-                )
-                candidate = (score, sig_dist, gap_frames, int(label))
-                if best_member is None or candidate < best_member:
-                    best_member = candidate
-            if best_member is not None:
-                candidates.append(best_member)
-
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-        best_score, _, _, best_label = candidates[0]
-        if len(candidates) > 1 and (candidates[1][0] - best_score) < ambiguity_margin:
-            return None
-        return int(best_label)
+        return self._choose_signature_attachment_label_for_group(
+            tids=[str(tid)],
+            tracklets=tracklets,
+            face_label_by_tid=face_label_by_tid,
+            histogram_attach_max_sig=histogram_attach_max_sig,
+            video_fps=video_fps,
+            shot_segments=shot_segments,
+        )
 
     def _choose_signature_attachment_label_for_group(
         self,
@@ -753,88 +726,203 @@ class ClyptWorker:
         tracklets: dict[str, list[dict]],
         face_label_by_tid: dict[str, int],
         histogram_attach_max_sig: float,
+        video_fps: float = 25.0,
+        shot_segments: list[dict] | None = None,
     ) -> int | None:
-        import math
-        import os
-
         if not tids:
             return None
+        relevant_tids = set(str(t) for t in tids) | {
+            str(cluster_tid) for cluster_tid in face_label_by_tid.keys()
+        }
+        max_frame_idx = -1
+        for rt in relevant_tids:
+            for det in tracklets.get(rt, []):
+                try:
+                    max_frame_idx = max(max_frame_idx, int(det.get("frame_idx", -1)))
+                except (TypeError, ValueError):
+                    continue
+        duration_ms = 0
+        if max_frame_idx >= 0 and float(video_fps) > 0.0:
+            duration_ms = int(round(((max_frame_idx + 1) / float(video_fps)) * 1000.0))
+        pick = self._hist_groups_hungarian_signature_assign(
+            hist_groups=[list(tids)],
+            tracklets=tracklets,
+            face_label_by_tid=face_label_by_tid,
+            histogram_attach_max_sig=histogram_attach_max_sig,
+            shot_segments=shot_segments,
+            video_fps=float(video_fps),
+            duration_ms=duration_ms,
+        )
+        if not pick:
+            return None
+        label = pick[0]
+        return int(label) if label is not None else None
 
-        max_gap_frames = max(0, int(os.getenv("CLYPT_CLUSTER_ATTACH_MAX_GAP_FRAMES", "180")))
-        score_gap_weight = float(os.getenv("CLYPT_CLUSTER_ATTACH_GAP_WEIGHT", "0.35"))
-        ambiguity_margin = float(os.getenv("CLYPT_CLUSTER_ATTACH_AMBIGUITY_MARGIN", "0.05"))
+    def _hist_groups_hungarian_signature_assign(
+        self,
+        *,
+        hist_groups: list[list[str]],
+        tracklets: dict[str, list[dict]],
+        face_label_by_tid: dict[str, int],
+        histogram_attach_max_sig: float,
+        shot_segments: list[dict],
+        video_fps: float,
+        duration_ms: int,
+    ) -> list[int | None]:
+        """Globally optimal one-to-one hist-group → face label assignment (shot-gated, sig + temporal cost)."""
+        import math
+        from collections import Counter
+
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+        from backend.pipeline.phase1.config import get_phase1_config
+
+        BIG = 1.0e7
+        out: list[int | None] = [None] * len(hist_groups)
+        if not hist_groups:
+            return out
+
+        labels = sorted(set(int(x) for x in face_label_by_tid.values()))
+        if not labels:
+            return out
+
+        cfg = get_phase1_config()
+        max_gap_frames = int(cfg.cluster_attach_max_gap_frames)
+        score_gap_weight = float(cfg.cluster_attach_gap_weight)
+        temp_weight = float(cfg.hist_attach_temp_weight)
+        ambiguity_margin = float(cfg.cluster_attach_ambiguity_margin)
         group_relax = float(os.getenv("CLYPT_CLUSTER_GROUP_ATTACH_SIG_RELAX", "1.25"))
         min_support_share = float(os.getenv("CLYPT_CLUSTER_GROUP_ATTACH_MIN_SUPPORT_SHARE", "0.5"))
         min_support_count = max(1, int(os.getenv("CLYPT_CLUSTER_GROUP_ATTACH_MIN_SUPPORT_COUNT", "1")))
+        unassign_cost = float(cfg.hist_attach_unassign_cost)
         group_max_sig = histogram_attach_max_sig * max(1.0, group_relax)
-        group_sig = self._tracklet_signature(tracklets, tids)
+        dur = max(1, int(duration_ms))
+        multi_shot = bool(shot_segments and len(shot_segments) > 1)
 
-        candidates: list[tuple[float, float, int, int, int]] = []
-        labels = sorted(set(int(lbl) for lbl in face_label_by_tid.values()))
+        group_rows: list[dict] = []
+        for tids in hist_groups:
+            centers = [self._tracklet_temporal_center_ms(tracklets, x, video_fps) for x in tids]
+            gc = int(sorted(centers)[len(centers) // 2]) if centers else 0
+            if multi_shot:
+                shot_ids = [
+                    self._shot_index_for_time_ms(int(c), shot_segments) for c in centers
+                ]
+                g_shot = Counter(shot_ids).most_common(1)[0][0] if shot_ids else 0
+            else:
+                g_shot = 0
+            group_rows.append(
+                {
+                    "tids": tids,
+                    "center_ms": gc,
+                    "shot": g_shot,
+                    "sig": self._tracklet_signature(tracklets, tids),
+                }
+            )
+
+        label_cols: list[dict] = []
         for label in labels:
             cluster_tids = [
-                cluster_tid
-                for cluster_tid, cluster_lbl in face_label_by_tid.items()
-                if int(cluster_lbl) == label
+                str(ct)
+                for ct, lb in face_label_by_tid.items()
+                if int(lb) == int(label)
             ]
-            if not cluster_tids:
-                continue
-            if not self._clusters_have_compatible_seat_signature(
-                tracklets,
-                tids,
-                cluster_tids,
-                max_signature_distance=group_max_sig,
-            ):
-                continue
-
-            cluster_sig = self._tracklet_signature(tracklets, cluster_tids)
-            sig_dist = self._tracklet_signature_distance(group_sig, cluster_sig)
-            if sig_dist > group_max_sig:
-                continue
-
-            compatible_members = 0
-            min_gap_frames = 1_000_000
-            for tid in tids:
-                member_best_gap = None
-                for cluster_tid in cluster_tids:
-                    if not self._clusters_have_compatible_seat_signature(
-                        tracklets,
-                        [tid],
-                        [cluster_tid],
-                        max_signature_distance=group_max_sig,
-                    ):
-                        continue
-                    gap_frames = self._track_boundary_gap_frames_for_tracklets(tracklets, tid, cluster_tid)
-                    if gap_frames > max_gap_frames:
-                        continue
-                    member_best_gap = gap_frames if member_best_gap is None else min(member_best_gap, gap_frames)
-                if member_best_gap is not None:
-                    compatible_members += 1
-                    min_gap_frames = min(min_gap_frames, int(member_best_gap))
-
-            if compatible_members <= 0:
-                continue
-            required_members = max(
-                min_support_count,
-                int(math.ceil(float(len(tids)) * min_support_share)),
+            centers = [self._tracklet_temporal_center_ms(tracklets, ct, video_fps) for ct in cluster_tids]
+            lc = int(sorted(centers)[len(centers) // 2]) if centers else 0
+            if multi_shot:
+                l_shot = self._shot_index_for_time_ms(lc, shot_segments)
+            else:
+                l_shot = 0
+            label_cols.append(
+                {
+                    "label": int(label),
+                    "cluster_tids": cluster_tids,
+                    "center_ms": lc,
+                    "shot": l_shot,
+                    "sig": self._tracklet_signature(tracklets, cluster_tids),
+                }
             )
-            if compatible_members < required_members:
-                continue
-            if min_gap_frames > max_gap_frames:
-                continue
 
-            score = sig_dist + (
-                score_gap_weight * (min_gap_frames / max(1.0, float(max_gap_frames or 1)))
-            ) - (0.03 * compatible_members)
-            candidates.append((score, sig_dist, min_gap_frames, -compatible_members, int(label)))
+        R = len(hist_groups)
+        L = len(labels)
+        mat = np.full((R, L + R), BIG, dtype=np.float64)
+        for i in range(R):
+            mat[i, L + i] = unassign_cost
 
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
-        best_score, _, _, _, best_label = candidates[0]
-        if len(candidates) > 1 and (candidates[1][0] - best_score) < ambiguity_margin:
-            return None
-        return int(best_label)
+        for i, gr in enumerate(group_rows):
+            tids = gr["tids"]
+            if gr["sig"] is None:
+                continue
+            for j, lc in enumerate(label_cols):
+                if multi_shot and int(gr["shot"]) != int(lc["shot"]):
+                    continue
+                cluster_tids = lc["cluster_tids"]
+                if not cluster_tids:
+                    continue
+                if not self._clusters_have_compatible_seat_signature(
+                    tracklets,
+                    tids,
+                    cluster_tids,
+                    max_signature_distance=group_max_sig,
+                ):
+                    continue
+                sig_dist = self._tracklet_signature_distance(gr["sig"], lc["sig"])
+                if sig_dist > group_max_sig:
+                    continue
+                compatible_members = 0
+                min_gap_frames = 1_000_000
+                for tid in tids:
+                    member_best_gap = None
+                    for cluster_tid in cluster_tids:
+                        if not self._clusters_have_compatible_seat_signature(
+                            tracklets,
+                            [tid],
+                            [cluster_tid],
+                            max_signature_distance=group_max_sig,
+                        ):
+                            continue
+                        gap_frames = self._track_boundary_gap_frames_for_tracklets(
+                            tracklets, tid, cluster_tid
+                        )
+                        if gap_frames > max_gap_frames:
+                            continue
+                        member_best_gap = (
+                            gap_frames if member_best_gap is None else min(member_best_gap, gap_frames)
+                        )
+                    if member_best_gap is not None:
+                        compatible_members += 1
+                        min_gap_frames = min(min_gap_frames, int(member_best_gap))
+                if compatible_members <= 0:
+                    continue
+                required_members = max(
+                    min_support_count,
+                    int(math.ceil(float(len(tids)) * min_support_share)),
+                )
+                if compatible_members < required_members:
+                    continue
+                if min_gap_frames > max_gap_frames:
+                    continue
+                temp_norm = abs(float(gr["center_ms"] - lc["center_ms"])) / float(dur)
+                gap_norm = min_gap_frames / max(1.0, float(max_gap_frames or 1))
+                c = float(sig_dist) + score_gap_weight * float(gap_norm) + temp_weight * float(temp_norm)
+                mat[i, j] = c
+
+        row_ind, col_ind = linear_sum_assignment(mat)
+        for i, c in zip(row_ind, col_ind):
+            if c >= L:
+                continue
+            assigned_cost = float(mat[i, c])
+            if assigned_cost >= BIG * 0.5:
+                continue
+            others = [
+                float(mat[i, j])
+                for j in range(L)
+                if j != c and float(mat[i, j]) < BIG * 0.5
+            ]
+            second_best = min(others) if others else BIG
+            if second_best - assigned_cost < ambiguity_margin:
+                continue
+            out[i] = int(labels[c])
+        return out
 
     def _cluster_signature_only_tracklets(
         self,
@@ -1721,6 +1809,9 @@ class ClyptWorker:
                     prev.pop("exclusive", None)
                 else:
                     prev["exclusive"] = merged_exclusive
+                # Keep overlap conservative when stitching same-speaker turns:
+                # if either source turn is marked non-overlap, treat merged span
+                # as non-overlap unless both explicitly claim overlap.
                 merged_overlap = _merged_bool(prev.get("overlap"), row.get("overlap"))
                 if merged_overlap is None:
                     prev.pop("overlap", None)
@@ -1902,14 +1993,24 @@ class ClyptWorker:
         active_speakers_local: list[dict],
         words: list[dict],
         speaker_candidate_debug: list[dict],
+        log_context: dict | None = None,
     ) -> list[dict]:
+        import json
+
         from backend.overlap_follow import maybe_adjudicate_overlap_follow_decisions
 
-        return maybe_adjudicate_overlap_follow_decisions(
+        run_metadata: dict = {}
+        decisions = maybe_adjudicate_overlap_follow_decisions(
             active_speakers_local=active_speakers_local,
             words=words,
             speaker_candidate_debug=speaker_candidate_debug,
+            log_context=log_context,
+            run_metadata_out=run_metadata,
         )
+        if run_metadata:
+            print(f"[overlap_follow] {json.dumps(run_metadata, default=str)}")
+        self._last_overlap_follow_run_metadata = run_metadata
+        return decisions
 
     @staticmethod
     def _speaker_remap_collision_metrics(words: list[dict]) -> dict[str, int]:
@@ -2110,6 +2211,31 @@ class ClyptWorker:
         except Exception:
             requested = 0
         return max(0, requested)
+
+    @staticmethod
+    def _face_pipeline_gpu_explicitly_required() -> bool:
+        """True when CLYPT_FACE_PIPELINE_GPU is set to an enabling literal (v3 GPU face policy)."""
+        raw = os.getenv("CLYPT_FACE_PIPELINE_GPU", "").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _fail_fast_face_pipeline_gpu_if_required(self) -> None:
+        """Raise if GPU face pipeline is explicitly required but CUDA or SCRFD/ArcFace init failed."""
+        if not self._face_pipeline_gpu_explicitly_required():
+            return
+        import torch
+
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CLYPT_FACE_PIPELINE_GPU is enabled (1/true/yes/on) but CUDA is not available. "
+                "Run on a GPU worker or set CLYPT_FACE_PIPELINE_GPU=0 for CPU-only face processing."
+            )
+        if getattr(self, "face_detector", None) is None or getattr(self, "face_recognizer", None) is None:
+            raise RuntimeError(
+                "CLYPT_FACE_PIPELINE_GPU is enabled (1/true/yes/on) but SCRFD and/or ArcFace "
+                "failed to initialize. Verify InsightFace buffalo_l assets under "
+                "~/.insightface/models/buffalo_l (det_10g.onnx, w600k_r50.onnx) and check the "
+                "initialization errors printed above."
+            )
 
     def _face_pipeline_uses_gpu(self) -> bool:
         requested = os.getenv("CLYPT_FACE_PIPELINE_GPU", "").strip().lower()
@@ -3906,9 +4032,10 @@ class ClyptWorker:
 
         self.time_stride = 8 * self.asr_model.cfg.preprocessor.window_stride
 
-        # --- Load YOLOv26 ---
-        print("Loading YOLO26s into GPU VRAM...")
-        self.yolo_model = YOLO(YOLO_WEIGHTS_PATH)
+        # --- Load YOLOv26 segmentation weights ---
+        yolo_weights_path = _configured_yolo_weights_path()
+        print(f"Loading {yolo_weights_path} into GPU VRAM...")
+        self.yolo_model = YOLO(yolo_weights_path)
 
         self.gpu_device = torch.device("cuda")
         self._face_runtime_name = "buffalo_l"
@@ -3954,13 +4081,13 @@ class ClyptWorker:
                 "Warning: ArcFace recognizer initialization failed "
                 f"({type(e).__name__}: {e})"
             )
-        # --- Load LR-ASD ---
-        self.lrasd_model = None
-        self.lrasd_loss_av = None
+        self._fail_fast_face_pipeline_gpu_if_required()
+
+        # --- Load LR-ASD (required for v3 speaker binding; no silent whole-job downgrade) ---
+        print("Loading LR-ASD model into GPU VRAM...")
+        if LRASD_REPO_ROOT not in sys.path:
+            sys.path.insert(0, LRASD_REPO_ROOT)
         try:
-            print("Loading LR-ASD model into GPU VRAM...")
-            if LRASD_REPO_ROOT not in sys.path:
-                sys.path.insert(0, LRASD_REPO_ROOT)
             from model.Model import ASD_Model
             from loss import lossAV
 
@@ -3975,15 +4102,13 @@ class ClyptWorker:
             self.lrasd_model.eval()
             self.lrasd_loss_av = self.lrasd_loss_av.to(self.gpu_device)
             self.lrasd_loss_av.eval()
-            print("LR-ASD ready.")
         except Exception as e:
-            # Keep worker alive; binding step falls back if this fails at runtime.
-            self.lrasd_model = None
-            self.lrasd_loss_av = None
-            print(
-                "Warning: failed to load LR-ASD checkpoint "
-                f"({type(e).__name__}: {e})"
-            )
+            raise RuntimeError(
+                "LR-ASD model load failed (required for Phase 1 v3). "
+                f"Ensure LR-ASD repo and checkpoint exist ({LRASD_MODEL_PATH}). "
+                f"Original error: {type(e).__name__}: {e}"
+            ) from e
+        print("LR-ASD ready.")
 
         print("Models ready in VRAM.")
 
@@ -4031,7 +4156,7 @@ class ClyptWorker:
         return words
 
     # ──────────────────────────────────────────
-    # Visual tracking (YOLOv26 + BoT-SORT)
+    # Visual tracking (YOLOv26-seg + ByteTrack)
     # ──────────────────────────────────────────
     def _ensure_h264(self, video_path: str) -> str:
         """Re-encode to H.264 if the video uses AV1 or another codec OpenCV can't decode."""
@@ -4124,7 +4249,7 @@ class ClyptWorker:
     def _build_tracking_model():
         from ultralytics import YOLO
 
-        return YOLO(YOLO_WEIGHTS_PATH)
+        return YOLO(_configured_yolo_weights_path())
 
     @staticmethod
     def _yolo_device_arg():
@@ -4384,42 +4509,15 @@ class ClyptWorker:
         if requested_mode not in {"", "auto"}:
             print(
                 f"  Warning: unknown CLYPT_SPEAKER_BINDING_MODE={requested_mode!r}; "
-                "falling back to auto"
+                "using LR-ASD-first policy (same as auto)"
             )
         if self._shared_analysis_proxy_enabled():
             return "shared_analysis_proxy"
 
-        meta = self._probe_video_meta(video_path)
-        width = int(meta.get("width", 0) or 0)
-        height = int(meta.get("height", 0) or 0)
-        duration_s = float(meta.get("duration_s", 0.0) or 0.0)
-        long_edge = max(width, height)
-
-        auto_max_duration_s = float(
-            os.getenv("CLYPT_SPEAKER_BINDING_AUTO_MAX_DURATION_S", "180")
-        )
-        auto_max_long_edge = int(
-            os.getenv("CLYPT_SPEAKER_BINDING_AUTO_MAX_LONG_EDGE", "1920")
-        )
-        auto_max_words = int(os.getenv("CLYPT_SPEAKER_BINDING_AUTO_MAX_WORDS", "450"))
-        auto_max_tracks = int(os.getenv("CLYPT_SPEAKER_BINDING_AUTO_MAX_TRACKS", "12"))
-
-        if (
-            (duration_s > auto_max_duration_s and long_edge > auto_max_long_edge)
-            or duration_s > (auto_max_duration_s * 1.5)
-            or len(words) > auto_max_words
-            or len(tracks) > auto_max_tracks
-        ):
-            print(
-                "  Speaker binding mode=heuristic (auto): "
-                f"duration_s={duration_s:.1f}, long_edge={long_edge}, "
-                f"tracks={len(tracks)}, words={len(words)}"
-            )
-            return "heuristic"
-
+        # Wave 1: `auto` does not switch the whole job to heuristic; LR-ASD runs first
+        # and heuristic applies only as a binding-time fallback when LR-ASD yields no result.
         print(
-            "  Speaker binding mode=lrasd (auto): "
-            f"duration_s={duration_s:.1f}, long_edge={long_edge}, "
+            "  Speaker binding mode=lrasd (auto): LR-ASD-first policy; "
             f"tracks={len(tracks)}, words={len(words)}"
         )
         return "lrasd"
@@ -4427,7 +4525,16 @@ class ClyptWorker:
     @staticmethod
     def _probe_video_meta(video_path: str) -> dict:
         """Return fps/size/frame_count metadata for a local video."""
-        import cv2
+        try:
+            import cv2
+        except ImportError:
+            return {
+                "fps": 25.0,
+                "width": 0,
+                "height": 0,
+                "total_frames": 0,
+                "duration_s": 0.0,
+            }
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -4450,6 +4557,117 @@ class ClyptWorker:
             "total_frames": total_frames,
             "duration_s": float(total_frames / max(1e-6, fps)),
         }
+
+    @staticmethod
+    def _ffmpeg_scene_cut_pts_seconds(video_path: str, scene_threshold: float) -> list[float] | None:
+        """Parse ffmpeg showinfo pts_time lines for scene-cut frames; None if unavailable."""
+        import re
+
+        if not video_path or not os.path.exists(video_path):
+            return None
+        thr = float(scene_threshold)
+        if not (0.0 < thr < 1.0):
+            thr = 0.35
+        vf = f"select='gt(scene,{thr})',showinfo"
+        try:
+            proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-nostats",
+                    "-i",
+                    video_path,
+                    "-filter:v",
+                    vf,
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        text = (proc.stderr or "") + "\n" + (proc.stdout or "")
+        pts_times: list[float] = []
+        for m in re.finditer(r"pts_time:([\d.]+)", text):
+            try:
+                pts_times.append(float(m.group(1)))
+            except ValueError:
+                continue
+        if not pts_times:
+            return None
+        return sorted(set(pts_times))
+
+    @staticmethod
+    def _editorial_shot_segments_ms(
+        video_path: str,
+        *,
+        duration_ms: int | None = None,
+    ) -> list[dict[str, int]]:
+        """Non-pseudo editorial shots: ffmpeg scene boundaries, else one segment over full duration."""
+        from backend.pipeline.phase1.config import get_phase1_config
+
+        meta = ClyptWorker._probe_video_meta(video_path)
+        if duration_ms is None:
+            duration_ms = max(1, int(round(float(meta.get("duration_s", 0.0)) * 1000.0)))
+        duration_ms = max(1, int(duration_ms))
+        threshold = float(get_phase1_config().shot_scene_threshold)
+        cuts_sec = ClyptWorker._ffmpeg_scene_cut_pts_seconds(video_path, threshold)
+        if not cuts_sec:
+            return [{"start_time_ms": 0, "end_time_ms": int(duration_ms)}]
+        cut_ms_list = sorted(
+            {
+                int(round(t * 1000.0))
+                for t in cuts_sec
+                if 0 < int(round(t * 1000.0)) < duration_ms
+            }
+        )
+        if not cut_ms_list:
+            return [{"start_time_ms": 0, "end_time_ms": int(duration_ms)}]
+        segments: list[dict[str, int]] = []
+        start = 0
+        for cut_ms in cut_ms_list:
+            if cut_ms <= start:
+                continue
+            segments.append({"start_time_ms": int(start), "end_time_ms": int(cut_ms)})
+            start = int(cut_ms)
+        if start < duration_ms:
+            segments.append({"start_time_ms": int(start), "end_time_ms": int(duration_ms)})
+        if not segments:
+            return [{"start_time_ms": 0, "end_time_ms": int(duration_ms)}]
+        return segments
+
+    @staticmethod
+    def _shot_index_for_time_ms(time_ms: int, shot_segments: list[dict]) -> int:
+        t = int(time_ms)
+        for i, seg in enumerate(shot_segments):
+            s = int(seg.get("start_time_ms", 0))
+            e = int(seg.get("end_time_ms", 0))
+            if i == len(shot_segments) - 1:
+                if s <= t <= e:
+                    return i
+            elif s <= t < e:
+                return i
+        return 0
+
+    @staticmethod
+    def _tracklet_temporal_center_ms(
+        tracklets: dict[str, list[dict]],
+        tid: str,
+        video_fps: float,
+    ) -> int:
+        dets = tracklets.get(str(tid), [])
+        frames = sorted(
+            int(d.get("frame_idx", -1)) for d in dets if int(d.get("frame_idx", -1)) >= 0
+        )
+        if not frames:
+            return 0
+        mid = frames[len(frames) // 2]
+        fps = float(video_fps) if float(video_fps) > 1e-6 else 25.0
+        return int(round((float(mid) / fps) * 1000.0))
 
     @staticmethod
     def _build_chunk_plan(total_frames: int, fps: float) -> list[dict]:
@@ -4481,47 +4699,17 @@ class ClyptWorker:
 
     @staticmethod
     def _select_tracker_backend() -> str:
+        """Wave 1: ByteTrack only. Invalid values fail fast (no BoT-SORT, no silent fallback)."""
         requested_backend = os.getenv("CLYPT_TRACKER_BACKEND", "bytetrack").strip().lower()
         if requested_backend in {"bytetrack", "byte_track", "byte-track", ""}:
             return "bytetrack"
-        if requested_backend in {"botsort", "botsort_reid", "bot-sort", "bot-sort-reid"}:
-            return "botsort_reid"
-        print(
-            f"  Warning: unknown CLYPT_TRACKER_BACKEND={requested_backend!r}; "
-            "falling back to botsort_reid"
+        raise ValueError(
+            "CLYPT_TRACKER_BACKEND is ByteTrack-only in Wave 1 (set to bytetrack or leave unset). "
+            f"Got {requested_backend!r}."
         )
-        return "botsort_reid"
 
     def _tracking_provenance_tag(self) -> str:
-        return "yolo26_bytetrack" if self._select_tracker_backend() == "bytetrack" else "yolo26_botsort"
-
-    def _tracking_backend_display_name(self) -> str:
-        return "ByteTrack" if self._select_tracker_backend() == "bytetrack" else "BoT-SORT"
-
-    @staticmethod
-    def _ensure_botsort_reid_yaml() -> str:
-        """Write a strict BoT-SORT config with ReID + GMC enabled."""
-        import os
-
-        out = "/tmp/clypt/botsort_reid.yaml"
-        os.makedirs("/tmp/clypt", exist_ok=True)
-        if not os.path.exists(out):
-            with open(out, "w", encoding="utf-8") as f:
-                f.write(
-                    "tracker_type: botsort\n"
-                    "track_high_thresh: 0.35\n"
-                    "track_low_thresh: 0.1\n"
-                    "new_track_thresh: 0.6\n"
-                    "track_buffer: 45\n"
-                    "match_thresh: 0.78\n"
-                    "fuse_score: True\n"
-                    "gmc_method: sparseOptFlow\n"
-                    "proximity_thresh: 0.5\n"
-                    "appearance_thresh: 0.25\n"
-                    "with_reid: True\n"
-                    "model: auto\n"
-                )
-        return out
+        return "yolo26_bytetrack"
 
     @staticmethod
     def _ensure_bytetrack_yaml() -> str:
@@ -4544,19 +4732,12 @@ class ClyptWorker:
         return out
 
     def _resolve_tracking_backend(self) -> dict:
-        backend = self._select_tracker_backend()
-        if backend == "bytetrack":
-            return {
-                "backend": "bytetrack",
-                "tracker_cfg": self._ensure_bytetrack_yaml(),
-                "provenance": "yolo26_bytetrack",
-                "display_name": "ByteTrack",
-            }
+        _ = self._select_tracker_backend()
         return {
-            "backend": "botsort_reid",
-            "tracker_cfg": self._ensure_botsort_reid_yaml(),
-            "provenance": "yolo26_botsort",
-            "display_name": "BoT-SORT",
+            "backend": "bytetrack",
+            "tracker_cfg": self._ensure_bytetrack_yaml(),
+            "provenance": "yolo26_bytetrack",
+            "display_name": "ByteTrack",
         }
 
     @staticmethod
@@ -4738,6 +4919,7 @@ class ClyptWorker:
         import os
         import subprocess
         import time
+        from backend.pipeline.phase1.config import get_phase1_config
 
         fps = float(meta["fps"])
         width = int(meta["width"])
@@ -4745,7 +4927,7 @@ class ClyptWorker:
         output_meta = output_meta or meta
         output_width = int(output_meta.get("width", width) or width)
         output_height = int(output_meta.get("height", height) or height)
-        infer_imgsz = max(320, int(os.getenv("CLYPT_YOLO_IMGSZ", "640")))
+        infer_imgsz = int(get_phase1_config().yolo_imgsz)
         start_f = int(chunk["start_frame"])
         end_f = int(chunk["end_frame"])
         start_s = start_f / max(1e-6, fps)
@@ -4902,7 +5084,7 @@ class ClyptWorker:
             "start_frame": int(start_f),
             "end_frame": int(end_f),
             "fps": float(fps),
-            "model": "yolo26s",
+            "model": YOLO_MANIFEST_MODEL_NAME,
             "tracker": self._select_tracker_backend(),
             "letterbox": lb_meta,
         }
@@ -4938,7 +5120,10 @@ class ClyptWorker:
         from concurrent.futures import ThreadPoolExecutor
 
         backend_info = self._resolve_tracking_backend()
-        print(f"Running YOLO26s + {backend_info['display_name']} direct tracking inference...")
+        print(
+            f"Running {YOLO_MANIFEST_MODEL_NAME} + {backend_info['display_name']} "
+            "direct tracking inference..."
+        )
         analysis_context = analysis_context or self._prepare_direct_analysis_context(video_path)
         tracking_video_path = str(analysis_context.get("analysis_video_path", video_path))
         meta = dict(analysis_context.get("analysis_meta", self._probe_video_meta(tracking_video_path)))
@@ -4955,7 +5140,9 @@ class ClyptWorker:
             print("  Warning: no frames found in video")
             return [], {}
 
-        infer_imgsz = max(320, int(os.getenv("CLYPT_YOLO_IMGSZ", "640")))
+        from backend.pipeline.phase1.config import get_phase1_config
+
+        infer_imgsz = int(get_phase1_config().yolo_imgsz)
         tracker_cfg = str(backend_info["tracker_cfg"])
         model = self._get_tracking_model()
         lb_meta = self._compute_letterbox_meta(width, height, infer_imgsz, infer_imgsz)
@@ -5220,7 +5407,10 @@ class ClyptWorker:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         backend_info = self._resolve_tracking_backend()
-        print(f"Running YOLO26s + {backend_info['display_name']} chunked tracking inference...")
+        print(
+            f"Running {YOLO_MANIFEST_MODEL_NAME} + {backend_info['display_name']} "
+            "chunked tracking inference..."
+        )
         analysis_context = analysis_context or self._prepare_analysis_video(video_path)
         tracking_video_path = str(analysis_context.get("analysis_video_path", video_path))
         meta = dict(analysis_context.get("analysis_meta", self._probe_video_meta(tracking_video_path)))
@@ -5577,8 +5767,12 @@ class ClyptWorker:
         track_to_dets: dict[str, list[dict]] | None = None,
         track_identity_features: dict[str, dict] | None = None,
         face_track_features: dict[str, dict] | None = None,
+        *,
+        shot_timeline_ms: list[dict] | None = None,
+        cluster_video_fps: float | None = None,
+        cluster_duration_ms: int | None = None,
     ) -> list[dict]:
-        """Cluster fragmented BoT-SORT track IDs into global person IDs via GPU face embeddings."""
+        """Cluster fragmented per-frame track IDs into global person IDs via GPU face embeddings."""
         import os
         import numpy as np
         from sklearn.cluster import DBSCAN
@@ -5617,6 +5811,20 @@ class ClyptWorker:
         # but decord can read most codecs directly.
         h264_path = video_path.replace(".mp4", "_h264.mp4")
         read_path = h264_path if os.path.exists(h264_path) else video_path
+
+        cluster_meta = self._probe_video_meta(read_path)
+        if shot_timeline_ms is None or not shot_timeline_ms:
+            _dur_fallback = max(
+                1, int(round(float(cluster_meta.get("duration_s", 0.0)) * 1000.0))
+            )
+            shot_timeline_for_cluster = [{"start_time_ms": 0, "end_time_ms": _dur_fallback}]
+        else:
+            shot_timeline_for_cluster = [dict(s) for s in shot_timeline_ms]
+        if cluster_video_fps is None:
+            cluster_video_fps = float(cluster_meta.get("fps") or 25.0)
+        if cluster_duration_ms is None:
+            cluster_duration_ms = int(shot_timeline_for_cluster[-1].get("end_time_ms", 1))
+        cluster_duration_ms = max(1, int(cluster_duration_ms))
 
         if track_to_dets is None:
             _, track_to_dets = self._build_track_indexes(tracks)
@@ -6128,30 +6336,17 @@ class ClyptWorker:
                     tracklets=tracklets,
                     base_max_sig=histogram_attach_max_sig,
                 )
-                for group in hist_groups:
-                    selected_label = self._choose_signature_attachment_label_for_group(
-                        tids=group,
-                        tracklets=tracklets,
-                        face_label_by_tid=face_label_by_tid,
-                        histogram_attach_max_sig=histogram_attach_max_sig,
-                    )
-                    label_votes: dict[int, int] = {}
-                    if selected_label is None:
-                        for tid in group:
-                            best_label = self._choose_signature_attachment_label(
-                                tid=tid,
-                                tracklets=tracklets,
-                                face_label_by_tid=face_label_by_tid,
-                                histogram_attach_max_sig=histogram_attach_max_sig,
-                            )
-                            if best_label is None:
-                                continue
-                            label_votes[int(best_label)] = label_votes.get(int(best_label), 0) + 1
-                        if label_votes:
-                            ranked_votes = sorted(label_votes.items(), key=lambda item: (-item[1], item[0]))
-                            best_label, best_votes = ranked_votes[0]
-                            if len(ranked_votes) == 1 or best_votes > ranked_votes[1][1]:
-                                selected_label = int(best_label)
+                hungarian_pick = self._hist_groups_hungarian_signature_assign(
+                    hist_groups=hist_groups,
+                    tracklets=tracklets,
+                    face_label_by_tid=face_label_by_tid,
+                    histogram_attach_max_sig=histogram_attach_max_sig,
+                    shot_segments=shot_timeline_for_cluster,
+                    video_fps=float(cluster_video_fps),
+                    duration_ms=int(cluster_duration_ms),
+                )
+                for gi, group in enumerate(hist_groups):
+                    selected_label = hungarian_pick[gi] if gi < len(hungarian_pick) else None
                     if selected_label is None:
                         assigned_label = int(next_hist_label)
                         next_hist_label += 1
@@ -7308,8 +7503,11 @@ class ClyptWorker:
         self._last_audio_turn_bindings = []
 
         if self.lrasd_model is None or self.lrasd_loss_av is None:
-            print("  LR-ASD unavailable; falling back to heuristic binder.")
-            return None
+            raise RuntimeError(
+                "LR-ASD is not loaded but the LR-ASD speaker-binding path was invoked. "
+                "After a successful load_model this should not occur; check worker startup logs "
+                "for LR-ASD load failures."
+            )
         if not words or not tracks:
             return []
 
@@ -9054,6 +9252,7 @@ class ClyptWorker:
         words: list[dict],
         tracks: list[dict],
         tracking_metrics: dict | None = None,
+        overlap_follow_log_context: dict | None = None,
     ) -> dict:
         """Finalize extraction from precomputed ASR words + tracking tracks."""
         metrics = dict(tracking_metrics) if isinstance(tracking_metrics, dict) else {}
@@ -9072,6 +9271,14 @@ class ClyptWorker:
         _, track_to_dets = self._build_track_indexes(tracks)
         precluster_frame_to_dets, precluster_track_to_dets = self._build_track_indexes(precluster_tracks)
 
+        vmeta = self._probe_video_meta(video_path)
+        cluster_duration_ms = max(1, int(round(float(vmeta.get("duration_s", 0.0)) * 1000.0)))
+        cluster_video_fps = float(vmeta.get("fps") or 25.0)
+        shot_changes = self._editorial_shot_segments_ms(
+            video_path,
+            duration_ms=cluster_duration_ms,
+        )
+
         # Step 3: Global tracklet clustering
         print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
         cluster_started_at = time.perf_counter()
@@ -9081,6 +9288,9 @@ class ClyptWorker:
             track_to_dets=track_to_dets,
             track_identity_features=track_identity_features,
             face_track_features=face_track_features,
+            shot_timeline_ms=shot_changes,
+            cluster_video_fps=cluster_video_fps,
+            cluster_duration_ms=cluster_duration_ms,
         )
         cluster_elapsed_s = time.perf_counter() - cluster_started_at
         metrics["cluster_tracklets_wallclock_s"] = round(cluster_elapsed_s, 3)
@@ -9139,7 +9349,11 @@ class ClyptWorker:
             active_speakers_local=active_speakers_local,
             words=words,
             speaker_candidate_debug=getattr(self, "_last_speaker_candidate_debug", []),
+            log_context=overlap_follow_log_context,
         )
+        overlap_adj = getattr(self, "_last_overlap_follow_run_metadata", None)
+        if isinstance(overlap_adj, dict) and overlap_adj:
+            metrics["overlap_follow_adjudication"] = overlap_adj
         if self._local_clip_bindings_enabled():
             speaker_bindings_local = self._build_bindings_from_word_track_field(
                 words,
@@ -9187,6 +9401,7 @@ class ClyptWorker:
             "tracks": tracks,
             "face_detections": face_detections,
             "person_detections": person_detections,
+            "shot_changes": shot_changes,
         }
         if self._local_clip_bindings_enabled():
             phase_1_visual["tracks_local"] = [dict(track) for track in precluster_tracks]
@@ -9358,6 +9573,12 @@ class ClyptWorker:
             # Avoid mutating caller-owned objects in-place.
             words_local = [dict(w) for w in words]
             tracks_local = [dict(t) for t in tracks]
+            overlap_ctx: dict[str, str] = {}
+            if job_id:
+                overlap_ctx["job_id"] = job_id
+            worker_hint = str(os.getenv("CLYPT_WORKER_ID", "") or os.getenv("MODAL_TASK_ID", "")).strip()
+            if worker_hint:
+                overlap_ctx["worker_id"] = worker_hint
             return self._finalize_from_words_tracks(
                 video_path=video_path,
                 audio_path=audio_path,
@@ -9365,6 +9586,7 @@ class ClyptWorker:
                 words=words_local,
                 tracks=tracks_local,
                 tracking_metrics=tracking_metrics if isinstance(tracking_metrics, dict) else {},
+                overlap_follow_log_context=overlap_ctx or None,
             )
         finally:
             # Only clean up files we created locally, not volume-staged ones.
@@ -9433,6 +9655,10 @@ class ClyptWorker:
             print("[Phase 1] Step 1+2/4: Running Parakeet ASR, then YOLO26 tracking, on the same GPU...")
             words = self._run_asr(audio_path)
             tracks, tracking_metrics = self._run_tracking(video_path)
+            overlap_ctx: dict[str, str] = {}
+            worker_hint = str(os.getenv("CLYPT_WORKER_ID", "") or os.getenv("MODAL_TASK_ID", "")).strip()
+            if worker_hint:
+                overlap_ctx["worker_id"] = worker_hint
             result = self._finalize_from_words_tracks(
                 video_path=video_path,
                 audio_path=audio_path,
@@ -9440,6 +9666,7 @@ class ClyptWorker:
                 words=words,
                 tracks=tracks,
                 tracking_metrics=tracking_metrics if isinstance(tracking_metrics, dict) else {},
+                overlap_follow_log_context=overlap_ctx or None,
             )
 
             # Cleanup

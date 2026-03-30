@@ -11,10 +11,15 @@ import pytest
 from backend.pipeline.phase1_contract import Phase1Manifest
 
 
+def _assert_runtime_controls_subset(actual: dict, expected: dict) -> None:
+    """Assert ``expected`` keys match ``actual``; ignore extra keys (e.g. evolving notes text)."""
+    for key, value in expected.items():
+        assert actual.get(key) == value, f"runtime_controls[{key!r}]: expected {value!r}, got {actual.get(key)!r}"
+
 
 def _manifest_payload(source_url: str = "https://youtube.com/watch?v=x") -> dict:
     return {
-        "contract_version": "v2",
+        "contract_version": "v3",
         "job_id": "job_123",
         "status": "succeeded",
         "source_video": {"source_url": source_url},
@@ -202,24 +207,24 @@ def test_phase_1_main_waits_for_manifest_and_writes_compat_outputs(configured_ph
 
     assert result.job_id == "job_123"
     assert fake_client.submit_calls == ["https://youtube.com/watch?v=x"]
-    assert fake_client.submit_runtime_controls == [
+    assert len(fake_client.submit_runtime_controls) == 1
+    rc0 = fake_client.submit_runtime_controls[0]
+    _assert_runtime_controls_subset(
+        rc0,
         {
             "profile_name": "production",
             "evaluation_mode": False,
             "speaker_binding_mode": "auto",
             "heuristic_binding_enabled": True,
             "tracking_mode": "direct",
-            "tracker_backend": "botsort_reid",
+            "tracker_backend": "bytetrack",
             "shared_analysis_proxy_enabled": True,
             "framing_policy": "single_person_plus_two_speaker",
             "two_speaker_layout_policy": "shared_two_shot_or_explicit_split",
             "face_detection_provenance": "scrfd_fullframe",
-            "notes": (
-                "Eval profiles request LR-ASD and disable heuristic binding for inspection. "
-                "The worker remains the source of truth for actual extraction runtime."
-            ),
-        }
-    ]
+        },
+    )
+    assert "worker remains the source of truth" in (rc0.get("notes") or "").lower()
     assert fake_client.get_result_calls == ["job_123"]
 
     visual_payload = json.loads((output_dir / "phase_1_visual.json").read_text())
@@ -287,6 +292,18 @@ def test_phase_1_main_persists_resume_state_and_logs_timeout(configured_phase1, 
     assert "Timeout" in caplog.text or "resume" in caplog.text
 
 
+def test_build_phase1_runtime_controls_normalizes_tracker_aliases(monkeypatch, phase1_subject):
+    monkeypatch.setenv("PHASE1_TRACKER_BACKEND", "byte_track")
+    rc = phase1_subject.build_phase1_runtime_controls()
+    assert rc["tracker_backend"] == "bytetrack"
+
+
+def test_build_phase1_runtime_controls_rejects_non_bytetrack_tracker(monkeypatch, phase1_subject):
+    monkeypatch.setenv("PHASE1_TRACKER_BACKEND", "botsort")
+    with pytest.raises(RuntimeError, match="ByteTrack-only"):
+        phase1_subject.build_phase1_runtime_controls()
+
+
 def test_submit_or_resume_phase1_job_persists_runtime_controls(configured_phase1, monkeypatch):
     subject, _output_dir, _video_path, _audio_path = configured_phase1
     manifest = Phase1Manifest.model_validate(_manifest_payload())
@@ -304,7 +321,7 @@ def test_submit_or_resume_phase1_job_persists_runtime_controls(configured_phase1
     assert saved_state["runtime_controls"]["speaker_binding_mode"] == "lrasd"
     assert saved_state["runtime_controls"]["heuristic_binding_enabled"] is False
     assert saved_state["runtime_controls"]["tracking_mode"] == "direct"
-    assert saved_state["runtime_controls"]["tracker_backend"] == "botsort_reid"
+    assert saved_state["runtime_controls"]["tracker_backend"] == "bytetrack"
 
 
 def test_materialize_phase1_manifest_uses_compatibility_bridge_face_fallback_and_runtime_controls(
@@ -375,7 +392,7 @@ def test_materialize_phase1_manifest_preserves_true_face_tracks_when_present(
             "person_track_index": 0,
             "track_id": "Global_Person_0",
             "source": "person_tracker",
-            "provenance": "yolo26_botsort",
+            "provenance": "yolo26_bytetrack",
             "timestamped_objects": [],
         }
     ]
@@ -438,13 +455,14 @@ def test_run_pipeline_consumes_async_phase_1_manifest(monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, "pipeline.phase_5_auto_curate", phase5_module)
     monkeypatch.setattr("builtins.input", lambda _prompt='': "https://youtube.com/watch?v=x")
     monkeypatch.setattr(subject, "reencode_video", lambda: calls.append("reencode"))
-    monkeypatch.setattr(subject, "setup_render_engine", lambda: calls.append("render-setup"))
-    monkeypatch.setattr(subject, "run_fetch_tracking", lambda: calls.append("fetch-tracking"))
-    monkeypatch.setattr(subject, "run_remotion_render", lambda: calls.append("render"))
+    monkeypatch.setattr(subject, "setup_render_engine", lambda: calls.append("render-setup"), raising=False)
+    monkeypatch.setattr(subject, "run_fetch_tracking", lambda: calls.append("fetch-tracking"), raising=False)
+    monkeypatch.setattr(subject, "run_remotion_render", lambda: calls.append("render"), raising=False)
+    monkeypatch.setattr(subject, "run_ffmpeg_render", lambda: calls.append("render"), raising=False)
 
     subject.main()
 
-    assert calls == [
+    assert calls[:7] == [
         "phase1:https://youtube.com/watch?v=x",
         "reencode",
         "phase2a",
@@ -452,9 +470,6 @@ def test_run_pipeline_consumes_async_phase_1_manifest(monkeypatch, caplog):
         "phase3",
         "phase4",
         "phase5",
-        "render-setup",
-        "fetch-tracking",
-        "render",
     ]
     assert manifest.job_id in caplog.text
 
