@@ -5736,26 +5736,11 @@ class ClyptWorker:
 
     def _run_tracking(self, video_path: str) -> tuple[list[dict], dict]:
         """Run tracking using either direct or chunked execution."""
-        mode = self._select_tracking_mode()
-        print(f"Tracking mode={mode}")
-        if mode == "direct":
-            analysis_context = self._prepare_direct_analysis_context(video_path)
-        else:
-            analysis_context = self._prepare_analysis_video(video_path)
-        execution_mode = "direct" if mode in {"direct", "shared_analysis_proxy"} else "chunked"
-        if execution_mode == "direct":
-            try:
-                tracks, metrics = self._run_tracking_direct(video_path, analysis_context=analysis_context)
-            except TypeError:
-                tracks, metrics = self._run_tracking_direct(video_path)
-        else:
-            try:
-                tracks, metrics = self._run_tracking_chunked(video_path, analysis_context=analysis_context)
-            except TypeError:
-                tracks, metrics = self._run_tracking_chunked(video_path)
-        metrics = dict(metrics or {})
-        metrics.setdefault("tracking_mode", mode)
-        return tracks, metrics
+        from backend.pipeline.phase1.decode_cache import Phase1AnalysisContext
+        from backend.pipeline.phase1.tracking import run_tracking_stage
+
+        ctx = Phase1AnalysisContext(video_path)
+        return run_tracking_stage(self, video_path, ctx)
 
     # ──────────────────────────────────────────
     # Global tracklet clustering (InsightFace + DBSCAN)
@@ -9267,10 +9252,6 @@ class ClyptWorker:
             {str(track.get("track_id", "")) for track in tracks if str(track.get("track_id", ""))}
         )
 
-        precluster_tracks = [dict(track) for track in tracks]
-        _, track_to_dets = self._build_track_indexes(tracks)
-        precluster_frame_to_dets, precluster_track_to_dets = self._build_track_indexes(precluster_tracks)
-
         vmeta = self._probe_video_meta(video_path)
         cluster_duration_ms = max(1, int(round(float(vmeta.get("duration_s", 0.0)) * 1000.0)))
         cluster_video_fps = float(vmeta.get("fps") or 25.0)
@@ -9279,10 +9260,26 @@ class ClyptWorker:
             duration_ms=cluster_duration_ms,
         )
 
+        from backend.pipeline.phase1.clustering import post_track_reid_merge, run_cluster_tracklets_stage
+        from backend.pipeline.phase1.postprocess import merge_stage_metrics
+
+        tracks, track_identity_features, reid_metrics = post_track_reid_merge(
+            tracks,
+            track_identity_features,
+            shot_timeline_ms=shot_changes,
+            video_fps=cluster_video_fps,
+        )
+        merge_stage_metrics(metrics, reid_metrics)
+
+        precluster_tracks = [dict(track) for track in tracks]
+        _, track_to_dets = self._build_track_indexes(tracks)
+        precluster_frame_to_dets, precluster_track_to_dets = self._build_track_indexes(precluster_tracks)
+
         # Step 3: Global tracklet clustering
         print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
         cluster_started_at = time.perf_counter()
-        tracks = self._cluster_tracklets(
+        tracks = run_cluster_tracklets_stage(
+            self,
             video_path,
             tracks,
             track_to_dets=track_to_dets,
@@ -9306,8 +9303,18 @@ class ClyptWorker:
         metrics["identity_track_count_after_clustering"] = len(
             {str(track.get("track_id", "")) for track in tracks if str(track.get("track_id", ""))}
         )
+        phase1_decode_ctx = metrics.get("phase1_decode_context")
+        face_video_path = video_path
+        try:
+            from backend.pipeline.phase1.decode_cache import Phase1AnalysisContext
+            from backend.pipeline.phase1.faces import analysis_video_path_for_faces
+
+            if isinstance(phase1_decode_ctx, Phase1AnalysisContext):
+                face_video_path = analysis_video_path_for_faces(phase1_decode_ctx)
+        except Exception:
+            face_video_path = video_path
         face_detections, person_detections, face_metrics = self._build_visual_detection_ledgers(
-            video_path=video_path,
+            video_path=face_video_path,
             tracks=tracks,
             frame_to_dets=frame_to_dets,
             track_to_dets=track_to_dets,
@@ -9322,8 +9329,16 @@ class ClyptWorker:
         if isinstance(last_audio_diarization_metrics, dict):
             metrics.update(last_audio_diarization_metrics)
         speaker_binding_started_at = time.perf_counter()
-        binding_analysis_context = dict(analysis_context) if isinstance(analysis_context, dict) else {}
-        binding_analysis_context["audio_speaker_turns"] = audio_speaker_turns
+        from backend.pipeline.phase1.binding import build_speaker_binding_analysis_context
+        from backend.pipeline.phase1.decode_cache import Phase1AnalysisContext
+
+        binding_analysis_context = build_speaker_binding_analysis_context(
+            phase1_context=phase1_decode_ctx
+            if isinstance(phase1_decode_ctx, Phase1AnalysisContext)
+            else None,
+            analysis_context_fallback=analysis_context if isinstance(analysis_context, dict) else None,
+            audio_speaker_turns=audio_speaker_turns,
+        )
         self._last_speaker_candidate_debug = []
         speaker_bindings = self._run_speaker_binding(
             video_path,
