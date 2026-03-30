@@ -386,6 +386,7 @@ class Phase1Metadata(BaseModel):
     runtime: Phase1RuntimeMetadata
     timings: Phase1TimingsMetadata
     quality_metrics: Phase1QualityMetrics | None = None
+    benchmark_scorecard: dict[str, object] | None = None
     retry: Phase1RetryMetadata | None = None
     failure: Phase1FailureMetadata | None = None
 

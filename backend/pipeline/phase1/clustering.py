@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from collections import defaultdict
+from statistics import fmean
 from typing import Any
 
 import numpy as np
@@ -52,6 +55,161 @@ def _covisible(span_a: tuple[int, int], span_b: tuple[int, int]) -> bool:
     a0, a1 = span_a
     b0, b1 = span_b
     return max(a0, b0) <= min(a1, b1)
+
+
+def _bbox_iou_norm_xywh(det_a: dict, det_b: dict) -> float:
+    """IoU in normalized x_center/y_center/width/height space (matches worker `_detection_iou`)."""
+    ax1 = float(det_a.get("x_center", 0.0)) - 0.5 * float(det_a.get("width", 0.0))
+    ay1 = float(det_a.get("y_center", 0.0)) - 0.5 * float(det_a.get("height", 0.0))
+    ax2 = ax1 + float(det_a.get("width", 0.0))
+    ay2 = ay1 + float(det_a.get("height", 0.0))
+    bx1 = float(det_b.get("x_center", 0.0)) - 0.5 * float(det_b.get("width", 0.0))
+    by1 = float(det_b.get("y_center", 0.0)) - 0.5 * float(det_b.get("height", 0.0))
+    bx2 = bx1 + float(det_b.get("width", 0.0))
+    by2 = by1 + float(det_b.get("height", 0.0))
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    union = max(1.0, (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter)
+    return float(inter / union)
+
+
+def build_mask_overlap_clustering_signals(
+    track_to_dets: dict[str, list[dict]],
+    track_identity_features: dict[str, dict] | None,
+    *,
+    video_fps: float,
+    duration_ms: int,
+) -> dict[str, Any]:
+    """Per-track proxies aligned with worker `mask_stability_signals` / bbox continuity (Wave 4).
+
+    Used only for optional histogram→face attachment cost shaping. When ``active`` is False,
+    callers must not apply mask-overlap terms (preserves legacy behavior).
+    """
+    fps = max(1e-6, float(video_fps or 25.0))
+    duration_ms = max(0, int(duration_ms))
+    max_frame_gap = 5
+
+    max_det_frame = max(
+        (int(d.get("frame_idx", -1)) for dets in track_to_dets.values() for d in dets),
+        default=-1,
+    )
+    if max_det_frame < 0:
+        max_det_frame = int(min(1_000_000, round((duration_ms / 1000.0) * fps)))
+
+    window_span = max(30, min(300, int(round(fps * 3.0))))
+    win_end = max_det_frame
+    win_start = max(0, win_end - window_span + 1)
+
+    person_keys: set[tuple[str, int]] = set()
+    for tid in sorted(track_to_dets.keys()):
+        for d in track_to_dets[tid]:
+            fi = int(d.get("frame_idx", -1))
+            if fi < 0:
+                continue
+            if win_start <= fi <= win_end:
+                person_keys.add((str(tid), fi))
+
+    face_keys: set[tuple[str, int]] = set()
+    if isinstance(track_identity_features, dict) and track_identity_features:
+        for tid, feat in track_identity_features.items():
+            tid_s = str(tid)
+            if not tid_s:
+                continue
+            for obs in feat.get("face_observations") or []:
+                if not isinstance(obs, dict):
+                    continue
+                fi = int(obs.get("frame_idx", -1))
+                if fi < 0:
+                    continue
+                if win_start <= fi <= win_end:
+                    face_keys.add((tid_s, fi))
+
+    overlap_pf = person_keys & face_keys
+
+    iou_values: list[float] = []
+    per_track_iou_vals: dict[str, list[float]] = defaultdict(list)
+    for tid in sorted(track_to_dets.keys()):
+        window_dets = [
+            d
+            for d in track_to_dets[tid]
+            if win_start <= int(d.get("frame_idx", -1)) <= win_end
+        ]
+        window_dets.sort(key=lambda x: int(x["frame_idx"]))
+        for i in range(len(window_dets) - 1):
+            a, b = window_dets[i], window_dets[i + 1]
+            fa, fb = int(a.get("frame_idx", -1)), int(b.get("frame_idx", -1))
+            gap = fb - fa
+            if gap <= 0 or gap > max_frame_gap:
+                continue
+            iou_v = float(_bbox_iou_norm_xywh(a, b))
+            iou_values.append(iou_v)
+            per_track_iou_vals[str(tid)].append(iou_v)
+
+    person_frames_by_tid: dict[str, set[int]] = defaultdict(set)
+    for tid, fi in person_keys:
+        person_frames_by_tid[tid].add(fi)
+    overlap_frames_by_tid: dict[str, set[int]] = defaultdict(set)
+    for tid, fi in overlap_pf:
+        overlap_frames_by_tid[tid].add(fi)
+
+    per_track: dict[str, dict[str, float]] = {}
+    for tid in person_frames_by_tid:
+        pcount = len(person_frames_by_tid[tid])
+        fp_ratio = len(overlap_frames_by_tid[tid]) / max(1, pcount)
+        ious = per_track_iou_vals.get(tid) or []
+        mean_iou = float(fmean(ious)) if ious else 0.0
+        stab = float(0.55 * fp_ratio + 0.45 * mean_iou)
+        per_track[tid] = {
+            "face_person_overlap_ratio": round(fp_ratio, 6),
+            "mean_consecutive_iou": round(mean_iou, 6),
+            "stab": round(stab, 6),
+        }
+
+    active = bool(person_keys) and (bool(overlap_pf) or bool(iou_values))
+    return {
+        "active": active,
+        "per_track": per_track,
+        "signal_version": "cluster_attach_bbox_v1",
+        "short_term_stability_memory": {
+            "window_start_frame": win_start,
+            "window_end_frame": win_end,
+            "face_person_frame_overlap": len(overlap_pf),
+            "iou_consecutive_pair_count": len(iou_values),
+            "person_track_frames_in_window": len(person_keys),
+        },
+    }
+
+
+def mask_overlap_attachment_cost_reduction(
+    group_tids: list[str],
+    cluster_tids: list[str],
+    mask_ctx: dict[str, Any],
+) -> float:
+    """Non-negative reduction subtracted from Hungarian cost when mask/stability context is active."""
+    if not mask_ctx.get("active"):
+        return 0.0
+    ga = {str(t) for t in group_tids if str(t)}
+    ca = {str(t) for t in cluster_tids if str(t)}
+    if ga == ca:
+        return 0.0
+    per_track: dict[str, dict[str, float]] = mask_ctx.get("per_track") or {}
+    weight = float(os.getenv("CLYPT_CLUSTER_MASK_OVERLAP_ATTACH_WEIGHT", "0.12"))
+    eps = 1e-9
+
+    def _mean_stab(tids: list[str]) -> float:
+        vals = [float(per_track[t]["stab"]) for t in tids if t in per_track]
+        return float(sum(vals) / max(1, len(vals))) if vals else 0.0
+
+    mg = _mean_stab([str(t) for t in group_tids])
+    mc = _mean_stab([str(t) for t in cluster_tids])
+    if mg < eps and mc < eps:
+        return 0.0
+    return float(weight * mg * mc)
 
 
 def _shot_index_for_time_ms(shot_timeline_ms: list[dict], t_ms: float) -> int | None:
@@ -292,6 +450,8 @@ def run_cluster_tracklets_stage(
 
 
 __all__ = [
+    "build_mask_overlap_clustering_signals",
+    "mask_overlap_attachment_cost_reduction",
     "post_track_reid_merge",
     "run_cluster_tracklets_stage",
     "_norm_track_id",

@@ -8,6 +8,7 @@ from typing import Protocol
 from google.cloud import storage as gcs_storage
 
 from backend.do_phase1_service.models import PersistedPhase1Manifest
+from backend.pipeline.phase1.metrics_scorecard import compute_phase1_scorecard
 from backend.pipeline.phase1_contract import Phase1Manifest
 
 
@@ -67,6 +68,17 @@ def persist_phase1_outputs(
     transcript_uri = _upload_json(storage, phase_1_audio, f"phase_1/jobs/{job_id}/phase_1_audio.json")
     visual_uri = _upload_json(storage, phase_1_visual, f"phase_1/jobs/{job_id}/phase_1_visual.json")
 
+    timings_payload = {
+        "ingest_ms": int((timings or {}).get("ingest_ms", 0)),
+        "processing_ms": int((timings or {}).get("processing_ms", 0)),
+        "upload_ms": int((timings or {}).get("upload_ms", 0)),
+    }
+    benchmark_scorecard = compute_phase1_scorecard(
+        phase_1_audio,
+        phase_1_visual,
+        job_timings_ms=timings_payload,
+    )
+
     manifest_payload = {
         "contract_version": "v2",
         "job_id": job_id,
@@ -116,11 +128,8 @@ def persist_phase1_outputs(
                 "worker_id": os.getenv("DO_PHASE1_WORKER_ID"),
                 "region": os.getenv("DO_REGION"),
             },
-            "timings": {
-                "ingest_ms": int((timings or {}).get("ingest_ms", 0)),
-                "processing_ms": int((timings or {}).get("processing_ms", 0)),
-                "upload_ms": int((timings or {}).get("upload_ms", 0)),
-            },
+            "timings": timings_payload,
+            "benchmark_scorecard": benchmark_scorecard,
             "quality_metrics": {
                 "schema_pass_rate": float(phase_1_visual.get("tracking_metrics", {}).get("schema_pass_rate", 1.0)),
                 "transcript_coverage": 1.0 if phase_1_audio.get("words") is not None else 0.0,

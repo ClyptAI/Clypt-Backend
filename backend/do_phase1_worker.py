@@ -882,9 +882,11 @@ class ClyptWorker:
             tracklets=tracklets,
             face_label_by_tid=face_label_by_tid,
             histogram_attach_max_sig=histogram_attach_max_sig,
-            shot_segments=shot_segments,
+            shot_segments=shot_segments or [],
             video_fps=float(video_fps),
             duration_ms=duration_ms,
+            track_identity_features=None,
+            aux_metrics=None,
         )
         if not pick:
             return None
@@ -901,6 +903,8 @@ class ClyptWorker:
         shot_segments: list[dict],
         video_fps: float,
         duration_ms: int,
+        track_identity_features: dict[str, dict] | None = None,
+        aux_metrics: dict[str, int | float] | None = None,
     ) -> list[int | None]:
         """Globally optimal one-to-one hist-group → face label assignment (shot-gated, sig + temporal cost)."""
         import math
@@ -908,6 +912,10 @@ class ClyptWorker:
 
         import numpy as np
         from scipy.optimize import linear_sum_assignment
+        from backend.pipeline.phase1.clustering import (
+            build_mask_overlap_clustering_signals,
+            mask_overlap_attachment_cost_reduction,
+        )
         from backend.pipeline.phase1.config import get_phase1_config
 
         BIG = 1.0e7
@@ -931,6 +939,18 @@ class ClyptWorker:
         group_max_sig = histogram_attach_max_sig * max(1.0, group_relax)
         dur = max(1, int(duration_ms))
         multi_shot = bool(shot_segments and len(shot_segments) > 1)
+
+        mask_ctx = build_mask_overlap_clustering_signals(
+            tracklets,
+            track_identity_features if isinstance(track_identity_features, dict) else None,
+            video_fps=float(video_fps),
+            duration_ms=int(dur),
+        )
+        mask_cells_adjusted = 0
+        if aux_metrics is not None:
+            aux_metrics["cluster_mask_overlap_term_active"] = 1 if mask_ctx.get("active") else 0
+            aux_metrics["cluster_mask_overlap_assignment_cells_adjusted"] = 0
+            aux_metrics["cluster_mask_overlap_cost_reduction_sum"] = 0.0
 
         group_rows: list[dict] = []
         for tids in hist_groups:
@@ -1037,7 +1057,17 @@ class ClyptWorker:
                 temp_norm = abs(float(gr["center_ms"] - lc["center_ms"])) / float(dur)
                 gap_norm = min_gap_frames / max(1.0, float(max_gap_frames or 1))
                 c = float(sig_dist) + score_gap_weight * float(gap_norm) + temp_weight * float(temp_norm)
-                mat[i, j] = c
+                red = mask_overlap_attachment_cost_reduction(tids, cluster_tids, mask_ctx)
+                if red > 0.0:
+                    mask_cells_adjusted += 1
+                    if aux_metrics is not None:
+                        aux_metrics["cluster_mask_overlap_cost_reduction_sum"] = float(
+                            aux_metrics.get("cluster_mask_overlap_cost_reduction_sum", 0.0)
+                        ) + float(red)
+                mat[i, j] = c - float(red)
+
+        if aux_metrics is not None:
+            aux_metrics["cluster_mask_overlap_assignment_cells_adjusted"] = int(mask_cells_adjusted)
 
         row_ind, col_ind = linear_sum_assignment(mat)
         for i, c in zip(row_ind, col_ind):
@@ -5694,6 +5724,9 @@ class ClyptWorker:
                 "accidental_merge_proxy": 0.0,
                 "covisibility_conflict_rejections": 0,
                 "histogram_attach_rejections": 0,
+                "cluster_mask_overlap_term_active": 0,
+                "cluster_mask_overlap_assignment_cells_adjusted": 0,
+                "cluster_mask_overlap_cost_reduction_sum": 0.0,
             }
             self._last_track_identity_features_after_clustering = (
                 dict(track_identity_features) if isinstance(track_identity_features, dict) else None
@@ -5881,6 +5914,9 @@ class ClyptWorker:
                 "covisibility_conflict_rejections": 0,
                 "histogram_attach_rejections": 0,
                 "face_track_gap_propagated_tracklets": 0,
+                "cluster_mask_overlap_term_active": 0,
+                "cluster_mask_overlap_assignment_cells_adjusted": 0,
+                "cluster_mask_overlap_cost_reduction_sum": 0.0,
             }
             self._last_track_identity_features_after_clustering = (
                 dict(track_identity_features) if isinstance(track_identity_features, dict) else None
@@ -5911,6 +5947,9 @@ class ClyptWorker:
                 ),
                 "covisibility_conflict_rejections": 0,
                 "histogram_attach_rejections": 0,
+                "cluster_mask_overlap_term_active": 0,
+                "cluster_mask_overlap_assignment_cells_adjusted": 0,
+                "cluster_mask_overlap_cost_reduction_sum": 0.0,
             }
             self._last_track_identity_features_after_clustering = (
                 dict(track_identity_features) if isinstance(track_identity_features, dict) else None
@@ -6229,6 +6268,11 @@ class ClyptWorker:
             print(f"  Face clusters after refinement: {n_face_clusters}")
 
         # Attach histogram-only tracklets to nearest face cluster by spatial signature.
+        mask_cluster_attach_aux: dict[str, int | float] = {
+            "cluster_mask_overlap_term_active": 0,
+            "cluster_mask_overlap_assignment_cells_adjusted": 0,
+            "cluster_mask_overlap_cost_reduction_sum": 0.0,
+        }
         if hist_tids:
             if n_face_clusters > 0:
                 face_label_by_tid = {
@@ -6253,6 +6297,10 @@ class ClyptWorker:
                     shot_segments=shot_timeline_for_cluster,
                     video_fps=float(cluster_video_fps),
                     duration_ms=int(cluster_duration_ms),
+                    track_identity_features=track_identity_features
+                    if isinstance(track_identity_features, dict)
+                    else None,
+                    aux_metrics=mask_cluster_attach_aux,
                 )
                 for gi, group in enumerate(hist_groups):
                     selected_label = hungarian_pick[gi] if gi < len(hungarian_pick) else None
@@ -6380,6 +6428,7 @@ class ClyptWorker:
             "same_identity_frame_collision_frames_after_repair": collision_metrics_after_repair["same_identity_frame_collision_frames"],
             "same_identity_labels_with_collisions_after_repair": collision_metrics_after_repair["same_identity_labels_with_collisions"],
             **repair_metrics,
+            **mask_cluster_attach_aux,
         }
         if isinstance(track_identity_features, dict):
             remapped_feature_maps: list[dict[str, dict]] = []

@@ -444,6 +444,93 @@ def test_follow_target_stability_adjustment_backward_compatible_without_signals(
     )
 
 
+def test_follow_target_stability_adjustment_overlap_boosts_short_term_memory():
+    mod = load_module()
+    det = make_clean_body_detection("A")
+    overlap = [{"start_time_ms": 0, "end_time_ms": 60_000, "camera_target_track_id": None, "stay_wide": True}]
+    in_overlap = mod.follow_target_stability_adjustment(
+        track_id="A",
+        frame_idx=0,
+        abs_ms=5000,
+        frame_width=1280,
+        frame_height=720,
+        det=det,
+        mask_stability_index=None,
+        overlap_follow_decisions=overlap,
+        prefer_local_track_ids=False,
+        last_resolved_track_id="A",
+    )
+    outside = mod.follow_target_stability_adjustment(
+        track_id="A",
+        frame_idx=0,
+        abs_ms=5000,
+        frame_width=1280,
+        frame_height=720,
+        det=det,
+        mask_stability_index=None,
+        overlap_follow_decisions=None,
+        prefer_local_track_ids=False,
+        last_resolved_track_id="A",
+    )
+    assert in_overlap - outside == mod.RENDER_OVERLAP_SHORT_TERM_MEMORY_BOOST
+
+
+def test_tiebreak_two_visible_hysteresis_keeps_last_resolved_on_small_margin(monkeypatch):
+    mod = load_module()
+    det_a = {**make_clean_body_detection("A"), "track_id": "A"}
+    det_b = {**make_clean_body_detection("B"), "track_id": "B"}
+
+    def patched_score(det, fw, fh):
+        tid = str(det.get("track_id") or "")
+        if tid == "A":
+            return 1.0
+        if tid == "B":
+            return 1.19
+        return mod.score_render_target_candidate(det, fw, fh)
+
+    monkeypatch.setattr(mod, "score_render_target_candidate", patched_score)
+    picked = mod.tiebreak_two_visible_tracks_for_follow(
+        frame_detections=[det_a, det_b],
+        frame_width=1280,
+        frame_height=720,
+        abs_ms=1000,
+        video_fps=24.0,
+        mask_stability_index=None,
+        overlap_follow_decisions=None,
+        prefer_local_track_ids=False,
+        last_resolved_track_id="A",
+    )
+    assert picked == "A"
+
+
+def test_tiebreak_two_visible_hysteresis_yields_to_clear_leader(monkeypatch):
+    mod = load_module()
+    det_a = {**make_clean_body_detection("A"), "track_id": "A"}
+    det_b = {**make_clean_body_detection("B"), "track_id": "B"}
+
+    def patched_score(det, fw, fh):
+        tid = str(det.get("track_id") or "")
+        if tid == "A":
+            return 1.0
+        if tid == "B":
+            return 1.30
+        return mod.score_render_target_candidate(det, fw, fh)
+
+    monkeypatch.setattr(mod, "score_render_target_candidate", patched_score)
+    picked = mod.tiebreak_two_visible_tracks_for_follow(
+        frame_detections=[det_a, det_b],
+        frame_width=1280,
+        frame_height=720,
+        abs_ms=1000,
+        video_fps=24.0,
+        mask_stability_index=None,
+        overlap_follow_decisions=None,
+        prefer_local_track_ids=False,
+        last_resolved_track_id="A",
+    )
+    assert picked == "B"
+
+
 def test_resolve_follow_identity_symmetric_bodies_follow_overlap_camera_target():
     mod = load_module()
     bindings = []

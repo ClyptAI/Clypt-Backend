@@ -84,6 +84,12 @@ TWO_TRACK_MASK_STABILITY_WEIGHT = 0.38
 RENDER_OVERLAP_CAMERA_TARGET_BIAS = 0.22
 RENDER_OVERLAP_VISIBLE_LIST_BIAS = 0.07
 RENDER_SHORT_TERM_TRACK_MEMORY_BIAS = 0.14
+# Extra short-term memory while an overlap-follow window is active (reduces target dither).
+RENDER_OVERLAP_SHORT_TERM_MEMORY_BOOST = 0.10
+# Scale mask-stability contribution during overlap when both bodies compete for follow.
+RENDER_OVERLAP_MASK_STABILITY_SCALE = 1.35
+# Keep prior follow target unless the challenger leads by at least this (renderer score units).
+RENDER_TWO_TRACK_FOLLOW_HYSTERESIS_MARGIN = 0.06
 
 
 @dataclass(frozen=True)
@@ -212,14 +218,12 @@ def mask_stability_bonus_for_render_det(
     return clamp(best, 0.0, 1.0)
 
 
-def overlap_follow_renderer_bias(
-    abs_ms: int,
+def overlap_follow_bias_for_decision(
+    decision: dict | None,
     track_id: str,
-    overlap_follow_decisions: list[dict] | None,
     *,
     prefer_local_track_ids: bool,
 ) -> float:
-    decision = overlap_follow_decision_at_ms(overlap_follow_decisions, abs_ms)
     if not decision:
         return 0.0
     target = _decision_camera_target_track_id(decision, prefer_local_track_ids=prefer_local_track_ids)
@@ -240,10 +244,29 @@ def overlap_follow_renderer_bias(
     return 0.0
 
 
-def short_term_track_memory_bias(track_id: str, last_resolved_track_id: str | None) -> float:
-    if last_resolved_track_id and track_id == last_resolved_track_id:
-        return RENDER_SHORT_TERM_TRACK_MEMORY_BIAS
-    return 0.0
+def overlap_follow_renderer_bias(
+    abs_ms: int,
+    track_id: str,
+    overlap_follow_decisions: list[dict] | None,
+    *,
+    prefer_local_track_ids: bool,
+) -> float:
+    decision = overlap_follow_decision_at_ms(overlap_follow_decisions, abs_ms)
+    return overlap_follow_bias_for_decision(decision, track_id, prefer_local_track_ids=prefer_local_track_ids)
+
+
+def short_term_track_memory_bias(
+    track_id: str,
+    last_resolved_track_id: str | None,
+    *,
+    overlap_active: bool = False,
+) -> float:
+    if not last_resolved_track_id or track_id != last_resolved_track_id:
+        return 0.0
+    bias = RENDER_SHORT_TERM_TRACK_MEMORY_BIAS
+    if overlap_active:
+        bias += RENDER_OVERLAP_SHORT_TERM_MEMORY_BOOST
+    return bias
 
 
 def follow_target_stability_adjustment(
@@ -260,13 +283,20 @@ def follow_target_stability_adjustment(
     last_resolved_track_id: str | None,
 ) -> float:
     """Renderer-only score delta: mask stability + overlap-follow hints + short-term track memory."""
-    adj = TWO_TRACK_MASK_STABILITY_WEIGHT * mask_stability_bonus_for_render_det(
+    overlap_decision = overlap_follow_decision_at_ms(overlap_follow_decisions, abs_ms)
+    overlap_active = overlap_decision is not None
+    mask_w = TWO_TRACK_MASK_STABILITY_WEIGHT * (
+        RENDER_OVERLAP_MASK_STABILITY_SCALE if overlap_active else 1.0
+    )
+    adj = mask_w * mask_stability_bonus_for_render_det(
         mask_stability_index, frame_idx, track_id, det, frame_width, frame_height
     )
-    adj += overlap_follow_renderer_bias(
-        abs_ms, track_id, overlap_follow_decisions, prefer_local_track_ids=prefer_local_track_ids
+    adj += overlap_follow_bias_for_decision(
+        overlap_decision, track_id, prefer_local_track_ids=prefer_local_track_ids
     )
-    adj += short_term_track_memory_bias(track_id, last_resolved_track_id)
+    adj += short_term_track_memory_bias(
+        track_id, last_resolved_track_id, overlap_active=overlap_active
+    )
     return adj
 
 
@@ -318,7 +348,14 @@ def tiebreak_two_visible_tracks_for_follow(
 
     s0 = _score(plausible[0])
     s1 = _score(plausible[1])
-    if abs(s0 - s1) < 1e-6:
+    margin = abs(s0 - s1)
+    if (
+        last_resolved_track_id
+        and last_resolved_track_id in (tid0, tid1)
+        and margin < RENDER_TWO_TRACK_FOLLOW_HYSTERESIS_MARGIN
+    ):
+        return last_resolved_track_id
+    if margin < 1e-6:
         if last_resolved_track_id in (tid0, tid1):
             return last_resolved_track_id
         return tid0
