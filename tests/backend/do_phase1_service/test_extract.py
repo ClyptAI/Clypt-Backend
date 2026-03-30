@@ -113,6 +113,12 @@ def test_extract_job_manifest_carries_mask_stability_signals_structure(tmp_path:
             "iou_consecutive_pair_count": 2,
             "tracks_with_motion_score": 1,
         },
+        "mask_signal_meta": {
+            "payload_version": "1.1.0",
+            "segmentation_provenance": "absent",
+            "seg_model_manifest": "yolo26m-seg",
+            "coordinate_space": "absolute_original_frame_xyxy",
+        },
     }
 
     monkeypatch.setattr(
@@ -171,7 +177,12 @@ def test_extract_job_manifest_carries_mask_stability_signals_structure(tmp_path:
         "face_presence_ratio",
         "motion_smoothness_proxy",
         "short_term_stability_memory",
+        "mask_signal_meta",
     }
+    msm = mss["mask_signal_meta"]
+    assert isinstance(msm, dict)
+    assert msm.get("payload_version") == "1.1.0"
+    assert "segmentation_provenance" in msm
     iou_p = mss["iou_continuity_proxy"]
     assert isinstance(iou_p, dict)
     assert {"mean_iou_consecutive", "pair_count", "tracks_with_consecutive_pairs", "max_frame_gap"} <= set(iou_p.keys())
@@ -199,6 +210,9 @@ def test_compute_mask_stability_signals_empty_tracks_deterministic():
     mem = out["short_term_stability_memory"]
     assert mem["person_track_frames_in_window"] == 0
     assert mem["iou_consecutive_pair_count"] == 0
+    assert out["mask_signal_meta"]["segmentation_provenance"] == "absent"
+    assert out["mask_signal_meta"]["payload_version"] == "1.1.0"
+    assert "entries" not in out
 
 
 def test_extract_job_records_stage_timings(tmp_path: Path, monkeypatch):
@@ -4507,6 +4521,62 @@ def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
     assert isinstance(mss["face_presence_ratio"], float)
     assert "mean_track_smoothness" in mss["motion_smoothness_proxy"]
     assert "window_start_frame" in mss["short_term_stability_memory"]
+    assert mss["mask_signal_meta"]["segmentation_provenance"] == "absent"
+
+
+def test_compute_mask_stability_signals_includes_seg_entries_when_proxies_present():
+    """Per-detection seg_mask_proxies produce entries, segmentation_mask_proxies, and provenance."""
+    worker_cls = ClyptWorker._get_user_cls()
+    track_to_dets = {
+        "track-1": [
+            {
+                "frame_idx": 0,
+                "track_id": "track-1",
+                "x_center": 0.5,
+                "y_center": 0.5,
+                "width": 0.1,
+                "height": 0.2,
+                "bbox_norm_xywh": {"x_center": 0.5, "y_center": 0.5, "width": 0.1, "height": 0.2},
+                "seg_mask_proxies": {
+                    "mask_area_in_bbox_ratio": 0.72,
+                    "signal_provenance": "yolo_instance_mask_tensor",
+                },
+            },
+            {
+                "frame_idx": 1,
+                "track_id": "track-1",
+                "x_center": 0.51,
+                "y_center": 0.51,
+                "width": 0.1,
+                "height": 0.2,
+                "bbox_norm_xywh": {"x_center": 0.51, "y_center": 0.51, "width": 0.1, "height": 0.2},
+                "seg_mask_proxies": {
+                    "mask_area_in_bbox_ratio": 0.70,
+                    "signal_provenance": "yolo_instance_mask_tensor",
+                },
+            },
+        ],
+    }
+    out = worker_cls._compute_mask_stability_signals(
+        track_to_dets,
+        [],
+        video_fps=25.0,
+        duration_ms=10_000,
+    )
+    assert out["mask_signal_meta"]["segmentation_provenance"] != "absent"
+    assert "yolo" in out["mask_signal_meta"]["segmentation_provenance"].lower()
+    assert "entries" in out
+    assert len(out["entries"]) == 2
+    e0 = out["entries"][0]
+    assert set(e0.keys()) >= {"frame_idx", "track_id", "stability", "mask_area_in_bbox_ratio", "signal_provenance"}
+    assert e0["frame_idx"] == 0
+    assert e0["track_id"] == "track-1"
+    smp = out["segmentation_mask_proxies"]
+    assert smp["active"] is True
+    assert smp["detections_with_seg_proxy"] == 2
+    assert "track-1" in smp["per_track"]
+    assert smp["per_track"]["track-1"]["frames_with_seg_proxy"] == 2
+    assert smp["mean_consecutive_mask_fill_consistency"] > 0.0
 
 
 def test_finalize_mask_stability_signals_multi_frame_continuity_and_face_ratio(monkeypatch):
@@ -4625,6 +4695,7 @@ def test_finalize_mask_stability_signals_multi_frame_continuity_and_face_ratio(m
     mem = mss["short_term_stability_memory"]
     assert mem["person_track_frames_in_window"] == 3
     assert mem["face_person_frame_overlap"] == 3
+    assert mss["mask_signal_meta"]["segmentation_provenance"] == "absent"
 
 
 def test_finalize_records_audio_diarization_fallback_metrics_when_pyannote_unavailable(monkeypatch):

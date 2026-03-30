@@ -1711,6 +1711,29 @@ def test_build_mask_stability_index_from_visual_returns_none_without_field():
     assert mod.build_mask_stability_index_from_visual({"mask_stability_signals": None}) is None
 
 
+def test_parse_mask_stability_signals_payload_hybrid_dict_with_aggregate_keys():
+    """Worker Phase-1 dict may bundle bbox aggregates plus ``entries``; parser uses entries only."""
+    mod = load_module()
+    raw = {
+        "signal_version": "worker_bbox_v1",
+        "mask_signal_meta": {"payload_version": "1.1.0", "segmentation_provenance": "yolo_seg_masks:yolo26m-seg"},
+        "segmentation_mask_proxies": {"active": True},
+        "entries": [
+            {
+                "frame_idx": 0,
+                "track_id": "track_A",
+                "stability": 0.88,
+                "x_center": 0.42,
+                "y_center": 0.55,
+                "mask_area_in_bbox_ratio": 0.71,
+            },
+        ],
+    }
+    idx = mod.parse_mask_stability_signals_payload(raw)
+    assert (0, "track_A") in idx.spatial
+    assert idx.spatial[(0, "track_A")][0] == (0.42, 0.55, 0.88)
+
+
 def test_build_track_index_prefers_mask_stable_duplicate_detection():
     """When one duplicate body box aligns with spatial mask stability, keep that instance (anti-jitter)."""
     mod = load_module()

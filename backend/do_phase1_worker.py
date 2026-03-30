@@ -353,6 +353,67 @@ class ClyptWorker:
         return float(inter / union)
 
     @staticmethod
+    def _yolo_instance_seg_proxies(
+        r,
+        inst_idx: int,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        frame_w: int,
+        frame_h: int,
+    ) -> dict | None:
+        """Compact mask-derived scalars from Ultralytics seg output (no raster persistence)."""
+        masks = getattr(r, "masks", None)
+        if masks is None:
+            return None
+        data = getattr(masks, "data", None)
+        if data is None:
+            return None
+        try:
+            import numpy as np
+
+            if hasattr(data, "detach"):
+                t = np.asarray(data.detach().cpu().float().numpy())
+            else:
+                t = np.asarray(data)
+            n = int(t.shape[0])
+            if inst_idx < 0 or inst_idx >= n:
+                return None
+            mi = t[inst_idx]
+            if getattr(mi, "ndim", None) != 2:
+                return None
+            mh, mw = int(mi.shape[0]), int(mi.shape[1])
+            fw = max(1, int(frame_w))
+            fh = max(1, int(frame_h))
+            vals = mi.astype(np.float64, copy=False)
+            vmax = float(vals.max())
+            vmin = float(vals.min())
+            if vmax > 1.0 or vmin < 0.0:
+                vals = 1.0 / (1.0 + np.exp(-vals))
+            binary = (vals > 0.5).astype(np.float64)
+            mask_pixels = float(binary.sum())
+            cell_area_orig = (fw / max(1, mw)) * (fh / max(1, mh))
+            mask_area_orig = mask_pixels * cell_area_orig
+            bbox_area = max(1.0, (float(x2) - float(x1)) * (float(y2) - float(y1)))
+            fill_ratio = mask_area_orig / bbox_area
+            fill_ratio = min(2.0, max(0.0, fill_ratio))
+            if mask_pixels > 0:
+                mean_conf = float(vals[binary > 0].mean())
+            else:
+                mean_conf = float(vals.mean())
+            return {
+                "mask_area_in_bbox_ratio": round(fill_ratio, 6),
+                "mask_mean_confidence": round(mean_conf, 6),
+                "mask_grid_h": mh,
+                "mask_grid_w": mw,
+                "signal_provenance": "yolo_instance_mask_tensor",
+                "seg_model_manifest": YOLO_MANIFEST_MODEL_NAME,
+            }
+        except Exception:
+            return None
+
+    @staticmethod
     def _compute_mask_stability_signals(
         track_to_dets: dict[str, list[dict]],
         face_detections: list[dict],
@@ -360,8 +421,9 @@ class ClyptWorker:
         video_fps: float,
         duration_ms: int,
     ) -> dict[str, object]:
-        """Deterministic bbox/track proxies for mask stability (Wave 4); no persisted seg masks required."""
+        """Bbox/track proxies plus optional YOLO seg-derived per-frame entries (schema-compatible dict)."""
         import math
+        from collections import defaultdict
         from statistics import fmean, median
 
         fps = max(1e-6, float(video_fps or 25.0))
@@ -469,7 +531,71 @@ class ClyptWorker:
             "tracks_with_motion_score": len(smooth_scores),
         }
 
-        return {
+        mask_signal_meta: dict[str, object] = {
+            "payload_version": "1.1.0",
+            "segmentation_provenance": "absent",
+            "seg_model_manifest": YOLO_MANIFEST_MODEL_NAME,
+            "coordinate_space": PHASE1_COORDINATE_SPACE,
+        }
+
+        def _fill_ratio_to_stability(fill_f: float, has_face_overlap: bool) -> float:
+            base = (float(fill_f) - 0.12) / 0.78
+            base = min(1.0, max(0.0, base))
+            if has_face_overlap:
+                base = min(1.0, 0.22 + 0.78 * base)
+            return round(base, 6)
+
+        entries: list[dict[str, object]] = []
+        per_track_fills: dict[str, list[float]] = defaultdict(list)
+        consistency_vals: list[float] = []
+        for tid in sorted(track_to_dets.keys()):
+            window_dets = [
+                d
+                for d in track_to_dets[tid]
+                if win_start <= int(d.get("frame_idx", -1)) <= win_end
+            ]
+            window_dets.sort(key=lambda x: int(x["frame_idx"]))
+            prev_fill: float | None = None
+            for d in window_dets:
+                fi = int(d.get("frame_idx", -1))
+                sm = d.get("seg_mask_proxies")
+                if not isinstance(sm, dict):
+                    prev_fill = None
+                    continue
+                raw_fill = sm.get("mask_area_in_bbox_ratio")
+                if raw_fill is None:
+                    prev_fill = None
+                    continue
+                try:
+                    fill_f = float(raw_fill)
+                except (TypeError, ValueError):
+                    prev_fill = None
+                    continue
+                per_track_fills[str(tid)].append(fill_f)
+                if prev_fill is not None:
+                    mx = max(prev_fill, fill_f, 1e-6)
+                    mn = min(prev_fill, fill_f)
+                    consistency_vals.append(mn / mx)
+                prev_fill = fill_f
+                has_face = (str(tid), fi) in overlap_pf
+                stab = _fill_ratio_to_stability(fill_f, has_face)
+                entry: dict[str, object] = {
+                    "frame_idx": fi,
+                    "track_id": str(tid),
+                    "stability": stab,
+                    "mask_area_in_bbox_ratio": round(fill_f, 6),
+                    "signal_provenance": str(sm.get("signal_provenance") or "yolo_instance_mask_tensor"),
+                }
+                bbn = d.get("bbox_norm_xywh")
+                if isinstance(bbn, dict):
+                    try:
+                        entry["x_center"] = float(bbn["x_center"])
+                        entry["y_center"] = float(bbn["y_center"])
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                entries.append(entry)
+
+        base_payload: dict[str, object] = {
             "signal_version": "worker_bbox_v1",
             "iou_continuity_proxy": {
                 "mean_iou_consecutive": mean_iou,
@@ -483,7 +609,32 @@ class ClyptWorker:
                 "tracks_evaluated": len(smooth_scores),
             },
             "short_term_stability_memory": short_term_stability_memory,
+            "mask_signal_meta": mask_signal_meta,
         }
+
+        if not entries:
+            return base_payload
+
+        mask_signal_meta["segmentation_provenance"] = f"yolo_seg_masks:{YOLO_MANIFEST_MODEL_NAME}"
+        all_fills = [v for vs in per_track_fills.values() for v in vs]
+        mean_fill = float(fmean(all_fills)) if all_fills else 0.0
+        mean_cons = float(fmean(consistency_vals)) if consistency_vals else mean_fill
+        per_track_summary: dict[str, dict[str, float | int]] = {}
+        for tid, fills in sorted(per_track_fills.items()):
+            per_track_summary[tid] = {
+                "mean_mask_area_in_bbox_ratio": round(float(fmean(fills)), 6),
+                "frames_with_seg_proxy": int(len(fills)),
+            }
+
+        base_payload["segmentation_mask_proxies"] = {
+            "active": True,
+            "mean_mask_area_in_bbox_ratio": round(mean_fill, 6),
+            "mean_consecutive_mask_fill_consistency": round(mean_cons, 6),
+            "detections_with_seg_proxy": int(len(entries)),
+            "per_track": per_track_summary,
+        }
+        base_payload["entries"] = sorted(entries, key=lambda e: (int(e["frame_idx"]), str(e["track_id"])))
+        return base_payload
 
     @classmethod
     def _visibility_conflict_stats(
@@ -4989,6 +5140,11 @@ class ClyptWorker:
                     pts = obb_polys[i].reshape(-1, 2).tolist()
                     out["geometry_type"] = "obb"
                     out["polygon"] = [[float(px), float(py)] for px, py in pts]
+                seg_px = self._yolo_instance_seg_proxies(
+                    r, i, x1, y1, x2, y2, width, height
+                )
+                if seg_px is not None:
+                    out["seg_mask_proxies"] = seg_px
                 analysis_tracks.append(dict(out))
                 tracks.append(
                     self._scale_detection_geometry(
@@ -5219,6 +5375,11 @@ class ClyptWorker:
                         pts = obb_polys[i].reshape(-1, 2).tolist()
                         out["geometry_type"] = "obb"
                         out["polygon"] = [[float(px), float(py)] for px, py in pts]
+                    seg_px = self._yolo_instance_seg_proxies(
+                        r, i, x1, y1, x2, y2, width, height
+                    )
+                    if seg_px is not None:
+                        out["seg_mask_proxies"] = seg_px
                     frame_face_dets.append(dict(out))
                     projected_out = self._scale_detection_geometry(
                         out,
