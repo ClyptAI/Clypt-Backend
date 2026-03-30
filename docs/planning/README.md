@@ -20,5 +20,5 @@ For **Phase 1**, the real source of truth is code, not planning prose:
 - `04-data-integrations-and-reference.md`: integrations, artifacts, and storage/runtime reference.
 
 ## Legacy Material
-- [Legacy Combined](./legacy-combined.md) is preserved as archive material only.
 - Older planning docs that described Google Video Intelligence, `phase_1a_reconcile`, TalkNet, or YOLO11 are no longer authoritative for Phase 1.
+- For current implementation decisions, use `docs/superpowers/specs/clypt_v3_refactor_spec.md`.

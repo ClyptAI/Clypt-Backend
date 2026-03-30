@@ -1160,12 +1160,12 @@ def test_audio_speaker_local_track_map_salvages_ambiguous_full_turn_from_clean_s
     ]
 
 
-def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
+def test_face_detector_input_size_defaults_to_1280_and_honors_env(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
 
     monkeypatch.delenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", raising=False)
     monkeypatch.delenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", raising=False)
-    assert worker_cls._face_detector_input_size() == (960, 960)
+    assert worker_cls._face_detector_input_size() == (1280, 1280)
 
     monkeypatch.setenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", "960")
     assert worker_cls._face_detector_input_size() == (960, 960)
@@ -1173,6 +1173,30 @@ def test_face_detector_input_size_defaults_to_960_and_honors_env(monkeypatch):
     monkeypatch.delenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", raising=False)
     monkeypatch.setenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", "768")
     assert worker_cls._face_detector_input_size() == (768, 768)
+
+
+def test_face_pipeline_start_frame_defaults_to_zero_and_honors_env(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+
+    monkeypatch.delenv("CLYPT_FACE_PIPELINE_START_FRAME", raising=False)
+    assert worker_cls._face_pipeline_start_frame() == 0
+
+    monkeypatch.setenv("CLYPT_FACE_PIPELINE_START_FRAME", "42")
+    assert worker_cls._face_pipeline_start_frame() == 42
+
+
+def test_face_pipeline_gpu_toggle_honors_env(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    worker.face_detector = object()
+    worker.face_recognizer = object()
+    worker._face_runtime_ctx_id = 0
+
+    monkeypatch.setenv("CLYPT_FACE_PIPELINE_GPU", "0")
+    assert worker._face_pipeline_uses_gpu() is False
+
+    monkeypatch.setenv("CLYPT_FACE_PIPELINE_GPU", "1")
+    assert worker._face_pipeline_uses_gpu() is True
 
 
 def test_extract_job_isolates_phase1_pipeline_workspace_per_job(tmp_path: Path, monkeypatch):

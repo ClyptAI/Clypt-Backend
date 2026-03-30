@@ -2106,17 +2106,23 @@ class ClyptWorker:
     def _face_pipeline_start_frame() -> int:
         raw = os.getenv("CLYPT_FACE_PIPELINE_START_FRAME", "").strip()
         try:
-            requested = int(raw) if raw else 600
+            requested = int(raw) if raw else 0
         except Exception:
-            requested = 600
+            requested = 0
         return max(0, requested)
 
     def _face_pipeline_uses_gpu(self) -> bool:
+        requested = os.getenv("CLYPT_FACE_PIPELINE_GPU", "").strip().lower()
+        if requested in {"0", "false", "no", "off"}:
+            return False
         if getattr(self, "face_detector", None) is None:
             return False
         if getattr(self, "face_recognizer", None) is None:
             return False
-        return bool(getattr(self, "_face_runtime_ctx_id", 0) >= 0)
+        gpu_available = bool(getattr(self, "_face_runtime_ctx_id", 0) >= 0)
+        if requested in {"1", "true", "yes", "on"}:
+            return gpu_available
+        return gpu_available
 
     def _face_pipeline_workers(self) -> int:
         requested = self._requested_face_pipeline_workers()
@@ -2480,11 +2486,11 @@ class ClyptWorker:
     def _face_detector_input_size() -> tuple[int, int]:
         raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_SIZE", "").strip()
         if not raw:
-            raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", "960").strip()
+            raw = os.getenv("CLYPT_FACE_DETECTOR_INPUT_LONG_EDGE", "1280").strip()
         try:
             requested = int(raw)
         except Exception:
-            requested = 960
+            requested = 1280
         requested = max(256, requested)
         return (requested, requested)
 
@@ -2683,7 +2689,7 @@ class ClyptWorker:
 
         fh, fw = frame_rgb.shape[:2]
         out: list[dict] = []
-        min_face_size = float(os.getenv("CLYPT_FULLFRAME_FACE_MIN_SIZE", "28"))
+        min_face_size = float(os.getenv("CLYPT_FULLFRAME_FACE_MIN_SIZE", "14"))
         for idx, row in enumerate(np.asarray(det)):
             if len(row) < 5:
                 continue
