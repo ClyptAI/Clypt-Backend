@@ -352,6 +352,139 @@ class ClyptWorker:
         union = max(1.0, (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter)
         return float(inter / union)
 
+    @staticmethod
+    def _compute_mask_stability_signals(
+        track_to_dets: dict[str, list[dict]],
+        face_detections: list[dict],
+        *,
+        video_fps: float,
+        duration_ms: int,
+    ) -> dict[str, object]:
+        """Deterministic bbox/track proxies for mask stability (Wave 4); no persisted seg masks required."""
+        import math
+        from statistics import fmean, median
+
+        fps = max(1e-6, float(video_fps or 25.0))
+        duration_ms = max(0, int(duration_ms))
+        max_frame_gap = 5
+
+        max_det_frame = max(
+            (int(d.get("frame_idx", -1)) for dets in track_to_dets.values() for d in dets),
+            default=-1,
+        )
+        if max_det_frame < 0:
+            max_det_frame = int(min(1_000_000, round((duration_ms / 1000.0) * fps)))
+
+        window_span = max(30, min(300, int(round(fps * 3.0))))
+        win_end = max_det_frame
+        win_start = max(0, win_end - window_span + 1)
+
+        person_keys: set[tuple[str, int]] = set()
+        for tid in sorted(track_to_dets.keys()):
+            for d in track_to_dets[tid]:
+                fi = int(d.get("frame_idx", -1))
+                if fi < 0:
+                    continue
+                if win_start <= fi <= win_end:
+                    person_keys.add((tid, fi))
+
+        face_keys: set[tuple[str, int]] = set()
+        for seg in face_detections:
+            tid_seg = str(seg.get("track_id", "") or "")
+            for obj in seg.get("timestamped_objects") or []:
+                tid = str(obj.get("track_id", "") or tid_seg)
+                if not tid:
+                    continue
+                tm = obj.get("time_ms")
+                if tm is None:
+                    continue
+                fi = int(round((float(tm) / 1000.0) * fps))
+                if fi < 0:
+                    continue
+                if win_start <= fi <= win_end:
+                    face_keys.add((tid, fi))
+
+        overlap_pf = person_keys & face_keys
+        face_presence_ratio = (
+            round(len(overlap_pf) / max(1, len(person_keys)), 6) if person_keys else 0.0
+        )
+
+        iou_values: list[float] = []
+        tracks_with_iou_pairs = 0
+        for tid in sorted(track_to_dets.keys()):
+            window_dets = [
+                d
+                for d in track_to_dets[tid]
+                if win_start <= int(d.get("frame_idx", -1)) <= win_end
+            ]
+            window_dets.sort(key=lambda x: int(x["frame_idx"]))
+            local_pairs = 0
+            for i in range(len(window_dets) - 1):
+                a, b = window_dets[i], window_dets[i + 1]
+                fa, fb = int(a.get("frame_idx", -1)), int(b.get("frame_idx", -1))
+                gap = fb - fa
+                if gap <= 0 or gap > max_frame_gap:
+                    continue
+                iou_values.append(float(ClyptWorker._detection_iou(a, b)))
+                local_pairs += 1
+            if local_pairs > 0:
+                tracks_with_iou_pairs += 1
+
+        mean_iou = round(float(fmean(iou_values)), 6) if iou_values else 0.0
+
+        smooth_scores: list[float] = []
+        for tid in sorted(track_to_dets.keys()):
+            window_dets = [
+                d
+                for d in track_to_dets[tid]
+                if win_start <= int(d.get("frame_idx", -1)) <= win_end
+            ]
+            window_dets.sort(key=lambda x: int(x["frame_idx"]))
+            if len(window_dets) < 3:
+                continue
+            xs = [float(d.get("x_center", 0.0)) for d in window_dets]
+            ys = [float(d.get("y_center", 0.0)) for d in window_dets]
+            frs = [int(d.get("frame_idx", 0)) for d in window_dets]
+            steps: list[float] = []
+            for i in range(len(window_dets) - 1):
+                df = max(1, frs[i + 1] - frs[i])
+                dist = math.hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i]) / float(df)
+                steps.append(dist)
+            wids = [max(1.0, float(d.get("width", 1.0))) for d in window_dets]
+            scale = max(1.0, float(median(wids)))
+            nj = float(fmean(steps)) / scale
+            smooth_scores.append(round(1.0 / (1.0 + nj), 6))
+
+        mean_smooth = round(float(fmean(smooth_scores)), 6) if smooth_scores else 1.0
+
+        short_term_stability_memory = {
+            "window_start_frame": win_start,
+            "window_end_frame": win_end,
+            "window_span_frames": win_end - win_start + 1,
+            "person_track_frames_in_window": len(person_keys),
+            "face_track_frames_in_window": len(face_keys),
+            "face_person_frame_overlap": len(overlap_pf),
+            "tracks_with_observations_in_window": len({t for t, _ in person_keys}),
+            "iou_consecutive_pair_count": len(iou_values),
+            "tracks_with_motion_score": len(smooth_scores),
+        }
+
+        return {
+            "signal_version": "worker_bbox_v1",
+            "iou_continuity_proxy": {
+                "mean_iou_consecutive": mean_iou,
+                "pair_count": len(iou_values),
+                "tracks_with_consecutive_pairs": tracks_with_iou_pairs,
+                "max_frame_gap": max_frame_gap,
+            },
+            "face_presence_ratio": face_presence_ratio,
+            "motion_smoothness_proxy": {
+                "mean_track_smoothness": mean_smooth,
+                "tracks_evaluated": len(smooth_scores),
+            },
+            "short_term_stability_memory": short_term_stability_memory,
+        }
+
     @classmethod
     def _visibility_conflict_stats(
         cls,
@@ -1322,223 +1455,14 @@ class ClyptWorker:
         support_tiebreak_margin: float = 0.1,
     ) -> list[dict]:
         """Aggregate local-track candidate evidence across each diarized turn."""
-        from collections import defaultdict
+        from backend.pipeline.phase1.lrasd_binding_stages import bind_audio_turns_to_local_tracks
 
-        def _as_int_ms(value, default: int = 0) -> int:
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return int(default)
-
-        def _as_score(candidate: dict) -> float | None:
-            for field_name in ("score", "total", "prob", "body_prior", "confidence"):
-                value = candidate.get(field_name)
-                if value is None:
-                    continue
-                try:
-                    return float(value)
-                except (TypeError, ValueError):
-                    continue
-            return None
-
-        normalized_evidence: list[dict] = []
-        for evidence in local_candidate_evidence or []:
-            start_time_ms = _as_int_ms(evidence.get("start_time_ms"), default=0)
-            end_time_ms = _as_int_ms(evidence.get("end_time_ms"), default=start_time_ms)
-            if end_time_ms < start_time_ms:
-                start_time_ms, end_time_ms = end_time_ms, start_time_ms
-            if end_time_ms <= start_time_ms:
-                continue
-
-            candidates = evidence.get("candidates")
-            if not isinstance(candidates, list):
-                candidates = [evidence]
-
-            normalized_candidates: list[dict] = []
-            for candidate in candidates:
-                if not isinstance(candidate, dict) or bool(candidate.get("hard_reject", False)):
-                    continue
-                local_track_id = (
-                    candidate.get("local_track_id")
-                    or candidate.get("local_tid")
-                    or candidate.get("track_id")
-                )
-                if local_track_id in (None, ""):
-                    continue
-                score = _as_score(candidate)
-                if score is None:
-                    continue
-                normalized_candidates.append(
-                    {
-                        "local_track_id": str(local_track_id),
-                        "score": float(score),
-                    }
-                )
-
-            if normalized_candidates:
-                normalized_evidence.append(
-                    {
-                        "start_time_ms": start_time_ms,
-                        "end_time_ms": end_time_ms,
-                        "candidates": normalized_candidates,
-                    }
-                )
-
-        bindings: list[dict] = []
-        for turn in turns or []:
-            start_time_ms = _as_int_ms(turn.get("start_time_ms"), default=0)
-            end_time_ms = _as_int_ms(turn.get("end_time_ms"), default=start_time_ms)
-            if end_time_ms < start_time_ms:
-                start_time_ms, end_time_ms = end_time_ms, start_time_ms
-            turn_duration_ms = max(1, end_time_ms - start_time_ms)
-            overlap_present = bool(turn.get("overlap", False))
-            explicit_exclusive = turn.get("exclusive")
-            high_ambiguity_turn = bool(
-                overlap_present
-                or explicit_exclusive is False
-            )
-
-            weighted_score_ms_by_track: dict[str, float] = defaultdict(float)
-            support_ms_by_track: dict[str, int] = defaultdict(int)
-            clean_weighted_score_ms_by_track: dict[str, float] = defaultdict(float)
-            clean_support_ms_by_track: dict[str, int] = defaultdict(int)
-            overlapping_evidence: list[dict] = []
-            slice_boundaries_ms = {start_time_ms, end_time_ms}
-            max_visible_candidates = 0
-
-            for evidence in normalized_evidence:
-                overlap_start_ms = max(start_time_ms, int(evidence["start_time_ms"]))
-                overlap_end_ms = min(end_time_ms, int(evidence["end_time_ms"]))
-                if overlap_end_ms <= overlap_start_ms:
-                    continue
-                overlapping_evidence.append(
-                    {
-                        "start_time_ms": overlap_start_ms,
-                        "end_time_ms": overlap_end_ms,
-                        "candidates": evidence["candidates"],
-                    }
-                )
-                slice_boundaries_ms.add(overlap_start_ms)
-                slice_boundaries_ms.add(overlap_end_ms)
-
-            ordered_boundaries_ms = sorted(slice_boundaries_ms)
-            for slice_start_ms, slice_end_ms in zip(ordered_boundaries_ms, ordered_boundaries_ms[1:]):
-                slice_duration_ms = slice_end_ms - slice_start_ms
-                if slice_duration_ms <= 0:
-                    continue
-                active_by_track: dict[str, list[float]] = defaultdict(list)
-                for evidence in overlapping_evidence:
-                    if int(evidence["end_time_ms"]) <= slice_start_ms or int(evidence["start_time_ms"]) >= slice_end_ms:
-                        continue
-                    for candidate in evidence["candidates"]:
-                        active_by_track[str(candidate["local_track_id"])].append(float(candidate["score"]))
-                visible_candidate_count = len(active_by_track)
-                max_visible_candidates = max(max_visible_candidates, visible_candidate_count)
-
-                for local_track_id, active_scores in active_by_track.items():
-                    if not active_scores:
-                        continue
-                    avg_score = (sum(active_scores) / len(active_scores))
-                    weighted_score_ms_by_track[local_track_id] += (avg_score * slice_duration_ms)
-                    support_ms_by_track[local_track_id] += slice_duration_ms
-                    if visible_candidate_count <= 2:
-                        clean_weighted_score_ms_by_track[local_track_id] += (avg_score * slice_duration_ms)
-                        clean_support_ms_by_track[local_track_id] += slice_duration_ms
-
-            binding = {
-                "speaker_id": str(turn.get("speaker_id", "") or ""),
-                "start_time_ms": start_time_ms,
-                "end_time_ms": end_time_ms,
-                "local_track_id": None,
-                "ambiguous": False,
-                "winning_score": None,
-                "winning_margin": None,
-                "support_ratio": 0.0,
-            }
-            if max_visible_candidates > 2:
-                binding["max_visible_candidates"] = int(max_visible_candidates)
-            if not weighted_score_ms_by_track:
-                if high_ambiguity_turn:
-                    binding["ambiguous"] = True
-                bindings.append(binding)
-                continue
-
-            ranked = sorted(
-                (
-                    (
-                        float(weighted_score_ms / turn_duration_ms),
-                        float(support_ms_by_track[local_track_id] / turn_duration_ms),
-                        str(local_track_id),
-                    )
-                    for local_track_id, weighted_score_ms in weighted_score_ms_by_track.items()
-                ),
-                key=lambda item: (item[0], item[1], item[2]),
-                reverse=True,
-            )
-            best_score, best_support_ratio, best_local_track_id = ranked[0]
-            second_score = ranked[1][0] if len(ranked) > 1 else None
-            second_support_ratio = ranked[1][1] if len(ranked) > 1 else None
-            winning_margin = (
-                float(best_score)
-                if second_score is None
-                else float(best_score - second_score)
-            )
-            support_margin = (
-                float(best_support_ratio)
-                if second_support_ratio is None
-                else float(best_support_ratio - second_support_ratio)
-            )
-
-            if high_ambiguity_turn:
-                best_score *= 0.5
-                winning_margin *= 0.5
-
-            binding["winning_score"] = float(best_score)
-            binding["winning_margin"] = float(winning_margin)
-            binding["support_ratio"] = float(best_support_ratio)
-            crowded_turn = max_visible_candidates > 2
-            if crowded_turn:
-                clean_ranked = sorted(
-                    (
-                        (
-                            float(clean_weighted_score_ms_by_track[local_track_id] / clean_support_ms_by_track[local_track_id]),
-                            float(clean_support_ms_by_track[local_track_id] / turn_duration_ms),
-                            str(local_track_id),
-                        )
-                        for local_track_id in clean_support_ms_by_track.keys()
-                        if int(clean_support_ms_by_track[local_track_id]) > 0
-                    ),
-                    key=lambda item: (item[0], item[1], item[2]),
-                    reverse=True,
-                )
-                if clean_ranked:
-                    clean_best_score, clean_best_support_ratio, clean_best_local_track_id = clean_ranked[0]
-                    clean_best_support_ms = int(clean_support_ms_by_track.get(clean_best_local_track_id, 0))
-                    clean_second_score = clean_ranked[1][0] if len(clean_ranked) > 1 else None
-                    binding["clean_local_track_id"] = str(clean_best_local_track_id)
-                    binding["clean_support_ms"] = clean_best_support_ms
-                    binding["clean_support_ratio"] = float(clean_best_support_ratio)
-                    binding["clean_winning_score"] = float(clean_best_score)
-                    binding["clean_winning_margin"] = (
-                        float(clean_best_score)
-                        if clean_second_score is None
-                        else float(clean_best_score - clean_second_score)
-                    )
-
-            if high_ambiguity_turn:
-                binding["ambiguous"] = True
-            elif (
-                second_score is not None
-                and winning_margin < float(ambiguity_margin)
-                and support_margin < float(support_tiebreak_margin)
-            ):
-                binding["ambiguous"] = True
-            elif best_score > 0.0 and best_support_ratio > 0.0:
-                binding["local_track_id"] = str(best_local_track_id)
-
-            bindings.append(binding)
-
-        return bindings
+        return bind_audio_turns_to_local_tracks(
+            turns,
+            local_candidate_evidence,
+            ambiguity_margin=ambiguity_margin,
+            support_tiebreak_margin=support_tiebreak_margin,
+        )
 
     @staticmethod
     def _build_audio_speaker_local_track_map(
@@ -1995,9 +1919,10 @@ class ClyptWorker:
         speaker_candidate_debug: list[dict],
         log_context: dict | None = None,
     ) -> list[dict]:
-        import json
-
         from backend.overlap_follow import maybe_adjudicate_overlap_follow_decisions
+        from backend.pipeline.phase1.stage_log import emit_overlap_follow_postpass_summary, resolve_job_and_worker_ids
+
+        jid, wid = resolve_job_and_worker_ids(log_context if isinstance(log_context, dict) else None)
 
         run_metadata: dict = {}
         decisions = maybe_adjudicate_overlap_follow_decisions(
@@ -2007,8 +1932,7 @@ class ClyptWorker:
             log_context=log_context,
             run_metadata_out=run_metadata,
         )
-        if run_metadata:
-            print(f"[overlap_follow] {json.dumps(run_metadata, default=str)}")
+        emit_overlap_follow_postpass_summary(job_id=jid, worker_id=wid, run_metadata=run_metadata)
         self._last_overlap_follow_run_metadata = run_metadata
         return decisions
 
@@ -7502,7 +7426,13 @@ class ClyptWorker:
         import numpy as np
         import torch
         from bisect import bisect_left
-        from collections import Counter
+
+        from backend.pipeline.phase1.lrasd_binding_stages import (
+            apply_turn_consistency_smoothing,
+            calibrate_lrasd_word_confidence,
+            evaluate_lrasd_assignment_policy,
+            lrasd_abstention_reason,
+        )
 
         protected_unknown_key = "_speaker_binding_protected_unknown"
 
@@ -8382,6 +8312,8 @@ class ClyptWorker:
             decision_source: str,
             ambiguous: bool,
             top_margin: float | None,
+            calibrated_confidence: float | None = None,
+            abstention_reason: str | None = None,
         ) -> None:
             active_turns = _active_audio_turns(word)
             active_audio_local_track_id = None
@@ -8414,6 +8346,8 @@ class ClyptWorker:
                         )
                     ),
                     "top_1_top_2_margin": top_margin,
+                    "calibrated_confidence": calibrated_confidence,
+                    "abstention_reason": abstention_reason,
                     "candidates": [
                         {
                             "local_track_id": str(candidate.get("local_tid", "")),
@@ -8493,8 +8427,12 @@ class ClyptWorker:
                     decision_source="unknown",
                     ambiguous=False,
                     top_margin=None,
+                    calibrated_confidence=None,
+                    abstention_reason="no_candidates",
                 )
                 _clear_word_assignment(w)
+                w["calibrated_confidence"] = None
+                w["abstention_reason"] = "no_candidates"
                 continue
             if (
                 active_turn is not None
@@ -8505,6 +8443,13 @@ class ClyptWorker:
                 )
             ):
                 audio_prior_abstentions += 1
+                _bc = scored_candidates[0]
+                _cal_a = calibrate_lrasd_word_confidence(
+                    best_prob=_bc.get("prob"),
+                    best_body=float(_bc["body_prior"]),
+                    top_margin=None,
+                    min_assignment_margin=min_assignment_margin,
+                )
                 _append_speaker_candidate_debug(
                     word=w,
                     scored_candidates=scored_candidates,
@@ -8515,8 +8460,12 @@ class ClyptWorker:
                     decision_source="unknown",
                     ambiguous=bool(debug_turn_binding.get("ambiguous", False)),
                     top_margin=None,
+                    calibrated_confidence=_cal_a,
+                    abstention_reason="audio_turn_abstain",
                 )
                 _mark_protected_unknown(w)
+                w["calibrated_confidence"] = _cal_a
+                w["abstention_reason"] = "audio_turn_abstain"
                 continue
 
             best_candidate = scored_candidates[0]
@@ -8555,6 +8504,13 @@ class ClyptWorker:
                 )
                 if prior_candidate is None:
                     audio_prior_abstentions += 1
+                    _bc2 = scored_candidates[0]
+                    _cal_b = calibrate_lrasd_word_confidence(
+                        best_prob=_bc2.get("prob"),
+                        best_body=float(_bc2["body_prior"]),
+                        top_margin=visual_margin,
+                        min_assignment_margin=min_assignment_margin,
+                    )
                     _append_speaker_candidate_debug(
                         word=w,
                         scored_candidates=scored_candidates,
@@ -8565,8 +8521,12 @@ class ClyptWorker:
                         decision_source="unknown",
                         ambiguous=False,
                         top_margin=visual_margin,
+                        calibrated_confidence=_cal_b,
+                        abstention_reason="audio_prior_mismatch",
                     )
                     _mark_protected_unknown(w)
+                    w["calibrated_confidence"] = _cal_b
+                    w["abstention_reason"] = "audio_prior_mismatch"
                     continue
                 strong_turn_owner = bool(
                     not bool(active_turn_binding.get("ambiguous", False))
@@ -8624,29 +8584,15 @@ class ClyptWorker:
                 scored_candidates,
                 str(best_candidate.get("local_tid", "")),
             )
-            if best_prob is not None:
-                confident_pick = bool(
-                    float(best_prob) >= min_lrasd_prob
-                    and (
-                        second_total is None
-                        or (best_total - second_total) >= min_assignment_margin
-                        or best_body >= 0.80
-                        or audio_prior_applied
-                    )
-                )
-            else:
-                confident_pick = bool(
-                    best_body >= min_body_fallback_score
-                    and (
-                        second_total is None
-                        or (best_total - second_total) >= (0.5 * min_assignment_margin)
-                    )
-                )
-
-            top_margin = (
-                None
-                if second_total is None
-                else float(best_total - second_total)
+            confident_pick, top_margin = evaluate_lrasd_assignment_policy(
+                best_prob=best_prob,
+                best_total=best_total,
+                best_body=best_body,
+                second_total=second_total,
+                min_lrasd_prob=min_lrasd_prob,
+                min_assignment_margin=min_assignment_margin,
+                min_body_fallback_score=min_body_fallback_score,
+                audio_prior_applied=audio_prior_applied,
             )
             decision_source = (
                 "audio_boosted_visual"
@@ -8662,14 +8608,39 @@ class ClyptWorker:
             if not decision_ambiguous and not confident_pick and top_margin is not None:
                 decision_ambiguous = bool(top_margin < min_assignment_margin)
 
+            _cal_word = calibrate_lrasd_word_confidence(
+                best_prob=best_prob,
+                best_body=best_body,
+                top_margin=top_margin,
+                min_assignment_margin=min_assignment_margin,
+            )
+            _abstention = lrasd_abstention_reason(
+                confident_pick=confident_pick,
+                no_candidates=False,
+                audio_prior_abstain=False,
+                audio_prior_mismatch=False,
+                best_prob=best_prob,
+                best_body=best_body,
+                second_total=second_total,
+                best_total=best_total,
+                min_lrasd_prob=min_lrasd_prob,
+                min_assignment_margin=min_assignment_margin,
+                min_body_fallback_score=min_body_fallback_score,
+                audio_prior_applied=audio_prior_applied,
+            )
+
             if best_tid is not None and confident_pick:
                 w["speaker_track_id"] = best_tid
                 w["speaker_tag"] = best_tid
                 w["speaker_local_track_id"] = str(best_candidate["local_tid"])
                 w["speaker_local_tag"] = str(best_candidate["local_tid"])
+                w["calibrated_confidence"] = _cal_word
+                w["abstention_reason"] = None
                 assigned += 1
             else:
                 _clear_word_assignment(w)
+                w["calibrated_confidence"] = _cal_word
+                w["abstention_reason"] = _abstention
 
             _append_speaker_candidate_debug(
                 word=w,
@@ -8685,6 +8656,8 @@ class ClyptWorker:
                 decision_source=decision_source,
                 ambiguous=decision_ambiguous,
                 top_margin=top_margin,
+                calibrated_confidence=_cal_word,
+                abstention_reason=_abstention,
             )
 
         self._last_speaker_candidate_debug = [
@@ -8699,46 +8672,13 @@ class ClyptWorker:
             for entry in speaker_candidate_debug
         ]
 
-        # Smooth local flicker.
-        seq = [w.get("speaker_track_id") for w in words]
-        smoothed = seq[:]
-        local_seq = [w.get("speaker_local_track_id") for w in words]
-        local_smoothed = local_seq[:]
-        win = 2
-        for i in range(len(seq)):
-            if bool(words[i].get(protected_unknown_key, False)):
-                smoothed[i] = None
-                local_smoothed[i] = None
-                continue
-            lo = max(0, i - win)
-            hi = min(len(seq), i + win + 1)
-            neigh = [t for t in seq[lo:hi] if t]
-            if not neigh:
-                local_neigh = [t for t in local_seq[lo:hi] if t]
-                if local_neigh:
-                    local_major, local_cnt = Counter(local_neigh).most_common(1)[0]
-                    if local_cnt >= 2:
-                        local_smoothed[i] = local_major
-                continue
-            major, cnt = Counter(neigh).most_common(1)[0]
-            if cnt >= 2:
-                smoothed[i] = major
-            local_neigh = [t for t in local_seq[lo:hi] if t]
-            if local_neigh:
-                local_major, local_cnt = Counter(local_neigh).most_common(1)[0]
-                if local_cnt >= 2:
-                    local_smoothed[i] = local_major
-        for w, tid, local_tid in zip(words, smoothed, local_smoothed):
-            if bool(w.get(protected_unknown_key, False)):
-                w["speaker_track_id"] = None
-                w["speaker_tag"] = "unknown"
-                w["speaker_local_track_id"] = None
-                w["speaker_local_tag"] = "unknown"
-                continue
-            w["speaker_track_id"] = tid
-            w["speaker_tag"] = tid or "unknown"
-            w["speaker_local_track_id"] = local_tid
-            w["speaker_local_tag"] = local_tid or "unknown"
+        apply_turn_consistency_smoothing(
+            words,
+            protected_unknown_key=protected_unknown_key,
+            window=2,
+            min_neighbor_votes=2,
+            suppress_singleton_switches=True,
+        )
 
         bindings: list[dict] = []
         cur = None
@@ -9240,17 +9180,18 @@ class ClyptWorker:
         overlap_follow_log_context: dict | None = None,
     ) -> dict:
         """Finalize extraction from precomputed ASR words + tracking tracks."""
+        from backend.pipeline.phase1.stage_log import emit_stage_log, resolve_job_and_worker_ids
+
         metrics = dict(tracking_metrics) if isinstance(tracking_metrics, dict) else {}
+        job_id, worker_id = resolve_job_and_worker_ids(
+            overlap_follow_log_context if isinstance(overlap_follow_log_context, dict) else None
+        )
         track_identity_features = metrics.pop("track_identity_features", None)
         face_track_features = metrics.pop("face_track_features", None)
         analysis_context = metrics.get("analysis_context") if isinstance(metrics.get("analysis_context"), dict) else None
         metrics["schema_pass_rate"] = self._tracking_contract_pass_rate(tracks)
         self._validate_tracking_contract(tracks)
         self._enforce_rollout_gates(metrics)
-        metrics["track_identity_feature_track_count"] = len(track_identity_features or {})
-        metrics["identity_track_count_before_clustering"] = len(
-            {str(track.get("track_id", "")) for track in tracks if str(track.get("track_id", ""))}
-        )
 
         vmeta = self._probe_video_meta(video_path)
         cluster_duration_ms = max(1, int(round(float(vmeta.get("duration_s", 0.0)) * 1000.0)))
@@ -9262,6 +9203,22 @@ class ClyptWorker:
 
         from backend.pipeline.phase1.clustering import post_track_reid_merge, run_cluster_tracklets_stage
         from backend.pipeline.phase1.postprocess import merge_stage_metrics
+        from backend.pipeline.phase1.tracking_post import split_tracks_at_shot_boundaries
+
+        tracks, track_identity_features, camera_cut_metrics = split_tracks_at_shot_boundaries(
+            tracks,
+            shot_timeline_ms=shot_changes,
+            video_fps=cluster_video_fps,
+            track_identity_features=track_identity_features,
+        )
+        merge_stage_metrics(metrics, camera_cut_metrics)
+
+        metrics["schema_pass_rate"] = self._tracking_contract_pass_rate(tracks)
+        self._validate_tracking_contract(tracks)
+        metrics["track_identity_feature_track_count"] = len(track_identity_features or {})
+        metrics["identity_track_count_before_clustering"] = len(
+            {str(track.get("track_id", "")) for track in tracks if str(track.get("track_id", ""))}
+        )
 
         tracks, track_identity_features, reid_metrics = post_track_reid_merge(
             tracks,
@@ -9277,6 +9234,15 @@ class ClyptWorker:
 
         # Step 3: Global tracklet clustering
         print("[Phase 1] Step 3/4: Clustering tracklets into global IDs...")
+        emit_stage_log(
+            job_id=job_id,
+            stage="clustering",
+            event="stage_start",
+            decision_source="pipeline",
+            reason_code="ok",
+            elapsed_ms=0,
+            worker_id=worker_id,
+        )
         cluster_started_at = time.perf_counter()
         tracks = run_cluster_tracklets_stage(
             self,
@@ -9291,6 +9257,15 @@ class ClyptWorker:
         )
         cluster_elapsed_s = time.perf_counter() - cluster_started_at
         metrics["cluster_tracklets_wallclock_s"] = round(cluster_elapsed_s, 3)
+        emit_stage_log(
+            job_id=job_id,
+            stage="clustering",
+            event="stage_end",
+            decision_source="pipeline",
+            reason_code="ok",
+            elapsed_ms=int(cluster_elapsed_s * 1000.0),
+            worker_id=worker_id,
+        )
         print(f"[Phase 1] Step 3/4 complete in {cluster_elapsed_s:.2f}s")
         last_clustering_metrics = getattr(self, "_last_clustering_metrics", None)
         if isinstance(last_clustering_metrics, dict):
@@ -9340,6 +9315,16 @@ class ClyptWorker:
             audio_speaker_turns=audio_speaker_turns,
         )
         self._last_speaker_candidate_debug = []
+        emit_stage_log(
+            job_id=job_id,
+            stage="binding",
+            event="stage_start",
+            decision_source="pipeline",
+            reason_code="ok",
+            elapsed_ms=0,
+            worker_id=worker_id,
+        )
+        binding_inner_started_at = time.perf_counter()
         speaker_bindings = self._run_speaker_binding(
             video_path,
             audio_path,
@@ -9350,6 +9335,29 @@ class ClyptWorker:
             track_identity_features=track_identity_features,
             analysis_context=binding_analysis_context,
             track_id_remap=cluster_id_remap,
+        )
+        binding_inner_elapsed_ms = int((time.perf_counter() - binding_inner_started_at) * 1000.0)
+        last_binding_mode = getattr(self, "_last_speaker_binding_metrics", None)
+        bind_src = "pipeline"
+        bind_reason = "ok"
+        if isinstance(last_binding_mode, dict):
+            mode = str(last_binding_mode.get("speaker_binding_resolved_mode") or "")
+            if mode == "lrasd":
+                bind_src = "lrasd"
+            elif mode == "heuristic":
+                bind_src = "heuristic_fallback"
+                bind_reason = "lrasd_unavailable_or_empty"
+            elif last_binding_mode.get("speaker_binding_fallback_used"):
+                bind_src = "heuristic_fallback"
+                bind_reason = "lrasd_fallback"
+        emit_stage_log(
+            job_id=job_id,
+            stage="binding",
+            event="stage_end",
+            decision_source=bind_src,
+            reason_code=bind_reason,
+            elapsed_ms=binding_inner_elapsed_ms,
+            worker_id=worker_id,
         )
         speaker_follow_bindings = self._build_speaker_follow_bindings(speaker_bindings)
         speaker_bindings_local: list[dict] = []
@@ -9405,6 +9413,12 @@ class ClyptWorker:
             if any(str(t.get("geometry_type", "")) == "obb" for t in tracks)
             else PHASE1_GEOMETRY_TYPE
         )
+        mask_stability_signals = self._compute_mask_stability_signals(
+            track_to_dets,
+            face_detections,
+            video_fps=float(cluster_video_fps or 25.0),
+            duration_ms=int(cluster_duration_ms),
+        )
         phase_1_visual = {
             "source_video": youtube_url,
             "schema_version": PHASE1_SCHEMA_VERSION,
@@ -9417,6 +9431,7 @@ class ClyptWorker:
             "face_detections": face_detections,
             "person_detections": person_detections,
             "shot_changes": shot_changes,
+            "mask_stability_signals": mask_stability_signals,
         }
         if self._local_clip_bindings_enabled():
             phase_1_visual["tracks_local"] = [dict(track) for track in precluster_tracks]
@@ -9665,15 +9680,40 @@ class ClyptWorker:
         print(f"[Phase 1] Received video ({video_mb:.1f} MB) + audio ({audio_mb:.1f} MB)")
 
         try:
+            import uuid
+
+            from backend.pipeline.phase1.stage_log import emit_stage_log, resolve_phase1_worker_id
+
             # Keep NeMo CUDA-graph decoding enabled by ensuring tracking does not
             # launch GPU work until ASR has fully completed.
             print("[Phase 1] Step 1+2/4: Running Parakeet ASR, then YOLO26 tracking, on the same GPU...")
             words = self._run_asr(audio_path)
-            tracks, tracking_metrics = self._run_tracking(video_path)
-            overlap_ctx: dict[str, str] = {}
+            phase1_job_id = uuid.uuid4().hex
+            overlap_ctx: dict[str, str] = {"job_id": phase1_job_id}
             worker_hint = str(os.getenv("CLYPT_WORKER_ID", "") or os.getenv("MODAL_TASK_ID", "")).strip()
             if worker_hint:
                 overlap_ctx["worker_id"] = worker_hint
+            track_wid = overlap_ctx.get("worker_id") or resolve_phase1_worker_id()
+            emit_stage_log(
+                job_id=phase1_job_id,
+                stage="tracking",
+                event="stage_start",
+                decision_source="pipeline",
+                reason_code="ok",
+                elapsed_ms=0,
+                worker_id=track_wid,
+            )
+            track_started_at = time.perf_counter()
+            tracks, tracking_metrics = self._run_tracking(video_path)
+            emit_stage_log(
+                job_id=phase1_job_id,
+                stage="tracking",
+                event="stage_end",
+                decision_source="pipeline",
+                reason_code="ok",
+                elapsed_ms=int((time.perf_counter() - track_started_at) * 1000.0),
+                worker_id=track_wid,
+            )
             result = self._finalize_from_words_tracks(
                 video_path=video_path,
                 audio_path=audio_path,

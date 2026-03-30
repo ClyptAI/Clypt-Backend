@@ -108,6 +108,7 @@ def run_ffmpeg_render():
     from render_speaker_follow_clips import (
         load_json,
         build_track_index,
+        build_mask_stability_index_from_visual,
         build_frame_detection_index,
         build_face_index,
         select_binding_sets,
@@ -163,7 +164,13 @@ def run_ffmpeg_render():
     video_duration_s = float(meta.get("duration_ms", 0)) / 1000.0
 
     frame_detection_index = build_frame_detection_index(tracks)
-    person_track_index = build_track_index(tracks)
+    mask_stability_index = build_mask_stability_index_from_visual(visual)
+    person_track_index = build_track_index(
+        tracks,
+        mask_stability_index=mask_stability_index,
+        src_w=src_w,
+        src_h=src_h,
+    )
     available_track_ids = {str(tid) for tid in person_track_index.keys() if str(tid)}
     prefer_local_track_ids = binding_source.endswith("_local")
     face_track_index = build_face_index(
@@ -319,6 +326,7 @@ def run_ffmpeg_render():
                                 motion_profile=seg_profile,
                                 overlap_follow_decisions=seg_overlap_decisions,
                                 prefer_local_track_ids=prefer_local_track_ids,
+                                mask_stability_index=mask_stability_index,
                             )
                         else:
                             x_kf, y_kf = build_single_track_path(
@@ -366,6 +374,7 @@ def run_ffmpeg_render():
                             motion_profile=profile,
                             overlap_follow_decisions=seg_overlap_decisions,
                             prefer_local_track_ids=prefer_local_track_ids,
+                            mask_stability_index=mask_stability_index,
                         )
                     else:
                         x_kf, y_kf = build_single_track_path(

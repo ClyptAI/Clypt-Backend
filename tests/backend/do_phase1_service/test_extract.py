@@ -82,6 +82,125 @@ def test_extract_job_produces_manifest_and_artifacts(tmp_path: Path, monkeypatch
     assert result.metadata.retry is None
 
 
+def test_extract_job_manifest_carries_mask_stability_signals_structure(tmp_path: Path, monkeypatch):
+    """Worker-emitted mask_stability_signals must survive persist and match Phase1VisualArtifact shape."""
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"video")
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"audio")
+
+    worker_like_mss = {
+        "signal_version": "worker_bbox_v1",
+        "iou_continuity_proxy": {
+            "mean_iou_consecutive": 0.85,
+            "pair_count": 4,
+            "tracks_with_consecutive_pairs": 1,
+            "max_frame_gap": 5,
+        },
+        "face_presence_ratio": 0.75,
+        "motion_smoothness_proxy": {
+            "mean_track_smoothness": 0.92,
+            "tracks_evaluated": 1,
+        },
+        "short_term_stability_memory": {
+            "window_start_frame": 0,
+            "window_end_frame": 74,
+            "window_span_frames": 75,
+            "person_track_frames_in_window": 3,
+            "face_track_frames_in_window": 3,
+            "face_person_frame_overlap": 2,
+            "tracks_with_observations_in_window": 1,
+            "iou_consecutive_pair_count": 2,
+            "tracks_with_motion_score": 1,
+        },
+    }
+
+    monkeypatch.setattr(
+        "backend.do_phase1_service.extract.download_media",
+        lambda url: (str(video_path), str(audio_path)),
+    )
+    monkeypatch.setattr(
+        "backend.do_phase1_service.extract.execute_local_extraction",
+        lambda video_path, audio_path, youtube_url: {
+            "status": "success",
+            "phase_1_visual": {
+                "source_video": youtube_url,
+                "schema_version": "2.0.0",
+                "task_type": "person_tracking",
+                "coordinate_space": "absolute_original_frame_xyxy",
+                "geometry_type": "aabb",
+                "class_taxonomy": {"0": "person"},
+                "tracking_metrics": {"schema_pass_rate": 1.0},
+                "tracks": [],
+                "face_detections": [],
+                "person_detections": [],
+                "label_detections": [],
+                "object_tracking": [],
+                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+                "video_metadata": {"width": 1920, "height": 1080, "fps": 30.0, "duration_ms": 1000},
+                "mask_stability_signals": worker_like_mss,
+            },
+            "phase_1_audio": {
+                "source_audio": youtube_url,
+                "words": [],
+                "speaker_bindings": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "backend.do_phase1_service.extract.enrich_visual_ledger_for_downstream",
+        lambda phase_1_visual, phase_1_audio, video_path: phase_1_visual,
+    )
+    monkeypatch.setattr("backend.do_phase1_service.extract.validate_phase_handoff", lambda visual_ledger, audio_ledger: None)
+
+    result = run_extraction_job(
+        source_url="https://youtube.com/watch?v=mask_stab",
+        job_id="job_mss",
+        output_dir=tmp_path,
+        storage=FakeStorage(),
+        host_lock_path=tmp_path / "extract.lock",
+    )
+
+    vt = result.artifacts.visual_tracking
+    mss = vt.mask_stability_signals
+    assert isinstance(mss, dict)
+    assert mss.get("signal_version") == "worker_bbox_v1"
+    assert set(mss.keys()) >= {
+        "signal_version",
+        "iou_continuity_proxy",
+        "face_presence_ratio",
+        "motion_smoothness_proxy",
+        "short_term_stability_memory",
+    }
+    iou_p = mss["iou_continuity_proxy"]
+    assert isinstance(iou_p, dict)
+    assert {"mean_iou_consecutive", "pair_count", "tracks_with_consecutive_pairs", "max_frame_gap"} <= set(iou_p.keys())
+    mot = mss["motion_smoothness_proxy"]
+    assert {"mean_track_smoothness", "tracks_evaluated"} <= set(mot.keys())
+    mem = mss["short_term_stability_memory"]
+    assert {"window_start_frame", "window_end_frame", "window_span_frames"} <= set(mem.keys())
+
+
+def test_compute_mask_stability_signals_empty_tracks_deterministic():
+    """No tracks/faces still yields a stable, schema-shaped dict (duration-derived window)."""
+    worker_cls = ClyptWorker._get_user_cls()
+    out = worker_cls._compute_mask_stability_signals(
+        {},
+        [],
+        video_fps=25.0,
+        duration_ms=4000,
+    )
+    assert out["signal_version"] == "worker_bbox_v1"
+    assert isinstance(out["face_presence_ratio"], float)
+    assert out["iou_continuity_proxy"]["pair_count"] == 0
+    assert out["iou_continuity_proxy"]["mean_iou_consecutive"] == 0.0
+    assert out["motion_smoothness_proxy"]["tracks_evaluated"] == 0
+    assert out["motion_smoothness_proxy"]["mean_track_smoothness"] == 1.0
+    mem = out["short_term_stability_memory"]
+    assert mem["person_track_frames_in_window"] == 0
+    assert mem["iou_consecutive_pair_count"] == 0
+
+
 def test_extract_job_records_stage_timings(tmp_path: Path, monkeypatch):
     video_path = tmp_path / "video.mp4"
     video_path.write_bytes(b"video")
@@ -3630,6 +3749,8 @@ def test_run_lrasd_binding_persists_speaker_candidate_debug(monkeypatch, tmp_pat
             "decision_source": "audio_boosted_visual",
             "ambiguous": False,
             "top_1_top_2_margin": pytest.approx(0.0, abs=0.1),
+            "calibrated_confidence": pytest.approx(0.35, abs=0.35),
+            "abstention_reason": None,
             "candidates": [
                 {
                     "local_track_id": "listener_local",
@@ -3708,6 +3829,8 @@ def test_run_lrasd_binding_persists_candidate_debug_for_off_screen_audio_abstent
             "decision_source": "unknown",
             "ambiguous": False,
             "top_1_top_2_margin": pytest.approx(0.0, abs=1.0),
+            "calibrated_confidence": pytest.approx(0.1, abs=0.15),
+            "abstention_reason": "audio_turn_abstain",
             "candidates": [
                 {
                     "local_track_id": "listener_local",
@@ -3787,6 +3910,8 @@ def test_run_lrasd_binding_persists_ambiguous_audio_turn_context_in_debug(monkey
             "decision_source": "visual",
             "ambiguous": True,
             "top_1_top_2_margin": pytest.approx(0.0, abs=1.0),
+            "calibrated_confidence": pytest.approx(0.45, abs=0.45),
+            "abstention_reason": None,
             "candidates": [
                 {
                     "local_track_id": "speaker_local",
@@ -4310,7 +4435,14 @@ def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
         "_build_track_indexes",
         lambda tracks: ({0: tracks}, {"track-1": tracks}),
     )
-    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+    def fake_cluster_tracklets(
+        video_path,
+        tracks,
+        track_to_dets=None,
+        track_identity_features=None,
+        face_track_features=None,
+        **_kwargs,
+    ):
         worker._last_clustering_metrics = {
             "cluster_visible_people_estimate": 2,
             "overfragmentation_proxy": 0.5,
@@ -4367,6 +4499,132 @@ def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
     assert metrics["identity_track_count_after_clustering"] == 1
     assert metrics["cluster_visible_people_estimate"] == 2
     assert metrics["overfragmentation_proxy"] == 0.5
+
+    mss = visual["mask_stability_signals"]
+    assert mss["signal_version"] == "worker_bbox_v1"
+    assert "mean_iou_consecutive" in mss["iou_continuity_proxy"]
+    assert "pair_count" in mss["iou_continuity_proxy"]
+    assert isinstance(mss["face_presence_ratio"], float)
+    assert "mean_track_smoothness" in mss["motion_smoothness_proxy"]
+    assert "window_start_frame" in mss["short_term_stability_memory"]
+
+
+def test_finalize_mask_stability_signals_multi_frame_continuity_and_face_ratio(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    tracks = [
+        {
+            "frame_idx": 0,
+            "track_id": "track-1",
+            "x1": 10.0,
+            "y1": 20.0,
+            "x2": 110.0,
+            "y2": 220.0,
+            "x_center": 60.0,
+            "y_center": 120.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.9,
+        },
+        {
+            "frame_idx": 1,
+            "track_id": "track-1",
+            "x1": 11.0,
+            "y1": 21.0,
+            "x2": 111.0,
+            "y2": 221.0,
+            "x_center": 61.0,
+            "y_center": 121.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.89,
+        },
+        {
+            "frame_idx": 2,
+            "track_id": "track-1",
+            "x1": 12.0,
+            "y1": 22.0,
+            "x2": 112.0,
+            "y2": 222.0,
+            "x_center": 62.0,
+            "y_center": 122.0,
+            "width": 100.0,
+            "height": 200.0,
+            "confidence": 0.88,
+        },
+    ]
+    words = [{"text": "hello", "start_time_ms": 0, "end_time_ms": 100, "speaker_track_id": "track-1"}]
+
+    monkeypatch.setattr(
+        worker,
+        "_probe_video_meta",
+        lambda path: {
+            "width": 1920,
+            "height": 1080,
+            "fps": 25.0,
+            "duration_s": 10.0,
+            "total_frames": 300,
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "_editorial_shot_segments_ms",
+        lambda video_path, duration_ms=None: [{"start_time_ms": 0, "end_time_ms": 100000}],
+    )
+    monkeypatch.setattr(worker, "_tracking_contract_pass_rate", lambda tracks: 1.0)
+    monkeypatch.setattr(worker, "_validate_tracking_contract", lambda tracks: None)
+    monkeypatch.setattr(worker, "_enforce_rollout_gates", lambda metrics: None)
+
+    def fake_cluster_tracklets(
+        video_path,
+        tracks,
+        track_to_dets=None,
+        track_identity_features=None,
+        face_track_features=None,
+        **_kwargs,
+    ):
+        return tracks
+
+    monkeypatch.setattr(worker, "_cluster_tracklets", fake_cluster_tracklets)
+    monkeypatch.setattr(
+        worker,
+        "_build_visual_detection_ledgers",
+        lambda video_path, tracks, frame_to_dets=None, track_to_dets=None, track_identity_features=None: (
+            [
+                {
+                    "track_id": "track-1",
+                    "timestamped_objects": [
+                        {"time_ms": 0, "track_id": "track-1", "confidence": 0.9, "bounding_box": {}},
+                        {"time_ms": 40, "track_id": "track-1", "confidence": 0.9, "bounding_box": {}},
+                        {"time_ms": 80, "track_id": "track-1", "confidence": 0.9, "bounding_box": {}},
+                    ],
+                }
+            ],
+            [{"track_id": "track-1", "timestamped_objects": []}],
+            {},
+        ),
+    )
+    monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [{"track_id": "track-1"}])
+    monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
+
+    result = worker._finalize_from_words_tracks(
+        video_path="video.mp4",
+        audio_path="audio.wav",
+        youtube_url="https://youtube.com/watch?v=example",
+        words=words,
+        tracks=tracks,
+        tracking_metrics={},
+    )
+
+    mss = result["phase_1_visual"]["mask_stability_signals"]
+    assert mss["iou_continuity_proxy"]["pair_count"] == 2
+    assert mss["iou_continuity_proxy"]["tracks_with_consecutive_pairs"] == 1
+    assert mss["face_presence_ratio"] == 1.0
+    assert mss["motion_smoothness_proxy"]["tracks_evaluated"] == 1
+    mem = mss["short_term_stability_memory"]
+    assert mem["person_track_frames_in_window"] == 3
+    assert mem["face_person_frame_overlap"] == 3
 
 
 def test_finalize_records_audio_diarization_fallback_metrics_when_pyannote_unavailable(monkeypatch):

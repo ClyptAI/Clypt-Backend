@@ -237,6 +237,8 @@ def test_manifest_accepts_local_clip_experiment_fields():
             "decision_source": "audio_boosted_visual",
             "ambiguous": False,
             "top_1_top_2_margin": 0.081,
+            "calibrated_confidence": 0.72,
+            "abstention_reason": None,
             "candidates": [
                 {
                     "local_track_id": "track_1",

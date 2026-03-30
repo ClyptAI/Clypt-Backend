@@ -106,6 +106,7 @@ def persist_phase1_outputs(
                 "object_tracking": phase_1_visual["object_tracking"],
                 "shot_changes": phase_1_visual["shot_changes"],
                 "video_metadata": phase_1_visual["video_metadata"],
+                "mask_stability_signals": phase_1_visual.get("mask_stability_signals") or {},
             },
             "events": None,
         },

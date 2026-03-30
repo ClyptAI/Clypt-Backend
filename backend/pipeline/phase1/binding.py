@@ -5,6 +5,13 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from backend.pipeline.phase1.decode_cache import Phase1AnalysisContext
+from backend.pipeline.phase1.lrasd_binding_stages import (
+    apply_turn_consistency_smoothing,
+    bind_audio_turns_to_local_tracks,
+    calibrate_lrasd_word_confidence,
+    evaluate_lrasd_assignment_policy,
+    lrasd_abstention_reason,
+)
 
 
 def build_speaker_binding_analysis_context(
@@ -26,4 +33,11 @@ def build_speaker_binding_analysis_context(
     return out
 
 
-__all__ = ["build_speaker_binding_analysis_context"]
+__all__ = [
+    "apply_turn_consistency_smoothing",
+    "bind_audio_turns_to_local_tracks",
+    "build_speaker_binding_analysis_context",
+    "calibrate_lrasd_word_confidence",
+    "evaluate_lrasd_assignment_policy",
+    "lrasd_abstention_reason",
+]

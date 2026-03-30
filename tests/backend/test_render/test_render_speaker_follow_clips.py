@@ -348,6 +348,129 @@ def test_resolve_follow_identity_prefers_dominant_track_when_unbound_and_fragmen
     ) == "track_51"
 
 
+def test_follow_target_stability_adjustment_overlap_prefers_camera_target():
+    mod = load_module()
+    det = make_clean_body_detection("A")
+    overlap = [{"start_time_ms": 0, "end_time_ms": 60_000, "camera_target_track_id": "A"}]
+    adj_a = mod.follow_target_stability_adjustment(
+        track_id="A",
+        frame_idx=0,
+        abs_ms=5000,
+        frame_width=1280,
+        frame_height=720,
+        det=det,
+        mask_stability_index=None,
+        overlap_follow_decisions=overlap,
+        prefer_local_track_ids=False,
+        last_resolved_track_id=None,
+    )
+    adj_b = mod.follow_target_stability_adjustment(
+        track_id="B",
+        frame_idx=0,
+        abs_ms=5000,
+        frame_width=1280,
+        frame_height=720,
+        det=det,
+        mask_stability_index=None,
+        overlap_follow_decisions=overlap,
+        prefer_local_track_ids=False,
+        last_resolved_track_id=None,
+    )
+    assert adj_a - adj_b == mod.RENDER_OVERLAP_CAMERA_TARGET_BIAS
+
+
+def test_follow_target_stability_adjustment_memory_reduces_track_flip():
+    mod = load_module()
+    det_a = make_clean_body_detection("A")
+    det_b = {**make_clean_body_detection("B"), "track_id": "B"}
+    with_memory = mod.follow_target_stability_adjustment(
+        track_id="A",
+        frame_idx=0,
+        abs_ms=1000,
+        frame_width=1280,
+        frame_height=720,
+        det=det_a,
+        mask_stability_index=None,
+        overlap_follow_decisions=None,
+        prefer_local_track_ids=False,
+        last_resolved_track_id="A",
+    )
+    without_memory = mod.follow_target_stability_adjustment(
+        track_id="A",
+        frame_idx=0,
+        abs_ms=1000,
+        frame_width=1280,
+        frame_height=720,
+        det=det_a,
+        mask_stability_index=None,
+        overlap_follow_decisions=None,
+        prefer_local_track_ids=False,
+        last_resolved_track_id="B",
+    )
+    assert with_memory == mod.RENDER_SHORT_TERM_TRACK_MEMORY_BIAS
+    assert without_memory == 0.0
+    # Same geometry/score for A vs B: memory breaks the tie toward the previous track.
+    picked = mod.tiebreak_two_visible_tracks_for_follow(
+        frame_detections=[det_a, det_b],
+        frame_width=1280,
+        frame_height=720,
+        abs_ms=1000,
+        video_fps=24.0,
+        mask_stability_index=None,
+        overlap_follow_decisions=None,
+        prefer_local_track_ids=False,
+        last_resolved_track_id="B",
+    )
+    assert picked == "B"
+
+
+def test_follow_target_stability_adjustment_backward_compatible_without_signals():
+    mod = load_module()
+    det = make_clean_body_detection("A")
+    assert (
+        mod.follow_target_stability_adjustment(
+            track_id="A",
+            frame_idx=0,
+            abs_ms=0,
+            frame_width=1280,
+            frame_height=720,
+            det=det,
+            mask_stability_index=None,
+            overlap_follow_decisions=None,
+            prefer_local_track_ids=False,
+            last_resolved_track_id=None,
+        )
+        == 0.0
+    )
+
+
+def test_resolve_follow_identity_symmetric_bodies_follow_overlap_camera_target():
+    mod = load_module()
+    bindings = []
+    frame_detections = [
+        {"track_id": "A", "bbox": [0.05, 0.10, 0.40, 0.90], "score": 0.88, "frame_idx": 0},
+        {"track_id": "B", "bbox": [0.55, 0.10, 0.90, 0.90], "score": 0.88, "frame_idx": 0},
+    ]
+    overlap_follow_decisions = [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 60_000,
+            "camera_target_track_id": "B",
+            "stay_wide": False,
+        }
+    ]
+    assert (
+        mod.resolve_follow_identity(
+            bindings,
+            5000,
+            frame_detections=frame_detections,
+            overlap_follow_decisions=overlap_follow_decisions,
+            video_fps=24.0,
+        )
+        == "B"
+    )
+
+
 def test_build_camera_path_uses_clean_follow_box_for_active_speaker():
     mod = load_module()
     mod.KEYFRAME_STEP_S = 0.5
@@ -1493,6 +1616,130 @@ def test_build_track_index_from_raw_detections_uses_correct_keys():
     det_a_0 = index['A'][0]
     assert det_a_0.frame_idx == 0
     assert det_a_0.x_center == 500
+
+
+def test_build_mask_stability_index_from_visual_returns_none_without_field():
+    mod = load_module()
+    assert mod.build_mask_stability_index_from_visual({}) is None
+    assert mod.build_mask_stability_index_from_visual({"mask_stability_signals": None}) is None
+
+
+def test_build_track_index_prefers_mask_stable_duplicate_detection():
+    """When one duplicate body box aligns with spatial mask stability, keep that instance (anti-jitter)."""
+    mod = load_module()
+    tracks = [
+        {
+            "track_id": "A",
+            "frame_idx": 0,
+            "x_center": 520.0,
+            "y_center": 400.0,
+            "width": 200.0,
+            "height": 600.0,
+            "confidence": 0.92,
+        },
+        {
+            "track_id": "A",
+            "frame_idx": 0,
+            "x_center": 300.0,
+            "y_center": 400.0,
+            "width": 200.0,
+            "height": 600.0,
+            "confidence": 0.90,
+        },
+    ]
+    raw = [
+        {
+            "frame_idx": 0,
+            "track_id": "A",
+            "x_center": 0.3,
+            "y_center": 0.5,
+            "stability": 1.0,
+        },
+    ]
+    index = mod.parse_mask_stability_signals_payload(raw)
+    resolved = mod.build_track_index(
+        tracks,
+        mask_stability_index=index,
+        src_w=1000,
+        src_h=800,
+    )
+    assert len(resolved["A"]) == 1
+    assert abs(resolved["A"][0].x_center - 300.0) < 0.01
+
+
+def test_tiebreak_two_visible_tracks_prefers_overlap_visible_hint():
+    mod = load_module()
+    left = {
+        "track_id": "track_L",
+        "bbox": [0.06, 0.12, 0.44, 0.92],
+        "score": 0.91,
+        "frame_idx": 0,
+    }
+    right = {
+        "track_id": "track_R",
+        "bbox": [0.56, 0.12, 0.94, 0.92],
+        "score": 0.91,
+        "frame_idx": 0,
+    }
+    decisions = [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 10_000,
+            "stay_wide": False,
+            "camera_target_track_id": None,
+            "camera_target_local_track_id": None,
+            "visible_track_ids": ["track_R"],
+        }
+    ]
+    picked = mod.tiebreak_two_visible_tracks_for_follow(
+        frame_detections=[left, right],
+        frame_width=1280,
+        frame_height=720,
+        abs_ms=500,
+        video_fps=25.0,
+        mask_stability_index=None,
+        overlap_follow_decisions=decisions,
+        prefer_local_track_ids=False,
+        last_resolved_track_id=None,
+    )
+    assert picked == "track_R"
+
+
+def test_resolve_follow_identity_tiebreak_respects_overlap_visible_hints():
+    mod = load_module()
+    frame_detections = [
+        {
+            "track_id": "track_L",
+            "bbox": [0.06, 0.12, 0.44, 0.92],
+            "score": 0.91,
+            "frame_idx": 0,
+        },
+        {
+            "track_id": "track_R",
+            "bbox": [0.56, 0.12, 0.94, 0.92],
+            "score": 0.91,
+            "frame_idx": 0,
+        },
+    ]
+    decisions = [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 10_000,
+            "stay_wide": False,
+            "camera_target_track_id": None,
+            "visible_track_ids": ["track_R"],
+        }
+    ]
+    assert (
+        mod.resolve_follow_identity(
+            [],
+            500,
+            overlap_follow_decisions=decisions,
+            frame_detections=frame_detections,
+            video_fps=25.0,
+        )
+        == "track_R"
+    )
 
 
 def test_build_frame_detection_index_builds_per_frame_lookup():

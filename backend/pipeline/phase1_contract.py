@@ -52,6 +52,8 @@ class Phase1Word(BaseModel):
     speaker_tag: str
     speaker_local_track_id: str | None = None
     speaker_local_tag: str | None = None
+    calibrated_confidence: Confidence01 | None = None
+    abstention_reason: str | None = None
 
     @model_validator(mode="after")
     def _check_time_order(self):
@@ -231,6 +233,8 @@ class Phase1SpeakerCandidateDebugEntry(BaseModel):
     decision_source: Literal["visual", "audio_boosted_visual", "unknown"]
     ambiguous: bool
     top_1_top_2_margin: float | None = None
+    calibrated_confidence: Confidence01 | None = None
+    abstention_reason: str | None = None
     candidates: list[Phase1SpeakerCandidateDebugCandidate] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -318,6 +322,7 @@ class Phase1VisualArtifact(BaseModel):
     object_tracking: list[Phase1DetectionSegment]
     shot_changes: list[Phase1ShotChange]
     video_metadata: Phase1VideoMetadata
+    mask_stability_signals: dict[str, object] = Field(default_factory=dict)
 
 
 class Phase1EventsArtifact(BaseModel):

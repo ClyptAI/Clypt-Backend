@@ -77,6 +77,253 @@ SPLIT_MIN_DISTINCT_CENTER_GAP_RATIO = 0.16
 SPLIT_MAX_OVERLAP_IOU = 0.28
 SINGLE_SPEAKER_MIN_SEGMENT_S = 0.45
 
+# Renderer-only hints: never mutate transcript / word labels.
+MASK_STABILITY_SPATIAL_RADIUS_NORM = 0.14
+TRACK_INDEX_MASK_STABILITY_WEIGHT = 2.5
+TWO_TRACK_MASK_STABILITY_WEIGHT = 0.38
+RENDER_OVERLAP_CAMERA_TARGET_BIAS = 0.22
+RENDER_OVERLAP_VISIBLE_LIST_BIAS = 0.07
+RENDER_SHORT_TERM_TRACK_MEMORY_BIAS = 0.14
+
+
+@dataclass(frozen=True)
+class MaskStabilityIndex:
+    """Coarse (frame, track) stability in [0, 1] plus optional normalized spatial anchors."""
+
+    coarse: dict[tuple[int, str], float]
+    spatial: dict[tuple[int, str], list[tuple[float, float, float]]]
+
+
+def build_mask_stability_index_from_visual(visual: dict | None) -> MaskStabilityIndex | None:
+    """Parse optional ``mask_stability_signals`` from phase_1_visual; returns None if absent."""
+    if not isinstance(visual, dict) or "mask_stability_signals" not in visual:
+        return None
+    raw = visual.get("mask_stability_signals")
+    if raw is None:
+        return None
+    return parse_mask_stability_signals_payload(raw)
+
+
+def parse_mask_stability_signals_payload(raw: object) -> MaskStabilityIndex:
+    """Normalize list or ``{"entries": [...]}`` payloads into lookup tables."""
+    coarse: dict[tuple[int, str], float] = {}
+    spatial: dict[tuple[int, str], list[tuple[float, float, float]]] = {}
+    if isinstance(raw, dict) and "entries" in raw:
+        raw = raw["entries"]
+    if not isinstance(raw, list):
+        return MaskStabilityIndex(coarse=coarse, spatial=spatial)
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            fi = int(item.get("frame_idx", item.get("frame", -1)))
+        except (TypeError, ValueError):
+            continue
+        tid = _normalize_stability_track_id(item)
+        if not tid:
+            continue
+        key = (fi, tid)
+        stab = _coerce_stability_scalar(
+            item.get("stability", item.get("mask_stability", item.get("stability_score", item.get("score"))))
+        )
+        if stab is None:
+            continue
+        xc = item.get("x_center")
+        yc = item.get("y_center")
+        if xc is not None and yc is not None:
+            try:
+                fx = float(xc)
+                fy = float(yc)
+            except (TypeError, ValueError):
+                coarse[key] = max(float(coarse.get(key, 0.0)), stab)
+                continue
+            if max(abs(fx), abs(fy)) <= 1.5:
+                spatial.setdefault(key, []).append((fx, fy, stab))
+            else:
+                coarse[key] = max(float(coarse.get(key, 0.0)), stab)
+        else:
+            coarse[key] = max(float(coarse.get(key, 0.0)), stab)
+
+    return MaskStabilityIndex(coarse=coarse, spatial=spatial)
+
+
+def _normalize_stability_track_id(item: dict) -> str:
+    for key in ("track_id", "local_track_id", "global_track_id"):
+        text = str(item.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _coerce_stability_scalar(raw: object) -> float | None:
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(v) or math.isinf(v):
+        return None
+    return clamp(v, 0.0, 1.0)
+
+
+def mask_stability_bonus_for_pixel_detection(
+    index: MaskStabilityIndex | None,
+    frame_idx: int,
+    track_id: str,
+    det: Detection,
+    src_w: int | None,
+    src_h: int | None,
+) -> float:
+    if index is None:
+        return 0.0
+    key = (int(frame_idx), str(track_id))
+    best = float(index.coarse.get(key, 0.0))
+    points = index.spatial.get(key, [])
+    if not points or not src_w or not src_h:
+        return clamp(best, 0.0, 1.0)
+    nx = float(det.x_center) / max(1.0, float(src_w))
+    ny = float(det.y_center) / max(1.0, float(src_h))
+    for sx, sy, st in points:
+        if math.hypot(nx - float(sx), ny - float(sy)) <= MASK_STABILITY_SPATIAL_RADIUS_NORM:
+            best = max(best, float(st))
+    return clamp(best, 0.0, 1.0)
+
+
+def mask_stability_bonus_for_render_det(
+    index: MaskStabilityIndex | None,
+    frame_idx: int,
+    track_id: str,
+    det: dict,
+    frame_width: int,
+    frame_height: int,
+) -> float:
+    if index is None or "bbox" not in det:
+        return 0.0
+    key = (int(frame_idx), str(track_id))
+    best = float(index.coarse.get(key, 0.0))
+    x1, y1, x2, y2 = _bbox_in_unit_space(det["bbox"], frame_width, frame_height)
+    nx = 0.5 * (x1 + x2)
+    ny = 0.5 * (y1 + y2)
+    for sx, sy, st in index.spatial.get(key, []):
+        if math.hypot(nx - float(sx), ny - float(sy)) <= MASK_STABILITY_SPATIAL_RADIUS_NORM:
+            best = max(best, float(st))
+    return clamp(best, 0.0, 1.0)
+
+
+def overlap_follow_renderer_bias(
+    abs_ms: int,
+    track_id: str,
+    overlap_follow_decisions: list[dict] | None,
+    *,
+    prefer_local_track_ids: bool,
+) -> float:
+    decision = overlap_follow_decision_at_ms(overlap_follow_decisions, abs_ms)
+    if not decision:
+        return 0.0
+    target = _decision_camera_target_track_id(decision, prefer_local_track_ids=prefer_local_track_ids)
+    if target and target == track_id:
+        return RENDER_OVERLAP_CAMERA_TARGET_BIAS
+    vis_primary = _normalized_id_list(
+        decision.get("visible_local_track_ids") if prefer_local_track_ids else decision.get("visible_track_ids")
+    )
+    vis_secondary = _normalized_id_list(
+        decision.get("visible_track_ids") if prefer_local_track_ids else decision.get("visible_local_track_ids")
+    )
+    merged: list[str] = []
+    for t in vis_primary + vis_secondary:
+        if t and t not in merged:
+            merged.append(t)
+    if track_id in merged:
+        return RENDER_OVERLAP_VISIBLE_LIST_BIAS
+    return 0.0
+
+
+def short_term_track_memory_bias(track_id: str, last_resolved_track_id: str | None) -> float:
+    if last_resolved_track_id and track_id == last_resolved_track_id:
+        return RENDER_SHORT_TERM_TRACK_MEMORY_BIAS
+    return 0.0
+
+
+def follow_target_stability_adjustment(
+    *,
+    track_id: str,
+    frame_idx: int,
+    abs_ms: int,
+    frame_width: int,
+    frame_height: int,
+    det: dict,
+    mask_stability_index: MaskStabilityIndex | None,
+    overlap_follow_decisions: list[dict] | None,
+    prefer_local_track_ids: bool,
+    last_resolved_track_id: str | None,
+) -> float:
+    """Renderer-only score delta: mask stability + overlap-follow hints + short-term track memory."""
+    adj = TWO_TRACK_MASK_STABILITY_WEIGHT * mask_stability_bonus_for_render_det(
+        mask_stability_index, frame_idx, track_id, det, frame_width, frame_height
+    )
+    adj += overlap_follow_renderer_bias(
+        abs_ms, track_id, overlap_follow_decisions, prefer_local_track_ids=prefer_local_track_ids
+    )
+    adj += short_term_track_memory_bias(track_id, last_resolved_track_id)
+    return adj
+
+
+def tiebreak_two_visible_tracks_for_follow(
+    *,
+    frame_detections: list[dict],
+    frame_width: int,
+    frame_height: int,
+    abs_ms: int,
+    video_fps: float,
+    mask_stability_index: MaskStabilityIndex | None,
+    overlap_follow_decisions: list[dict] | None,
+    prefer_local_track_ids: bool,
+    last_resolved_track_id: str | None,
+) -> str | None:
+    """When exactly two plausible bodies disagree by track, bias toward overlap target, mask stability, and memory."""
+    plausible = [
+        det
+        for det in frame_detections
+        if "bbox" in det and is_plausible_render_target(det, frame_width, frame_height)
+    ]
+    if len(plausible) != 2:
+        return None
+    if _dominant_larger_render_target(plausible, frame_width, frame_height) is not None:
+        return None
+    tid0 = str(plausible[0].get("track_id", "") or "").strip()
+    tid1 = str(plausible[1].get("track_id", "") or "").strip()
+    if not tid0 or not tid1 or tid0 == tid1:
+        return None
+
+    frame_idx = int(round((float(abs_ms) / 1000.0) * float(video_fps)))
+
+    def _score(det: dict) -> float:
+        tid = str(det.get("track_id", "") or "").strip()
+        score = float(score_render_target_candidate(det, frame_width, frame_height))
+        score += follow_target_stability_adjustment(
+            track_id=tid,
+            frame_idx=frame_idx,
+            abs_ms=abs_ms,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            det=det,
+            mask_stability_index=mask_stability_index,
+            overlap_follow_decisions=overlap_follow_decisions,
+            prefer_local_track_ids=prefer_local_track_ids,
+            last_resolved_track_id=last_resolved_track_id,
+        )
+        return score
+
+    s0 = _score(plausible[0])
+    s1 = _score(plausible[1])
+    if abs(s0 - s1) < 1e-6:
+        if last_resolved_track_id in (tid0, tid1):
+            return last_resolved_track_id
+        return tid0
+    return tid0 if s0 > s1 else tid1
+
 
 @dataclass
 class Detection:
@@ -350,7 +597,13 @@ def ema_smooth(values: list[float], smoothing: int) -> list[float]:
     return out
 
 
-def build_track_index(tracks: list[dict]) -> dict[str, list[Detection]]:
+def build_track_index(
+    tracks: list[dict],
+    *,
+    mask_stability_index: MaskStabilityIndex | None = None,
+    src_w: int | None = None,
+    src_h: int | None = None,
+) -> dict[str, list[Detection]]:
     by_track: dict[str, dict[int, list[Detection]]] = {}
     for t in tracks:
         tid = str(t.get("track_id", ""))
@@ -396,6 +649,10 @@ def build_track_index(tracks: list[dict]) -> dict[str, list[Detection]]:
                 scored: list[tuple[float, Detection]] = []
                 for det in candidates:
                     score = (5.0 * float(det.confidence)) - (0.001 * float(det.width * det.height))
+                    stab = mask_stability_bonus_for_pixel_detection(
+                        mask_stability_index, frame_idx, tid, det, src_w, src_h
+                    )
+                    score += TRACK_INDEX_MASK_STABILITY_WEIGHT * stab
                     if last_selected is not None:
                         avg_w = max(1.0, 0.5 * (float(last_selected.width) + float(det.width)))
                         avg_h = max(1.0, 0.5 * (float(last_selected.height) + float(det.height)))
@@ -670,6 +927,9 @@ def resolve_follow_identity(
     overlap_follow_decisions: list[dict] | None = None,
     prefer_local_track_ids: bool = False,
     frame_detections: list[dict] | None = None,
+    mask_stability_index: MaskStabilityIndex | None = None,
+    last_resolved_track_id: str | None = None,
+    video_fps: float | None = None,
 ) -> str | None:
     def _inferred_frame_size() -> tuple[int, int]:
         max_x = 1.0
@@ -696,10 +956,17 @@ def resolve_follow_identity(
 
     def _dominant_visible_track_id() -> str | None:
         frame_width, frame_height = _inferred_frame_size()
-        return _dominant_visible_track_id_when_unbound(
+        use_fps = float(video_fps) if video_fps is not None else 24.0
+        return _resolve_ambiguous_frame_visible_track(
             frame_detections=list(frame_detections or []),
             frame_width=frame_width,
             frame_height=frame_height,
+            abs_ms=abs_ms,
+            video_fps=use_fps,
+            mask_stability_index=mask_stability_index,
+            overlap_follow_decisions=overlap_follow_decisions,
+            prefer_local_track_ids=prefer_local_track_ids,
+            last_resolved_track_id=last_resolved_track_id,
         )
 
     active_decision = overlap_follow_decision_at_ms(overlap_follow_decisions, abs_ms)
@@ -985,21 +1252,40 @@ def _is_fragment_like_render_target(det: dict, frame_width: int, frame_height: i
     )
 
 
-def _dominant_visible_track_id_when_unbound(
+def _resolve_ambiguous_frame_visible_track(
     *,
     frame_detections: list[dict],
     frame_width: int,
     frame_height: int,
+    abs_ms: int,
+    video_fps: float,
+    mask_stability_index: MaskStabilityIndex | None = None,
+    overlap_follow_decisions: list[dict] | None = None,
+    prefer_local_track_ids: bool = False,
+    last_resolved_track_id: str | None = None,
 ) -> str | None:
-    if len(frame_detections) != 2:
-        return None
-    plausible = [det for det in frame_detections if "bbox" in det and is_plausible_render_target(det, frame_width, frame_height)]
+    """Pick a visible body track when not forced by overlap camera_target: dominant size, else stability tie-break."""
+    plausible = [
+        det
+        for det in frame_detections
+        if "bbox" in det and is_plausible_render_target(det, frame_width, frame_height)
+    ]
     if len(plausible) != 2:
         return None
     dominant = _dominant_larger_render_target(plausible, frame_width, frame_height)
-    if dominant is None:
-        return None
-    return str(dominant.get("track_id", "")).strip() or None
+    if dominant is not None:
+        return str(dominant.get("track_id", "") or "").strip() or None
+    return tiebreak_two_visible_tracks_for_follow(
+        frame_detections=frame_detections,
+        frame_width=frame_width,
+        frame_height=frame_height,
+        abs_ms=abs_ms,
+        video_fps=video_fps,
+        mask_stability_index=mask_stability_index,
+        overlap_follow_decisions=overlap_follow_decisions,
+        prefer_local_track_ids=prefer_local_track_ids,
+        last_resolved_track_id=last_resolved_track_id,
+    )
 
 
 def _rescue_follow_box_with_larger_nearby_target(
@@ -1817,6 +2103,7 @@ def build_camera_path(
     motion_profile: MotionProfile | None = None,
     overlap_follow_decisions: list[dict] | None = None,
     prefer_local_track_ids: bool = False,
+    mask_stability_index: MaskStabilityIndex | None = None,
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     motion_profile = motion_profile or motion_profile_for_composition("single_person")
     crop_w, crop_h = crop_dimensions(src_w, src_h, camera_zoom=motion_profile.camera_zoom)
@@ -1829,6 +2116,7 @@ def build_camera_path(
     y_keyframes: list[tuple[float, float]] = []
     segment_samples: list[tuple[float, float, float]] = []
     segment_tid: str | None = None
+    last_resolved_tid: str | None = None
     cut_epsilon_s = 0.001
 
     def flush_segment() -> None:
@@ -1863,7 +2151,12 @@ def build_camera_path(
             overlap_follow_decisions=overlap_follow_decisions,
             prefer_local_track_ids=prefer_local_track_ids,
             frame_detections=(frame_detection_index or {}).get(frame_idx, []),
+            mask_stability_index=mask_stability_index,
+            last_resolved_track_id=last_resolved_tid,
+            video_fps=fps,
         )
+        if tid is not None:
+            last_resolved_tid = tid
         person_det = interpolate_detection(person_track_index.get(tid), frame_idx, fps) if tid else None
         det = _track_anchor_candidate(
             tid,
@@ -2960,7 +3253,13 @@ def main() -> None:
         raise RuntimeError("Missing video duration in phase_1_visual.json video_metadata")
 
     frame_detection_index = build_frame_detection_index(tracks)
-    person_track_index = build_track_index(tracks)
+    mask_stability_index = build_mask_stability_index_from_visual(visual)
+    person_track_index = build_track_index(
+        tracks,
+        mask_stability_index=mask_stability_index,
+        src_w=src_w,
+        src_h=src_h,
+    )
     available_track_ids = {str(track_id) for track_id in person_track_index.keys() if str(track_id)}
     prefer_local_track_ids = binding_source.endswith("_local")
     face_track_index: dict[str, list[Detection]] = build_face_index(
@@ -3169,6 +3468,7 @@ def main() -> None:
                                 motion_profile=single_profile,
                                 overlap_follow_decisions=segment_overlap_decisions,
                                 prefer_local_track_ids=prefer_local_track_ids,
+                                mask_stability_index=mask_stability_index,
                             )
                         else:
                             x_keyframes, y_keyframes = build_single_track_path(
@@ -3464,6 +3764,7 @@ def main() -> None:
                             motion_profile=single_profile,
                             overlap_follow_decisions=segment_overlap_decisions,
                             prefer_local_track_ids=prefer_local_track_ids,
+                            mask_stability_index=mask_stability_index,
                         )
                     else:
                         x_keyframes, y_keyframes = build_single_track_path(
