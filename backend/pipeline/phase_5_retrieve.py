@@ -28,10 +28,10 @@ from pydantic import BaseModel, Field
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-v2"
+PROJECT_ID = "clypt-v3"
 LOCATION = "us-central1"
-SPANNER_INSTANCE = "clypt-spanner-v2"
-SPANNER_DATABASE = "clypt-graph-db-v2"
+SPANNER_INSTANCE = "clypt-spanner-v3"
+SPANNER_DATABASE = "clypt-graph-db-v3"
 GEMINI_LOCATION = "global"
 GEMINI_MODEL = "gemini-3.1-pro-preview"
 EMBEDDING_MODEL = "gemini-embedding-2-preview"
@@ -56,6 +56,23 @@ logging.basicConfig(
 log = logging.getLogger("phase_5")
 # Suppress Spanner SDK internal metrics export errors (missing instance_id in Cloud Monitoring)
 logging.getLogger("opentelemetry.sdk.metrics._internal.export").setLevel(logging.CRITICAL)
+
+
+def _visual_description_from_labels(value: object) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return ", ".join(str(item) for item in parsed if str(item).strip())
+            return text
+        except Exception:
+            return text
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if str(item).strip())
+    return ""
 
 # ──────────────────────────────────────────────
 # Pydantic schema for ClipScoringAgent response
@@ -119,8 +136,8 @@ def hybrid_query(query_vector: list[float], top_k: int = 5) -> list[dict]:
 
     knn_sql = f"""
         SELECT node_id, video_uri, start_time_ms, end_time_ms,
-               transcript_text, visual_description, vocal_delivery,
-               speakers, content_mechanisms, spatial_tracking_uri,
+               transcript_text, vocal_delivery,
+               speakers, visual_labels, content_mechanisms, spatial_tracking_uri,
                APPROX_COSINE_DISTANCE(
                    ARRAY<FLOAT64>{vec_str}, embedding
                ) AS distance
@@ -139,9 +156,10 @@ def hybrid_query(query_vector: list[float], top_k: int = 5) -> list[dict]:
                 "start_time_ms": row[2],
                 "end_time_ms": row[3],
                 "transcript_text": row[4],
-                "visual_description": row[5],
-                "vocal_delivery": row[6],
-                "speakers": row[7],
+                "vocal_delivery": row[5],
+                "speakers": row[6],
+                "visual_labels": row[7],
+                "visual_description": _visual_description_from_labels(row[7]),
                 "content_mechanisms": row[8],
                 "spatial_tracking_uri": row[9],
                 "distance": row[10],
@@ -154,7 +172,7 @@ def hybrid_query(query_vector: list[float], top_k: int = 5) -> list[dict]:
     log.info(f"  Anchor node: {anchor_id} (distance={nodes[0]['distance']:.4f})")
 
     graph_sql = f"""
-        SELECT ne.from_node_id, ne.to_node_id, ne.edge_type,
+        SELECT ne.from_node_id, ne.to_node_id, ne.label,
                ne.narrative_classification, ne.confidence_score,
                scn.start_time_ms, scn.end_time_ms,
                scn.transcript_text, scn.vocal_delivery,

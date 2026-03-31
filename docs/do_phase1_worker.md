@@ -12,7 +12,6 @@ For Phase 1 behavior, those files are the source of truth.
 The worker accepts a muxed MP4 video plus a 16kHz mono WAV and returns:
 - `phase_1_visual`
 - `phase_1_audio`
-- compatibility aliases `phase_1a_visual` and `phase_1a_audio`
 
 The active production path runs inside the DigitalOcean Phase 1 service, which calls the worker in-process.
 
@@ -114,10 +113,8 @@ The active binding path consumes the canonical face stream first instead of redi
 The worker response includes:
 - `phase_1_visual`
 - `phase_1_audio`
-- `phase_1a_visual`
-- `phase_1a_audio`
 
-The DigitalOcean extraction service enriches and validates those artifacts, uploads them to GCS, and persists a contract `v2` manifest.
+The DigitalOcean extraction service enriches and validates those artifacts, uploads them to GCS, and persists a contract `v3` manifest.
 
 ## DigitalOcean Service Flow
 

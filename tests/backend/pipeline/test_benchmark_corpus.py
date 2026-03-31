@@ -23,7 +23,7 @@ def _minimal_visual(tracking_metrics: dict | None = None) -> dict:
         "uri": "gs://b/v.json",
         "source_video": "https://youtube.com/watch?v=x",
         "video_gcs_uri": "gs://b/v.mp4",
-        "schema_version": "2.0.0",
+            "schema_version": "3.0.0",
         "task_type": "person_tracking",
         "coordinate_space": "absolute_original_frame_xyxy",
         "geometry_type": "aabb",
@@ -110,7 +110,18 @@ def test_aggregate_scorecard_summary_two_clips():
             words=[
                 {"speaker_track_id": "G0", "word": "x", "start_time_ms": 0, "end_time_ms": 10, "speaker_tag": "t"}
             ],
-            tracking_metrics={"tracking_wallclock_s": 10.0},
+            tracking_metrics={
+                "tracking_wallclock_s": 10.0,
+                "canonical_face_stream_coverage": 0.6,
+                "identity_track_count_before_clustering": 10,
+                "identity_track_count_after_reid_merge": 8,
+                "identity_track_count_after_clustering": 8,
+                "decode_prepare_wallclock_ms": 50,
+                "decode_source_video_mb": 100.0,
+                "decode_analysis_video_mb": 90.0,
+                "lrasd_stage_gpu_utilization_pct_sampled_mean": 70.0,
+            },
+            timings={"processing_ms": 200},
         )
     )
     c2 = scorecard_for_payload(
@@ -120,7 +131,18 @@ def test_aggregate_scorecard_summary_two_clips():
                 {"speaker_track_id": None, "word": "y", "start_time_ms": 0, "end_time_ms": 10, "speaker_tag": "t"},
                 {"speaker_track_id": "G1", "word": "z", "start_time_ms": 10, "end_time_ms": 20, "speaker_tag": "t"},
             ],
-            tracking_metrics={"tracking_wallclock_s": 20.0},
+            tracking_metrics={
+                "tracking_wallclock_s": 20.0,
+                "canonical_face_stream_coverage": 0.8,
+                "identity_track_count_before_clustering": 12,
+                "identity_track_count_after_reid_merge": 6,
+                "identity_track_count_after_clustering": 6,
+                "decode_prepare_wallclock_ms": 120,
+                "decode_source_video_mb": 100.0,
+                "decode_analysis_video_mb": 70.0,
+                "lrasd_stage_gpu_utilization_pct_sampled_mean": 80.0,
+            },
+            timings={"processing_ms": 400},
         )
     )
     s = aggregate_scorecard_summary([c1, c2])
@@ -129,6 +151,42 @@ def test_aggregate_scorecard_summary_two_clips():
     assert s["unknown_rate"]["mean"] == pytest.approx(0.25)
     assert s["stage_wallclock_s"]["tracking_wallclock_s"]["mean"] == pytest.approx(15.0)
     assert s["stage_wallclock_s"]["tracking_wallclock_s"]["n"] == 2
+    assert s["canonical_face_stream_coverage"]["mean"] == pytest.approx(0.7)
+    assert s["identity_fragmentation_reduction_ratio"]["mean"] == pytest.approx(0.35)
+    assert s["decode_overhead_ratio"]["mean"] == pytest.approx(0.275)
+    assert s["decode_before_after_size_ratio"]["mean"] == pytest.approx(0.8)
+    assert s["gpu_utilization_pct"]["lrasd_stage"]["mean"] == pytest.approx(75.0)
+    assert s["aggregation_inputs"]["input_clip_count"] == 2
+    assert s["aggregation_inputs"]["eligible_clip_count"] == 2
+    assert s["aggregation_inputs"]["excluded_missing_wallclock_count"] == 0
+
+
+def test_aggregate_scorecard_summary_excludes_missing_wallclock_rows():
+    with_wallclock = {
+        "assignment_coverage": 1.0,
+        "with_scored_candidate_ratio": 1.0,
+        "unknown_rate": 0.0,
+        "overlap_camera_consistency_ratio": 1.0,
+        "canonical_face_stream_coverage": 0.8,
+        "identity_fragmentation_reduction_ratio": 0.3,
+        "decode_overhead_ratio": 0.2,
+        "decode_before_after_size_ratio": 0.9,
+        "wallclock_ms": {"ingest_ms": 1, "processing_ms": 2, "upload_ms": 3, "total_ms": 6},
+        "decode_overhead_ms": {"prepare_ms": 100},
+        "gpu_utilization_pct": {"lrasd_stage": 50.0, "face_stage": 40.0},
+        "stage_wallclock_s": {},
+    }
+    missing_wallclock = {
+        **with_wallclock,
+        "assignment_coverage": 0.0,
+    }
+    missing_wallclock.pop("wallclock_ms", None)
+    s = aggregate_scorecard_summary([with_wallclock, missing_wallclock])
+    # Ratio aggregates include all scorecards; wallclock aggregates use eligible subset.
+    assert s["assignment_coverage"]["mean"] == pytest.approx(0.5)
+    assert s["aggregation_inputs"]["input_clip_count"] == 2
+    assert s["aggregation_inputs"]["eligible_clip_count"] == 1
+    assert s["aggregation_inputs"]["excluded_missing_wallclock_count"] == 1
 
 
 def test_build_benchmark_report_from_files(tmp_path: Path):
@@ -188,7 +246,7 @@ def test_build_benchmark_report_from_files(tmp_path: Path):
 
 def test_build_benchmark_report_manifest_shape(tmp_path: Path):
     payload = {
-        "contract_version": "v2",
+        "contract_version": "v3",
         "job_id": "manifest_job",
         "status": JobState.SUCCEEDED,
         "source_video": {"source_url": "https://youtube.com/watch?v=x"},

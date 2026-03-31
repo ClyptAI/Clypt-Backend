@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-v2"
+PROJECT_ID = "clypt-v3"
 LOCATION = "global"
 MODEL_ID = "gemini-3.1-pro-preview"
 

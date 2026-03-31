@@ -261,7 +261,7 @@ def evaluate_lrasd_assignment_policy(
     min_body_fallback_score: float,
     audio_prior_applied: bool,
 ) -> tuple[bool, float | None]:
-    """Decision policy: assign vs unknown from threshold gates (matches legacy worker logic)."""
+    """Decision policy: assign vs unknown from threshold gates."""
     top_margin = None if second_total is None else float(best_total - second_total)
     if best_prob is not None:
         confident_pick = bool(

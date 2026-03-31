@@ -31,9 +31,9 @@ from pydantic import BaseModel, Field
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-v2"
-SPANNER_INSTANCE = "clypt-spanner-v2"
-SPANNER_DATABASE = "clypt-graph-db-v2"
+PROJECT_ID = "clypt-v3"
+SPANNER_INSTANCE = "clypt-spanner-v3"
+SPANNER_DATABASE = "clypt-graph-db-v3"
 GEMINI_LOCATION = "global"
 GEMINI_MODEL = "gemini-3.1-pro-preview"
 
@@ -73,6 +73,23 @@ log = logging.getLogger("phase_5_auto")
 # Suppress Spanner SDK internal metrics export errors (missing instance_id / rate limit)
 for _name in ("opentelemetry.sdk.metrics._internal.export", "opentelemetry.sdk.metrics"):
     logging.getLogger(_name).setLevel(logging.CRITICAL)
+
+
+def _visual_description_from_labels(value: object) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return ", ".join(str(item) for item in parsed if str(item).strip())
+            return text
+        except Exception:
+            return text
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if str(item).strip())
+    return ""
 
 # ──────────────────────────────────────────────
 # Pydantic schema for ClipScoringAgent response
@@ -121,7 +138,7 @@ def _fetch_all_nodes() -> list[dict]:
 
     sql = """
         SELECT node_id, video_uri, start_time_ms, end_time_ms,
-               transcript_text, visual_description, vocal_delivery,
+               transcript_text, vocal_delivery,
                speakers, objects_present, visual_labels,
                content_mechanisms, spatial_tracking_uri
         FROM SemanticClipNode
@@ -137,13 +154,13 @@ def _fetch_all_nodes() -> list[dict]:
                 "start_time_ms": row[2],
                 "end_time_ms": row[3],
                 "transcript_text": row[4],
-                "visual_description": row[5],
-                "vocal_delivery": row[6],
-                "speakers": row[7],
-                "objects_present": row[8],
-                "visual_labels": row[9],
-                "content_mechanisms": row[10],
-                "spatial_tracking_uri": row[11],
+                "vocal_delivery": row[5],
+                "speakers": row[6],
+                "objects_present": row[7],
+                "visual_labels": row[8],
+                "visual_description": _visual_description_from_labels(row[8]),
+                "content_mechanisms": row[9],
+                "spatial_tracking_uri": row[10],
             })
     return nodes
 
@@ -168,6 +185,7 @@ def _fetch_all_edges() -> list[dict]:
                 "from_node_id": row[1],
                 "to_node_id": row[2],
                 "label": row[3],
+                "edge_type": row[3],
                 "narrative_classification": row[4],
                 "confidence_score": row[5],
             })
@@ -277,6 +295,7 @@ def load_local_edges(nodes: list[dict]) -> list[dict]:
             "from_node_id": from_id,
             "to_node_id": to_id,
             "label": e.get("edge_type", ""),
+            "edge_type": e.get("edge_type", ""),
             "narrative_classification": e.get("narrative_classification", ""),
             "confidence_score": float(e.get("confidence_score", 0.0) or 0.0),
         })

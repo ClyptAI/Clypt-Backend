@@ -23,7 +23,7 @@ def test_manifest_uses_durable_storage_uris(tmp_path: Path):
         },
         phase_1_visual={
             "source_video": "https://youtube.com/watch?v=x",
-            "schema_version": "2.0.0",
+            "schema_version": "3.0.0",
             "task_type": "person_tracking",
             "coordinate_space": "absolute_original_frame_xyxy",
             "geometry_type": "aabb",
@@ -160,7 +160,7 @@ def test_manifest_persists_local_clip_experiment_fields(tmp_path: Path):
         },
         phase_1_visual={
             "source_video": "https://youtube.com/watch?v=local",
-            "schema_version": "2.0.0",
+            "schema_version": "3.0.0",
             "task_type": "person_tracking",
             "coordinate_space": "absolute_original_frame_xyxy",
             "geometry_type": "aabb",
@@ -245,7 +245,7 @@ def test_manifest_persistence_rejects_unknown_audio_turn_fields(tmp_path: Path):
             },
             phase_1_visual={
                 "source_video": "https://youtube.com/watch?v=bad",
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -291,7 +291,7 @@ def test_manifest_persistence_rejects_unknown_speaker_candidate_debug_fields(tmp
             },
             phase_1_visual={
                 "source_video": "https://youtube.com/watch?v=bad-debug",
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -341,7 +341,7 @@ def test_manifest_persistence_rejects_unknown_overlap_follow_decision_fields(tmp
             },
             phase_1_visual={
                 "source_video": "https://youtube.com/watch?v=bad-overlap",
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",

@@ -7,6 +7,7 @@ analysis context instead of calling prep helpers independently.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 from typing import Any, Callable, Mapping
 
 
@@ -18,6 +19,7 @@ class Phase1AnalysisContext:
     _payload: dict[str, Any] | None = None
     _prepare_invocations: int = 0
     _cache_hits: int = field(default=0, repr=False)
+    _prepare_elapsed_ms: float = field(default=0.0, repr=False)
 
     def ensure_prepared(
         self,
@@ -37,6 +39,7 @@ class Phase1AnalysisContext:
             return self._payload
 
         self._prepare_invocations += 1
+        started_at = time.perf_counter()
         if prepare_direct is not None and prepare_proxy is not None:
             if tracking_mode == "direct":
                 self._payload = dict(prepare_direct(self.source_video_path))
@@ -47,6 +50,7 @@ class Phase1AnalysisContext:
                 self._payload = dict(worker._prepare_direct_analysis_context(self.source_video_path))
             else:
                 self._payload = dict(worker._prepare_analysis_video(self.source_video_path))
+        self._prepare_elapsed_ms += (time.perf_counter() - started_at) * 1000.0
         return self._payload
 
     def as_dict(self) -> dict[str, Any]:
@@ -69,6 +73,10 @@ class Phase1AnalysisContext:
     @property
     def cache_hits(self) -> int:
         return int(self._cache_hits)
+
+    @property
+    def prepare_elapsed_ms(self) -> float:
+        return float(self._prepare_elapsed_ms)
 
 
 __all__ = ["Phase1AnalysisContext"]

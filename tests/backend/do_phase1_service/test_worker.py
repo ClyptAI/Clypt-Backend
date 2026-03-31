@@ -16,7 +16,7 @@ class DummyResult:
 
     def model_dump(self, mode: str = "python"):
         return {
-            "contract_version": "v2",
+            "contract_version": "v3",
             "job_id": "job_123",
             "status": "succeeded",
             "source_video": {"source_url": "https://youtube.com/watch?v=x"},
@@ -33,7 +33,7 @@ class DummyResult:
                     "uri": "gs://bucket/visual.json",
                     "source_video": "https://youtube.com/watch?v=x",
                     "video_gcs_uri": "gs://bucket/phase_1/jobs/job_123/source_video.mp4",
-                    "schema_version": "2.0.0",
+                    "schema_version": "3.0.0",
                     "task_type": "person_tracking",
                     "coordinate_space": "absolute_original_frame_xyxy",
                     "geometry_type": "aabb",

@@ -440,10 +440,10 @@ def test_load_gemini_client_uses_vertex_ai_when_configured(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v2")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
     monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
 
     client = _load_gemini_client()
 
     assert client is not None
-    assert calls == [{"vertexai": True, "project": "clypt-v2", "location": "global"}]
+    assert calls == [{"vertexai": True, "project": "clypt-v3", "location": "global"}]

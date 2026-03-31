@@ -3,11 +3,11 @@
 Phase 1: DigitalOcean async job orchestration
 =============================================
 Submits the source URL to the DO Phase 1 service, polls until the job completes,
-then materializes the returned manifest artifacts into the legacy local files
-that downstream phases still consume.
+then materializes the returned manifest artifacts into local v3 ledgers
+that downstream phases consume.
 
 Outputs:
-  - downloads/video.mp4           (compatibility bridge for downstream + Remotion)
+  - downloads/video.mp4
   - outputs/phase_1_visual.json   (tracking data derived from the manifest)
   - outputs/phase_1_audio.json    (transcript data derived from the manifest)
 """
@@ -206,11 +206,6 @@ def ensure_h264_local(video_path: str) -> str:
     return h264_path
 
 
-def _single_shot_change(duration_ms: int) -> list[dict]:
-    end_ms = max(0, int(duration_ms))
-    return [{"start_time_ms": 0, "end_time_ms": end_ms}]
-
-
 def build_phase1_runtime_controls() -> dict:
     """Return the effective phase-1 runtime policy for local contract outputs.
 
@@ -265,8 +260,7 @@ def enrich_visual_ledger_for_downstream(
     *,
     runtime_controls: dict | None = None,
 ) -> dict:
-    """Add backward-compatible visual fields (shot/person/face/object/label blocks)."""
-    tracks = list(phase_1_visual.get("tracks", []))
+    """Attach pipeline-local metadata to canonical v3 visual ledger."""
     w, h, fps_str = probe_video_stream(video_path)
     fps = parse_fps_value(fps_str)
     duration_s = probe_duration_seconds(video_path)
@@ -275,137 +269,21 @@ def enrich_visual_ledger_for_downstream(
     audio_end_ms = int(words[-1]["end_time_ms"]) if words else 0
     duration_ms = max(int(duration_s * 1000), audio_end_ms, 1)
 
-    by_track: dict[str, list[dict]] = {}
-    for t in tracks:
-        tid = str(t.get("track_id", ""))
-        if not tid:
-            continue
-        by_track.setdefault(tid, []).append(t)
-    for tid in list(by_track.keys()):
-        by_track[tid].sort(key=lambda d: int(d.get("frame_idx", -1)))
-
-    def _norm_bbox(t: dict) -> dict:
-        x1 = float(t.get("x1", 0.0))
-        y1 = float(t.get("y1", 0.0))
-        x2 = float(t.get("x2", x1 + 1.0))
-        y2 = float(t.get("y2", y1 + 1.0))
-        if w > 0 and h > 0:
-            return {
-                "left": max(0.0, min(1.0, x1 / w)),
-                "top": max(0.0, min(1.0, y1 / h)),
-                "right": max(0.0, min(1.0, x2 / w)),
-                "bottom": max(0.0, min(1.0, y2 / h)),
-            }
-        return {
-            "left": max(0.0, x1),
-            "top": max(0.0, y1),
-            "right": max(0.0, x2),
-            "bottom": max(0.0, y2),
-        }
-
-    existing_person_detections = list(phase_1_visual.get("person_detections", []))
-    existing_face_detections = list(phase_1_visual.get("face_detections", []))
-    person_detections = []
-    proxy_face_detections = []
-    for idx, (tid, dets) in enumerate(sorted(by_track.items())):
-        ts_objs = []
-        face_ts_objs = []
-        for d in dets:
-            fi = int(d.get("frame_idx", 0))
-            time_ms = int(round((fi / max(1e-6, fps)) * 1000.0))
-            bbox = _norm_bbox(d)
-            ts_objs.append(
-                {
-                    "time_ms": time_ms,
-                    "bounding_box": bbox,
-                    "track_id": tid,
-                    "confidence": float(d.get("confidence", 0.0)),
-                    "source": "person_track",
-                    "provenance": {
-                        "kind": "person_track",
-                        "derived_from": "tracking_tracks",
-                        "track_id": tid,
-                        "frame_idx": fi,
-                    },
-                }
-            )
-            # Head-biased proxy face box from person bbox.
-            bw = max(1e-6, float(bbox["right"] - bbox["left"]))
-            bh = max(1e-6, float(bbox["bottom"] - bbox["top"]))
-            fx1 = bbox["left"] + 0.18 * bw
-            fx2 = bbox["right"] - 0.18 * bw
-            fy1 = bbox["top"] + 0.02 * bh
-            fy2 = bbox["top"] + 0.48 * bh
-            face_ts_objs.append(
-                {
-                    "time_ms": time_ms,
-                    "bounding_box": {
-                        "left": max(0.0, min(1.0, fx1)),
-                        "top": max(0.0, min(1.0, fy1)),
-                        "right": max(0.0, min(1.0, fx2)),
-                        "bottom": max(0.0, min(1.0, fy2)),
-                    },
-                    "track_id": tid,
-                    "confidence": float(d.get("confidence", 0.0)),
-                    "source": "compatibility_bridge",
-                    "provenance": {
-                        "kind": "compatibility_bridge",
-                        "derived_from": "person_track_bbox",
-                        "track_id": tid,
-                        "frame_idx": fi,
-                        "basis": "head_biased_crop_from_body_box",
-                    },
-                }
-            )
-        if not ts_objs:
-            continue
-        person_detections.append(
-            {
-                "confidence": float(sum(float(x.get("confidence", 0.0)) for x in ts_objs) / max(1, len(ts_objs))),
-                "segment_start_ms": int(ts_objs[0]["time_ms"]),
-                "segment_end_ms": int(ts_objs[-1]["time_ms"]),
-                "person_track_index": idx,
-                "track_id": tid,
-                "timestamped_objects": ts_objs,
-                "source": "person_track",
-                "provenance": {
-                    "kind": "person_track",
-                    "derived_from": "tracking_tracks",
-                    "track_id": tid,
-                    "track_count": len(ts_objs),
-                },
-            }
-        )
-        proxy_face_detections.append(
-            {
-                "confidence": float(sum(float(x.get("confidence", 0.0)) for x in face_ts_objs) / max(1, len(face_ts_objs))),
-                "segment_start_ms": int(face_ts_objs[0]["time_ms"]),
-                "segment_end_ms": int(face_ts_objs[-1]["time_ms"]),
-                "face_track_index": idx,
-                "track_id": tid,
-                "timestamped_objects": face_ts_objs,
-                "source": "compatibility_bridge",
-                "provenance": {
-                    "kind": "compatibility_bridge",
-                    "derived_from": "person_track_bbox",
-                    "track_id": tid,
-                    "track_count": len(face_ts_objs),
-                    "basis": "head_biased_crop_from_body_box",
-                },
-            }
-        )
-
     enriched = dict(phase_1_visual)
-    existing_shots = phase_1_visual.get("shot_changes")
-    if isinstance(existing_shots, list) and len(existing_shots) > 0:
-        enriched["shot_changes"] = list(existing_shots)
-    else:
-        # No worker-provided editorial shot timeline is available; preserve
-        # contract shape with a single segment instead of synthetic pseudo windows.
-        enriched["shot_changes"] = _single_shot_change(duration_ms=duration_ms)
-    enriched["person_detections"] = existing_person_detections or person_detections
-    enriched["face_detections"] = existing_face_detections or proxy_face_detections
-    enriched["proxy_face_detections"] = proxy_face_detections
+    for required_key in (
+        "tracks",
+        "shot_changes",
+        "person_detections",
+        "face_detections",
+        "object_tracking",
+        "label_detections",
+    ):
+        value = enriched.get(required_key)
+        if not isinstance(value, list):
+            raise RuntimeError(
+                "DigitalOcean Phase 1 manifest must provide canonical v3 visual lists; "
+                f"missing/invalid key: {required_key}"
+            )
     enriched["object_tracking"] = list(enriched.get("object_tracking", []))
     enriched["label_detections"] = list(enriched.get("label_detections", []))
     enriched["runtime_controls"] = runtime_controls
@@ -422,7 +300,7 @@ def write_visual_ndjson(visual_ledger: dict, path: Path):
     """Serialize phase handoff to NDJSON (header + per-detection records)."""
     header = {
         "record_type": "header",
-        "schema_version": str(visual_ledger.get("schema_version", "2.0.0")),
+        "schema_version": str(visual_ledger.get("schema_version", "3.0.0")),
         "task_type": str(visual_ledger.get("task_type", "person_tracking")),
         "coordinate_space": str(visual_ledger.get("coordinate_space", "absolute_original_frame_xyxy")),
         "geometry_type": str(visual_ledger.get("geometry_type", "aabb")),
@@ -585,10 +463,6 @@ def download_media(url: str) -> tuple[str, str]:
         "phase_2a_nodes.json", "phase_2b_narrative_edges.json",
         "phase_3_embeddings.json", "remotion_payloads_array.json",
         "remotion_payload.json",
-        # Legacy phase naming (cleanup compatibility)
-        "phase_1a_visual.json", "phase_1a_audio.json",
-        "phase_1b_nodes.json", "phase_1c_narrative_edges.json",
-        "phase_2_embeddings.json",
     ):
         p = OUTPUT_DIR / stale
         if p.exists():
@@ -795,10 +669,7 @@ async def wait_for_phase1_manifest(
 
 
 def materialize_phase1_manifest(manifest: Phase1Manifest, *, source_url: str) -> tuple[dict, dict]:
-    # Compatibility bridge: later pipeline phases and Remotion still expect a
-    # local download alongside the JSON ledgers, even though extraction moved to
-    # DigitalOcean jobs.
-    log.info("── Step 3: Local Media Acquisition For Downstream Compatibility ──")
+    log.info("── Step 3: Local Media Acquisition For Downstream ──")
     runtime_controls = build_phase1_runtime_controls()
     video_path, _audio_path = download_media(source_url)
 

@@ -39,17 +39,17 @@ Artifact notes:
 
 ## Manifest Flow
 
-The DO service persists a contract `v2` manifest plus uploaded artifacts. The local pipeline fetches the manifest from the DO API and materializes local copies for downstream compatibility.
+The DO service persists a contract `v3` manifest plus uploaded artifacts. The local pipeline fetches the manifest from the DO API and materializes local copies for downstream compatibility.
 
 ## Infrastructure Summary
 
 | Resource | Service | Purpose |
 |---|---|---|
 | DO Phase 1 endpoint | DigitalOcean | async extraction job target |
-| `clypt-v2` | GCP project | non-extraction cloud resources |
-| `clypt-storage-v2` | Cloud Storage | artifact storage |
-| `clypt-spanner-v2` | Spanner instance | database host |
-| `clypt-graph-db-v2` | Spanner database | graph + vectors |
+| `clypt-v3` | GCP project | non-extraction cloud resources |
+| `clypt-storage-v3` | Cloud Storage | artifact storage |
+| `clypt-spanner-v3` | Spanner instance | database host |
+| `clypt-graph-db-v3` | Spanner database | graph + vectors |
 
 ## Runtime Dependencies
 

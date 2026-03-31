@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS_DIR = ROOT / "outputs"
 VIDEOS_DIR = ROOT / "videos"
 
-PROJECT_ID = "clypt-v2"
+PROJECT_ID = "clypt-v3"
 EMBEDDING_LOCATION = "us-central1"
 EMBEDDING_MODEL = "gemini-embedding-2-preview"
 EMBEDDING_DIM = 768

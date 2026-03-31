@@ -1,111 +1,28 @@
-"""
-Clypt Phase 1 extraction worker definitions.
-
-When legacy serverless wrapper support is explicitly enabled, this module also
-exposes the old remote deployment wrappers. Otherwise the pure Python extraction
-code can be imported and reused by the DigitalOcean worker path.
-"""
+"""Clypt Phase 1 extraction worker definitions (v3-only runtime)."""
 
 import os
 import subprocess
 import time
 
-try:
-    if os.getenv("CLYPT_ENABLE_LEGACY_SERVERLESS_SDK", "0") != "1":
-        raise ImportError("Legacy serverless SDK disabled for the DO runtime path")
-    import modal  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover - exercised implicitly by DO runtime import
-    class _ShimMethod:
-        def __init__(self, fn):
-            self._fn = fn
 
-        def __get__(self, instance, owner):
-            if instance is None:
-                return self
-            return self._fn.__get__(instance, owner)
+class _TrackingVolume:
+    """Shared-volume noop wrapper for non-serverless runtime."""
 
-        def _get_raw_f(self):
-            return self._fn
+    def commit(self) -> None:
+        return None
 
-    def _shim_method(*_args, **_kwargs):
-        def _decorator(fn):
-            return _ShimMethod(fn)
-        return _decorator
+    def reload(self) -> None:
+        return None
 
-    class _ShimVolume:
-        @staticmethod
-        def from_name(*_args, **_kwargs):
-            return _ShimVolume()
 
-        def commit(self):
-            return None
-
-        def reload(self):
-            return None
-
-    class _ShimSecret:
-        @staticmethod
-        def from_dict(*_args, **_kwargs):
-            return _ShimSecret()
-
-    class _ShimImage:
-        @staticmethod
-        def debian_slim(*_args, **_kwargs):
-            return _ShimImage()
-
-        def apt_install(self, *_args, **_kwargs):
-            return self
-
-        def pip_install(self, *_args, **_kwargs):
-            return self
-
-        def run_function(self, *_args, **_kwargs):
-            return self
-
-    class _ShimApp:
-        def __init__(self, name: str):
-            self.name = name
-
-        def cls(self, **_kwargs):
-            def _decorator(cls):
-                cls._get_user_cls = classmethod(lambda klass: klass)
-                return cls
-            return _decorator
-
-    class _ShimCls:
-        @staticmethod
-        def from_name(*_args, **_kwargs):
-            raise RuntimeError("Legacy remote class lookup is unavailable without the optional serverless SDK")
-
-    class _ShimModal:
-        App = _ShimApp
-        Volume = _ShimVolume
-        Secret = _ShimSecret
-        Image = _ShimImage
-        Cls = _ShimCls
-        method = staticmethod(_shim_method)
-        enter = staticmethod(_shim_method)
-
-    modal = _ShimModal()
-
-# ──────────────────────────────────────────────
-# App + Image
-# ──────────────────────────────────────────────
-app = modal.App("clypt-sota-worker")
-TRACKING_VOLUME = modal.Volume.from_name("clypt-phase1-tracking", create_if_missing=True)
-MODEL_DEBUG_SECRET = modal.Secret.from_dict(
-    {
-        "CLYPT_MODEL_DEBUG": "1",
-        "CLYPT_MODEL_DEBUG_EVERY": "10",
-    }
-)
+TRACKING_VOLUME = _TrackingVolume()
 
 ASR_MODEL_NAME = "nvidia/parakeet-tdt-1.1b"
 LRASD_MODEL_PATH = "/root/.cache/clypt/finetuning_TalkSet.model"
 LRASD_REPO_ROOT = "/root/lrasd"
 YOLO_WEIGHTS_PATH = "yolo26m-seg.pt"
 YOLO_MANIFEST_MODEL_NAME = "yolo26m-seg"
-PHASE1_SCHEMA_VERSION = "2.0.0"
+PHASE1_SCHEMA_VERSION = "3.0.0"
 PHASE1_TASK_TYPE = "person_tracking"
 PHASE1_COORDINATE_SPACE = "absolute_original_frame_xyxy"
 PHASE1_GEOMETRY_TYPE = "aabb"
@@ -204,67 +121,10 @@ def download_insightface_model():
         print(f"Warning: could not pre-cache InsightFace model pack ({type(e).__name__}: {e})")
 
 
-clypt_image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .apt_install(
-        "ffmpeg",
-        "cmake",
-        "build-essential",
-        "libgl1",
-        "libglib2.0-0",
-        "libsndfile1",
-    )
-    # Step 1: Core ML deps (cached once torch is resolved)
-    .pip_install(
-        "torch",
-        "torchvision",
-        "torchaudio",
-        "fastapi[standard]",
-        "pydantic",
-        "ultralytics",
-        "lap>=0.5.12",
-        "scikit-learn",
-        "opencv-python-headless",
-        "decord",
-        "insightface",
-        "onnxruntime-gpu",
-        "onnx",
-        "python_speech_features",
-        "mediapipe",
-        "pandas",
-        "scipy",
-        "tqdm",
-        "matplotlib",
-        "imageio",
-        "Pillow",
-        "resampy",
-        "soundfile",
-    )
-    # Step 2: NeMo ASR
-    .pip_install("nemo_toolkit[asr]")
-    # Step 3: Cache model weights at build time
-    .run_function(download_asr_model)
-    .run_function(download_yolo_model)
-    .run_function(download_lrasd_model)
-    .run_function(download_insightface_model)
-)
-
-
-# ──────────────────────────────────────────────
-# GPU Worker (class-based for VRAM persistence)
-# ──────────────────────────────────────────────
-@app.cls(
-    image=clypt_image,
-    gpu="H100",
-    timeout=3600,
-    max_containers=4,
-    min_containers=0,
-    scaledown_window=120,
-    enable_memory_snapshot=False,
-    secrets=[MODEL_DEBUG_SECRET],
-    volumes={"/vol/clypt-chunks": TRACKING_VOLUME},
-)
 class ClyptWorker:
+    @classmethod
+    def _get_user_cls(cls):
+        return cls
 
     @staticmethod
     def _load_lrasd_checkpoint(model, loss_av, ckpt_path: str):
@@ -596,7 +456,7 @@ class ClyptWorker:
                 entries.append(entry)
 
         base_payload: dict[str, object] = {
-            "signal_version": "worker_bbox_v1",
+            "signal_version": "worker_bbox_v3",
             "iou_continuity_proxy": {
                 "mean_iou_consecutive": mean_iou,
                 "pair_count": len(iou_values),
@@ -1841,6 +1701,251 @@ class ClyptWorker:
         return resolved_mappings
 
     @staticmethod
+    def _derive_audio_visual_mappings(
+        *,
+        audio_turn_bindings: list[dict] | None = None,
+        audio_speaker_local_track_map: list[dict],
+        local_to_global_track_id: dict[str, str] | None = None,
+    ) -> list[dict]:
+        """Build audio-speaker to visual-identity mappings from clean turn evidence."""
+        remap = {
+            str(local_tid): str(global_tid)
+            for local_tid, global_tid in dict(local_to_global_track_id or {}).items()
+            if str(local_tid) and str(global_tid)
+        }
+        speaker_evidence: dict[str, list[dict]] = {}
+        for row in audio_turn_bindings or []:
+            speaker_id = str(row.get("speaker_id", "") or "")
+            local_track_id = str(row.get("clean_local_track_id") or row.get("local_track_id") or "")
+            if not speaker_id or not local_track_id:
+                continue
+            if bool(row.get("ambiguous", False)):
+                continue
+            global_track_id = remap.get(local_track_id, local_track_id)
+            confidence = float(
+                row.get("clean_winning_score")
+                if row.get("clean_winning_score") is not None
+                else row.get("winning_score", 0.0)
+                or 0.0
+            )
+            speaker_evidence.setdefault(speaker_id, []).append(
+                {
+                    "visual_identity_id": global_track_id,
+                    "local_track_id": local_track_id,
+                    "confidence": max(0.0, min(1.0, confidence)),
+                    "start_time_ms": int(row.get("start_time_ms", 0) or 0),
+                    "end_time_ms": int(row.get("end_time_ms", 0) or 0),
+                }
+            )
+        if not audio_speaker_local_track_map:
+            synthesized_map: list[dict] = []
+            for speaker_id, edges in sorted(speaker_evidence.items()):
+                if not edges:
+                    continue
+                buckets: dict[str, list[dict]] = {}
+                for edge in edges:
+                    buckets.setdefault(str(edge["local_track_id"]), []).append(edge)
+                ranked = sorted(
+                    buckets.items(),
+                    key=lambda item: (
+                        sum(float(edge.get("confidence", 0.0) or 0.0) for edge in item[1]),
+                        len(item[1]),
+                        str(item[0]),
+                    ),
+                    reverse=True,
+                )
+                if not ranked:
+                    continue
+                best_local_track_id, best_edges = ranked[0]
+                conf = sum(float(edge.get("confidence", 0.0) or 0.0) for edge in best_edges) / max(1, len(best_edges))
+                synthesized_map.append(
+                    {
+                        "speaker_id": speaker_id,
+                        "local_track_id": best_local_track_id,
+                        "support_segments": int(len(best_edges)),
+                        "support_ms": int(
+                            sum(
+                                max(
+                                    0,
+                                    int(edge.get("end_time_ms", 0) or 0)
+                                    - int(edge.get("start_time_ms", 0) or 0),
+                                )
+                                for edge in best_edges
+                            )
+                        ),
+                        "confidence": round(max(0.0, min(1.0, conf)), 3),
+                    }
+                )
+            audio_speaker_local_track_map = synthesized_map
+
+        mappings: list[dict] = []
+        for row in audio_speaker_local_track_map or []:
+            speaker_id = str(row.get("speaker_id", "") or "")
+            local_track_id = str(row.get("local_track_id", "") or "")
+            if not speaker_id or not local_track_id:
+                continue
+            visual_identity_id = remap.get(local_track_id, local_track_id)
+            clean_evidence = [
+                edge
+                for edge in speaker_evidence.get(speaker_id, [])
+                if str(edge.get("visual_identity_id", "")) == visual_identity_id
+            ]
+            candidate_buckets: dict[str, list[dict]] = {}
+            for edge in speaker_evidence.get(speaker_id, []):
+                candidate_buckets.setdefault(str(edge["visual_identity_id"]), []).append(edge)
+
+            candidate_stats: list[dict] = []
+            for candidate_id, edges in sorted(candidate_buckets.items()):
+                confidence_sum = float(sum(float(edge.get("confidence", 0.0) or 0.0) for edge in edges))
+                support_count = len(edges)
+                candidate_stats.append(
+                    {
+                        "visual_identity_id": candidate_id,
+                        "support_count": int(support_count),
+                        "confidence_sum": round(confidence_sum, 3),
+                        "average_confidence": round(confidence_sum / max(1, support_count), 3),
+                    }
+                )
+            candidate_stats.sort(
+                key=lambda item: (
+                    float(item["average_confidence"]),
+                    int(item["support_count"]),
+                    str(item["visual_identity_id"]),
+                ),
+                reverse=True,
+            )
+            top_avg = float(candidate_stats[0]["average_confidence"]) if candidate_stats else 0.0
+            runner_up_avg = float(candidate_stats[1]["average_confidence"]) if len(candidate_stats) > 1 else 0.0
+            top_score_margin = top_avg - runner_up_avg if candidate_stats else 0.0
+            confidence = (
+                top_avg
+                if candidate_stats
+                else float(row.get("confidence", 0.0) or 0.0)
+            )
+            if len(candidate_stats) == 1:
+                confidence = 1.0
+            evidence_edges = tuple(
+                {
+                    "audio_speaker_id": speaker_id,
+                    "visual_identity_id": visual_identity_id,
+                    "confidence": round(float(edge.get("confidence", 0.0) or 0.0), 3),
+                    "support_track_ids": (visual_identity_id,),
+                    "evidence_kind": "clean_span",
+                    "metadata": {
+                        "start_time_ms": int(edge.get("start_time_ms", 0) or 0),
+                        "end_time_ms": int(edge.get("end_time_ms", 0) or 0),
+                    },
+                }
+                for edge in clean_evidence
+            )
+            mappings.append(
+                {
+                    "audio_speaker_id": speaker_id,
+                    "matched_visual_identity_id": visual_identity_id,
+                    "confidence": round(max(0.0, min(1.0, confidence)), 3),
+                    "candidate_visual_identity_ids": (visual_identity_id,),
+                    "evidence_edges": evidence_edges,
+                    "supporting_track_ids": (visual_identity_id,),
+                    "ambiguous": False,
+                    "mapping_strategy": "clean-span-aggregation",
+                    "metadata": {
+                        "candidate_stats": tuple(candidate_stats),
+                        "clean_evidence_count": len(clean_evidence),
+                        "ignored_evidence_count": max(
+                            0,
+                            len(speaker_evidence.get(speaker_id, [])) - len(clean_evidence),
+                        ),
+                        "top_score_margin": round(float(top_score_margin), 3),
+                    },
+                }
+            )
+        return mappings
+
+    @staticmethod
+    def _prepare_span_candidates_v3(spans: list[dict]) -> list[dict]:
+        """Normalize span payloads for v3 assignment decisions."""
+        return [dict(span) for span in spans or []]
+
+    @staticmethod
+    def _build_span_assignments(
+        *,
+        active_speakers_local: list[dict],
+        audio_visual_mappings: list[dict],
+    ) -> list[dict]:
+        mapping_by_speaker = {
+            str(row.get("audio_speaker_id", "") or ""): str(
+                row.get("matched_visual_identity_id", "") or ""
+            )
+            for row in (audio_visual_mappings or [])
+            if str(row.get("audio_speaker_id", "") or "")
+            and str(row.get("matched_visual_identity_id", "") or "")
+        }
+        assignments: list[dict] = []
+        for span in active_speakers_local or []:
+            audio_speaker_ids = tuple(
+                str(sid)
+                for sid in list(span.get("audio_speaker_ids", []) or [])
+                if str(sid)
+            )
+            visible_ids = tuple(
+                str(tid)
+                for tid in list(span.get("visible_track_ids", []) or [])
+                if str(tid)
+            )
+            assigned_ids: list[str] = []
+            offscreen_speakers: list[str] = []
+            unresolved_speakers: list[str] = []
+            for speaker_id in audio_speaker_ids:
+                mapped = mapping_by_speaker.get(speaker_id)
+                if mapped and mapped in visible_ids:
+                    if mapped not in assigned_ids:
+                        assigned_ids.append(mapped)
+                    continue
+                if mapped and mapped not in visible_ids:
+                    offscreen_speakers.append(speaker_id)
+                    continue
+                unresolved_speakers.append(speaker_id)
+
+            overlap = bool(span.get("overlap")) or len(audio_speaker_ids) > 1
+            dominant = assigned_ids[0] if len(assigned_ids) == 1 and not overlap else None
+            decision_source = "overlap_mapping" if overlap else "mapping"
+            require_hard = not assigned_ids and len(visible_ids) > 1 and bool(audio_speaker_ids)
+            hard_candidates = list(span.get("hard_span_candidates", []) or [])
+            if require_hard and hard_candidates:
+                hard_candidates.sort(
+                    key=lambda item: (
+                        float(item.get("mouth_motion_score", 0.0) or 0.0),
+                        float(item.get("face_visibility_score", 0.0) or 0.0),
+                        float(item.get("pose_visibility_score", 0.0) or 0.0),
+                        float(item.get("mapping_confidence", 0.0) or 0.0),
+                    ),
+                    reverse=True,
+                )
+                best_id = str(hard_candidates[0].get("visual_identity_id", "") or "")
+                if best_id:
+                    assigned_ids = [best_id]
+                    dominant = best_id
+                    decision_source = "hard_visual_disambiguation"
+                    require_hard = False
+            if assigned_ids:
+                unresolved_speakers = []
+
+            assignments.append(
+                {
+                    "start_time_ms": int(span.get("start_time_ms", 0) or 0),
+                    "end_time_ms": int(span.get("end_time_ms", 0) or 0),
+                    "audio_speaker_ids": tuple(audio_speaker_ids),
+                    "assigned_visual_identity_ids": tuple(assigned_ids),
+                    "dominant_visual_identity_id": dominant,
+                    "offscreen_audio_speaker_ids": tuple(sorted(set(offscreen_speakers))),
+                    "unresolved_audio_speaker_ids": tuple(sorted(set(unresolved_speakers))),
+                    "require_hard_disambiguation": bool(require_hard),
+                    "decision_source": decision_source,
+                }
+            )
+        return assignments
+
+    @staticmethod
     def _binding_context_turn_pad_ms() -> int:
         return 80
 
@@ -2363,9 +2468,7 @@ class ClyptWorker:
 
     @staticmethod
     def _face_pipeline_segment_frames() -> int:
-        raw = os.getenv("CLYPT_FACE_PIPELINE_SEGMENT_FRAMES", "").strip()
-        if not raw:
-            raw = os.getenv("CLYPT_FACE_LEDGER_SEGMENT_FRAMES", "240").strip()
+        raw = os.getenv("CLYPT_FACE_PIPELINE_SEGMENT_FRAMES", "240").strip()
         try:
             requested = int(raw)
         except Exception:
@@ -2379,18 +2482,11 @@ class ClyptWorker:
             return True
         if raw in {"0", "false", "no", "off"}:
             return False
-        legacy_raw = os.getenv("CLYPT_ANALYSIS_PROXY_ENABLE", "").strip().lower()
-        if legacy_raw in {"1", "true", "yes", "on"}:
-            return True
-        if legacy_raw in {"0", "false", "no", "off"}:
-            return False
         return True
 
     @staticmethod
     def _analysis_proxy_max_long_edge() -> int:
-        raw = os.getenv("CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE", "").strip()
-        if not raw:
-            raw = os.getenv("CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE", "1920").strip()
+        raw = os.getenv("CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE", "1920").strip()
         try:
             requested = int(raw)
         except Exception:
@@ -4100,7 +4196,6 @@ class ClyptWorker:
             print(f"  [LR-ASD DEBUG] forward_call={self._lrasd_debug_calls} b={b} t={t}")
         return av_prob
 
-    @modal.enter()
     def load_model(self):
         """Load Parakeet, YOLO, and LR-ASD into GPU VRAM."""
         import os
@@ -4362,20 +4457,62 @@ class ClyptWorker:
 
         return 0 if torch.cuda.is_available() else "cpu"
 
+    def _emit_runtime_stage_log(
+        self,
+        stage: str,
+        reason_code: str,
+        *,
+        event: str = "runtime_info",
+        decision_source: str = "runtime_policy",
+        **extras,
+    ) -> None:
+        try:
+            from backend.pipeline.phase1.stage_log import emit_stage_log, resolve_phase1_worker_id
+
+            emit_stage_log(
+                job_id=str(getattr(self, "_runtime_log_job_id", "") or ""),
+                stage=stage,
+                event=event,
+                decision_source=decision_source,
+                reason_code=reason_code,
+                elapsed_ms=0,
+                worker_id=resolve_phase1_worker_id(),
+                **extras,
+            )
+        except Exception as exc:
+            print(f"[phase1-runtime-log-fallback] stage={stage} reason={reason_code} err={type(exc).__name__}")
+
+    def _set_runtime_log_job_id(self, job_id: str | None) -> str:
+        prev = str(getattr(self, "_runtime_log_job_id", "") or "")
+        next_job_id = str(job_id or "").strip()
+        self._runtime_log_job_id = next_job_id
+        return prev
+
+    def _restore_runtime_log_job_id(self, previous_job_id: str) -> None:
+        self._runtime_log_job_id = str(previous_job_id or "").strip()
+
     def _select_tracking_mode(self) -> str:
-        requested_mode = os.getenv("CLYPT_TRACKING_MODE", "auto").strip().lower()
+        requested_mode = os.getenv("CLYPT_TRACKING_MODE", "direct").strip().lower()
         if requested_mode in {"direct", "chunked"}:
             return requested_mode
         if requested_mode == "shared_analysis_proxy":
             return requested_mode
         if requested_mode not in {"", "auto"}:
-            print(
-                f"  Warning: unknown CLYPT_TRACKING_MODE={requested_mode!r}; "
-                "falling back to auto"
+            self._emit_runtime_stage_log(
+                "tracking",
+                "unknown_tracking_mode",
+                event="config_warning",
+                tracking_mode=requested_mode,
             )
-        if self._shared_analysis_proxy_enabled():
-            return "shared_analysis_proxy"
-        return "direct" if self._tracking_chunk_workers() == 1 else "chunked"
+            requested_mode = "auto"
+        if requested_mode == "":
+            # Compatibility: an explicitly empty env var behaves like "auto".
+            requested_mode = "auto"
+        if requested_mode == "auto":
+            if self._shared_analysis_proxy_enabled():
+                return "shared_analysis_proxy"
+            return "direct" if self._tracking_chunk_workers() == 1 else "chunked"
+        return "direct"
 
     @staticmethod
     def _scale_detection_geometry(det: dict, scale_x: float, scale_y: float) -> dict:
@@ -4422,9 +4559,12 @@ class ClyptWorker:
                         if source_width >= source_height
                         else f"scale=-2:{max_long_edge}"
                     )
-                    print(
-                        "  Shared analysis proxy: "
-                        f"{source_width}x{source_height} -> long_edge {max_long_edge}px"
+                    self._emit_runtime_stage_log(
+                        "tracking",
+                        "shared_analysis_proxy_prepare",
+                        source_width=int(source_width),
+                        source_height=int(source_height),
+                        max_long_edge=int(max_long_edge),
                     )
                     try:
                         subprocess.run(
@@ -4480,9 +4620,13 @@ class ClyptWorker:
                     analysis_meta = proxy_meta
                     scale_x = proxy_width / max(1.0, float(source_width))
                     scale_y = proxy_height / max(1.0, float(source_height))
-                    print(
-                        "  Shared analysis proxy ready: "
-                        f"{proxy_width}x{proxy_height} (scale_x={scale_x:.3f}, scale_y={scale_y:.3f})"
+                    self._emit_runtime_stage_log(
+                        "tracking",
+                        "shared_analysis_proxy_ready",
+                        proxy_width=int(proxy_width),
+                        proxy_height=int(proxy_height),
+                        scale_x=round(float(scale_x), 4),
+                        scale_y=round(float(scale_y), 4),
                     )
 
         return {
@@ -4510,11 +4654,11 @@ class ClyptWorker:
         }
 
     def _prepare_speaker_binding_video(self, video_path: str) -> tuple[str, float, float]:
-        """Compatibility wrapper around the shared analysis proxy."""
+        """Prepare optional speaker-binding proxy video when enabled."""
         if not self._shared_analysis_proxy_enabled():
             if os.getenv("CLYPT_SPEAKER_BINDING_PROXY_ENABLE", "1") != "1":
                 return video_path, 1.0, 1.0
-            max_long_edge = max(0, int(os.getenv("CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE", "1280")))
+            max_long_edge = self._analysis_proxy_max_long_edge()
             if max_long_edge <= 0:
                 return video_path, 1.0, 1.0
             meta = self._probe_video_meta(video_path)
@@ -4579,9 +4723,13 @@ class ClyptWorker:
                 return video_path, 1.0, 1.0
             scale_x = proxy_width / max(1.0, float(width))
             scale_y = proxy_height / max(1.0, float(height))
-            print(
-                "  Speaker-binding proxy ready: "
-                f"{proxy_width}x{proxy_height} (scale_x={scale_x:.3f}, scale_y={scale_y:.3f})"
+            self._emit_runtime_stage_log(
+                "binding",
+                "speaker_binding_proxy_ready",
+                proxy_width=int(proxy_width),
+                proxy_height=int(proxy_height),
+                scale_x=round(float(scale_x), 4),
+                scale_y=round(float(scale_y), 4),
             )
             return proxy_path, scale_x, scale_y
         context = self._prepare_analysis_video(video_path)
@@ -4600,31 +4748,42 @@ class ClyptWorker:
         """Choose the speaker-binding path for this clip."""
         eval_profile = os.getenv("CLYPT_PHASE1_EVAL_PROFILE", "").strip().lower()
         if eval_profile in {"podcast", "eval", "test"}:
-            print(
-                "  Speaker binding mode=lrasd (eval profile): "
-                f"profile={eval_profile}"
+            self._emit_runtime_stage_log(
+                "binding",
+                "eval_profile_forces_lrasd",
+                eval_profile=eval_profile,
             )
             return "lrasd"
 
-        requested_mode = os.getenv("CLYPT_SPEAKER_BINDING_MODE", "auto").strip().lower()
+        requested_mode = os.getenv("CLYPT_SPEAKER_BINDING_MODE", "lrasd").strip().lower()
         if requested_mode in {"heuristic", "lrasd"}:
             return requested_mode
         if requested_mode == "shared_analysis_proxy":
             return requested_mode
         if requested_mode not in {"", "auto"}:
-            print(
-                f"  Warning: unknown CLYPT_SPEAKER_BINDING_MODE={requested_mode!r}; "
-                "using LR-ASD-first policy (same as auto)"
+            self._emit_runtime_stage_log(
+                "binding",
+                "unknown_speaker_binding_mode",
+                event="config_warning",
+                binding_mode=requested_mode,
             )
+            requested_mode = "auto"
+        if requested_mode == "":
+            # Compatibility: an explicitly empty env var behaves like "auto".
+            requested_mode = "auto"
+        if requested_mode == "auto":
+            if self._shared_analysis_proxy_enabled():
+                return "shared_analysis_proxy"
+            self._emit_runtime_stage_log(
+                "binding",
+                "auto_mode_lrasd_first",
+                requested_mode="auto",
+                tracks=len(tracks),
+                words=len(words),
+            )
+            return "lrasd"
         if self._shared_analysis_proxy_enabled():
             return "shared_analysis_proxy"
-
-        # Wave 1: `auto` does not switch the whole job to heuristic; LR-ASD runs first
-        # and heuristic applies only as a binding-time fallback when LR-ASD yields no result.
-        print(
-            "  Speaker binding mode=lrasd (auto): LR-ASD-first policy; "
-            f"tracks={len(tracks)}, words={len(words)}"
-        )
         return "lrasd"
 
     @staticmethod
@@ -6441,6 +6600,12 @@ class ClyptWorker:
                     for tid in sorted(set(face_tids))
                     if tid in id_map
                 }
+                # Keep propagated/seeded IDs sticky during histogram attachment.
+                for tid, seeded_label in seed_label_by_tid.items():
+                    if tid in face_label_by_tid:
+                        continue
+                    if int(seeded_label) < n_face_clusters:
+                        face_label_by_tid[str(tid)] = int(seeded_label)
 
                 reassigned_hist = 0
                 unattached_hist_group_count = 0
@@ -7383,13 +7548,12 @@ class ClyptWorker:
 
         return bucket_length, (tid, frames, valid_length, visual_batch, audio_np)
 
-    @staticmethod
-    def _lrasd_prep_workers() -> int:
-        raw = os.getenv("CLYPT_LRASD_PREP_WORKERS", "16").strip()
+    def _lrasd_prep_workers(self, prof: dict[str, int | str] | None = None) -> int:
+        raw = os.getenv("CLYPT_LRASD_PREP_WORKERS", str(self._lrasd_prep_workers_default(prof))).strip()
         try:
             value = int(raw)
         except Exception:
-            value = 16
+            value = self._lrasd_prep_workers_default(prof)
         return max(1, min(16, value))
 
     @staticmethod
@@ -7401,6 +7565,71 @@ class ClyptWorker:
             value = 128
         default_floor = max(1, int(prep_workers or 1) * 2)
         return max(default_floor, min(512, value))
+
+    @staticmethod
+    def _gpu_device_profile_name() -> str:
+        from backend.pipeline.phase1.runtime_telemetry import gpu_device_profile_name
+
+        return gpu_device_profile_name()
+
+    def _resolve_lrasd_runtime_profile(self) -> dict[str, int | str]:
+        from backend.pipeline.phase1.runtime_telemetry import resolve_lrasd_runtime_profile
+
+        prof, warning = resolve_lrasd_runtime_profile(
+            profile_raw=str(os.getenv("CLYPT_LRASD_PROFILE", "auto")),
+            gpu_name=self._gpu_device_profile_name(),
+        )
+        if warning:
+            self._emit_runtime_stage_log(
+                "binding",
+                "unknown_lrasd_profile",
+                event="config_warning",
+                profile=str(os.getenv("CLYPT_LRASD_PROFILE", "")),
+            )
+        return prof
+
+    def _lrasd_batch_size(self, prof: dict[str, int | str] | None = None) -> int:
+        prof = prof or self._resolve_lrasd_runtime_profile()
+        raw = os.getenv("CLYPT_LRASD_BATCH_SIZE", str(prof["batch_size"])).strip()
+        try:
+            value = int(raw)
+        except Exception:
+            value = int(prof["batch_size"])
+        return max(4, min(96, value))
+
+    def _lrasd_max_inflight(self, prof: dict[str, int | str] | None = None) -> int:
+        prof = prof or self._resolve_lrasd_runtime_profile()
+        raw = os.getenv("CLYPT_LRASD_MAX_INFLIGHT", str(prof["max_inflight"])).strip()
+        try:
+            value = int(raw)
+        except Exception:
+            value = int(prof["max_inflight"])
+        return max(1, min(6, value))
+
+    def _lrasd_prep_workers_default(self, prof: dict[str, int | str] | None = None) -> int:
+        prof = prof or self._resolve_lrasd_runtime_profile()
+        return int(prof["prep_workers"])
+
+    @staticmethod
+    def _gpu_telemetry_snapshot() -> dict[str, float] | None:
+        from backend.pipeline.phase1.runtime_telemetry import gpu_telemetry_snapshot
+
+        return gpu_telemetry_snapshot()
+
+    @classmethod
+    def _gpu_stage_window_metrics(
+        cls,
+        stage_prefix: str,
+        started: dict[str, float] | None,
+        ended: dict[str, float] | None,
+    ) -> dict[str, float | int]:
+        from backend.pipeline.phase1.runtime_telemetry import gpu_stage_window_metrics
+
+        return gpu_stage_window_metrics(
+            stage_prefix=stage_prefix,
+            started=started,
+            ended=ended,
+        )
 
     @staticmethod
     def _lrasd_pending_bucket_counts(
@@ -7666,12 +7895,33 @@ class ClyptWorker:
                     "LR-ASD GPU decode was requested but binding video initialization failed "
                     f"({type(e).__name__}: {e})"
                 ) from e
-            print(
-                "  Warning: could not open video for LR-ASD binding "
-                f"({type(e).__name__}: {e})"
+            self._emit_runtime_stage_log(
+                "binding",
+                "lrasd_video_open_failed",
+                decision_source="lrasd",
+                event="stage_warning",
+                error_type=type(e).__name__,
+                error=str(e),
             )
             return None
-        print(f"  LR-ASD decode backend: {decode_backend}")
+        self._emit_runtime_stage_log(
+            "binding",
+            "decode_backend",
+            decision_source="lrasd",
+            decode_backend=str(decode_backend),
+        )
+        lrasd_gpu_start = None
+        lrasd_gpu_metrics_emitted = False
+
+        def _finalize_lrasd_gpu_metrics() -> None:
+            nonlocal lrasd_gpu_metrics_emitted
+            if lrasd_gpu_metrics_emitted:
+                return
+            lrasd_gpu_end = self._gpu_telemetry_snapshot()
+            self._last_speaker_binding_metrics.update(
+                self._gpu_stage_window_metrics("lrasd_stage", lrasd_gpu_start, lrasd_gpu_end)
+            )
+            lrasd_gpu_metrics_emitted = True
 
         fps = float(vr.get_avg_fps() or 0.0)
         if fps <= 0.0:
@@ -7714,9 +7964,13 @@ class ClyptWorker:
             existing_binding_metrics.update(lrasd_metrics)
         else:
             self._last_speaker_binding_metrics = dict(lrasd_metrics)
-        print(
-            "  Canonical face stream: "
-            f"{len(canonical_face_boxes)}/{needed_face_boxes}={canonical_coverage:.1%} coverage"
+        self._emit_runtime_stage_log(
+            "binding",
+            "canonical_face_stream_coverage",
+            decision_source="lrasd",
+            canonical_face_stream_boxes=int(len(canonical_face_boxes)),
+            canonical_face_stream_needed_boxes=int(needed_face_boxes),
+            canonical_face_stream_coverage=round(float(canonical_coverage), 4),
         )
         raw_audio_turns = self._serialize_audio_speaker_turns(
             (analysis_context or {}).get("audio_speaker_turns")
@@ -7745,9 +7999,12 @@ class ClyptWorker:
             }
         )
         self._last_lrasd_candidate_debug = dict(lrasd_candidate_debug)
-        print(
-            "  LR-ASD candidate pruning: "
-            f"eligible={len(eligible_lrasd_track_ids)}/{len(track_to_dets)}"
+        self._emit_runtime_stage_log(
+            "binding",
+            "candidate_pruning",
+            decision_source="lrasd",
+            eligible_tracks=int(len(eligible_lrasd_track_ids)),
+            total_tracks=int(len(track_to_dets)),
         )
         selected_turn_candidates, lrasd_turn_candidate_debug = self._select_lrasd_turn_topk_track_ids(
             audio_speaker_turns=audio_speaker_turns,
@@ -7777,17 +8034,21 @@ class ClyptWorker:
             )
             top_k_value = self._lrasd_topk_candidates_per_turn()
             if top_k_value > 0:
-                print(
-                    "  LR-ASD turn top-k: "
-                    f"top_k={top_k_value}, "
-                    f"turns={len(selected_turn_candidates)}, "
-                    f"selected_tracks={len(selected_turn_track_union)}"
+                self._emit_runtime_stage_log(
+                    "binding",
+                    "turn_topk_enabled",
+                    decision_source="lrasd",
+                    top_k=int(top_k_value),
+                    turns=int(len(selected_turn_candidates)),
+                    selected_tracks=int(len(selected_turn_track_union)),
                 )
             else:
-                print(
-                    "  LR-ASD turn top-k: disabled, "
-                    f"turns={len(selected_turn_candidates)}, "
-                    f"selected_tracks={len(selected_turn_track_union)}"
+                self._emit_runtime_stage_log(
+                    "binding",
+                    "turn_topk_disabled",
+                    decision_source="lrasd",
+                    turns=int(len(selected_turn_candidates)),
+                    selected_tracks=int(len(selected_turn_track_union)),
                 )
         audio_feature_cache_path = binding_video_path.replace(".mp4", "_lrasd_features.npz")
         full_audio_features = self._load_or_build_lrasd_audio_features(
@@ -7803,12 +8064,13 @@ class ClyptWorker:
         chunk_size = 120
         min_chunk_frames = 20
         # Moderate batching + optional CPU/GPU overlap on a single GPU.
-        lrasd_batch_size = max(4, min(64, int(os.getenv("CLYPT_LRASD_BATCH_SIZE", "32"))))
+        lrasd_profile = self._resolve_lrasd_runtime_profile()
+        lrasd_batch_size = self._lrasd_batch_size(lrasd_profile)
         enable_lrasd_overlap = os.getenv("CLYPT_LRASD_PIPELINE_OVERLAP", "1") == "1"
-        max_inflight = max(1, min(4, int(os.getenv("CLYPT_LRASD_MAX_INFLIGHT", "4"))))
+        max_inflight = self._lrasd_max_inflight(lrasd_profile)
         if not enable_lrasd_overlap:
             max_inflight = 1
-        prep_workers = self._lrasd_prep_workers()
+        prep_workers = self._lrasd_prep_workers(lrasd_profile)
         prep_queue_limit = self._lrasd_prep_queue_limit(prep_workers)
         contiguous_frame_gap = 4
         interpolation_gap = 5
@@ -7817,10 +8079,26 @@ class ClyptWorker:
         min_lrasd_prob = 0.15
         min_lrasd_assign_ratio = 0.15
         min_body_fallback_score = 0.62
-        print(
-            "  LR-ASD pipeline: "
-            f"batch_size={lrasd_batch_size}, overlap={'on' if enable_lrasd_overlap else 'off'}, "
-            f"max_inflight={max_inflight}, prep_workers={prep_workers}, prep_queue={prep_queue_limit}"
+        self._emit_runtime_stage_log(
+            "binding",
+            "pipeline_tuning",
+            decision_source="lrasd",
+            profile=str(lrasd_profile.get("profile") or "unknown"),
+            batch_size=int(lrasd_batch_size),
+            overlap_enabled=bool(enable_lrasd_overlap),
+            max_inflight=int(max_inflight),
+            prep_workers=int(prep_workers),
+            prep_queue=int(prep_queue_limit),
+        )
+        self._last_speaker_binding_metrics.update(
+            {
+                "lrasd_runtime_profile": str(lrasd_profile.get("profile") or "unknown"),
+                "lrasd_runtime_gpu_name": str(lrasd_profile.get("gpu_name") or "unknown"),
+                "lrasd_batch_size": int(lrasd_batch_size),
+                "lrasd_max_inflight": int(max_inflight),
+                "lrasd_prep_workers": int(prep_workers),
+                "lrasd_pipeline_overlap_enabled": bool(enable_lrasd_overlap),
+            }
         )
 
         # Use speech timing to skip obviously irrelevant chunks.
@@ -8081,17 +8359,23 @@ class ClyptWorker:
 
         def _log_lrasd_progress(prefix: str):
             pending_buckets = self._lrasd_pending_bucket_counts(pending_by_t)
-            print(
-                f"  {prefix}: "
-                f"prepared={prepared_chunks}, "
-                f"inferred={scored_chunks}, "
-                f"track_windows={eligible_chunk_counter}/{max(total_chunks, 1)}, "
-                f"prep_queue_depth={len(prep_futures)}, "
-                f"pending_buckets={pending_buckets}, "
-                f"inflight_batches={len(inflight_futures)}, "
-                f"scored_tracks={len(scored_track_ids)}"
+            self._emit_runtime_stage_log(
+                "binding",
+                "progress",
+                decision_source="lrasd",
+                phase=str(prefix),
+                prepared_chunks=int(prepared_chunks),
+                inferred_chunks=int(scored_chunks),
+                track_windows_total=int(max(total_chunks, 1)),
+                track_windows_seen=int(eligible_chunk_counter),
+                prep_queue_depth=int(len(prep_futures)),
+                pending_bucket_count=int(len(pending_buckets)),
+                pending_buckets=dict(pending_buckets),
+                inflight_batches=int(len(inflight_futures)),
+                scored_tracks=int(len(scored_track_ids)),
             )
 
+        lrasd_gpu_start = self._gpu_telemetry_snapshot()
         try:
             prep_seq = 0
             for tid in sorted(eligible_lrasd_track_ids):
@@ -8200,33 +8484,50 @@ class ClyptWorker:
                 prep_executor.shutdown(wait=True, cancel_futures=False)
             if infer_executor is not None:
                 infer_executor.shutdown(wait=True, cancel_futures=False)
+            _finalize_lrasd_gpu_metrics()
 
         if not asd_scores:
-            print("  LR-ASD produced no valid frame scores")
+            self._emit_runtime_stage_log(
+                "binding",
+                "no_valid_frame_scores",
+                decision_source="lrasd",
+                event="stage_warning",
+            )
             return None
         if self.model_debug:
             total_face_events = face_hits + face_misses
             hit_rate = (face_hits / total_face_events) if total_face_events > 0 else 0.0
-            print(
-                "  [LR-ASD DEBUG] face crop stats: "
-                f"hits={face_hits}, misses={face_misses}, hit_rate={hit_rate:.1%}, "
-                f"flushes={flush_counter}, scored_chunks={scored_chunks}"
+            self._emit_runtime_stage_log(
+                "binding",
+                "debug_face_crop_stats",
+                decision_source="lrasd",
+                event="debug",
+                hits=int(face_hits),
+                misses=int(face_misses),
+                hit_rate=round(float(hit_rate), 4),
+                flushes=int(flush_counter),
+                scored_chunks=int(scored_chunks),
             )
 
         score_vals = np.asarray(list(asd_scores.values()), dtype=np.float32)
-        print(
-            "  LR-ASD score stats: "
-            f"min={float(np.min(score_vals)):.3f}, "
-            f"p10={float(np.percentile(score_vals, 10)):.3f}, "
-            f"p50={float(np.percentile(score_vals, 50)):.3f}, "
-            f"p90={float(np.percentile(score_vals, 90)):.3f}, "
-            f"max={float(np.max(score_vals)):.3f}"
+        self._emit_runtime_stage_log(
+            "binding",
+            "score_stats",
+            decision_source="lrasd",
+            min_score=round(float(np.min(score_vals)), 4),
+            p10_score=round(float(np.percentile(score_vals, 10)), 4),
+            p50_score=round(float(np.percentile(score_vals, 50)), 4),
+            p90_score=round(float(np.percentile(score_vals, 90)), 4),
+            max_score=round(float(np.max(score_vals)), 4),
         )
         score_spread = float(np.percentile(score_vals, 90) - np.percentile(score_vals, 50))
         min_assignment_margin = max(0.004, 0.18 * score_spread)
-        print(
-            "  LR-ASD assignment gates: "
-            f"min_prob={min_lrasd_prob:.3f}, margin={min_assignment_margin:.4f}"
+        self._emit_runtime_stage_log(
+            "binding",
+            "assignment_gates",
+            decision_source="lrasd",
+            min_prob=round(float(min_lrasd_prob), 4),
+            min_margin=round(float(min_assignment_margin), 6),
         )
 
         frame_keys = sorted(frame_to_dets.keys())
@@ -8715,10 +9016,16 @@ class ClyptWorker:
                 if prior_candidate is None:
                     audio_prior_abstentions += 1
                     _bc2 = scored_candidates[0]
+                    # If the diarization turn owner is off-screen/unmapped in visual tracks,
+                    # treat this as a turn-level abstention (not a mismatch with on-screen priors).
+                    prior_owner_offscreen = bool(prior_local_tid) and (
+                        str(prior_local_tid) not in track_to_dets
+                    )
+                    abstention_reason = "audio_turn_abstain" if prior_owner_offscreen else "audio_prior_mismatch"
                     _cal_b = calibrate_lrasd_word_confidence(
                         best_prob=_bc2.get("prob"),
-                        best_body=float(_bc2["body_prior"]),
-                        top_margin=visual_margin,
+                        best_body=(0.0 if prior_owner_offscreen else float(_bc2["body_prior"])),
+                        top_margin=None if prior_owner_offscreen else visual_margin,
                         min_assignment_margin=min_assignment_margin,
                     )
                     _append_speaker_candidate_debug(
@@ -8732,11 +9039,11 @@ class ClyptWorker:
                         ambiguous=False,
                         top_margin=visual_margin,
                         calibrated_confidence=_cal_b,
-                        abstention_reason="audio_prior_mismatch",
+                        abstention_reason=abstention_reason,
                     )
                     _mark_protected_unknown(w)
                     w["calibrated_confidence"] = _cal_b
-                    w["abstention_reason"] = "audio_prior_mismatch"
+                    w["abstention_reason"] = abstention_reason
                     continue
                 strong_turn_owner = bool(
                     not bool(active_turn_binding.get("ambiguous", False))
@@ -8913,14 +9220,24 @@ class ClyptWorker:
         if cur:
             bindings.append(cur)
 
-        print(
-            "  LR-ASD word matching: "
-            f"with_frame={words_with_frame}/{len(words)}, "
-            f"with_dets={words_with_dets}/{len(words)}, "
-            f"with_scored_candidate={words_with_scored_candidate}/{len(words)}"
+        self._emit_runtime_stage_log(
+            "binding",
+            "word_matching",
+            decision_source="lrasd",
+            words_with_frame=int(words_with_frame),
+            words_with_dets=int(words_with_dets),
+            words_with_scored_candidate=int(words_with_scored_candidate),
+            total_words=int(len(words)),
         )
         assigned_ratio = assigned / max(1, len(words))
-        print(f"  LR-ASD assignment ratio: {assigned}/{len(words)}={assigned_ratio:.1%}")
+        self._emit_runtime_stage_log(
+            "binding",
+            "assignment_ratio",
+            decision_source="lrasd",
+            assigned_words=int(assigned),
+            total_words=int(len(words)),
+            assigned_ratio=round(float(assigned_ratio), 4),
+        )
         effective_candidate_track_count = len(runtime_relevant_eligible_track_ids)
         insufficient_track_support = (
             len(scored_track_ids) < 2
@@ -8928,25 +9245,36 @@ class ClyptWorker:
         )
         if assigned_ratio < min_lrasd_assign_ratio or insufficient_track_support:
             if audio_prior_abstentions > 0 and assigned == 0:
-                print(
-                    "  LR-ASD preserved unknown assignments for off-screen audio turns; "
-                    "skipping heuristic fallback."
+                self._emit_runtime_stage_log(
+                    "binding",
+                    "preserved_unknown_offscreen_audio",
+                    decision_source="lrasd",
+                    event="stage_info",
+                    audio_prior_abstentions=int(audio_prior_abstentions),
                 )
                 _clear_protected_unknown_markers(words)
                 return []
-            print(
-                "  LR-ASD confidence too low for final binding "
-                f"(assigned_ratio={assigned_ratio:.1%}, scored_tracks={len(scored_track_ids)}, "
-                f"eligible_tracks={len(eligible_lrasd_track_ids)}, "
-                f"effective_candidate_tracks={effective_candidate_track_count}); "
-                "falling back to heuristic binder."
+            self._emit_runtime_stage_log(
+                "binding",
+                "fallback_to_heuristic_low_confidence",
+                decision_source="lrasd",
+                event="stage_warning",
+                assigned_ratio=round(float(assigned_ratio), 4),
+                scored_tracks=int(len(scored_track_ids)),
+                eligible_tracks=int(len(eligible_lrasd_track_ids)),
+                effective_candidate_tracks=int(effective_candidate_track_count),
             )
             return None
 
-        print(
-            "LR-ASD binding complete: "
-            f"{assigned}/{len(words)} words assigned, "
-            f"{len(scored_track_ids)} scored tracks, {len(bindings)} segments"
+        self._emit_runtime_stage_log(
+            "binding",
+            "lrasd_binding_complete",
+            decision_source="lrasd",
+            event="stage_end",
+            assigned_words=int(assigned),
+            total_words=int(len(words)),
+            scored_tracks=int(len(scored_track_ids)),
+            segment_count=int(len(bindings)),
         )
         _clear_protected_unknown_markers(words)
         return bindings
@@ -8994,9 +9322,13 @@ class ClyptWorker:
         try:
             vr = VideoReader(read_path, ctx=cpu(0))
         except Exception as e:
-            print(
-                "  Warning: could not open video for speaker binding "
-                f"({type(e).__name__}: {e})"
+            self._emit_runtime_stage_log(
+                "binding",
+                "heuristic_video_open_failed",
+                decision_source="heuristic",
+                event="stage_warning",
+                error_type=type(e).__name__,
+                error=str(e),
             )
             return []
 
@@ -9244,9 +9576,14 @@ class ClyptWorker:
         if cur:
             bindings.append(cur)
 
-        print(
-            "Heuristic speaker binding complete: "
-            f"{assigned}/{len(words)} words assigned, {len(bindings)} segments"
+        self._emit_runtime_stage_log(
+            "binding",
+            "heuristic_binding_complete",
+            decision_source="heuristic",
+            event="stage_end",
+            assigned_words=int(assigned),
+            total_words=int(len(words)),
+            segment_count=int(len(bindings)),
         )
         return bindings
 
@@ -9324,7 +9661,12 @@ class ClyptWorker:
 
             speaker_metrics["speaker_binding_fallback_used"] = True
             speaker_metrics["speaker_binding_resolved_mode"] = "heuristic"
-        print("Running fallback speaker binding heuristic...")
+        self._emit_runtime_stage_log(
+            "binding",
+            "heuristic_fallback_start",
+            decision_source="pipeline",
+            event="stage_start",
+        )
         bindings = self._run_speaker_binding_heuristic(
             video_path,
             tracks,
@@ -9366,15 +9708,23 @@ class ClyptWorker:
         if max_wallclock_s > 0.0:
             gate_ok = gate_ok and (wc_v <= max_wallclock_s)
         gate_ok = gate_ok and (schema_v >= min_schema_pass)
-        print(
-            "  Rollout gates: "
-            f"idf1_proxy={idf1_v:.3f}>={min_idf1:.3f}, "
-            f"mota_proxy={mota_v:.3f}>={min_mota:.3f}, "
-            f"frag={frag_v:.3f}<={max_frag:.3f}, "
-            f"throughput={thr_v:.2f}>={min_thr_fps:.2f}, "
-            f"wallclock={wc_v:.1f}<={max_wallclock_s:.1f}, "
-            f"schema_pass={schema_v:.3f}>={min_schema_pass:.3f} -> "
-            f"{'PASS' if gate_ok else 'FAIL'}"
+        self._emit_runtime_stage_log(
+            "tracking",
+            "rollout_gates_evaluated",
+            decision_source="runtime_policy",
+            idf1_proxy=round(float(idf1_v), 4),
+            idf1_min=round(float(min_idf1), 4),
+            mota_proxy=round(float(mota_v), 4),
+            mota_min=round(float(min_mota), 4),
+            fragmentation=round(float(frag_v), 4),
+            fragmentation_max=round(float(max_frag), 4),
+            throughput_fps=round(float(thr_v), 3),
+            throughput_min=round(float(min_thr_fps), 3),
+            tracking_wallclock_s=round(float(wc_v), 3),
+            tracking_wallclock_max=round(float(max_wallclock_s), 3),
+            schema_pass_rate=round(float(schema_v), 4),
+            schema_pass_min=round(float(min_schema_pass), 4),
+            gate_ok=bool(gate_ok),
         )
         if gate_enforce and not gate_ok:
             raise RuntimeError("Rollout gates failed for tracking quality/continuity")
@@ -9437,6 +9787,9 @@ class ClyptWorker:
             video_fps=cluster_video_fps,
         )
         merge_stage_metrics(metrics, reid_metrics)
+        metrics["identity_track_count_after_reid_merge"] = len(
+            {str(track.get("track_id", "")) for track in tracks if str(track.get("track_id", ""))}
+        )
 
         precluster_tracks = [dict(track) for track in tracks]
         _, track_to_dets = self._build_track_indexes(tracks)
@@ -9498,6 +9851,7 @@ class ClyptWorker:
                 face_video_path = analysis_video_path_for_faces(phase1_decode_ctx)
         except Exception:
             face_video_path = video_path
+        face_gpu_start = self._gpu_telemetry_snapshot()
         face_detections, person_detections, face_metrics = self._build_visual_detection_ledgers(
             video_path=face_video_path,
             tracks=tracks,
@@ -9505,7 +9859,9 @@ class ClyptWorker:
             track_to_dets=track_to_dets,
             track_identity_features=clustered_track_identity_features,
         )
+        face_gpu_end = self._gpu_telemetry_snapshot()
         metrics.update(face_metrics)
+        metrics.update(self._gpu_stage_window_metrics("face_stage", face_gpu_start, face_gpu_end))
 
         # Step 4: Speaker binding
         print("[Phase 1] Step 4/4: Running speaker binding...")
@@ -9535,6 +9891,7 @@ class ClyptWorker:
             worker_id=worker_id,
         )
         binding_inner_started_at = time.perf_counter()
+        binding_gpu_start = self._gpu_telemetry_snapshot()
         speaker_bindings = self._run_speaker_binding(
             video_path,
             audio_path,
@@ -9546,6 +9903,7 @@ class ClyptWorker:
             analysis_context=binding_analysis_context,
             track_id_remap=cluster_id_remap,
         )
+        binding_gpu_end = self._gpu_telemetry_snapshot()
         binding_inner_elapsed_ms = int((time.perf_counter() - binding_inner_started_at) * 1000.0)
         last_binding_mode = getattr(self, "_last_speaker_binding_metrics", None)
         bind_src = "pipeline"
@@ -9572,7 +9930,9 @@ class ClyptWorker:
         speaker_follow_bindings = self._build_speaker_follow_bindings(speaker_bindings)
         speaker_bindings_local: list[dict] = []
         speaker_follow_bindings_local: list[dict] = []
-        audio_speaker_local_track_map: list[dict] = []
+        audio_speaker_local_track_map: list[dict] = self._build_audio_speaker_local_track_map(
+            getattr(self, "_last_audio_turn_bindings", []),
+        )
         active_speakers_local: list[dict] = self._build_active_speakers_local(
             audio_speaker_turns=audio_speaker_turns,
             audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
@@ -9600,17 +9960,61 @@ class ClyptWorker:
             speaker_follow_bindings_local = self._build_speaker_follow_bindings(
                 speaker_bindings_local
             )
-            audio_speaker_local_track_map = self._build_audio_speaker_local_track_map(
-                getattr(self, "_last_audio_turn_bindings", []),
+        audio_visual_mappings = self._derive_audio_visual_mappings(
+            audio_turn_bindings=getattr(self, "_last_audio_turn_bindings", []),
+            audio_speaker_local_track_map=audio_speaker_local_track_map,
+            local_to_global_track_id=cluster_id_remap,
+        )
+        enriched_spans = self._prepare_span_candidates_v3(active_speakers_local)
+        span_assignments = self._build_span_assignments(
+            active_speakers_local=enriched_spans,
+            audio_visual_mappings=audio_visual_mappings,
+        )
+        span_assignments_sorted = sorted(
+            [dict(span) for span in span_assignments],
+            key=lambda item: (int(item.get("start_time_ms", 0)), int(item.get("end_time_ms", 0))),
+        )
+        for word in words:
+            ws = int(word.get("start_time_ms", 0) or 0)
+            we = int(word.get("end_time_ms", ws) or ws)
+            matched_span = None
+            for span in span_assignments_sorted:
+                span_start = int(span.get("start_time_ms", 0) or 0)
+                span_end = int(span.get("end_time_ms", span_start) or span_start)
+                if we > span_start and ws < span_end:
+                    matched_span = span
+                    break
+            if not matched_span:
+                continue
+            assigned_ids = [
+                str(track_id)
+                for track_id in list(matched_span.get("assigned_visual_identity_ids", ()) or ())
+                if str(track_id)
+            ]
+            word["speaker_track_ids"] = assigned_ids
+            word["speaker_track_id"] = matched_span.get("dominant_visual_identity_id")
+            word["offscreen_audio_speaker_ids"] = [
+                str(sid)
+                for sid in list(matched_span.get("offscreen_audio_speaker_ids", ()) or ())
+                if str(sid)
+            ]
+            word["speaker_assignment_source"] = str(
+                matched_span.get("decision_source", "") or "mapping"
+            )
+            word["requires_hard_disambiguation"] = bool(
+                matched_span.get("require_hard_disambiguation", False)
             )
         speaker_binding_elapsed_s = time.perf_counter() - speaker_binding_started_at
         metrics["speaker_binding_wallclock_s"] = round(speaker_binding_elapsed_s, 3)
         metrics["speaker_follow_binding_segment_count"] = len(speaker_follow_bindings)
         metrics["speaker_binding_local_segment_count"] = len(speaker_bindings_local)
         metrics["speaker_follow_binding_local_segment_count"] = len(speaker_follow_bindings_local)
+        metrics["audio_visual_mapping_count"] = len(audio_visual_mappings)
+        metrics["span_assignment_count"] = len(span_assignments_sorted)
         last_binding_metrics = getattr(self, "_last_speaker_binding_metrics", None)
         if isinstance(last_binding_metrics, dict):
             metrics.update(last_binding_metrics)
+        metrics.update(self._gpu_stage_window_metrics("binding_stage", binding_gpu_start, binding_gpu_end))
         assigned_words = sum(1 for word in words if word.get("speaker_track_id"))
         metrics["speaker_binding_assignment_ratio"] = round(
             float(assigned_words / max(1, len(words))),
@@ -9629,6 +10033,69 @@ class ClyptWorker:
             video_fps=float(cluster_video_fps or 25.0),
             duration_ms=int(cluster_duration_ms),
         )
+        visual_identities: list[dict] = []
+        remap = {
+            str(old_tid): str(new_tid)
+            for old_tid, new_tid in dict(cluster_id_remap or {}).items()
+            if str(old_tid) and str(new_tid)
+        }
+        track_ids_in_output = sorted(
+            {
+                str(track.get("track_id", ""))
+                for track in tracks
+                if str(track.get("track_id", ""))
+            }
+        )
+        for identity_id in track_ids_in_output:
+            confidence_candidates: list[float] = []
+            for track in tracks:
+                if str(track.get("track_id", "")) != identity_id:
+                    continue
+                confidence_candidates.append(float(track.get("confidence", 0.0) or 0.0))
+            feature = (
+                clustered_track_identity_features.get(identity_id, {})
+                if isinstance(clustered_track_identity_features, dict)
+                else {}
+            )
+            if isinstance(feature, dict):
+                confidence_candidates.append(float(feature.get("confidence", 0.0) or 0.0))
+            matched_face_track_ids = []
+            if isinstance(face_track_features, dict):
+                for face_track_id, face_feature in face_track_features.items():
+                    if not isinstance(face_feature, dict):
+                        continue
+                    dominant = str(face_feature.get("dominant_track_id", "") or "")
+                    dominant_global = remap.get(dominant, dominant)
+                    if dominant_global == identity_id:
+                        matched_face_track_ids.append(str(face_track_id))
+            source_counts = {
+                "tracks": 1,
+                "track_identity_features": 1 if isinstance(feature, dict) and feature else 0,
+                "face_track_features": len(matched_face_track_ids),
+            }
+            sources = tuple(
+                source
+                for source in ("face_track_features", "track_identity_features", "tracks")
+                if source_counts.get(source, 0) > 0
+            )
+            visual_identities.append(
+                {
+                    "identity_id": identity_id,
+                    "confidence": round(max(confidence_candidates) if confidence_candidates else 0.0, 3),
+                    "track_ids": (identity_id,),
+                    "face_track_ids": tuple(sorted(set(matched_face_track_ids))),
+                    "person_track_ids": (identity_id,),
+                    "evidence_edge_ids": (),
+                    "metadata": {
+                        "track_count": 1,
+                        "person_track_count": 1,
+                        "face_track_count": len(set(matched_face_track_ids)),
+                        "source_counts": source_counts,
+                        "sources": sources,
+                    },
+                }
+            )
+        metrics["visual_identity_count"] = len(visual_identities)
         phase_1_visual = {
             "source_video": youtube_url,
             "schema_version": PHASE1_SCHEMA_VERSION,
@@ -9640,6 +10107,7 @@ class ClyptWorker:
             "tracks": tracks,
             "face_detections": face_detections,
             "person_detections": person_detections,
+            "visual_identities": visual_identities,
             "shot_changes": shot_changes,
             "mask_stability_signals": mask_stability_signals,
         }
@@ -9653,7 +10121,16 @@ class ClyptWorker:
             "audio_speaker_turns": audio_speaker_turns,
             "speaker_candidate_debug": getattr(self, "_last_speaker_candidate_debug", []),
             "speaker_follow_bindings": speaker_follow_bindings,
-            "active_speakers_local": active_speakers_local,
+            "audio_visual_mappings": audio_visual_mappings,
+            "span_assignments": span_assignments_sorted,
+            "active_speakers_local": [
+                {
+                    key: value
+                    for key, value in dict(span).items()
+                    if key != "hard_span_candidates"
+                }
+                for span in enriched_spans
+            ],
             "overlap_follow_decisions": overlap_follow_decisions,
         }
         if self._local_clip_bindings_enabled():
@@ -9666,12 +10143,8 @@ class ClyptWorker:
             "status": "success",
             "phase_1_visual": phase_1_visual,
             "phase_1_audio": phase_1_audio,
-            # Backward compatibility for older clients still expecting 1A keys.
-            "phase_1a_visual": phase_1_visual,
-            "phase_1a_audio": phase_1_audio,
         }
 
-    @modal.method()
     def stage_video_for_tracking(self, video_bytes: bytes) -> dict:
         """Persist video bytes to volume, normalize codec, and return chunk plan."""
         import os
@@ -9712,7 +10185,6 @@ class ClyptWorker:
         )
         return manifest
 
-    @modal.method()
     def run_asr_only(self, audio_wav_bytes: bytes) -> list[dict]:
         """Run ASR-only path for distributed fan-out workflow."""
         import os
@@ -9729,7 +10201,6 @@ class ClyptWorker:
             if os.path.exists(audio_path):
                 os.remove(audio_path)
 
-    @modal.method()
     def track_chunk_from_staged(
         self,
         job_id: str,
@@ -9747,13 +10218,11 @@ class ClyptWorker:
         os.makedirs(chunk_dir, exist_ok=True)
         return self._track_single_chunk(video_path, meta, chunk, tracker_cfg, chunk_dir)
 
-    @modal.method()
     def stitch_tracking_chunks(self, chunk_results: list[dict], fps: float) -> dict:
         """Stitch distributed chunk outputs into global track IDs."""
         tracks, metrics = self._stitch_chunk_tracks(chunk_results, fps=fps)
         return {"tracks": tracks, "tracking_metrics": metrics}
 
-    @modal.method()
     def finalize_extraction(
         self,
         audio_wav_bytes: bytes,
@@ -9775,48 +10244,50 @@ class ClyptWorker:
         import json
         import uuid
 
-        dl_dir = "/tmp/clypt"
-        os.makedirs(dl_dir, exist_ok=True)
-        suffix = uuid.uuid4().hex
-
-        # --- Video: prefer staged volume path over RPC bytes ---
-        video_path = None
-        _video_from_volume = False
-        if job_id:
-            TRACKING_VOLUME.reload()
-            manifest_path = f"/vol/clypt-chunks/jobs/{job_id}/manifest.json"
-            if os.path.exists(manifest_path):
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    manifest = json.load(f)
-                vol_video = manifest.get("video_path", "")
-                if vol_video and os.path.exists(vol_video):
-                    video_path = vol_video
-                    _video_from_volume = True
-                    print(f"[finalize] Reusing staged video from volume ({job_id[:8]}...)")
-
-        if video_path is None:
-            if video_bytes is None:
-                raise RuntimeError(
-                    "finalize_extraction requires either job_id (volume) or video_bytes"
-                )
-            video_path = f"{dl_dir}/video_finalize_{suffix}.mp4"
-            with open(video_path, "wb") as f:
-                f.write(video_bytes)
-            print("[finalize] Wrote video from RPC bytes (no volume path available)")
-
-        # --- Audio: always from bytes (small payload) ---
-        audio_path = f"{dl_dir}/audio_finalize_{suffix}.wav"
-        with open(audio_path, "wb") as f:
-            f.write(audio_wav_bytes)
-
+        runtime_job_id = str(job_id or "").strip() or uuid.uuid4().hex
+        prev_runtime_job_id = self._set_runtime_log_job_id(runtime_job_id)
         try:
+            dl_dir = "/tmp/clypt"
+            os.makedirs(dl_dir, exist_ok=True)
+            suffix = uuid.uuid4().hex
+
+            # --- Video: prefer staged volume path over RPC bytes ---
+            video_path = None
+            _video_from_volume = False
+            if job_id:
+                TRACKING_VOLUME.reload()
+                manifest_path = f"/vol/clypt-chunks/jobs/{job_id}/manifest.json"
+                if os.path.exists(manifest_path):
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        manifest = json.load(f)
+                    vol_video = manifest.get("video_path", "")
+                    if vol_video and os.path.exists(vol_video):
+                        video_path = vol_video
+                        _video_from_volume = True
+                        print(f"[finalize] Reusing staged video from volume ({job_id[:8]}...)")
+
+            if video_path is None:
+                if video_bytes is None:
+                    raise RuntimeError(
+                        "finalize_extraction requires either job_id (volume) or video_bytes"
+                    )
+                video_path = f"{dl_dir}/video_finalize_{suffix}.mp4"
+                with open(video_path, "wb") as f:
+                    f.write(video_bytes)
+                print("[finalize] Wrote video from RPC bytes (no volume path available)")
+
+            # --- Audio: always from bytes (small payload) ---
+            audio_path = f"{dl_dir}/audio_finalize_{suffix}.wav"
+            with open(audio_path, "wb") as f:
+                f.write(audio_wav_bytes)
+
             # Avoid mutating caller-owned objects in-place.
             words_local = [dict(w) for w in words]
             tracks_local = [dict(t) for t in tracks]
             overlap_ctx: dict[str, str] = {}
             if job_id:
                 overlap_ctx["job_id"] = job_id
-            worker_hint = str(os.getenv("CLYPT_WORKER_ID", "") or os.getenv("MODAL_TASK_ID", "")).strip()
+            worker_hint = str(os.getenv("CLYPT_WORKER_ID", "")).strip()
             if worker_hint:
                 overlap_ctx["worker_id"] = worker_hint
             return self._finalize_from_words_tracks(
@@ -9829,16 +10300,27 @@ class ClyptWorker:
                 overlap_follow_log_context=overlap_ctx or None,
             )
         finally:
-            # Only clean up files we created locally, not volume-staged ones.
-            h264_video_path = video_path.replace(".mp4", "_h264.mp4")
-            cleanup = [audio_path]
-            if not _video_from_volume:
-                cleanup.extend([video_path, h264_video_path])
-            for p in cleanup:
-                if os.path.exists(p):
-                    os.remove(p)
+            try:
+                video_path_val = locals().get("video_path")
+                audio_path_val = locals().get("audio_path")
+                _video_from_volume_val = bool(locals().get("_video_from_volume", False))
+                if isinstance(video_path_val, str) and video_path_val:
+                    h264_video_path = video_path_val.replace(".mp4", "_h264.mp4")
+                else:
+                    h264_video_path = None
+                cleanup: list[str] = []
+                if isinstance(audio_path_val, str) and audio_path_val:
+                    cleanup.append(audio_path_val)
+                if not _video_from_volume_val and isinstance(video_path_val, str) and video_path_val:
+                    cleanup.append(video_path_val)
+                    if h264_video_path:
+                        cleanup.append(h264_video_path)
+                for p in cleanup:
+                    if os.path.exists(p):
+                        os.remove(p)
+            finally:
+                self._restore_runtime_log_job_id(prev_runtime_job_id)
 
-    @modal.method()
     def cleanup_tracking_job(self, job_id: str) -> None:
         """Remove staged chunk artifacts for a distributed tracking job."""
         import os
@@ -9855,7 +10337,6 @@ class ClyptWorker:
     # ──────────────────────────────────────────
     # Main extraction method (called remotely)
     # ──────────────────────────────────────────
-    @modal.method()
     def extract(
         self,
         video_bytes: bytes,
@@ -9873,6 +10354,7 @@ class ClyptWorker:
             dict with phase_1_visual and phase_1_audio payloads.
         """
         import os
+        import uuid
 
         dl_dir = "/tmp/clypt"
         os.makedirs(dl_dir, exist_ok=True)
@@ -9889,8 +10371,9 @@ class ClyptWorker:
         audio_mb = len(audio_wav_bytes) / 1e6
         print(f"[Phase 1] Received video ({video_mb:.1f} MB) + audio ({audio_mb:.1f} MB)")
 
+        phase1_job_id = uuid.uuid4().hex
+        prev_runtime_job_id = self._set_runtime_log_job_id(phase1_job_id)
         try:
-            import uuid
 
             from backend.pipeline.phase1.stage_log import emit_stage_log, resolve_phase1_worker_id
 
@@ -9898,9 +10381,8 @@ class ClyptWorker:
             # launch GPU work until ASR has fully completed.
             print("[Phase 1] Step 1+2/4: Running Parakeet ASR, then YOLO26 tracking, on the same GPU...")
             words = self._run_asr(audio_path)
-            phase1_job_id = uuid.uuid4().hex
             overlap_ctx: dict[str, str] = {"job_id": phase1_job_id}
-            worker_hint = str(os.getenv("CLYPT_WORKER_ID", "") or os.getenv("MODAL_TASK_ID", "")).strip()
+            worker_hint = str(os.getenv("CLYPT_WORKER_ID", "")).strip()
             if worker_hint:
                 overlap_ctx["worker_id"] = worker_hint
             track_wid = overlap_ctx.get("worker_id") or resolve_phase1_worker_id()
@@ -9965,3 +10447,5 @@ class ClyptWorker:
         except Exception as e:
             print(f"[Phase 1] Error: {e}")
             return {"status": "error", "message": str(e)}
+        finally:
+            self._restore_runtime_log_job_id(prev_runtime_job_id)

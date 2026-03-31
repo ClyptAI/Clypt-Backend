@@ -12,7 +12,7 @@ exclusively for the FFmpeg speaker-follow renderer.
 A merge pass deduplicates boundary nodes into the final output.
 
 Inputs:
-  - gs://clypt-storage-v2/phase_1/video.mp4  (muxed video+audio on GCS)
+  - gs://clypt-storage-v3/phase_1/video.mp4  (muxed video+audio on GCS)
   - phase_1_audio.json    (transcript words, sliced per chunk)
 
 Output:
@@ -36,12 +36,12 @@ from pydantic import BaseModel, Field
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-v2"
+PROJECT_ID = "clypt-v3"
 LOCATION = "global"
 MODEL_ID = "gemini-3.1-pro-preview"
 
 ROOT = Path(__file__).resolve().parent.parent
-VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
+VIDEO_GCS_URI = "gs://clypt-storage-v3/phase_1/video.mp4"
 AUDIO_LEDGER_PATH = ROOT / "outputs" / "phase_1_audio.json"
 OUTPUT_PATH = ROOT / "outputs" / "phase_2a_nodes.json"
 CHECKPOINT_PATH = ROOT / "outputs" / "phase_2a_nodes.checkpoint.json"

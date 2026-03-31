@@ -27,7 +27,7 @@ from pipeline.audience.crowd_utils import OUTPUTS_DIR, VIDEOS_DIR, clamp, extrac
 
 INPUT_PATH = OUTPUTS_DIR / "crowd_2_resolved_signals.json"
 OUTPUT_PATH = OUTPUTS_DIR / "crowd_3_clip_candidates.json"
-PROJECT_ID = "clypt-v2"
+PROJECT_ID = "clypt-v3"
 EMBEDDING_LOCATION = "us-central1"
 EMBEDDING_MODEL = "gemini-embedding-2-preview"
 EMBEDDING_DIM = 768

@@ -54,7 +54,7 @@ These phases remain local-orchestrated and Gemini-backed. They consume the Phase
 - No `phase_1a_reconcile` stage in the active path
 - No TalkNet in the active path
 - No requirement for Modal in the active path
-- `phase_1_visual` / `phase_1_audio` are the contract outputs; `phase_1a_*` aliases remain for compatibility only
+- `phase_1_visual` / `phase_1_audio` are the contract outputs; `phase_1a_*` aliases are retired
 
 ## Compatibility Bridge
 

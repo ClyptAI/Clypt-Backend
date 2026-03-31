@@ -51,7 +51,7 @@ def _manifest_payload(source_url: str = "https://youtube.com/watch?v=x") -> dict
                 "uri": "gs://bucket/phase_1/jobs/job_123/phase_1_visual.json",
                 "source_video": source_url,
                 "video_gcs_uri": "gs://bucket/phase_1/jobs/job_123/source_video.mp4",
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -195,7 +195,7 @@ def configured_phase1(tmp_path: Path, monkeypatch, phase1_subject):
     return phase1_subject, output_dir, video_path, audio_path
 
 
-def test_phase_1_main_waits_for_manifest_and_writes_compat_outputs(configured_phase1, monkeypatch, caplog):
+def test_phase_1_main_waits_for_manifest_and_writes_v3_outputs(configured_phase1, monkeypatch, caplog):
     caplog.set_level("INFO")
     subject, output_dir, video_path, _audio_path = configured_phase1
     manifest = Phase1Manifest.model_validate(_manifest_payload())
@@ -234,8 +234,8 @@ def test_phase_1_main_waits_for_manifest_and_writes_compat_outputs(configured_ph
     assert visual_payload["uri"] == manifest.artifacts.visual_tracking.uri
     assert visual_payload["video_gcs_uri"] == manifest.canonical_video_gcs_uri
     assert visual_payload["runtime_controls"]["speaker_binding_mode"] == "auto"
-    assert visual_payload["face_detections"][0]["source"] == "compatibility_bridge"
-    assert visual_payload["face_detections"][0]["provenance"]["kind"] == "compatibility_bridge"
+    assert visual_payload["face_detections"] == []
+    assert "proxy_face_detections" not in visual_payload
     assert audio_payload["uri"] == manifest.artifacts.transcript.uri
     assert audio_payload["video_gcs_uri"] == manifest.canonical_video_gcs_uri
     assert len(ndjson_rows) == 2
@@ -324,7 +324,7 @@ def test_submit_or_resume_phase1_job_persists_runtime_controls(configured_phase1
     assert saved_state["runtime_controls"]["tracker_backend"] == "bytetrack"
 
 
-def test_materialize_phase1_manifest_uses_compatibility_bridge_face_fallback_and_runtime_controls(
+def test_materialize_phase1_manifest_enforces_v3_visual_contract_and_runtime_controls(
     configured_phase1,
     monkeypatch,
 ):
@@ -341,9 +341,9 @@ def test_materialize_phase1_manifest_uses_compatibility_bridge_face_fallback_and
     )
 
     assert visual_payload["runtime_controls"]["speaker_binding_mode"] == "lrasd"
-    assert visual_payload["face_detections"][0]["source"] == "compatibility_bridge"
-    assert visual_payload["face_detections"][0]["provenance"]["kind"] == "compatibility_bridge"
-    assert visual_payload["person_detections"][0]["source"] == "person_track"
+    assert visual_payload["face_detections"] == []
+    assert visual_payload["person_detections"] == []
+    assert "proxy_face_detections" not in visual_payload
     assert audio_payload["words"][0]["speaker_track_id"] == "Global_Person_0"
 
     persisted_visual = json.loads((output_dir / "phase_1_visual.json").read_text())
@@ -411,8 +411,7 @@ def test_materialize_phase1_manifest_preserves_true_face_tracks_when_present(
     assert visual_payload["face_detections"][0]["source"] == "face_detector"
     assert visual_payload["face_detections"][0]["provenance"] == "scrfd_fullframe"
     assert visual_payload["person_detections"][0]["source"] == "person_tracker"
-    assert visual_payload["proxy_face_detections"][0]["source"] == "compatibility_bridge"
-    assert visual_payload["proxy_face_detections"][0]["provenance"]["kind"] == "compatibility_bridge"
+    assert "proxy_face_detections" not in visual_payload
 
 
 def test_run_pipeline_consumes_async_phase_1_manifest(monkeypatch, caplog):

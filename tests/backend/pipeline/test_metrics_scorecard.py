@@ -10,7 +10,7 @@ from backend.pipeline.phase1.metrics_scorecard import compute_phase1_scorecard
 def _minimal_visual(tracking_metrics: dict | None = None) -> dict:
     return {
         "source_video": "https://youtube.com/watch?v=x",
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "task_type": "person_tracking",
         "coordinate_space": "absolute_original_frame_xyxy",
         "geometry_type": "aabb",
@@ -144,6 +144,7 @@ def test_wallclock_and_stage_timings_from_tracking_metrics():
     }
     assert "track_identity_features" not in card["tracking_metrics_summary"]
     assert card["tracking_metrics_summary"]["schema_pass_rate"] == 0.99
+    assert card["decode_overhead_ms"]["prepare_ms"] is None
 
 
 def test_persist_manifest_includes_benchmark_scorecard(tmp_path):
@@ -163,4 +164,37 @@ def test_persist_manifest_includes_benchmark_scorecard(tmp_path):
     )
     assert m.metadata.benchmark_scorecard is not None
     assert m.metadata.benchmark_scorecard["wallclock_ms"]["total_ms"] == 6
-    assert m.metadata.benchmark_scorecard["version"] == 1
+    assert m.metadata.benchmark_scorecard["version"] == 3
+
+
+def test_scorecard_includes_canonical_fragmentation_decode_and_gpu_metrics():
+    audio = {"words": [{"speaker_track_id": "G0", "word": "x"}], "speaker_bindings": []}
+    visual = _minimal_visual(
+        {
+            "schema_pass_rate": 1.0,
+            "canonical_face_stream_coverage": 0.72,
+            "identity_track_count_before_clustering": 20,
+            "identity_track_count_after_reid_merge": 12,
+            "identity_track_count_after_clustering": 12,
+            "decode_prepare_wallclock_ms": 400,
+            "decode_source_video_mb": 200.0,
+            "decode_analysis_video_mb": 150.0,
+            "lrasd_stage_gpu_utilization_pct_sampled_mean": 74.0,
+            "face_stage_gpu_utilization_pct_sampled_mean": 62.0,
+        }
+    )
+    card = compute_phase1_scorecard(
+        audio,
+        visual,
+        job_timings_ms={"ingest_ms": 0, "processing_ms": 1000, "upload_ms": 0},
+    )
+    assert card["canonical_face_stream_coverage"] == pytest.approx(0.72)
+    assert card["identity_fragmentation_reduction_ratio"] == pytest.approx(0.4)
+    assert card["decode_overhead_ms"]["prepare_ms"] == 400
+    assert card["decode_overhead_ratio"] == pytest.approx(0.4)
+    assert card["decode_before_after_size_ratio"] == pytest.approx(0.75)
+    assert card["gpu_utilization_pct"]["lrasd_stage"] == pytest.approx(74.0)
+    assert card["gpu_utilization_pct"]["face_stage"] == pytest.approx(62.0)
+    assert card["counts"]["identity_track_count_before_clustering"] == 20
+    assert card["counts"]["identity_track_count_after_clustering"] == 12
+    assert card["counts"]["identity_track_count_after_reid_merge"] == 12

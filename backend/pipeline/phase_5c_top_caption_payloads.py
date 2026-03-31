@@ -40,7 +40,7 @@ DEFAULT_INPUT_CANDIDATES = (
     OUTPUTS_DIR / "remotion_payloads_array_audience.json",
 )
 
-PROJECT_ID = "clypt-v2"
+PROJECT_ID = "clypt-v3"
 GEMINI_LOCATION = "global"
 GEMINI_MODEL = "gemini-3.1-pro-preview"
 MAX_VARIANTS = 3

@@ -8,7 +8,7 @@ Embedding 2. Each node is embedded as interleaved text + video with
 
 Inputs:
   - phase_2a_nodes.json                        (local)
-  - gs://clypt-storage-v2/phase_1/video.mp4    (GCS)
+  - gs://clypt-storage-v3/phase_1/video.mp4    (GCS)
 
 Output:
   - phase_3_embeddings.json  (nodes + multimodal_embedding vectors)
@@ -28,10 +28,10 @@ from google.genai import types
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-v2"
+PROJECT_ID = "clypt-v3"
 LOCATION = "us-central1"
 ROOT = Path(__file__).resolve().parent.parent
-VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
+VIDEO_GCS_URI = "gs://clypt-storage-v3/phase_1/video.mp4"
 NODES_PATH = ROOT / "outputs" / "phase_2a_nodes.json"
 OUTPUT_PATH = ROOT / "outputs" / "phase_3_embeddings.json"
 VISUAL_LEDGER_PATH = ROOT / "outputs" / "phase_1_visual.json"

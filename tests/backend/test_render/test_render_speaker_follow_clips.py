@@ -1715,7 +1715,7 @@ def test_parse_mask_stability_signals_payload_hybrid_dict_with_aggregate_keys():
     """Worker Phase-1 dict may bundle bbox aggregates plus ``entries``; parser uses entries only."""
     mod = load_module()
     raw = {
-        "signal_version": "worker_bbox_v1",
+        "signal_version": "worker_bbox_v3",
         "mask_signal_meta": {"payload_version": "1.1.0", "segmentation_provenance": "yolo_seg_masks:yolo26m-seg"},
         "segmentation_mask_proxies": {"active": True},
         "entries": [

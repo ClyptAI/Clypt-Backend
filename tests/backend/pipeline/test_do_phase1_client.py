@@ -17,7 +17,7 @@ from backend.pipeline.do_phase1_client import (
 
 def _manifest_payload() -> dict:
     return {
-        "contract_version": "v2",
+        "contract_version": "v3",
         "job_id": "job_123",
         "status": "succeeded",
         "source_video": {"source_url": "https://youtube.com/watch?v=x"},
@@ -34,7 +34,7 @@ def _manifest_payload() -> dict:
                 "uri": "gs://bucket/visual.json",
                 "source_video": "https://youtube.com/watch?v=x",
                 "video_gcs_uri": "gs://bucket/phase_1/video.mp4",
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -149,7 +149,7 @@ def test_get_job_parses_nested_manifest_shape():
     assert isinstance(job, Phase1JobRecord)
     assert job.status == "succeeded"
     assert job.manifest is not None
-    assert job.manifest.contract_version == "v2"
+    assert job.manifest.contract_version == "v3"
     assert job.manifest.artifacts.visual_tracking.video_metadata.duration_ms == 1000
 
 
@@ -193,7 +193,7 @@ def test_get_result_returns_manifest_after_success():
     finally:
         asyncio.run(client.aclose())
 
-    assert manifest.contract_version == "v2"
+    assert manifest.contract_version == "v3"
     assert manifest.job_id == "job_123"
     assert manifest.status == "succeeded"
 

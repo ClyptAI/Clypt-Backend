@@ -474,7 +474,6 @@ def _track_anchor_candidate(
     src_w: int,
     src_h: int,
     person_track_index: dict[str, list[Detection]],
-    face_track_index: dict[str, list[Detection]],
     frame_detection_index: dict[int, list[dict]] | None = None,
 ) -> Detection | None:
     if not track_id:
@@ -498,9 +497,6 @@ def _track_anchor_candidate(
         if fallback is not None:
             return fallback
     person_det = interpolate_detection(person_track_index.get(track_id), frame_idx, fps)
-    # Renderer is currently body-led by design. We keep the face index plumbed
-    # through for compatibility with older call sites, but camera/overlay
-    # anchors intentionally ignore face tracks here.
     return person_det
 
 
@@ -1102,7 +1098,6 @@ def _track_anchor_at_frame(
     src_w: int,
     src_h: int,
     person_track_index: dict[str, list[Detection]],
-    face_track_index: dict[str, list[Detection]],
     frame_detection_index: dict[int, list[dict]] | None = None,
 ) -> Detection | None:
     return _track_anchor_candidate(
@@ -1112,7 +1107,6 @@ def _track_anchor_at_frame(
         src_w,
         src_h,
         person_track_index,
-        face_track_index,
         frame_detection_index,
     )
 
@@ -1729,7 +1723,6 @@ def choose_adaptive_split_segments(
             src_w,
             src_h,
             person_track_index,
-            face_track_index,
             frame_detection_index,
         )
         secondary_det = _track_anchor_at_frame(
@@ -1739,7 +1732,6 @@ def choose_adaptive_split_segments(
             src_w,
             src_h,
             person_track_index,
-            face_track_index,
             frame_detection_index,
         )
         if _split_frame_is_plausible(primary_det=primary_det, secondary_det=secondary_det, src_w=src_w):
@@ -1987,7 +1979,7 @@ def _sample_window_track_stats(
         abs_ms = int(round((clip_start_s + t) * 1000.0))
         frame_idx = int(round((abs_ms / 1000.0) * fps))
         for tid in track_ids:
-            det = _track_anchor_at_frame(tid, frame_idx, fps, 0, 0, person_track_index, face_track_index)
+            det = _track_anchor_at_frame(tid, frame_idx, fps, 0, 0, person_track_index)
             if det is None:
                 continue
             track_visible_samples[tid] = track_visible_samples.get(tid, 0) + 1
@@ -2202,7 +2194,6 @@ def build_camera_path(
             src_w,
             src_h,
             person_track_index,
-            face_track_index,
             frame_detection_index,
         )
         if det is not None and person_det is not None and det is person_det:
@@ -2273,7 +2264,6 @@ def build_single_track_path(
             src_w,
             src_h,
             person_track_index,
-            face_track_index,
             frame_detection_index,
         )
         if det is not None and person_det is not None and det is person_det:
@@ -2345,7 +2335,6 @@ def build_shared_two_shot_path(
             src_w,
             src_h,
             person_track_index,
-            face_track_index,
             frame_detection_index,
         )
         secondary_det = _track_anchor_at_frame(
@@ -2355,7 +2344,6 @@ def build_shared_two_shot_path(
             src_w,
             src_h,
             person_track_index,
-            face_track_index,
             frame_detection_index,
         )
         dets = [det for det in (primary_det, secondary_det) if det is not None]
@@ -2443,7 +2431,6 @@ def build_overlay_path(
             src_w,
             src_h,
             person_track_index,
-            face_track_index,
             frame_detection_index,
         )
 

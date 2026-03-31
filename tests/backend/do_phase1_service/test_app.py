@@ -72,7 +72,7 @@ def test_get_job_result_returns_409_until_success(tmp_path: Path):
 def test_get_job_result_returns_manifest_on_success(tmp_path: Path):
     store = SQLiteJobStore(tmp_path / "jobs.db")
     manifest = {
-        "contract_version": "v2",
+        "contract_version": "v3",
         "job_id": "job_123",
         "status": "succeeded",
         "source_video": {"source_url": "https://youtube.com/watch?v=x"},
@@ -89,7 +89,7 @@ def test_get_job_result_returns_manifest_on_success(tmp_path: Path):
                 "uri": "gs://bucket/visual.json",
                 "source_video": "https://youtube.com/watch?v=x",
                 "video_gcs_uri": "gs://bucket/phase_1/video.mp4",
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-SCORECARD_VERSION = 1
+SCORECARD_VERSION = 3
 
 # High-confidence binding rows: used only for the misassignment *proxy* (not ground truth).
 _HIGH_CONFIDENCE_THRESHOLD = 0.85
@@ -114,6 +114,14 @@ def _tracking_metrics_summary(tm: Mapping[str, Any]) -> dict[str, Any]:
         "idf1_proxy",
         "mota_proxy",
         "track_fragmentation_rate",
+        "canonical_face_stream_coverage",
+        "identity_track_count_before_clustering",
+        "identity_track_count_after_reid_merge",
+        "identity_track_count_after_clustering",
+        "decode_prepare_wallclock_ms",
+        "decode_before_after_size_ratio",
+        "lrasd_stage_gpu_utilization_pct_sampled_mean",
+        "face_stage_gpu_utilization_pct_sampled_mean",
     )
     out: dict[str, Any] = {}
     for k in keys:
@@ -130,6 +138,37 @@ def _tracking_metrics_summary(tm: Mapping[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 out[k] = str(v)
     return out
+
+
+def _canonical_face_stream_coverage(tm: Mapping[str, Any]) -> float | None:
+    return _safe_float(tm.get("canonical_face_stream_coverage"))
+
+
+def _identity_fragmentation_reduction_ratio(tm: Mapping[str, Any]) -> float | None:
+    before = _safe_float(tm.get("identity_track_count_before_clustering"))
+    after = _safe_float(tm.get("identity_track_count_after_reid_merge"))
+    if after is None:
+        after = _safe_float(tm.get("identity_track_count_after_clustering"))
+    if before is None or after is None or before <= 0.0:
+        return None
+    return max(-1.0, min(1.0, (before - after) / before))
+
+
+def _decode_overhead(prepare_ms: float | None, processing_ms: int) -> tuple[float | None, int | None]:
+    if prepare_ms is None:
+        return None, None
+    prep_int = int(max(0.0, round(prepare_ms)))
+    if processing_ms <= 0:
+        return None, prep_int
+    return float(prep_int / max(1, processing_ms)), prep_int
+
+
+def _decode_before_after_size_ratio(tm: Mapping[str, Any]) -> float | None:
+    src = _safe_float(tm.get("decode_source_video_mb"))
+    analysis = _safe_float(tm.get("decode_analysis_video_mb"))
+    if src is None or analysis is None or src <= 0.0:
+        return None
+    return float(analysis / src)
 
 
 def compute_phase1_scorecard(
@@ -192,19 +231,32 @@ def compute_phase1_scorecard(
     processing_ms = int(max(0, int(timings.get("processing_ms", 0) or 0)))
     upload_ms = int(max(0, int(timings.get("upload_ms", 0) or 0)))
     total_ms = ingest_ms + processing_ms + upload_ms
+    decode_prepare_ms = _safe_float(tm.get("decode_prepare_wallclock_ms"))
+    decode_overhead_ratio, decode_prepare_ms_int = _decode_overhead(decode_prepare_ms, processing_ms)
 
     return {
         "version": SCORECARD_VERSION,
         "assignment_coverage": assignment_coverage,
         "with_scored_candidate_ratio": _with_scored_candidate_ratio(debug_list),
         "unknown_rate": unknown_rate,
+        "canonical_face_stream_coverage": _canonical_face_stream_coverage(tm),
+        "identity_fragmentation_reduction_ratio": _identity_fragmentation_reduction_ratio(tm),
         "high_confidence_misassignment_proxy_ratio": _high_confidence_misassignment_proxy_ratio(debug_list),
         "overlap_camera_consistency_ratio": _overlap_camera_consistency_ratio(list(overlap_decisions)),
+        "decode_overhead_ratio": decode_overhead_ratio,
+        "decode_before_after_size_ratio": _decode_before_after_size_ratio(tm),
         "wallclock_ms": {
             "ingest_ms": ingest_ms,
             "processing_ms": processing_ms,
             "upload_ms": upload_ms,
             "total_ms": total_ms,
+        },
+        "decode_overhead_ms": {
+            "prepare_ms": decode_prepare_ms_int,
+        },
+        "gpu_utilization_pct": {
+            "lrasd_stage": _safe_float(tm.get("lrasd_stage_gpu_utilization_pct_sampled_mean")),
+            "face_stage": _safe_float(tm.get("face_stage_gpu_utilization_pct_sampled_mean")),
         },
         "stage_wallclock_s": _extract_stage_wallclock_s(tm),
         "tracking_metrics_summary": _tracking_metrics_summary(tm),
@@ -214,6 +266,15 @@ def compute_phase1_scorecard(
             "unknown_word_count": unknown,
             "speaker_candidate_debug_rows": len(debug_list),
             "overlap_follow_decisions": len([d for d in overlap_decisions if isinstance(d, dict)]),
+            "identity_track_count_before_clustering": int(
+                max(0, int(_safe_float(tm.get("identity_track_count_before_clustering")) or 0))
+            ),
+            "identity_track_count_after_clustering": int(
+                max(0, int(_safe_float(tm.get("identity_track_count_after_clustering")) or 0))
+            ),
+            "identity_track_count_after_reid_merge": int(
+                max(0, int(_safe_float(tm.get("identity_track_count_after_reid_merge")) or 0))
+            ),
         },
     }
 

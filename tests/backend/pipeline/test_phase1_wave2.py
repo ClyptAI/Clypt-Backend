@@ -67,6 +67,10 @@ def test_run_tracking_stage_reuses_context_across_internal_calls() -> None:
     assert tracks == []
     assert metrics.get("phase1_decode_context") is ctx
     assert metrics.get("analysis_context") == ctx.ensure_prepared(w, tracking_mode="direct")
+    assert metrics["decode_cache_prepare_invocations"] >= 0
+    assert metrics["decode_cache_hits"] >= 0
+    assert "decode_prepare_wallclock_ms" in metrics
+    assert "decode_proxy_active" in metrics
 
 
 def _emb() -> list[float]:

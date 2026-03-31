@@ -14,14 +14,19 @@ from typing import Any, Mapping
 
 from backend.pipeline.phase1.metrics_scorecard import compute_phase1_scorecard
 
-BENCHMARK_REPORT_VERSION = 1
-BENCHMARK_COMPARISON_VERSION = 1
+BENCHMARK_REPORT_VERSION = 3
+BENCHMARK_COMPARISON_VERSION = 3
+SUPPORTED_BENCHMARK_REPORT_VERSIONS = (3,)
 
 _RATIO_SUMMARY_KEYS = (
     "assignment_coverage",
     "with_scored_candidate_ratio",
     "unknown_rate",
     "overlap_camera_consistency_ratio",
+    "canonical_face_stream_coverage",
+    "identity_fragmentation_reduction_ratio",
+    "decode_overhead_ratio",
+    "decode_before_after_size_ratio",
 )
 _WALLCLOCK_MS_KEYS = ("ingest_ms", "processing_ms", "upload_ms", "total_ms")
 
@@ -118,23 +123,46 @@ def scorecard_for_payload(data: Mapping[str, Any]) -> dict[str, Any]:
 
 def aggregate_scorecard_summary(scorecards: list[dict[str, Any]]) -> dict[str, Any]:
     """Summary over successful per-clip scorecards (nullable ratios + timings)."""
-    assign = [sc.get("assignment_coverage") for sc in scorecards]
+    ratio_scorecards = list(scorecards)
+    eligible_scorecards = [
+        sc for sc in scorecards if isinstance(sc.get("wallclock_ms"), Mapping)
+    ]
+    excluded_missing_wallclock = max(0, len(scorecards) - len(eligible_scorecards))
+
+    assign = [sc.get("assignment_coverage") for sc in ratio_scorecards]
     assign_typed: list[float | None] = [float(x) if isinstance(x, (int, float)) else None for x in assign]
 
-    scored = [sc.get("with_scored_candidate_ratio") for sc in scorecards]
+    scored = [sc.get("with_scored_candidate_ratio") for sc in ratio_scorecards]
     scored_typed: list[float | None] = [float(x) if isinstance(x, (int, float)) else None for x in scored]
 
-    unknown = [sc.get("unknown_rate") for sc in scorecards]
+    unknown = [sc.get("unknown_rate") for sc in ratio_scorecards]
     unknown_typed: list[float | None] = [float(x) if isinstance(x, (int, float)) else None for x in unknown]
 
-    overlap = [sc.get("overlap_camera_consistency_ratio") for sc in scorecards]
+    overlap = [sc.get("overlap_camera_consistency_ratio") for sc in ratio_scorecards]
     overlap_typed: list[float | None] = [float(x) if isinstance(x, (int, float)) else None for x in overlap]
+    canonical = [sc.get("canonical_face_stream_coverage") for sc in ratio_scorecards]
+    canonical_typed: list[float | None] = [float(x) if isinstance(x, (int, float)) else None for x in canonical]
+    frag_reduction = [sc.get("identity_fragmentation_reduction_ratio") for sc in ratio_scorecards]
+    frag_reduction_typed: list[float | None] = [
+        float(x) if isinstance(x, (int, float)) else None for x in frag_reduction
+    ]
+    decode_overhead = [sc.get("decode_overhead_ratio") for sc in ratio_scorecards]
+    decode_overhead_typed: list[float | None] = [
+        float(x) if isinstance(x, (int, float)) else None for x in decode_overhead
+    ]
+    decode_before_after_size = [sc.get("decode_before_after_size_ratio") for sc in ratio_scorecards]
+    decode_before_after_size_typed: list[float | None] = [
+        float(x) if isinstance(x, (int, float)) else None for x in decode_before_after_size
+    ]
 
     ingest: list[float] = []
     proc: list[float] = []
     upload: list[float] = []
     total: list[float] = []
-    for sc in scorecards:
+    decode_prepare: list[float] = []
+    lrasd_gpu_util: list[float] = []
+    face_gpu_util: list[float] = []
+    for sc in eligible_scorecards:
         wc = sc.get("wallclock_ms")
         if not isinstance(wc, Mapping):
             continue
@@ -147,9 +175,22 @@ def aggregate_scorecard_summary(scorecards: list[dict[str, Any]]) -> dict[str, A
             v = wc.get(key)
             if isinstance(v, (int, float)):
                 bucket.append(float(v))
+        doh = sc.get("decode_overhead_ms")
+        if isinstance(doh, Mapping):
+            dp = doh.get("prepare_ms")
+            if isinstance(dp, (int, float)):
+                decode_prepare.append(float(dp))
+        gpu = sc.get("gpu_utilization_pct")
+        if isinstance(gpu, Mapping):
+            lv = gpu.get("lrasd_stage")
+            fv = gpu.get("face_stage")
+            if isinstance(lv, (int, float)):
+                lrasd_gpu_util.append(float(lv))
+            if isinstance(fv, (int, float)):
+                face_gpu_util.append(float(fv))
 
     stage_keys: set[str] = set()
-    for sc in scorecards:
+    for sc in eligible_scorecards:
         sw = sc.get("stage_wallclock_s")
         if isinstance(sw, Mapping):
             stage_keys.update(str(k) for k in sw.keys())
@@ -157,7 +198,7 @@ def aggregate_scorecard_summary(scorecards: list[dict[str, Any]]) -> dict[str, A
     stage_summary: dict[str, Any] = {}
     for sk in sorted(stage_keys):
         vals: list[float] = []
-        for sc in scorecards:
+        for sc in eligible_scorecards:
             sw = sc.get("stage_wallclock_s")
             if not isinstance(sw, Mapping):
                 continue
@@ -171,11 +212,27 @@ def aggregate_scorecard_summary(scorecards: list[dict[str, Any]]) -> dict[str, A
         "with_scored_candidate_ratio": _nullable_float_stats(scored_typed),
         "unknown_rate": _nullable_float_stats(unknown_typed),
         "overlap_camera_consistency_ratio": _nullable_float_stats(overlap_typed),
+        "canonical_face_stream_coverage": _nullable_float_stats(canonical_typed),
+        "identity_fragmentation_reduction_ratio": _nullable_float_stats(frag_reduction_typed),
+        "decode_overhead_ratio": _nullable_float_stats(decode_overhead_typed),
+        "decode_before_after_size_ratio": _nullable_float_stats(decode_before_after_size_typed),
         "wallclock_ms": {
             "ingest_ms": _float_stats(ingest),
             "processing_ms": _float_stats(proc),
             "upload_ms": _float_stats(upload),
             "total_ms": _float_stats(total),
+        },
+        "decode_overhead_ms": {
+            "prepare_ms": _float_stats(decode_prepare),
+        },
+        "gpu_utilization_pct": {
+            "lrasd_stage": _float_stats(lrasd_gpu_util),
+            "face_stage": _float_stats(face_gpu_util),
+        },
+        "aggregation_inputs": {
+            "input_clip_count": len(scorecards),
+            "eligible_clip_count": len(eligible_scorecards),
+            "excluded_missing_wallclock_count": excluded_missing_wallclock,
         },
         "stage_wallclock_s": stage_summary,
     }
@@ -218,6 +275,16 @@ def _wallclock_mean_from_summary(summary: Mapping[str, Any], subkey: str) -> flo
     return _safe_float_metric(inner.get("mean"))
 
 
+def _nested_mean_from_summary(summary: Mapping[str, Any], key: str, subkey: str) -> float | None:
+    outer = summary.get(key)
+    if not isinstance(outer, Mapping):
+        return None
+    inner = outer.get(subkey)
+    if not isinstance(inner, Mapping):
+        return None
+    return _safe_float_metric(inner.get("mean"))
+
+
 def _stage_means_from_summary(summary: Mapping[str, Any]) -> dict[str, float | None]:
     sw = summary.get("stage_wallclock_s")
     if not isinstance(sw, Mapping):
@@ -235,6 +302,26 @@ def load_benchmark_report(path: Path) -> dict[str, Any]:
         data = json.load(f)
     if not isinstance(data, dict):
         raise ValueError("benchmark report root must be a JSON object")
+    raw_version = data.get("version")
+    try:
+        version = int(raw_version) if raw_version is not None else 1
+    except (TypeError, ValueError):
+        version = -1
+    if version not in SUPPORTED_BENCHMARK_REPORT_VERSIONS:
+        supported = ", ".join(str(v) for v in SUPPORTED_BENCHMARK_REPORT_VERSIONS)
+        raise ValueError(
+            f"unsupported benchmark report version={raw_version!r}; "
+            f"supported versions: {supported}. "
+            "Regenerate benchmark reports with the v3 tooling before comparing."
+        )
+    data.setdefault("clips", [])
+    data.setdefault("summary", {})
+    data.setdefault("compatibility", {})
+    data["compatibility"] = {
+        **(data["compatibility"] if isinstance(data.get("compatibility"), Mapping) else {}),
+        "loaded_version": version,
+        "reader_supports_versions": list(SUPPORTED_BENCHMARK_REPORT_VERSIONS),
+    }
     return data
 
 
@@ -268,6 +355,23 @@ def compare_benchmark_reports(
         bm = _wallclock_mean_from_summary(b_summary, wk)
         cm = _wallclock_mean_from_summary(c_summary, wk)
         wallclock_agg[wk] = _delta_triplet(bm, cm)
+
+    decode_overhead_agg = {
+        "prepare_ms": _delta_triplet(
+            _nested_mean_from_summary(b_summary, "decode_overhead_ms", "prepare_ms"),
+            _nested_mean_from_summary(c_summary, "decode_overhead_ms", "prepare_ms"),
+        )
+    }
+    gpu_util_agg = {
+        "lrasd_stage": _delta_triplet(
+            _nested_mean_from_summary(b_summary, "gpu_utilization_pct", "lrasd_stage"),
+            _nested_mean_from_summary(c_summary, "gpu_utilization_pct", "lrasd_stage"),
+        ),
+        "face_stage": _delta_triplet(
+            _nested_mean_from_summary(b_summary, "gpu_utilization_pct", "face_stage"),
+            _nested_mean_from_summary(c_summary, "gpu_utilization_pct", "face_stage"),
+        ),
+    }
 
     b_stages = _stage_means_from_summary(b_summary)
     c_stages = _stage_means_from_summary(c_summary)
@@ -321,6 +425,13 @@ def compare_benchmark_reports(
         if isinstance(wc, Mapping):
             for wk in _WALLCLOCK_MS_KEYS:
                 out[f"wallclock_ms.{wk}"] = wc.get(wk)
+        doh = sc.get("decode_overhead_ms")
+        if isinstance(doh, Mapping):
+            out["decode_overhead_ms.prepare_ms"] = doh.get("prepare_ms")
+        gpu = sc.get("gpu_utilization_pct")
+        if isinstance(gpu, Mapping):
+            out["gpu_utilization_pct.lrasd_stage"] = gpu.get("lrasd_stage")
+            out["gpu_utilization_pct.face_stage"] = gpu.get("face_stage")
         sw = sc.get("stage_wallclock_s")
         if isinstance(sw, Mapping):
             for sk, sv in sw.items():
@@ -337,6 +448,13 @@ def compare_benchmark_reports(
                 ordered.append(k)
         for wk in _WALLCLOCK_MS_KEYS:
             kk = f"wallclock_ms.{wk}"
+            if kk in kb or kk in kc:
+                ordered.append(kk)
+        for kk in (
+            "decode_overhead_ms.prepare_ms",
+            "gpu_utilization_pct.lrasd_stage",
+            "gpu_utilization_pct.face_stage",
+        ):
             if kk in kb or kk in kc:
                 ordered.append(kk)
         stage_suffixes = sorted(
@@ -418,11 +536,16 @@ def compare_benchmark_reports(
         "version": BENCHMARK_COMPARISON_VERSION,
         "baseline_report_version": baseline.get("version"),
         "current_report_version": current.get("version"),
+        "compatibility": {
+            "reader_supports_report_versions": list(SUPPORTED_BENCHMARK_REPORT_VERSIONS),
+        },
         "baseline_generated_at": baseline.get("generated_at"),
         "current_generated_at": current.get("generated_at"),
         "aggregate": {
             "summary_ratio_means": aggregate_ratios,
             "wallclock_ms_means": wallclock_agg,
+            "decode_overhead_ms_means": decode_overhead_agg,
+            "gpu_utilization_pct_means": gpu_util_agg,
             "stage_wallclock_s_means": stage_agg,
         },
         "per_clip": per_clip,

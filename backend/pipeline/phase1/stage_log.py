@@ -7,7 +7,7 @@ import os
 from typing import Any
 
 def resolve_phase1_worker_id() -> str:
-    w = str(os.getenv("CLYPT_WORKER_ID", "") or os.getenv("MODAL_TASK_ID", "") or "").strip()
+    w = str(os.getenv("CLYPT_WORKER_ID", "") or "").strip()
     return w or "unknown"
 
 

@@ -84,8 +84,8 @@ def run_extraction_job(
                 if extraction_result.get("status") != "success":
                     raise RuntimeError(extraction_result.get("message", "phase 1 extraction failed"))
 
-                phase_1_visual = extraction_result.get("phase_1_visual") or extraction_result.get("phase_1a_visual")
-                phase_1_audio = extraction_result.get("phase_1_audio") or extraction_result.get("phase_1a_audio")
+                phase_1_visual = extraction_result.get("phase_1_visual")
+                phase_1_audio = extraction_result.get("phase_1_audio")
                 if phase_1_visual is None or phase_1_audio is None:
                     raise RuntimeError("phase 1 extraction did not return phase_1_visual and phase_1_audio")
 
@@ -134,14 +134,13 @@ class LocalDOPhase1Extractor:
         ensure_local_runtime_prereqs()
         user_cls = ClyptWorker._get_user_cls()
         self._worker = user_cls()
-        self._load_model = user_cls.load_model._get_raw_f()
-        self._extract = user_cls.extract._get_raw_f()
+        self._load_model = self._worker.load_model
+        self._extract = self._worker.extract
         self._loaded = False
 
     def extract(self, *, video_path: str, audio_path: str, youtube_url: str) -> dict:
         self._ensure_loaded()
         return self._extract(
-            self._worker,
             video_bytes=Path(video_path).read_bytes(),
             audio_wav_bytes=Path(audio_path).read_bytes(),
             youtube_url=youtube_url,
@@ -151,7 +150,7 @@ class LocalDOPhase1Extractor:
         if self._loaded:
             return
         try:
-            self._load_model(self._worker)
+            self._load_model()
         except Exception as exc:
             raise LocalExtractionRuntimeError(
                 "DigitalOcean Phase 1 local extraction runtime is not fully provisioned. "

@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import tempfile
+import math
 from pathlib import Path
 
 import cv2
@@ -85,6 +86,50 @@ def flatten_tracks(
         }
         frame_index.setdefault(frame_idx, []).append(det)
     return frame_index
+
+
+def grid_layout(
+    faces: list[dict],
+    *,
+    src_w: int,
+    src_h: int,
+    panel_w: int,
+) -> list[dict]:
+    """Allocate non-overlapping preview tiles in a right-side panel.
+
+    This helper is used by tests and by optional debug overlays.
+    """
+    count = len(faces or [])
+    if count <= 0:
+        return []
+    panel_w = max(1, int(panel_w))
+    src_w = max(1, int(src_w))
+    src_h = max(1, int(src_h))
+    panel_h = max(1, int(round(panel_w * (src_h / src_w))))
+
+    cols = max(1, int(math.ceil(math.sqrt(count))))
+    rows = max(1, int(math.ceil(count / cols)))
+    cell_w = max(1, panel_w // cols)
+    cell_h = max(1, panel_h // rows)
+
+    layout: list[dict] = []
+    for idx, face in enumerate(faces):
+        col = idx % cols
+        row = idx // cols
+        panel_x = int(col * cell_w)
+        panel_y = int(row * cell_h)
+        tile_w = int(cell_w if col < cols - 1 else max(1, panel_w - panel_x))
+        tile_h = int(cell_h if row < rows - 1 else max(1, panel_h - panel_y))
+        layout.append(
+            {
+                "track_id": str(face.get("track_id", "")),
+                "panel_x": panel_x,
+                "panel_y": panel_y,
+                "panel_w": tile_w,
+                "panel_h": tile_h,
+            }
+        )
+    return layout
 
 
 def select_binding_sets(audio: dict) -> tuple[list[dict], list[dict], str]:

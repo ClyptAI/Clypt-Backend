@@ -17,7 +17,7 @@ Use the template that matches your runtime. Do not commit real secrets.
 | `CLYPT_FRONTEND_ORIGINS` | Frontend → backend local API calls | Comma-separated allowed origins |
 | `DO_PHASE1_BASE_URL` | Remote Phase 1 extraction | Set when using DO extraction service |
 | `GOOGLE_APPLICATION_CREDENTIALS` | GCS / Vertex / Google SDKs | Usually host-level path |
-| `GCS_BUCKET` | Artifact persistence | Defaults to `clypt-storage-v2` in service code |
+| `GCS_BUCKET` | Artifact persistence | Defaults to `clypt-storage-v3` in service code |
 
 ## Recommended Local Backend Setup
 
@@ -33,8 +33,8 @@ If running extraction via remote Phase 1 service:
 ```env
 DO_PHASE1_BASE_URL=http://<droplet-ip>:8080
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/gcp-sa.json
-GOOGLE_CLOUD_PROJECT=clypt-v2
-GCS_BUCKET=clypt-storage-v2
+GOOGLE_CLOUD_PROJECT=clypt-v3
+GCS_BUCKET=clypt-storage-v3
 ```
 
 ## Phase 1 Service Env (DigitalOcean)

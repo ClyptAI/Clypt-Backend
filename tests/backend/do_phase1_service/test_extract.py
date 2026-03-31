@@ -43,7 +43,7 @@ def test_extract_job_produces_manifest_and_artifacts(tmp_path: Path, monkeypatch
             "status": "success",
             "phase_1_visual": {
                 "source_video": youtube_url,
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -90,7 +90,7 @@ def test_extract_job_manifest_carries_mask_stability_signals_structure(tmp_path:
     audio_path.write_bytes(b"audio")
 
     worker_like_mss = {
-        "signal_version": "worker_bbox_v1",
+        "signal_version": "worker_bbox_v3",
         "iou_continuity_proxy": {
             "mean_iou_consecutive": 0.85,
             "pair_count": 4,
@@ -131,7 +131,7 @@ def test_extract_job_manifest_carries_mask_stability_signals_structure(tmp_path:
             "status": "success",
             "phase_1_visual": {
                 "source_video": youtube_url,
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -170,7 +170,7 @@ def test_extract_job_manifest_carries_mask_stability_signals_structure(tmp_path:
     vt = result.artifacts.visual_tracking
     mss = vt.mask_stability_signals
     assert isinstance(mss, dict)
-    assert mss.get("signal_version") == "worker_bbox_v1"
+    assert mss.get("signal_version") == "worker_bbox_v3"
     assert set(mss.keys()) >= {
         "signal_version",
         "iou_continuity_proxy",
@@ -201,7 +201,7 @@ def test_compute_mask_stability_signals_empty_tracks_deterministic():
         video_fps=25.0,
         duration_ms=4000,
     )
-    assert out["signal_version"] == "worker_bbox_v1"
+    assert out["signal_version"] == "worker_bbox_v3"
     assert isinstance(out["face_presence_ratio"], float)
     assert out["iou_continuity_proxy"]["pair_count"] == 0
     assert out["iou_continuity_proxy"]["mean_iou_consecutive"] == 0.0
@@ -231,7 +231,7 @@ def test_extract_job_records_stage_timings(tmp_path: Path, monkeypatch):
             "status": "success",
             "phase_1_visual": {
                 "source_video": youtube_url,
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -297,7 +297,7 @@ def test_extract_job_writes_job_log_and_forwards_progress(tmp_path: Path, monkey
             "status": "success",
             "phase_1_visual": {
                 "source_video": youtube_url,
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -373,7 +373,7 @@ def test_extract_job_applies_runtime_controls_to_local_extraction_env(tmp_path: 
             "status": "success",
             "phase_1_visual": {
                 "source_video": youtube_url,
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -620,7 +620,7 @@ def test_finalize_from_words_tracks_persists_audio_speaker_turns(monkeypatch):
     )
 
     assert result["phase_1_audio"]["audio_speaker_turns"] == diarization_turns
-    assert result["phase_1a_audio"]["audio_speaker_turns"] == diarization_turns
+    assert not any(str(k).startswith("phase_1a_") for k in result.keys())
 
 
 def test_audio_diarization_disabled_returns_no_turns(monkeypatch):
@@ -1423,7 +1423,7 @@ def test_extract_job_isolates_phase1_pipeline_workspace_per_job(tmp_path: Path, 
             "status": "success",
             "phase_1_visual": {
                 "source_video": youtube_url,
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",
@@ -1477,9 +1477,8 @@ def test_speaker_binding_proxy_reencodes_large_video(tmp_path: Path, monkeypatch
     ffmpeg_invocations = []
 
     monkeypatch.setenv("CLYPT_SPEAKER_BINDING_PROXY_ENABLE", "1")
-    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE", "1280")
+    monkeypatch.setenv("CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE", "1280")
     monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
-    monkeypatch.setenv("CLYPT_ANALYSIS_PROXY_ENABLE", "0")
 
     meta_by_path = {
         str(video_path): {"width": 3840, "height": 2160, "fps": 24.0, "total_frames": 10, "duration_s": 1.0},
@@ -1553,12 +1552,13 @@ def test_speaker_binding_mode_forces_heuristic(monkeypatch):
     assert calls == ["heuristic"]
 
 
-def test_speaker_binding_mode_legacy_pyannote_visual_maps_to_lrasd(monkeypatch):
+def test_speaker_binding_mode_unknown_pyannote_visual_falls_back_to_auto_lrasd(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
     calls = []
 
     monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "pyannote_visual")
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
     monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd") or [{"track_id": "t1"}])
     monkeypatch.setattr(
         worker,
@@ -1607,7 +1607,6 @@ def test_speaker_binding_mode_auto_stays_lrasd_first_for_large_long_video(monkey
 
     monkeypatch.delenv("CLYPT_SPEAKER_BINDING_MODE", raising=False)
     monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
-    monkeypatch.setenv("CLYPT_ANALYSIS_PROXY_ENABLE", "0")
     monkeypatch.setattr(
         worker,
         "_probe_video_meta",
@@ -2004,9 +2003,8 @@ def test_shared_analysis_proxy_defaults_to_enabled_with_1920_long_edge(monkeypat
     worker = worker_cls.__new__(worker_cls)
 
     monkeypatch.delenv("CLYPT_SHARED_ANALYSIS_PROXY", raising=False)
-    monkeypatch.delenv("CLYPT_ANALYSIS_PROXY_ENABLE", raising=False)
     monkeypatch.delenv("CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE", raising=False)
-    monkeypatch.delenv("CLYPT_SPEAKER_BINDING_PROXY_MAX_LONG_EDGE", raising=False)
+    monkeypatch.delenv("CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE", raising=False)
 
     assert worker._shared_analysis_proxy_enabled() is True
     assert worker._analysis_proxy_max_long_edge() == 1920
@@ -2017,7 +2015,6 @@ def test_shared_analysis_proxy_explicit_disable_overrides_default(monkeypatch):
     worker = worker_cls.__new__(worker_cls)
 
     monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
-    monkeypatch.delenv("CLYPT_ANALYSIS_PROXY_ENABLE", raising=False)
 
     assert worker._shared_analysis_proxy_enabled() is False
 
@@ -2043,17 +2040,32 @@ def test_shared_analysis_proxy_can_drive_tracking_and_lrasd_selection(monkeypatc
     ) == "shared_analysis_proxy"
 
 
-def test_select_speaker_binding_mode_supports_pyannote_visual(monkeypatch):
+def test_speaker_binding_mode_empty_string_behaves_like_auto(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
 
-    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "pyannote_visual")
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "1")
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "")
 
     assert worker._select_speaker_binding_mode(
         video_path="video.mp4",
         tracks=[{"track_id": "track-1"}],
         words=[{"start_time_ms": 0, "end_time_ms": 100}],
-    ) == "pyannote_visual"
+    ) == "shared_analysis_proxy"
+
+
+def test_select_speaker_binding_mode_unknown_value_falls_back_to_auto(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "pyannote_visual")
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
+
+    assert worker._select_speaker_binding_mode(
+        video_path="video.mp4",
+        tracks=[{"track_id": "track-1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    ) == "lrasd"
 
 
 def test_make_lrasd_frame_provider_reads_and_caches(monkeypatch):
@@ -2248,26 +2260,6 @@ def test_open_lrasd_video_reader_raises_when_gpu_unavailable(monkeypatch, tmp_pa
     assert calls == [
         (str(video_path), "gpu:0"),
     ]
-
-
-def test_make_video_reader_delegates_to_open_lrasd_video_reader(monkeypatch):
-    worker_cls = ClyptWorker._get_user_cls()
-    worker = worker_cls.__new__(worker_cls)
-
-    sentinel = object()
-    calls = []
-
-    def _fake_open(path):
-        calls.append(path)
-        return sentinel, "gpu"
-
-    monkeypatch.setattr(worker, "_open_lrasd_video_reader", _fake_open)
-
-    vr, backend = worker._make_video_reader("video.mp4")
-
-    assert vr is sentinel
-    assert backend == "gpu"
-    assert calls == ["video.mp4"]
 
 
 def test_run_lrasd_binding_strict_gpu_decode_error_includes_underlying_exception(monkeypatch, tmp_path: Path):
@@ -2502,6 +2494,31 @@ def test_lrasd_prep_worker_and_queue_settings_are_bounded(monkeypatch):
     monkeypatch.setenv("CLYPT_LRASD_PREP_QUEUE", "1")
     assert worker._lrasd_prep_workers() == 16
     assert worker._lrasd_prep_queue_limit(16) == 32
+
+
+def test_lrasd_runtime_profile_invalid_value_falls_back_to_auto(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_LRASD_PROFILE", "invalid_profile_name")
+    monkeypatch.setattr(worker, "_gpu_device_profile_name", lambda: "NVIDIA H200")
+    prof = worker._resolve_lrasd_runtime_profile()
+    assert prof["profile"] == "h200"
+    assert prof["batch_size"] == 48
+    assert prof["max_inflight"] == 4
+
+
+def test_lrasd_runtime_profile_default_keeps_overlap_depth_for_unknown_gpu(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_LRASD_PROFILE", "auto")
+    monkeypatch.delenv("CLYPT_LRASD_MAX_INFLIGHT", raising=False)
+    monkeypatch.setattr(worker, "_gpu_device_profile_name", lambda: "mystery gpu")
+    prof = worker._resolve_lrasd_runtime_profile()
+    assert prof["profile"] == "default"
+    assert prof["max_inflight"] == 4
+    assert worker._lrasd_max_inflight(prof) == 4
 
 
 def test_prepare_lrasd_chunk_pending_entries_splits_on_real_face_gap(monkeypatch):
@@ -4515,7 +4532,7 @@ def test_finalize_includes_visual_ledgers_and_stage_metrics(monkeypatch):
     assert metrics["overfragmentation_proxy"] == 0.5
 
     mss = visual["mask_stability_signals"]
-    assert mss["signal_version"] == "worker_bbox_v1"
+    assert mss["signal_version"] == "worker_bbox_v3"
     assert "mean_iou_consecutive" in mss["iou_continuity_proxy"]
     assert "pair_count" in mss["iou_continuity_proxy"]
     assert isinstance(mss["face_presence_ratio"], float)
@@ -4786,7 +4803,14 @@ def test_finalize_passes_track_identity_features_to_clustering_and_ledgers(monke
         lambda tracks: ({0: tracks}, {"track-1": tracks}),
     )
 
-    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+    def fake_cluster_tracklets(
+        video_path,
+        tracks,
+        track_to_dets=None,
+        track_identity_features=None,
+        face_track_features=None,
+        **_kwargs,
+    ):
         passed["cluster"] = track_identity_features
         passed["face_tracks"] = face_track_features
         worker._last_clustering_metrics = {}
@@ -4867,7 +4891,14 @@ def test_finalize_emits_visual_identities_from_clustered_features(monkeypatch):
     monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [])
     monkeypatch.setattr(worker, "_run_audio_diarization", lambda audio_path: [])
 
-    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+    def fake_cluster_tracklets(
+        video_path,
+        tracks,
+        track_to_dets=None,
+        track_identity_features=None,
+        face_track_features=None,
+        **_kwargs,
+    ):
         worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
         worker._last_track_identity_features_after_clustering = {
             "Global_Person_0": {
@@ -4962,7 +4993,14 @@ def test_finalize_emits_audio_visual_mappings_from_clean_turn_bindings(monkeypat
     )
     monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
 
-    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+    def fake_cluster_tracklets(
+        video_path,
+        tracks,
+        track_to_dets=None,
+        track_identity_features=None,
+        face_track_features=None,
+        **_kwargs,
+    ):
         worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
         worker._last_track_identity_features_after_clustering = {
             "Global_Person_0": {
@@ -5084,7 +5122,14 @@ def test_finalize_emits_mapping_first_span_assignments(monkeypatch):
     )
     monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
 
-    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+    def fake_cluster_tracklets(
+        video_path,
+        tracks,
+        track_to_dets=None,
+        track_identity_features=None,
+        face_track_features=None,
+        **_kwargs,
+    ):
         worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
         worker._last_track_identity_features_after_clustering = {
             "Global_Person_0": {
@@ -5201,7 +5246,14 @@ def test_finalize_projects_hard_span_visual_disambiguation_to_words(monkeypatch)
     )
     monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
 
-    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+    def fake_cluster_tracklets(
+        video_path,
+        tracks,
+        track_to_dets=None,
+        track_identity_features=None,
+        face_track_features=None,
+        **_kwargs,
+    ):
         worker._last_cluster_id_map = {
             "local-1": "Global_Person_0",
             "local-2": "Global_Person_1",
@@ -5231,7 +5283,7 @@ def test_finalize_projects_hard_span_visual_disambiguation_to_words(monkeypatch)
         return []
 
     monkeypatch.setattr(worker, "_run_speaker_binding", fake_run_speaker_binding)
-    monkeypatch.setattr(worker, "_build_audio_visual_mappings", lambda **kwargs: [])
+    monkeypatch.setattr(worker, "_derive_audio_visual_mappings", lambda **kwargs: [])
     monkeypatch.setattr(
         worker,
         "_build_active_speakers_local",
@@ -5250,8 +5302,8 @@ def test_finalize_projects_hard_span_visual_disambiguation_to_words(monkeypatch)
     )
     monkeypatch.setattr(
         worker,
-        "_enrich_spans_with_hard_candidates",
-        lambda **kwargs: [
+        "_prepare_span_candidates_v3",
+        lambda spans: [
             {
                 "start_time_ms": 0,
                 "end_time_ms": 300,
@@ -5344,7 +5396,14 @@ def test_finalize_projects_overlap_visible_and_offscreen_truth_without_fake_sing
     )
     monkeypatch.setattr(worker, "_build_visual_detection_ledgers", lambda *args, **kwargs: ([], [], {}))
 
-    def fake_cluster_tracklets(video_path, tracks, track_to_dets=None, track_identity_features=None, face_track_features=None):
+    def fake_cluster_tracklets(
+        video_path,
+        tracks,
+        track_to_dets=None,
+        track_identity_features=None,
+        face_track_features=None,
+        **_kwargs,
+    ):
         worker._last_cluster_id_map = {"local-1": "Global_Person_0"}
         worker._last_track_identity_features_after_clustering = {}
         for track in tracks:
@@ -5364,7 +5423,7 @@ def test_finalize_projects_overlap_visible_and_offscreen_truth_without_fake_sing
     monkeypatch.setattr(worker, "_run_speaker_binding", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         worker,
-        "_build_audio_visual_mappings",
+        "_derive_audio_visual_mappings",
         lambda **kwargs: [
             {
                 "audio_speaker_id": "speaker-0",
@@ -5398,7 +5457,7 @@ def test_finalize_projects_overlap_visible_and_offscreen_truth_without_fake_sing
             }
         ],
     )
-    monkeypatch.setattr(worker, "_enrich_spans_with_hard_candidates", lambda spans, **kwargs: spans)
+    monkeypatch.setattr(worker, "_prepare_span_candidates_v3", lambda spans: spans)
     monkeypatch.setattr(worker, "_run_overlap_follow_postpass", lambda **kwargs: [])
 
     result = worker._finalize_from_words_tracks(
@@ -7319,7 +7378,6 @@ def test_tracking_mode_auto_prefers_direct_with_single_worker(monkeypatch):
 
     monkeypatch.delenv("CLYPT_TRACKING_MODE", raising=False)
     monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
-    monkeypatch.setenv("CLYPT_ANALYSIS_PROXY_ENABLE", "0")
     monkeypatch.setattr(worker, "_tracking_chunk_workers", lambda: 1)
 
     assert worker._select_tracking_mode() == "direct"
@@ -7329,12 +7387,33 @@ def test_tracking_mode_auto_prefers_chunked_with_multiple_workers(monkeypatch):
     worker_cls = ClyptWorker._get_user_cls()
     worker = worker_cls.__new__(worker_cls)
 
-    monkeypatch.delenv("CLYPT_TRACKING_MODE", raising=False)
+    monkeypatch.setenv("CLYPT_TRACKING_MODE", "auto")
     monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
-    monkeypatch.setenv("CLYPT_ANALYSIS_PROXY_ENABLE", "0")
     monkeypatch.setattr(worker, "_tracking_chunk_workers", lambda: 2)
 
     assert worker._select_tracking_mode() == "chunked"
+
+
+def test_tracking_mode_empty_string_behaves_like_auto(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.setenv("CLYPT_TRACKING_MODE", "")
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
+    monkeypatch.setattr(worker, "_tracking_chunk_workers", lambda: 2)
+
+    assert worker._select_tracking_mode() == "chunked"
+
+
+def test_tracking_mode_default_is_direct_even_with_multiple_workers(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+
+    monkeypatch.delenv("CLYPT_TRACKING_MODE", raising=False)
+    monkeypatch.setenv("CLYPT_SHARED_ANALYSIS_PROXY", "0")
+    monkeypatch.setattr(worker, "_tracking_chunk_workers", lambda: 2)
+
+    assert worker._select_tracking_mode() == "direct"
 
 
 def test_tracking_backend_defaults_to_bytetrack(monkeypatch):
@@ -7373,19 +7452,26 @@ def test_run_tracking_uses_direct_mode(monkeypatch):
     monkeypatch.setattr(
         worker,
         "_run_tracking_direct",
-        lambda video_path: calls.append(("direct", video_path)) or ([{"track_id": "t1"}], {"tracking_mode": "direct"}),
+        lambda video_path, analysis_context=None: (
+            calls.append(("direct", video_path, bool(analysis_context)))
+            or ([{"track_id": "t1"}], {"tracking_mode": "direct"})
+        ),
     )
     monkeypatch.setattr(
         worker,
         "_run_tracking_chunked",
-        lambda video_path: calls.append(("chunked", video_path)) or ([{"track_id": "t2"}], {"tracking_mode": "chunked"}),
+        lambda video_path, analysis_context=None: (
+            calls.append(("chunked", video_path, bool(analysis_context)))
+            or ([{"track_id": "t2"}], {"tracking_mode": "chunked"})
+        ),
     )
 
     tracks, metrics = worker._run_tracking("video.mp4")
 
     assert tracks == [{"track_id": "t1"}]
-    assert metrics == {"tracking_mode": "direct"}
-    assert calls == [("direct", "video.mp4")]
+    assert metrics["tracking_mode"] == "direct"
+    assert "analysis_context" in metrics
+    assert calls == [("direct", "video.mp4", True)]
 
 
 def test_run_tracking_direct_mode_bypasses_shared_analysis_proxy(monkeypatch):
@@ -7840,7 +7926,7 @@ def test_gpu_slot_serializes_only_extraction_and_allows_parallel_download(tmp_pa
             "status": "success",
             "phase_1_visual": {
                 "source_video": kwargs["youtube_url"],
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "task_type": "person_tracking",
                 "coordinate_space": "absolute_original_frame_xyxy",
                 "geometry_type": "aabb",

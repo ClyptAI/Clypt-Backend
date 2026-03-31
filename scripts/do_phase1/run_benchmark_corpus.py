@@ -24,12 +24,20 @@ class Wave4GateThresholds:
         max_unknown_rate_delta: float = 0.0,
         min_overlap_camera_consistency_delta: float = 0.0,
         max_total_wallclock_ms_delta: float = 0.0,
+        min_canonical_face_stream_coverage_delta: float = 0.0,
+        min_identity_fragmentation_reduction_delta: float = 0.0,
+        max_decode_overhead_ratio_delta: float = 0.0,
+        max_decode_before_after_size_ratio_delta: float = 0.0,
     ) -> None:
         self.min_assignment_coverage_delta = min_assignment_coverage_delta
         self.min_with_scored_candidate_ratio_delta = min_with_scored_candidate_ratio_delta
         self.max_unknown_rate_delta = max_unknown_rate_delta
         self.min_overlap_camera_consistency_delta = min_overlap_camera_consistency_delta
         self.max_total_wallclock_ms_delta = max_total_wallclock_ms_delta
+        self.min_canonical_face_stream_coverage_delta = min_canonical_face_stream_coverage_delta
+        self.min_identity_fragmentation_reduction_delta = min_identity_fragmentation_reduction_delta
+        self.max_decode_overhead_ratio_delta = max_decode_overhead_ratio_delta
+        self.max_decode_before_after_size_ratio_delta = max_decode_before_after_size_ratio_delta
 
 
 def _safe_float(v: Any) -> float | None:
@@ -135,6 +143,38 @@ def evaluate_wave4_exit_gates(
         t.max_total_wallclock_ms_delta,
         "Lower is better.",
     )
+    _add_check(
+        "canonical_face_stream_coverage_delta",
+        _comparison_delta(comparison, "summary_ratio_means", "canonical_face_stream_coverage"),
+        ">=",
+        t.min_canonical_face_stream_coverage_delta,
+        "Higher is better.",
+        required=False,
+    )
+    _add_check(
+        "identity_fragmentation_reduction_ratio_delta",
+        _comparison_delta(comparison, "summary_ratio_means", "identity_fragmentation_reduction_ratio"),
+        ">=",
+        t.min_identity_fragmentation_reduction_delta,
+        "Higher is better.",
+        required=False,
+    )
+    _add_check(
+        "decode_overhead_ratio_delta",
+        _comparison_delta(comparison, "summary_ratio_means", "decode_overhead_ratio"),
+        "<=",
+        t.max_decode_overhead_ratio_delta,
+        "Lower is better.",
+        required=False,
+    )
+    _add_check(
+        "decode_before_after_size_ratio_delta",
+        _comparison_delta(comparison, "summary_ratio_means", "decode_before_after_size_ratio"),
+        "<=",
+        t.max_decode_before_after_size_ratio_delta,
+        "Lower is better.",
+        required=False,
+    )
 
     return {
         "passed": all(bool(c["passed"]) for c in checks),
@@ -198,6 +238,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Output directory for generated report artifacts (default: timestamped .tmp path).",
     )
+    parser.add_argument("--min-assignment-coverage-delta", type=float, default=0.0)
+    parser.add_argument("--min-with-scored-candidate-ratio-delta", type=float, default=0.0)
+    parser.add_argument("--max-unknown-rate-delta", type=float, default=0.0)
+    parser.add_argument("--min-overlap-consistency-delta", type=float, default=0.0)
+    parser.add_argument("--max-total-wallclock-ms-delta", type=float, default=0.0)
+    parser.add_argument("--min-canonical-face-coverage-delta", type=float, default=0.0)
+    parser.add_argument("--min-fragmentation-reduction-delta", type=float, default=0.0)
+    parser.add_argument("--max-decode-overhead-ratio-delta", type=float, default=0.0)
+    parser.add_argument("--max-decode-before-after-size-ratio-delta", type=float, default=0.0)
     args = parser.parse_args(argv)
 
     out_dir = (args.output_dir or _default_output_dir()).expanduser().resolve()
@@ -242,7 +291,22 @@ def main(argv: list[str] | None = None) -> int:
         _write_json(comparison_path, comparison)
         summary["comparison_path"] = str(comparison_path)
 
-        gate = evaluate_wave4_exit_gates(comparison)
+        gate = evaluate_wave4_exit_gates(
+            comparison,
+            thresholds=Wave4GateThresholds(
+                min_assignment_coverage_delta=float(args.min_assignment_coverage_delta),
+                min_with_scored_candidate_ratio_delta=float(args.min_with_scored_candidate_ratio_delta),
+                max_unknown_rate_delta=float(args.max_unknown_rate_delta),
+                min_overlap_camera_consistency_delta=float(args.min_overlap_consistency_delta),
+                max_total_wallclock_ms_delta=float(args.max_total_wallclock_ms_delta),
+                min_canonical_face_stream_coverage_delta=float(args.min_canonical_face_coverage_delta),
+                min_identity_fragmentation_reduction_delta=float(args.min_fragmentation_reduction_delta),
+                max_decode_overhead_ratio_delta=float(args.max_decode_overhead_ratio_delta),
+                max_decode_before_after_size_ratio_delta=float(
+                    args.max_decode_before_after_size_ratio_delta
+                ),
+            ),
+        )
         gate_path = out_dir / "wave4_gate.json"
         _write_json(gate_path, gate)
         summary["gate_path"] = str(gate_path)

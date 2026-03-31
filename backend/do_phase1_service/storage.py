@@ -21,7 +21,7 @@ class StorageBackend(Protocol):
 
 class GCSStorage:
     def __init__(self, bucket: str | None = None):
-        self.bucket = bucket or os.getenv("GCS_BUCKET", "clypt-storage-v2")
+        self.bucket = bucket or os.getenv("GCS_BUCKET", "clypt-storage-v3")
         self._client = gcs_storage.Client()
 
     def upload_bytes(self, data: bytes, object_name: str) -> str:
@@ -80,7 +80,7 @@ def persist_phase1_outputs(
     )
 
     manifest_payload = {
-        "contract_version": "v2",
+        "contract_version": "v3",
         "job_id": job_id,
         "status": "succeeded",
         "source_video": {"source_url": source_url},
@@ -97,6 +97,8 @@ def persist_phase1_outputs(
                 "speaker_follow_bindings_local": phase_1_audio.get("speaker_follow_bindings_local") or [],
                 "audio_speaker_local_track_map": phase_1_audio.get("audio_speaker_local_track_map") or [],
                 "speaker_candidate_debug": phase_1_audio.get("speaker_candidate_debug") or [],
+                "audio_visual_mappings": phase_1_audio.get("audio_visual_mappings") or [],
+                "span_assignments": phase_1_audio.get("span_assignments") or [],
                 "active_speakers_local": phase_1_audio.get("active_speakers_local") or [],
                 "overlap_follow_decisions": phase_1_audio.get("overlap_follow_decisions") or [],
             },
@@ -119,6 +121,7 @@ def persist_phase1_outputs(
                 "shot_changes": phase_1_visual["shot_changes"],
                 "video_metadata": phase_1_visual["video_metadata"],
                 "mask_stability_signals": phase_1_visual.get("mask_stability_signals") or {},
+                "visual_identities": phase_1_visual.get("visual_identities") or [],
             },
             "events": None,
         },

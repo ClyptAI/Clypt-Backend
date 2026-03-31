@@ -54,6 +54,10 @@ class Phase1Word(BaseModel):
     speaker_local_tag: str | None = None
     calibrated_confidence: Confidence01 | None = None
     abstention_reason: str | None = None
+    speaker_track_ids: list[str] | None = None
+    offscreen_audio_speaker_ids: list[str] = Field(default_factory=list)
+    speaker_assignment_source: str | None = None
+    requires_hard_disambiguation: bool | None = None
 
     @model_validator(mode="after")
     def _check_time_order(self):
@@ -244,6 +248,51 @@ class Phase1SpeakerCandidateDebugEntry(BaseModel):
         return self
 
 
+class Phase1AudioVisualEvidenceEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audio_speaker_id: str
+    visual_identity_id: str
+    confidence: Confidence01
+    support_track_ids: list[str] = Field(default_factory=list)
+    evidence_kind: str
+    metadata: dict[str, object] | None = None
+
+
+class Phase1AudioVisualMapping(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audio_speaker_id: str
+    matched_visual_identity_id: str | None = None
+    confidence: Confidence01 | None = None
+    candidate_visual_identity_ids: list[str] = Field(default_factory=list)
+    evidence_edges: list[Phase1AudioVisualEvidenceEdge] = Field(default_factory=list)
+    supporting_track_ids: list[str] = Field(default_factory=list)
+    mapping_strategy: str | None = None
+    ambiguous: bool = False
+    metadata: dict[str, object] | None = None
+
+
+class Phase1SpanAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_time_ms: NonNegativeInt
+    end_time_ms: NonNegativeInt
+    audio_speaker_ids: list[str] = Field(default_factory=list)
+    assigned_visual_identity_ids: list[str] = Field(default_factory=list)
+    dominant_visual_identity_id: str | None = None
+    offscreen_audio_speaker_ids: list[str] = Field(default_factory=list)
+    unresolved_audio_speaker_ids: list[str] = Field(default_factory=list)
+    require_hard_disambiguation: bool | None = None
+    decision_source: str | None = None
+
+    @model_validator(mode="after")
+    def _check_time_order(self):
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("span assignment start_time_ms must be <= end_time_ms")
+        return self
+
+
 class Phase1ActiveSpeakerLocalSpan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -298,6 +347,8 @@ class Phase1TranscriptArtifact(BaseModel):
     speaker_follow_bindings_local: list[Phase1SpeakerBinding] = Field(default_factory=list)
     audio_speaker_local_track_map: list[Phase1AudioSpeakerLocalTrackMapEntry] = Field(default_factory=list)
     speaker_candidate_debug: list[Phase1SpeakerCandidateDebugEntry] = Field(default_factory=list)
+    audio_visual_mappings: list[Phase1AudioVisualMapping] = Field(default_factory=list)
+    span_assignments: list[Phase1SpanAssignment] = Field(default_factory=list)
     active_speakers_local: list[Phase1ActiveSpeakerLocalSpan] = Field(default_factory=list)
     overlap_follow_decisions: list[Phase1OverlapFollowDecision] = Field(default_factory=list)
 
@@ -323,6 +374,19 @@ class Phase1VisualArtifact(BaseModel):
     shot_changes: list[Phase1ShotChange]
     video_metadata: Phase1VideoMetadata
     mask_stability_signals: dict[str, object] = Field(default_factory=dict)
+    visual_identities: list["Phase1VisualIdentity"] = Field(default_factory=list)
+
+
+class Phase1VisualIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identity_id: str
+    confidence: Confidence01 | None = None
+    track_ids: list[str] = Field(default_factory=list)
+    face_track_ids: list[str] = Field(default_factory=list)
+    person_track_ids: list[str] = Field(default_factory=list)
+    evidence_edge_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] | None = None
 
 
 class Phase1EventsArtifact(BaseModel):
@@ -394,7 +458,7 @@ class Phase1Metadata(BaseModel):
 class Phase1Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["v2"]
+    contract_version: Literal["v3"]
     job_id: str
     status: JobState
     source_video: Phase1SourceVideo

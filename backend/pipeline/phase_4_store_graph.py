@@ -15,10 +15,10 @@ Inputs:
   - phase_1_audio.json              (word-level timestamps + speakers)
 
 Targets:
-  - Spanner: instance=clypt-spanner-v2, database=clypt-graph-db-v2
+  - Spanner: instance=clypt-spanner-v3, database=clypt-graph-db-v3
     - Table: SemanticClipNode
     - Table: NarrativeEdge
-  - GCS: gs://clypt-storage-v2/tracking/[node_id].json
+  - GCS: gs://clypt-storage-v3/tracking/[node_id].json
 """
 
 from __future__ import annotations
@@ -34,12 +34,12 @@ from google.cloud import spanner, storage
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-PROJECT_ID = "clypt-v2"
-SPANNER_INSTANCE = "clypt-spanner-v2"
-SPANNER_DATABASE = "clypt-graph-db-v2"
+PROJECT_ID = "clypt-v3"
+SPANNER_INSTANCE = "clypt-spanner-v3"
+SPANNER_DATABASE = "clypt-graph-db-v3"
 
-GCS_BUCKET = "clypt-storage-v2"
-VIDEO_GCS_URI = "gs://clypt-storage-v2/phase_1/video.mp4"
+GCS_BUCKET = "clypt-storage-v3"
+VIDEO_GCS_URI = "gs://clypt-storage-v3/phase_1/video.mp4"
 TRACKING_PREFIX = "tracking"
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -162,101 +162,6 @@ def _extract_visual_labels(node_start_ms: int, node_end_ms: int, visual: dict) -
     return sorted(labels)
 
 
-def _ensure_legacy_visual_from_tracks(visual: dict) -> dict:
-    """Build legacy face/person detection blocks from canonical tracks when missing."""
-    if not isinstance(visual, dict):
-        return {"person_detections": [], "face_detections": [], "object_tracking": [], "label_detections": []}
-
-    has_person = isinstance(visual.get("person_detections"), list)
-    has_face = isinstance(visual.get("face_detections"), list)
-    if has_person and has_face:
-        visual.setdefault("object_tracking", [])
-        visual.setdefault("label_detections", [])
-        return visual
-
-    tracks = visual.get("tracks", [])
-    if not isinstance(tracks, list) or not tracks:
-        visual["person_detections"] = visual.get("person_detections", [])
-        visual["face_detections"] = visual.get("face_detections", [])
-        visual.setdefault("object_tracking", [])
-        visual.setdefault("label_detections", [])
-        return visual
-
-    meta = visual.get("video_metadata", {}) if isinstance(visual.get("video_metadata"), dict) else {}
-    width = int(meta.get("width", 1920) or 1920)
-    height = int(meta.get("height", 1080) or 1080)
-    fps = float(meta.get("fps", 25.0) or 25.0)
-
-    by_tid: dict[str, list[dict]] = {}
-    for t in tracks:
-        tid = str(t.get("track_id", ""))
-        if not tid:
-            continue
-        by_tid.setdefault(tid, []).append(t)
-    for tid in list(by_tid.keys()):
-        by_tid[tid].sort(key=lambda x: int(x.get("frame_idx", -1)))
-
-    person_dets = []
-    face_dets = []
-    for idx, (tid, dets) in enumerate(sorted(by_tid.items())):
-        person_ts = []
-        face_ts = []
-        for d in dets:
-            fi = int(d.get("frame_idx", 0))
-            t_ms = int(round((fi / max(1e-6, fps)) * 1000.0))
-            x1 = float(d.get("x1", 0.0))
-            y1 = float(d.get("y1", 0.0))
-            x2 = float(d.get("x2", x1 + 1.0))
-            y2 = float(d.get("y2", y1 + 1.0))
-            bbox = {
-                "left": max(0.0, min(1.0, x1 / max(1, width))),
-                "top": max(0.0, min(1.0, y1 / max(1, height))),
-                "right": max(0.0, min(1.0, x2 / max(1, width))),
-                "bottom": max(0.0, min(1.0, y2 / max(1, height))),
-            }
-            person_ts.append({"time_ms": t_ms, "bounding_box": bbox})
-
-            bw = max(1e-6, bbox["right"] - bbox["left"])
-            bh = max(1e-6, bbox["bottom"] - bbox["top"])
-            face_bbox = {
-                "left": max(0.0, min(1.0, bbox["left"] + 0.18 * bw)),
-                "right": max(0.0, min(1.0, bbox["right"] - 0.18 * bw)),
-                "top": max(0.0, min(1.0, bbox["top"] + 0.02 * bh)),
-                "bottom": max(0.0, min(1.0, bbox["top"] + 0.48 * bh)),
-            }
-            face_ts.append({"time_ms": t_ms, "bounding_box": face_bbox})
-
-        if person_ts:
-            person_dets.append(
-                {
-                    "confidence": float(sum(float(d.get("confidence", 0.0)) for d in dets) / max(1, len(dets))),
-                    "segment_start_ms": int(person_ts[0]["time_ms"]),
-                    "segment_end_ms": int(person_ts[-1]["time_ms"]),
-                    "person_track_index": idx,
-                    "track_id": tid,
-                    "timestamped_objects": person_ts,
-                }
-            )
-        if face_ts:
-            face_dets.append(
-                {
-                    "confidence": float(sum(float(d.get("confidence", 0.0)) for d in dets) / max(1, len(dets))),
-                    "segment_start_ms": int(face_ts[0]["time_ms"]),
-                    "segment_end_ms": int(face_ts[-1]["time_ms"]),
-                    "face_track_index": idx,
-                    "track_id": tid,
-                    "timestamped_objects": face_ts,
-                }
-            )
-
-    visual["person_detections"] = person_dets
-    visual["face_detections"] = face_dets
-    visual.setdefault("object_tracking", [])
-    visual.setdefault("label_detections", [])
-    return visual
-
-
-
 def _extract_spatial_tracking(
     node_start_ms: int, node_end_ms: int, visual: dict,
 ) -> dict:
@@ -352,7 +257,11 @@ def main():
 
     with open(VISUAL_PATH) as f:
         visual = json.load(f)
-    visual = _ensure_legacy_visual_from_tracks(visual)
+    for key in ("person_detections", "face_detections", "object_tracking", "label_detections"):
+        if not isinstance(visual.get(key), list):
+            raise RuntimeError(
+                f"phase_1_visual.json must provide canonical v3 key '{key}' as a list"
+            )
     log.info(f"  Visual ledger loaded ({VISUAL_PATH})")
 
     with open(AUDIO_PATH) as f:

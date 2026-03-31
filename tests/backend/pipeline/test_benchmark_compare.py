@@ -14,6 +14,7 @@ from backend.pipeline.phase1.benchmark_corpus import (
     compare_benchmark_reports,
     load_benchmark_report,
     build_benchmark_report,
+    SUPPORTED_BENCHMARK_REPORT_VERSIONS,
 )
 
 
@@ -29,12 +30,24 @@ def _bundle(*, job_id: str, words: list[dict], processing_ms: int = 100, trackin
             "uri": "gs://b/v.json",
             "source_video": "https://example.com/x",
             "video_gcs_uri": "gs://b/v.mp4",
-            "schema_version": "2.0.0",
+            "schema_version": "3.0.0",
             "task_type": "person_tracking",
             "coordinate_space": "absolute_original_frame_xyxy",
             "geometry_type": "aabb",
             "class_taxonomy": {"0": "person"},
-            "tracking_metrics": {"schema_pass_rate": 1.0, "tracking_wallclock_s": tracking_s},
+            "tracking_metrics": {
+                "schema_pass_rate": 1.0,
+                "tracking_wallclock_s": tracking_s,
+                "canonical_face_stream_coverage": 0.75,
+                "identity_track_count_before_clustering": 10,
+                "identity_track_count_after_reid_merge": 8,
+                "identity_track_count_after_clustering": 8,
+                "decode_prepare_wallclock_ms": 10,
+                "decode_source_video_mb": 100.0,
+                "decode_analysis_video_mb": 80.0,
+                "lrasd_stage_gpu_utilization_pct_sampled_mean": 70.0,
+                "face_stage_gpu_utilization_pct_sampled_mean": 55.0,
+            },
             "tracks": [],
             "face_detections": [],
             "person_detections": [],
@@ -72,7 +85,11 @@ def test_compare_identical_reports_zero_aggregate_deltas(tmp_path: Path):
     assert diff["version"] == BENCHMARK_COMPARISON_VERSION
     agg = diff["aggregate"]
     assert agg["summary_ratio_means"]["assignment_coverage"]["delta"] == pytest.approx(0.0)
+    assert agg["summary_ratio_means"]["canonical_face_stream_coverage"]["delta"] == pytest.approx(0.0)
     assert agg["wallclock_ms_means"]["processing_ms"]["delta"] == pytest.approx(0.0)
+    assert agg["decode_overhead_ms_means"]["prepare_ms"]["delta"] == pytest.approx(0.0)
+    assert agg["summary_ratio_means"]["decode_before_after_size_ratio"]["delta"] == pytest.approx(0.0)
+    assert agg["gpu_utilization_pct_means"]["lrasd_stage"]["delta"] == pytest.approx(0.0)
     assert agg["stage_wallclock_s_means"]["tracking_wallclock_s"]["delta"] == pytest.approx(0.0)
     assert len(diff["per_clip"]) == 1
     assert diff["per_clip"][0]["match_basis"] == "job_id"
@@ -139,8 +156,18 @@ def test_compare_rejects_missing_clips():
 
 def test_load_benchmark_report_roundtrip(tmp_path: Path):
     p = tmp_path / "r.json"
-    p.write_text(json.dumps({"version": 1, "clips": [], "summary": {}}), encoding="utf-8")
-    assert load_benchmark_report(p)["version"] == 1
+    p.write_text(json.dumps({"version": 3, "clips": [], "summary": {}}), encoding="utf-8")
+    loaded = load_benchmark_report(p)
+    assert loaded["version"] == 3
+    assert loaded["compatibility"]["loaded_version"] == 3
+    assert loaded["compatibility"]["reader_supports_versions"] == list(SUPPORTED_BENCHMARK_REPORT_VERSIONS)
+
+
+def test_load_benchmark_report_rejects_unsupported_version(tmp_path: Path):
+    p = tmp_path / "unsupported.json"
+    p.write_text(json.dumps({"version": 99, "clips": [], "summary": {}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported benchmark report version"):
+        load_benchmark_report(p)
 
 
 def test_load_benchmark_report_rejects_non_object(tmp_path: Path):
@@ -205,6 +232,7 @@ def test_cli_baseline_writes_comparison_next_to_output(tmp_path: Path):
     assert comp.is_file()
     loaded = json.loads(comp.read_text(encoding="utf-8"))
     assert loaded["version"] == BENCHMARK_COMPARISON_VERSION
+    assert loaded["compatibility"]["reader_supports_report_versions"] == list(SUPPORTED_BENCHMARK_REPORT_VERSIONS)
     assert "aggregate" in loaded
 
 

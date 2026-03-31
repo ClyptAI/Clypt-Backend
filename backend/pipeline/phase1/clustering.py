@@ -88,7 +88,7 @@ def build_mask_overlap_clustering_signals(
     """Per-track proxies aligned with worker `mask_stability_signals` / bbox continuity (Wave 4).
 
     Used only for optional histogram→face attachment cost shaping. When ``active`` is False,
-    callers must not apply mask-overlap terms (preserves legacy behavior).
+    callers must not apply mask-overlap terms.
     """
     fps = max(1e-6, float(video_fps or 25.0))
     duration_ms = max(0, int(duration_ms))
@@ -174,7 +174,7 @@ def build_mask_overlap_clustering_signals(
     return {
         "active": active,
         "per_track": per_track,
-        "signal_version": "cluster_attach_bbox_v1",
+        "signal_version": "cluster_attach_bbox_v3",
         "short_term_stability_memory": {
             "window_start_frame": win_start,
             "window_end_frame": win_end,

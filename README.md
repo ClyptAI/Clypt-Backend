@@ -37,7 +37,7 @@ YouTube URL
 
 ### Important Phase 1 behavior
 - Phase 1 does **not** use TalkNet in the active path.
-- Phase 1 does **not** use Google Video Intelligence or `phase_1a_reconcile.py`.
+- Phase 1 does **not** use Google Video Intelligence or any legacy reconcile stage.
 - The worker runs **Parakeet ASR first, then tracking on the same GPU** to avoid CUDA-graph conflicts.
 - A shared analysis proxy path is used for tracking, face processing, and LR-ASD when enabled.
 - Canonical face observations are built early and reused across clustering, LR-ASD, and final ledgers.
@@ -55,7 +55,7 @@ YouTube URL
 4. Inside that worker, run Parakeet ASR, YOLO26s + BoT-SORT tracking, identity clustering, and speaker binding.
 5. Build final `phase_1_visual` / `phase_1_audio` payloads.
 6. Upload the canonical source video and Phase 1 artifacts to GCS.
-7. Persist a contract `v2` manifest and mark the DO job complete.
+7. Persist a contract `v3` manifest and mark the DO job complete.
 
 ### In the local pipeline bridge
 1. Submit the async DO job.
@@ -80,10 +80,10 @@ That local redownload is still present in code today because later phases and re
 
 ## Shared Team Resources
 
-- GCP project: `clypt-v2`
-- Bucket: `gs://clypt-storage-v2`
-- Spanner instance: `clypt-spanner-v2`
-- Spanner database: `clypt-graph-db-v2`
+- GCP project: `clypt-v3`
+- Bucket: `gs://clypt-storage-v3`
+- Spanner instance: `clypt-spanner-v3`
+- Spanner database: `clypt-graph-db-v3`
 
 ## Local Setup
 
@@ -102,7 +102,7 @@ cd remotion-render && npm install && cd ..
 ```bash
 gcloud auth login
 gcloud auth application-default login
-gcloud config set project clypt-v2
+gcloud config set project clypt-v3
 ```
 
 3. Enable required Google APIs

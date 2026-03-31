@@ -46,6 +46,10 @@ def test_evaluate_wave4_exit_gates_passes_on_improvement():
                 "with_scored_candidate_ratio": {"delta": 0.01},
                 "unknown_rate": {"delta": -0.02},
                 "overlap_camera_consistency_ratio": {"delta": 0.04},
+                "canonical_face_stream_coverage": {"delta": 0.05},
+                "identity_fragmentation_reduction_ratio": {"delta": 0.07},
+                "decode_overhead_ratio": {"delta": -0.03},
+                "decode_before_after_size_ratio": {"delta": -0.02},
             },
             "wallclock_ms_means": {
                 "total_ms": {"delta": -500.0},
@@ -66,6 +70,8 @@ def test_evaluate_wave4_exit_gates_fails_when_missing_or_regressed():
                 "with_scored_candidate_ratio": {"delta": 0.0},
                 "unknown_rate": {"delta": 0.03},
                 "overlap_camera_consistency_ratio": {"delta": 0.0},
+                "canonical_face_stream_coverage": {"delta": -0.05},
+                "identity_fragmentation_reduction_ratio": {"delta": -0.10},
             },
             "wallclock_ms_means": {
                 "total_ms": {"delta": 1200.0},
@@ -77,6 +83,32 @@ def test_evaluate_wave4_exit_gates_fails_when_missing_or_regressed():
     assert any(c["name"] == "assignment_coverage_delta" and c["passed"] is False for c in gate["checks"])
     assert any(c["name"] == "unknown_rate_delta" and c["passed"] is False for c in gate["checks"])
     assert any(c["name"] == "total_wallclock_ms_delta" and c["passed"] is False for c in gate["checks"])
+    assert any(
+        c["name"] == "identity_fragmentation_reduction_ratio_delta" and c["passed"] is False
+        for c in gate["checks"]
+    )
+
+
+def test_evaluate_wave4_exit_gates_honors_custom_decode_threshold():
+    mod = _load_subject()
+    comparison = {
+        "aggregate": {
+            "summary_ratio_means": {
+                "assignment_coverage": {"delta": 0.01},
+                "with_scored_candidate_ratio": {"delta": 0.01},
+                "unknown_rate": {"delta": -0.01},
+                "decode_before_after_size_ratio": {"delta": 0.12},
+            },
+            "wallclock_ms_means": {"total_ms": {"delta": -10.0}},
+        }
+    }
+    thresholds = mod.Wave4GateThresholds(max_decode_before_after_size_ratio_delta=0.05)
+    gate = mod.evaluate_wave4_exit_gates(comparison, thresholds=thresholds)
+    assert gate["passed"] is False
+    assert any(
+        c["name"] == "decode_before_after_size_ratio_delta" and c["passed"] is False
+        for c in gate["checks"]
+    )
 
 
 def test_main_generates_current_baseline_comparison_and_gate(tmp_path: Path):
