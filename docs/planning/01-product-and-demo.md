@@ -36,8 +36,8 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 
 ### What to show in the demo
 1. **DO extraction output** proving deterministic grounding on the active stack.
-2. **`phase_1_visual.json`** with tracking, person detections, face detections, and metrics.
-3. **`phase_1_audio.json`** with Parakeet word timings and speaker bindings.
+2. **`phase_1_visual.json`** with v3 ledgers: `tracks`, `shot_changes`, `person_detections`, `face_detections`, `object_tracking`, `label_detections`, and `tracking_metrics` (see `phase1_contract.Phase1VisualArtifact`).
+3. **`phase_1_audio.json`** with Parakeet word timings, speaker bindings (including local/follow fields when emitted), and optional overlap-follow spans where enabled.
 4. **Phase 2A / 2B outputs** showing Gemini reasoning on top of Phase 1 ledgers.
 5. **Rendered clips** showing speaker-aware framing behavior.
 

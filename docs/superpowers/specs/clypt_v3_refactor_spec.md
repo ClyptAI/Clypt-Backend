@@ -1,7 +1,7 @@
 # Phase 1 Refactor - Clypt v3 Implementation Spec
 
-**Status:** Proposed  
-**Date:** 2026-03-30  
+**Status:** Active — **implementation on `main` is authoritative** for contract shape, DO persistence, and worker defaults; remaining sections below may still describe backlog or verification items.  
+**Date:** 2026-03-30 (updated as implementation landed)  
 **Scope:** `backend/do_phase1_worker.py`, `backend/overlap_follow.py`, `backend/test-render/render_speaker_follow_clips.py`, `backend/pipeline/phase1_contract.py`, `backend/do_phase1_service/storage.py`, `backend/do_phase1_service/models.py`, `backend/do_phase1_service/.env.example`  
 **Primary objective:** Maximize accuracy and speed.  
 **Constraints:** No requirement to preserve v2 compatibility, no detect-only rollback path, no full heuristic-binding path.

@@ -1,6 +1,6 @@
 # Clypt v3 Cleanup Pass (Phase 1)
 
-This document records the v3 cleanup pass requested after final review findings.
+This document records the v3 cleanup pass requested after final review findings. **Code on [github.com/rithm84/Clypt-V3](https://github.com/rithm84/Clypt-V3)** is authoritative if this note drifts.
 
 ## Scope
 

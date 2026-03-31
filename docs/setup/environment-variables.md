@@ -68,3 +68,5 @@ Notable service groups (non-exhaustive; see template + worker):
 - `README.md`
 - `docs/deployment/do-phase1-digitalocean.md`
 - `docs/do_phase1_worker.md`
+- `docs/superpowers/specs/clypt_v3_refactor_spec.md` (v3 Phase 1 target behavior; cross-check with code)
+- `docs/superpowers/specs/clypt_v3_cleanup_pass.md` (v3 migration / cleanup notes)

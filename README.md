@@ -2,6 +2,8 @@
 
 Clypt turns a source video into structured multimodal ledgers, graph data, and 9:16 clip renders.
 
+**Repository:** [github.com/rithm84/Clypt-V3](https://github.com/rithm84/Clypt-V3) — Phase 1 ships a **v3** manifest contract (`contract_version: v3`); see `backend/pipeline/phase1_contract.py` and `docs/superpowers/specs/clypt_v3_refactor_spec.md`.
+
 The active extraction path is **DigitalOcean Phase 1**, backed by the code in:
 - `backend/do_phase1_worker.py`
 - `backend/do_phase1_service/`
@@ -212,6 +214,7 @@ printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python b
 | 5 (auto-curate) | `backend/pipeline/phase_5_auto_curate.py` |
 | 5 (retrieve) | `backend/pipeline/phase_5_retrieve.py` |
 | full orchestrator | `backend/pipeline/run_pipeline.py` |
+| optional Claude viral windows + ffmpeg | `scripts/make_clips.py` (standalone; not the Phase 5 graph path) |
 
 ## Planning Docs
 

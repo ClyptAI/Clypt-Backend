@@ -6,6 +6,9 @@ For **Phase 1**, the real source of truth is code, not planning prose:
 - `backend/do_phase1_worker.py`
 - `backend/do_phase1_service/`
 - `backend/pipeline/phase_1_do_pipeline.py`
+- v3 contract: `backend/pipeline/phase1_contract.py`
+
+**Repository:** [github.com/rithm84/Clypt-V3](https://github.com/rithm84/Clypt-V3)
 
 ## Read Order
 1. [Product and Demo](./01-product-and-demo.md)

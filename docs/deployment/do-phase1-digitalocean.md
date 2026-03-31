@@ -2,9 +2,33 @@
 
 This is the active deployment path for Phase 1 extraction.
 
+**Organize everything under the DigitalOcean project `Clypt-V3`.** New droplets, and any other DO resources you attach to this product, should be created or moved into that project so billing, access, and the control-plane “project” view match the v3 repo ([`rithm84/Clypt-V3`](https://github.com/rithm84/Clypt-V3)). This is separate from the GCP project `clypt-v3`.
+
+## DigitalOcean project: `Clypt-V3`
+
+Create the project once per account (skip if it already exists — `doctl` will error on duplicate name):
+
+```bash
+doctl projects create \
+  --name "Clypt-V3" \
+  --purpose "Web Application" \
+  --description "Clypt v3: Phase 1 GPU extraction, APIs, and related DO resources" \
+  --environment Production
+```
+
+Resolve its id for CLI use (droplet create, resource assignment, etc.):
+
+```bash
+PROJECT_ID=$(doctl projects list -o json | jq -r '.[] | select(.name == "Clypt-V3") | .id')
+echo "$PROJECT_ID"
+```
+
+To attach an **existing** droplet to this project: DigitalOcean control panel → **Move resources**, or `doctl projects resources assign` with the droplet’s URN.
+
 ## Current DO Facts To Verify Before Provisioning
 
-- Project: `Clypt-V2`
+- GitHub repository: [`rithm84/Clypt-V3`](https://github.com/rithm84/Clypt-V3) (canonical remote for this codebase)
+- DigitalOcean project: **`Clypt-V3`** (see above; use `PROJECT_ID` when creating droplets)
 - Droplet name: `clypt-phase1-gpu-1`
 - SSH key name: `clypt-do-phase1`
 - SSH key id: `55082300`
@@ -58,8 +82,9 @@ doctl compute ssh-key list --output json | jq -r '
 Only run this after the preflight checks confirm the exact target shape is available:
 
 ```bash
+PROJECT_ID=$(doctl projects list -o json | jq -r '.[] | select(.name == "Clypt-V3") | .id')
 doctl compute droplet create clypt-phase1-gpu-1 \
-  --project-id b306872c-0eb7-4c6f-9658-32188ac4a642 \
+  --project-id "$PROJECT_ID" \
   --region atl1 \
   --size gpu-h200x1-141gb \
   --image gpu-h100x1-base \
