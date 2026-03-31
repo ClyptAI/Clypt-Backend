@@ -24,7 +24,7 @@ __pycache__/
 # Node / frontend build artifacts
 node_modules/
 .next/
-cortex-ui/next-env.d.ts
+frontend/dist/
 dist/
 build/
 

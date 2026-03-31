@@ -118,17 +118,17 @@
 
 ## Recommended Usage by Clypt Phase
 
-### 1) Frontend (Cortex UI / Next.js)
+### 1) Frontend (Vite + React in `frontend/`)
 
-Use: `next-best-practices`
+Use: `next-best-practices` (React performance patterns still apply), `vercel-react-best-practices` where relevant
 
 When:
-- Refactoring `cortex-ui/*`
-- Improving app-router patterns, data fetching, caching, rendering boundaries
+- Refactoring `frontend/*`
+- Improving routing, data fetching, caching, rendering boundaries
 - Reducing unnecessary re-renders and bundle overhead
 
 Prompt pattern:
-- "Use `next-best-practices` to review and optimize `cortex-ui/app/graph/page.tsx` for performance and maintainability."
+- "Use `next-best-practices` / React performance guidance to review and optimize `frontend/src/pages/CortexGraph.tsx` for performance and maintainability."
 
 ### 2) Gemini Integration (Phases 2A/2B/3/5)
 
@@ -165,13 +165,13 @@ When:
 Prompt pattern:
 - "Use `python-testing-patterns` to add tests for `backend/do_phase1_worker.py` contract validation and track schema output."
 
-### 5) Browser E2E for Cortex UI
+### 5) Browser E2E for the web app (`frontend/`)
 
 Use: `playwright-generate-test`
 
 When:
 - Generating tests for graph interactions and UI flows
-- Regressions around `cortex-ui/app/graph/page.tsx` and component panels
+- Regressions around `frontend/src/pages/CortexGraph.tsx` and component panels
 
 Prompt pattern:
 - "Use `playwright-generate-test` to generate E2E tests for selecting a node, opening details, and rendering clip previews."
@@ -181,7 +181,7 @@ Prompt pattern:
 Use: `github-actions-templates`
 
 When:
-- Setting up CI for lint/test/build in both `backend` and `cortex-ui`
+- Setting up CI for lint/test/build in both `backend` and `frontend`
 - Running Playwright tests and Python tests on pull requests
 
 Prompt pattern:
@@ -220,7 +220,7 @@ When:
 - You are updating dependencies and need version-accurate usage
 
 Prompt pattern:
-- "Use `context7-mcp` to fetch current docs/examples for the library used in `cortex-ui/app/components/CortexGraph.tsx` before refactoring."
+- "Use `context7-mcp` to fetch current docs/examples for the library used in `frontend/src/pages/CortexGraph.tsx` before refactoring."
 
 ### 10) Fast QA and Dogfooding Flows
 
@@ -251,12 +251,12 @@ Prompt pattern:
 Use: `ui-ux-pro-max`, `ckm-design`, `ckm-ui-styling`, `ckm-design-system`, `ckm-brand`, `ckm-banner-design`, `ckm-slides`
 
 When:
-- You want to upgrade Cortex UI visual quality and consistency
+- You want to upgrade the web app (`frontend/`) visual quality and consistency
 - You need a tighter design-system foundation for reusable components
 - You need branded visual assets and presentation artifacts for demos/pitches
 
 Prompt patterns:
-- "Use `ckm-design-system` + `ckm-ui-styling` to standardize tokens, spacing, and component styling for `cortex-ui/app/components/*`."
+- "Use `ckm-design-system` + `ckm-ui-styling` to standardize tokens, spacing, and component styling for `frontend/src/components/*`."
 - "Use `ckm-design` + `ui-ux-pro-max` to redesign the graph detail and clip panels for clearer hierarchy and better usability."
 - "Use `ckm-brand` + `ckm-banner-design` to generate launch-ready visuals for Clypt announcements."
 - "Use `ckm-slides` to prepare a polished product walkthrough deck from our current docs."
@@ -265,7 +265,7 @@ Prompt patterns:
 
 1. `python-testing-patterns` to stabilize backend tests.
 2. `gemini-api-dev` and `vertex-ai-api-dev` to harden model calls.
-3. `next-best-practices` for `cortex-ui` optimization.
+3. `next-best-practices` (or React-focused skills) for `frontend/` optimization.
 4. `ui-ux-pro-max` + `ckm-*` skills for visual design/system passes.
 5. `playwright-generate-test` for UI regression coverage.
 6. `github-actions-templates` to enforce CI gates.

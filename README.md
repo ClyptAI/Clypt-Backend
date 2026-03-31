@@ -97,6 +97,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 cd remotion-render && npm install && cd ..
+cd frontend && npm install && cd ..
 ```
 
 2. Authenticate Google CLIs
