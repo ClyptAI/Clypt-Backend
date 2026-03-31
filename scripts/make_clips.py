@@ -1,12 +1,12 @@
 """
-make_clips.py — Cut viral short clips from Phase 1 data using Claude.
+Cut viral short clips from Phase 1 data using Claude (standalone from the main pipeline).
 
-Usage:
-    python make_clips.py
+Usage (from repo root):
+    python scripts/make_clips.py
 
-Reads:  outputs/phase_1_audio.json
-        downloads/video.mp4
-Writes: clips/clip_01.mp4, clips/clip_02.mp4, ...
+Reads:  backend/outputs/phase_1_audio.json
+        backend/downloads/video.mp4
+Writes: backend/outputs/claude_clips/clip_01.mp4, ...
 """
 
 import json
@@ -15,17 +15,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-AUDIO_JSON = ROOT / "outputs" / "phase_1_audio.json"
-VIDEO_PATH = ROOT / "downloads" / "video.mp4"
-CLIPS_DIR = ROOT / "clips"
+ROOT = Path(__file__).resolve().parents[1]
+AUDIO_JSON = ROOT / "backend" / "outputs" / "phase_1_audio.json"
+VIDEO_PATH = ROOT / "backend" / "downloads" / "video.mp4"
+CLIPS_DIR = ROOT / "backend" / "outputs" / "claude_clips"
 
-FFMPEG = os.getenv(
-    "FFMPEG_PATH",
-    r"C:\Users\chess\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe",
-)
-if not Path(FFMPEG).exists():
-    FFMPEG = "ffmpeg"
+FFMPEG = os.getenv("FFMPEG_PATH", "").strip() or "ffmpeg"
 
 
 def build_transcript(words: list[dict]) -> str:
@@ -137,7 +132,7 @@ def main():
         print(f"  {i+1}. [{c['start_s']:.1f}s - {c['end_s']:.1f}s] {c['title']}")
         print(f"     {c['reason']}")
 
-    CLIPS_DIR.mkdir(exist_ok=True)
+    CLIPS_DIR.mkdir(parents=True, exist_ok=True)
     for i, c in enumerate(clips):
         out = str(CLIPS_DIR / f"clip_{i+1:02d}_{c['title'].replace(' ', '_')[:30]}.mp4")
         print(f"\nCutting clip {i+1}: {out}")
