@@ -29,11 +29,11 @@ YouTube URL
 - Local pipeline client submits jobs, polls for completion, then materializes compatibility artifacts for downstream phases
 
 ### Models and major components
-- ASR: `nvidia/parakeet-tdt-1.1b`
-- Tracking: `YOLO26s + BoT-SORT`
+- ASR: `nvidia/parakeet-tdt-1.1b` (`ASR_MODEL_NAME` in `backend/do_phase1_worker.py`)
+- Tracking: Ultralytics **segmentation** weights default **`yolo26m-seg.pt`** (`YOLO_WEIGHTS_PATH`), plus **ByteTrack** only (`CLYPT_TRACKER_BACKEND` / `PHASE1_TRACKER_BACKEND`, default `bytetrack`; other backends fail fast in worker Wave 1)
 - Face pipeline: full-frame `SCRFD` face detection on the shared analysis video, then face-track building
 - Identity stabilization: `ArcFace/InsightFace` embeddings on face tracks, short-gap face-track propagation, then signature-only attachment for remaining fragments
-- Active speaker binding: **LR-ASD primary**, heuristic fallback, `auto` runtime mode for large videos
+- Active speaker binding: **LR-ASD** when mode resolves to `lrasd` / `shared_analysis_proxy` / `auto`; explicit **`heuristic`** mode skips LR-ASD. Whole-job heuristic after LR-ASD returns `None` is **off by default** unless `CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK=1` (see `backend/do_phase1_worker.py`)
 
 ### Important Phase 1 behavior
 - Phase 1 does **not** use TalkNet in the active path.
@@ -52,7 +52,7 @@ YouTube URL
 1. Download source media from the submitted URL.
 2. Convert audio to 16kHz mono WAV.
 3. Run the local Phase 1 worker in-process.
-4. Inside that worker, run Parakeet ASR, YOLO26s + BoT-SORT tracking, identity clustering, and speaker binding.
+4. Inside that worker, run Parakeet ASR, YOLOv26-seg + ByteTrack tracking, identity clustering, and speaker binding.
 5. Build final `phase_1_visual` / `phase_1_audio` payloads.
 6. Upload the canonical source video and Phase 1 artifacts to GCS.
 7. Persist a contract `v3` manifest and mark the DO job complete.
@@ -175,30 +175,20 @@ printf '%s\n' 'https://www.youtube.com/watch?v=dXUFsDcC0_4' | .venv/bin/python b
 
 ## Important Runtime Flags
 
-### Local Phase 1 client
-- `DO_PHASE1_BASE_URL`
-- `DO_PHASE1_POLL_INTERVAL_SECONDS`
-- `DO_PHASE1_TIMEOUT_SECONDS`
-- `PHASE1_RUNTIME_PROFILE`
-- `PHASE1_SPEAKER_BINDING_MODE`
-- `PHASE1_TRACKING_MODE`
-- `PHASE1_SHARED_ANALYSIS_PROXY`
-- `PHASE1_HEURISTIC_BINDING_ENABLED`
+### Local Phase 1 client (`backend/pipeline/phase_1_do_pipeline.py`)
+- Service URL: `DO_PHASE1_BASE_URL` or `PHASE1_SERVICE_URL` or `DIGITALOCEAN_PHASE1_BASE_URL` (first set wins)
+- `DO_PHASE1_POLL_INTERVAL_SECONDS` (default `10` in code)
+- `DO_PHASE1_TIMEOUT_SECONDS` (default `1800` seconds in code unless overridden)
+- `PHASE1_RUNTIME_PROFILE`, `PHASE1_FORCE_LRASD`
+- `PHASE1_SPEAKER_BINDING_MODE`, `PHASE1_TRACKING_MODE`, `PHASE1_TRACKER_BACKEND` (ByteTrack-only; same rule as worker)
+- `PHASE1_SHARED_ANALYSIS_PROXY`, `PHASE1_HEURISTIC_BINDING_ENABLED`
 
 ### DO worker / extraction service
-- `DO_PHASE1_WORKER_CONCURRENCY`
-- `DO_PHASE1_GPU_SLOTS`
-- `DO_PHASE1_STATE_ROOT`
-- `DO_PHASE1_DB_PATH`
-- `DO_PHASE1_OUTPUT_ROOT`
-- `DO_PHASE1_LOG_ROOT`
-- `CLYPT_SPEAKER_BINDING_MODE`
-- `CLYPT_TRACKING_MODE`
-- `CLYPT_TRACK_CHUNK_WORKERS`
-- `CLYPT_LRASD_BATCH_SIZE`
-- `CLYPT_LRASD_PIPELINE_OVERLAP`
-- `CLYPT_LRASD_MAX_INFLIGHT`
-- rollout gate thresholds in `backend/do_phase1_worker.py`
+- `DO_PHASE1_WORKER_CONCURRENCY`, `DO_PHASE1_GPU_SLOTS`, `DO_PHASE1_STATE_ROOT`, `DO_PHASE1_DB_PATH`, `DO_PHASE1_OUTPUT_ROOT`, `DO_PHASE1_LOG_ROOT`
+- `CLYPT_SPEAKER_BINDING_MODE`, `CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK` (v3: default `0` — no whole-job heuristic after LR-ASD `None` without opt-in)
+- `CLYPT_TRACKING_MODE` (worker default `direct` in code), `CLYPT_TRACKER_BACKEND` (ByteTrack-only), `CLYPT_TRACK_CHUNK_WORKERS`
+- `YOLO_WEIGHTS_PATH`, `CLYPT_YOLO_IMGSZ`, `CLYPT_LRASD_*` (including `CLYPT_LRASD_PROFILE`, batch/inflight/overlap)
+- Additional knobs: see `backend/do_phase1_service/.env.example` and `backend/do_phase1_worker.py`
 
 ## Expected Core Artifacts
 

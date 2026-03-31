@@ -9,9 +9,9 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 | YouTube + `yt-dlp` | source media acquisition |
 | DigitalOcean Phase 1 service | async extraction API + worker runtime |
 | Parakeet TDT 1.1B | transcription with word-level timing |
-| YOLO26s + BoT-SORT | person tracking |
+| YOLOv26-seg + ByteTrack | person/segment tracking (`yolo26m-seg.pt` default, ByteTrack-only backend in worker) |
 | SCRFD + ArcFace/InsightFace face-track pipeline | face observations, identity stabilization, and canonical face stream |
-| LR-ASD + heuristic fallback | speaker binding |
+| LR-ASD (+ optional heuristic paths per worker env) | speaker binding |
 | Gemini | node decomposition, narrative edges, clip scoring |
 | Vertex embeddings | node and query vectorization |
 | Cloud Spanner | graph + vector storage |
@@ -32,8 +32,8 @@ See also: [Planning Index](./README.md), [System Architecture](./02-system-archi
 | `remotion_payload.json` | Phase 5 retrieve | renderers |
 
 Artifact notes:
-- `phase_1_visual.json` includes `tracks`, `person_detections`, `face_detections`, and `tracking_metrics`.
-- `phase_1_audio.json` includes word timings and speaker bindings.
+- `phase_1_visual.json` includes `tracks`, `shot_changes`, `person_detections`, `face_detections`, `object_tracking`, `label_detections`, and `tracking_metrics` (v3 contract in `backend/pipeline/phase1_contract.py`; lists are coerced to `[]` in `backend/pipeline/phase_1_do_pipeline.py` when materializing).
+- `phase_1_audio.json` includes word timings, speaker bindings (including local/follow variants when emitted), and optional overlap-follow fields validated against the same contract.
 - `proxy_face_detections` may exist as a compatibility bridge even though real `face_detections` are preferred.
 - No `phase_1a_speaker_map.json` is part of the active path.
 

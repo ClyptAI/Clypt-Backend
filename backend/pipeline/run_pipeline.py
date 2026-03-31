@@ -153,7 +153,7 @@ def run_ffmpeg_render():
     audio = load_json(audio_path)
 
     bindings, raw_bindings, follow_bindings, binding_source = select_binding_sets(audio)
-    tracks, track_source = select_render_tracks(visual)
+    tracks, track_source = select_render_tracks(visual, audio=audio)
     if not tracks or not bindings:
         raise RuntimeError("Need non-empty tracks and speaker_bindings to render clips")
 

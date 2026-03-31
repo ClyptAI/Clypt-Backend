@@ -1373,7 +1373,7 @@
       <div class="sec-label" style="margin-top:1mm;">Semantic Graph Architecture</div>
       <ul class="bullet-list">
         <li><strong>3 analysis streams</strong> (transcript + audio events + visual descriptions) feed into a <strong>unified semantic graph</strong>. Transcript is segmented into <strong>variable-length semantic nodes</strong> (claims, opinions, emotional beats) &mdash; not fixed time windows. Audio &amp; visual data are similarly analyzed and bound directly onto these nodes by timestamp overlap.</li>
-        <li><strong>Deterministic object tracking:</strong> YOLO11 + BoT-SORT provides persistent track IDs across the full video at native framerate. Speaker identity is fused via TalkNet, giving every node exact spatial coordinates for speaker-aware 9:16 rendering.</li>
+        <li><strong>Deterministic object tracking:</strong> YOLOv26 segmentation + ByteTrack provides persistent track IDs across the full video. Speaker binding uses LR-ASD (with explicit/heuristic paths per worker configuration), giving nodes spatial coordinates for speaker-aware 9:16 rendering. (Product marketing deck &mdash; see repo code for current stack.)</li>
         <li><strong>Cross-modal/video understanding:</strong> Every node knows what was said, seen, and heard simultaneously. A <strong>narrative reasoning engine</strong> classifies edges between nodes (see next page).</li>
         <li><strong>Deterministic boundaries:</strong> Clip in/out points come directly from the graph structure, not heuristic timestamp windows.</li>
       </ul>

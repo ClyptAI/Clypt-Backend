@@ -198,6 +198,32 @@ def test_get_result_returns_manifest_after_success():
     assert manifest.status == "succeeded"
 
 
+def test_get_result_normalizes_overlap_runtime_keys_before_validate():
+    payload = _manifest_payload()
+    payload["artifacts"]["transcript"]["overlap_follow_decisions"] = [
+        {
+            "start_time_ms": 0,
+            "end_time_ms": 500,
+            "stay_wide": True,
+            "decision_source": "deterministic",
+            "decision_code": "low_overlap_evidence",
+            "evidence_context": {"gated_low_evidence": True},
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = DOPhase1Client(base_url="https://do.example", transport=httpx.MockTransport(handler))
+    try:
+        manifest = asyncio.run(client.get_result("job_ov"))
+    finally:
+        asyncio.run(client.aclose())
+
+    assert len(manifest.artifacts.transcript.overlap_follow_decisions) == 1
+    assert manifest.artifacts.transcript.overlap_follow_decisions[0].decision_source == "deterministic"
+
+
 def test_get_result_raises_not_found():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"

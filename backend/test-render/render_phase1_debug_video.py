@@ -133,6 +133,7 @@ def grid_layout(
 
 
 def select_binding_sets(audio: dict) -> tuple[list[dict], list[dict], str]:
+    """Prefer smoothed follow bindings (local then global); align with v3 materialized JSON."""
     if _use_local_clip_bindings_experiment():
         raw_local = list(audio.get("speaker_bindings_local", []))
         follow_local = list(audio.get("speaker_follow_bindings_local", []))
@@ -140,13 +141,39 @@ def select_binding_sets(audio: dict) -> tuple[list[dict], list[dict], str]:
             return raw_local, follow_local, "local"
         if raw_local:
             return raw_local, (follow_local or raw_local), "local"
+    follow_local = list(audio.get("speaker_follow_bindings_local", []))
+    if follow_local:
+        raw_for_overlay = list(audio.get("speaker_bindings_local", [])) or list(audio.get("speaker_bindings", []))
+        return raw_for_overlay, follow_local, "local"
     raw_global = list(audio.get("speaker_bindings", []))
     follow_global = list(audio.get("speaker_follow_bindings", []))
     return raw_global, (follow_global or raw_global), "global"
 
 
-def select_track_frame_index(visual: dict, *, fps: float, frame_width: int, frame_height: int) -> tuple[dict[int, list[dict]], str]:
+def _prefer_tracks_local(visual: dict, *, audio: dict | None) -> bool:
     if _use_local_clip_bindings_experiment():
+        return True
+    if not audio:
+        return False
+    follow_local = audio.get("speaker_follow_bindings_local")
+    if isinstance(follow_local, list) and len(follow_local) > 0:
+        return True
+    raw_local = audio.get("speaker_bindings_local")
+    raw_global = audio.get("speaker_bindings")
+    has_local = isinstance(raw_local, list) and len(raw_local) > 0
+    has_global = isinstance(raw_global, list) and len(raw_global) > 0
+    return bool(has_local and not has_global)
+
+
+def select_track_frame_index(
+    visual: dict,
+    *,
+    fps: float,
+    frame_width: int,
+    frame_height: int,
+    audio: dict | None = None,
+) -> tuple[dict[int, list[dict]], str]:
+    if _prefer_tracks_local(visual, audio=audio):
         tracks_local = list(visual.get("tracks_local", []))
         if tracks_local:
             return flatten_tracks(tracks_local, kind="person"), "tracks_local"
@@ -793,6 +820,7 @@ def render_debug_video(
 
     person_frame_index, track_source = select_track_frame_index(
         visual,
+        audio=audio,
         fps=fps,
         frame_width=frame_width,
         frame_height=frame_height,

@@ -17,11 +17,11 @@ The active production path runs inside the DigitalOcean Phase 1 service, which c
 
 ## Current Model Stack
 
-- ASR: `nvidia/parakeet-tdt-1.1b`
-- Tracking: `YOLO26s + BoT-SORT`
+- ASR: `nvidia/parakeet-tdt-1.1b` (`ASR_MODEL_NAME`)
+- Tracking: default weights `yolo26m-seg.pt` (`YOLO_WEIGHTS_PATH`, overridable) with **ByteTrack** only (`CLYPT_TRACKER_BACKEND`, default `bytetrack`; invalid values raise — no BoT-SORT path)
 - Face observations: full-frame `SCRFD` detections on the shared analysis video, then contiguous face tracks
 - Identity features: `ArcFace/InsightFace` embeddings on face tracks, short-gap propagation across missed stretches, then signature-only attachment for remaining fragments
-- Speaker binding: LR-ASD primary, heuristic fallback, `auto` selection for larger videos
+- Speaker binding: LR-ASD when mode is `lrasd`, `shared_analysis_proxy`, or `auto` (per `_select_speaker_binding_mode`); explicit `heuristic` skips LR-ASD. If LR-ASD returns `None`, whole-job heuristic runs **only** when `CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK` is truthy (`1`/`true`/etc.); default in `.env.example` is `0`
 
 Notes:
 - The active path does **not** use TalkNet.
@@ -94,7 +94,7 @@ The worker emits:
 
 ## Speaker Binding
 
-Supported speaker-binding modes:
+Supported speaker-binding modes (see `_select_speaker_binding_mode` / `_run_speaker_binding`):
 - `auto`
 - `lrasd`
 - `heuristic`
@@ -102,9 +102,10 @@ Supported speaker-binding modes:
 
 Behavior today:
 - `lrasd` uses the LR-ASD path and cached assets under `/root/lrasd` and `/root/.cache/clypt/finetuning_TalkSet.model`
-- `heuristic` uses a lightweight visual heuristic binder
-- `auto` chooses the path based on video size / complexity limits
-- `shared_analysis_proxy` resolves through the LR-ASD-oriented path, using the shared proxy pipeline
+- `heuristic` uses a lightweight visual heuristic binder and does not run LR-ASD
+- `auto` chooses between LR-ASD-oriented paths and thresholds based on worker heuristics (see code)
+- `shared_analysis_proxy` resolves through the LR-ASD-oriented path using the shared proxy pipeline
+- After LR-ASD returns `None`, **`CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK`** gates whether `_run_speaker_binding_heuristic` is invoked; when disabled (v3 default), bindings are built without that whole-job heuristic pass
 
 The active binding path consumes the canonical face stream first instead of rediscovering faces independently.
 
@@ -137,13 +138,12 @@ The service in `backend/do_phase1_service/extract.py` does this:
 - `PHASE1_HEURISTIC_BINDING_ENABLED`
 
 ### Worker controls
-- `CLYPT_TRACKING_MODE`
+- `CLYPT_TRACKING_MODE` (default `direct` in code)
+- `CLYPT_TRACKER_BACKEND` (ByteTrack-only)
 - `CLYPT_TRACK_CHUNK_WORKERS`
-- `CLYPT_SPEAKER_BINDING_MODE`
-- `CLYPT_LRASD_BATCH_SIZE`
-- `CLYPT_LRASD_PIPELINE_OVERLAP`
-- `CLYPT_LRASD_MAX_INFLIGHT`
-- rollout gate thresholds in `backend/do_phase1_worker.py`
+- `CLYPT_SPEAKER_BINDING_MODE`, `CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK`
+- `CLYPT_LRASD_PROFILE`, `CLYPT_LRASD_BATCH_SIZE`, `CLYPT_LRASD_PIPELINE_OVERLAP`, `CLYPT_LRASD_MAX_INFLIGHT`, `CLYPT_LRASD_PREP_WORKERS`, and related `CLYPT_LRASD_*` envs read in `backend/do_phase1_worker.py`
+- `YOLO_WEIGHTS_PATH`, `CLYPT_YOLO_IMGSZ` (see also `backend/pipeline/phase1/config.py` for shared Phase 1 config)
 
 ### Service controls
 - `DO_PHASE1_WORKER_CONCURRENCY`

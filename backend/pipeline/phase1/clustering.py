@@ -1,4 +1,12 @@
-"""Track clustering stage + conservative post-track ReID merge (before global clustering)."""
+"""Track clustering stage + conservative post-track ReID merge (before global clustering).
+
+v3 wave order (see docs/superpowers/specs/clypt_v3_refactor_spec.md):
+Wave 3 — Hybrid clustering uses face-primary + same-shot signature fallback with shot ID and
+temporal proximity; no mask-overlap term in base signature scoring.
+Wave 4 — After segmentation masks are integrated on the execution path, optional mask/bbox
+stability signals may activate (e.g. ``build_mask_overlap_clustering_signals`` →
+``mask_overlap_attachment_cost_reduction``); callers gate on ``mask_ctx["active"]``.
+"""
 
 from __future__ import annotations
 

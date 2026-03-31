@@ -308,11 +308,63 @@ def test_manifest_persistence_rejects_unknown_speaker_candidate_debug_fields(tmp
         )
 
 
-def test_manifest_persistence_rejects_unknown_overlap_follow_decision_fields(tmp_path: Path):
+def test_manifest_persistence_strips_runtime_overlap_keys(tmp_path: Path):
+    storage = LocalGCSStorage(bucket="test-bucket", root_dir=tmp_path / "gcs")
+    canonical_video_uri = storage.upload_bytes(b"video", object_name="phase_1/jobs/job_791b/source_video.mp4")
+
+    manifest = persist_phase1_outputs(
+        storage=storage,
+        output_dir=tmp_path,
+        job_id="job_791b",
+        source_url="https://youtube.com/watch?v=overlap-strip",
+        canonical_video_uri=canonical_video_uri,
+        phase_1_audio={
+            "source_audio": "https://youtube.com/watch?v=overlap-strip",
+            "words": [],
+            "speaker_bindings": [],
+            "overlap_follow_decisions": [
+                {
+                    "start_time_ms": 0,
+                    "end_time_ms": 100,
+                    "camera_target_local_track_id": None,
+                    "camera_target_track_id": None,
+                    "stay_wide": True,
+                    "visible_local_track_ids": [],
+                    "offscreen_audio_speaker_ids": ["SPEAKER_02"],
+                    "decision_model": None,
+                    "decision_source": "deterministic",
+                    "confidence": None,
+                    "decision_code": "deterministic_selected",
+                    "evidence_context": {"api_status": "ok"},
+                }
+            ],
+        },
+        phase_1_visual={
+            "source_video": "https://youtube.com/watch?v=overlap-strip",
+            "schema_version": "3.0.0",
+            "task_type": "person_tracking",
+            "coordinate_space": "absolute_original_frame_xyxy",
+            "geometry_type": "aabb",
+            "class_taxonomy": {"0": "person"},
+            "tracking_metrics": {"schema_pass_rate": 1.0},
+            "tracks": [],
+            "face_detections": [],
+            "person_detections": [],
+            "label_detections": [],
+            "object_tracking": [],
+            "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+            "video_metadata": {"width": 1920, "height": 1080, "fps": 30.0, "duration_ms": 1000},
+        },
+    )
+
+    assert manifest.artifacts.transcript.overlap_follow_decisions[0].decision_source == "deterministic"
+
+
+def test_manifest_persistence_rejects_invalid_overlap_follow_decision_values(tmp_path: Path):
     storage = LocalGCSStorage(bucket="test-bucket", root_dir=tmp_path / "gcs")
     canonical_video_uri = storage.upload_bytes(b"video", object_name="phase_1/jobs/job_791/source_video.mp4")
 
-    with pytest.raises(ValidationError, match="unexpected_field"):
+    with pytest.raises(ValidationError):
         persist_phase1_outputs(
             storage=storage,
             output_dir=tmp_path,
@@ -329,13 +381,12 @@ def test_manifest_persistence_rejects_unknown_overlap_follow_decision_fields(tmp
                         "end_time_ms": 100,
                         "camera_target_local_track_id": None,
                         "camera_target_track_id": None,
-                        "stay_wide": True,
+                        "stay_wide": "not-a-bool",
                         "visible_local_track_ids": [],
                         "offscreen_audio_speaker_ids": ["SPEAKER_02"],
                         "decision_model": None,
                         "decision_source": "deterministic",
                         "confidence": None,
-                        "unexpected_field": True,
                     }
                 ],
             },

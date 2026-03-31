@@ -103,22 +103,20 @@ Minimum env values to fill in:
 - `GCS_BUCKET`
 - `GOOGLE_CLOUD_PROJECT`
 
-Recommended starting values:
+Defaults and commented overrides are maintained in **`backend/do_phase1_service/.env.example`** (that file is the deployment template shipped with the repo).
+
+Typical production overrides (adjust to your GPU and load):
+
 - `DO_REGION=atl1` (or `nyc2` only when explicitly choosing the fallback region)
 - `DO_PHASE1_WORKER_ID=clypt-phase1-gpu-1`
-- `DO_PHASE1_WORKER_CONCURRENCY=3`
+- `DO_PHASE1_WORKER_CONCURRENCY=3` (template default is `1`; raise when validated on your hardware)
 - `DO_PHASE1_GPU_SLOTS=1`
-- `CLYPT_SPEAKER_BINDING_MODE=auto`
-- `CLYPT_TRACKING_MODE=auto`
+- `CLYPT_SPEAKER_BINDING_MODE=lrasd` (template default; `auto` / `heuristic` / `shared_analysis_proxy` are also implemented in `backend/do_phase1_worker.py`)
+- `CLYPT_TRACKING_MODE=direct` (worker default in code is `direct`; `chunked` / `auto` / `shared_analysis_proxy` are supported)
+- `CLYPT_TRACKER_BACKEND=bytetrack` (only ByteTrack is supported; invalid values fail fast)
 - `CLYPT_TRACK_CHUNK_WORKERS=1`
-- `CLYPT_SPEAKER_BINDING_PROXY_ENABLE=1`
-- `CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE=1280`
-- `CLYPT_ASD_PRECOMPUTED_FACE=1`
-- `CLYPT_ASD_FACE_FPS=1.0`
-- `CLYPT_ASD_PRECOMPUTED_MIN_COVERAGE=0.80`
-- `CLYPT_LRASD_BATCH_SIZE=32`
-- `CLYPT_LRASD_PIPELINE_OVERLAP=1`
-- `CLYPT_LRASD_MAX_INFLIGHT=4`
+- `CLYPT_SPEAKER_BINDING_PROXY_ENABLE=1`, `CLYPT_ANALYSIS_PROXY_MAX_LONG_EDGE=1280`
+- `CLYPT_LRASD_PIPELINE_OVERLAP=1`, and optional `CLYPT_LRASD_BATCH_SIZE` / `CLYPT_LRASD_MAX_INFLIGHT` (see template; `CLYPT_LRASD_PROFILE=auto` resolves defaults in worker)
 
 Pyannote diarization is available but stays off until we turn it on explicitly:
 - `CLYPT_AUDIO_DIARIZATION_ENABLE=0`
@@ -136,8 +134,8 @@ The first diarization-enabled boot will cache the model on the droplet, so plan 
 Why these defaults:
 - `DO_PHASE1_WORKER_CONCURRENCY=3` allows multiple jobs to be claimed and managed concurrently.
 - `DO_PHASE1_GPU_SLOTS=1` keeps the GPU-heavy extraction section serialized until higher overlap is validated.
-- `CLYPT_TRACKING_MODE=auto` lets the worker choose between direct and chunked tracking.
-- `CLYPT_SPEAKER_BINDING_MODE=auto` keeps LR-ASD for manageable clips while allowing fallback behavior on larger jobs.
+- `CLYPT_TRACKING_MODE=direct` runs full-video tracking in one pass unless you switch to `chunked` or `auto` in code-supported modes.
+- `CLYPT_SPEAKER_BINDING_MODE=lrasd` keeps the worker on the LR-ASD path; whole-job heuristic after LR-ASD returns `None` stays off unless `CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK=1`.
 
 ## Deploy the Service
 
@@ -163,7 +161,7 @@ sudo SKIP_GIT_SYNC=1 \
 
 The deploy script installs the dedicated Phase 1 dependency set and pre-caches the active Phase 1 assets:
 - Parakeet ASR
-- YOLO26s PyTorch weights
+- Ultralytics YOLOv26 **segmentation** weights (default `yolo26m-seg.pt` per `YOLO_WEIGHTS_PATH` in `backend/do_phase1_worker.py`)
 - LR-ASD repo + checkpoint assets
 - InsightFace packs
 

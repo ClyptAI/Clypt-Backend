@@ -6,7 +6,20 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from backend.pipeline.phase1_contract import JobState, Phase1Manifest
+from backend.pipeline.phase1_contract import JobState, Phase1Manifest, normalize_overlap_follow_decisions_list
+
+
+def _normalize_phase1_manifest_json_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Strip overlap runtime fields so Phase1Manifest.model_validate matches worker output."""
+    artifacts = dict(data.get("artifacts") or {})
+    transcript = dict(artifacts.get("transcript") or {})
+    transcript["overlap_follow_decisions"] = normalize_overlap_follow_decisions_list(
+        transcript.get("overlap_follow_decisions")
+    )
+    artifacts["transcript"] = transcript
+    out = dict(data)
+    out["artifacts"] = artifacts
+    return out
 
 
 class Phase1ClientError(RuntimeError):
@@ -112,7 +125,7 @@ class DOPhase1Client:
                 f"phase 1 job {job_id!r} is not ready yet; poll job status until it succeeds"
             )
         response.raise_for_status()
-        return Phase1Manifest.model_validate(response.json())
+        return Phase1Manifest.model_validate(_normalize_phase1_manifest_json_payload(response.json()))
 
 
 __all__ = [

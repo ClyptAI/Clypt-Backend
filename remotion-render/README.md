@@ -1,5 +1,9 @@
 # Remotion video
 
+**Clypt context:** The main orchestrator (`backend/pipeline/run_pipeline.py`) renders 9:16 clips with **FFmpeg** via `backend/test-render/render_speaker_follow_clips.py`, using Phase 5 windows from `backend/outputs/remotion_payloads_array.json` (or `remotion_payloads_array_audience.json` when `USE_AUDIENCE_SIGNAL_PAYLOADS` is set) plus Phase 1 ledgers. This directory is the **Remotion** project for preview/compose workflows (`npm run dev`, `npx remotion render`), not that FFmpeg path.
+
+---
+
 <p align="center">
   <a href="https://github.com/remotion-dev/logo">
     <picture>

@@ -313,6 +313,45 @@ class Phase1ActiveSpeakerLocalSpan(BaseModel):
         return self
 
 
+_PHASE1_OVERLAP_FOLLOW_DECISION_KEYS = frozenset(
+    {
+        "start_time_ms",
+        "end_time_ms",
+        "camera_target_local_track_id",
+        "camera_target_track_id",
+        "stay_wide",
+        "visible_local_track_ids",
+        "offscreen_audio_speaker_ids",
+        "decision_model",
+        "decision_source",
+        "confidence",
+    }
+)
+
+
+def normalize_overlap_follow_decision_dict(d: object) -> dict[str, object]:
+    """Strip runtime-only keys (e.g. decision_code, evidence_context) for strict Phase1OverlapFollowDecision validation."""
+    if not isinstance(d, dict):
+        return {}
+    cleaned: dict[str, object] = {}
+    for key in _PHASE1_OVERLAP_FOLLOW_DECISION_KEYS:
+        if key not in d:
+            continue
+        value = d[key]
+        if key in ("visible_local_track_ids", "offscreen_audio_speaker_ids"):
+            cleaned[key] = [str(x) for x in value] if isinstance(value, list) else []
+        else:
+            cleaned[key] = value
+    return cleaned
+
+
+def normalize_overlap_follow_decisions_list(items: object) -> list[dict[str, object]]:
+    """Normalize a runtime overlap_follow_decisions list for Phase1Manifest.model_validate."""
+    if not isinstance(items, list):
+        return []
+    return [normalize_overlap_follow_decision_dict(x) for x in items]
+
+
 class Phase1OverlapFollowDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

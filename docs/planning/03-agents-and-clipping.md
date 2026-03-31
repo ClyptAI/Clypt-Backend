@@ -20,15 +20,15 @@ The current system uses a hybrid runtime:
 
 Inside the worker, the stack is currently:
 1. Parakeet ASR
-2. YOLO26s + BoT-SORT tracking
+2. YOLOv26-seg + ByteTrack tracking
 3. early face observations + identity features
 4. global identity clustering
-5. LR-ASD or heuristic speaker binding
+5. speaker binding (LR-ASD for `lrasd` / `auto` / `shared_analysis_proxy` resolutions; explicit `heuristic` mode; whole-job heuristic after LR-ASD `None` gated by `CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK`)
 6. final visual/audio ledger construction
 
 Notes:
-- LR-ASD is the active audiovisual speaker-binding model path.
-- Heuristic binding still exists as a fallback or explicit mode.
+- LR-ASD is the primary audiovisual speaker-binding model path when the resolved mode is not `heuristic`.
+- Heuristic binding remains available as an explicit mode and as an opt-in fallback when LR-ASD returns `None`.
 - Face observations are reused across clustering, LR-ASD, and final ledgers.
 
 ## Clipping Logic

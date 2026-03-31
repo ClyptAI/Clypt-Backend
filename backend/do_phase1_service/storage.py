@@ -9,7 +9,7 @@ from google.cloud import storage as gcs_storage
 
 from backend.do_phase1_service.models import PersistedPhase1Manifest
 from backend.pipeline.phase1.metrics_scorecard import compute_phase1_scorecard
-from backend.pipeline.phase1_contract import Phase1Manifest
+from backend.pipeline.phase1_contract import Phase1Manifest, normalize_overlap_follow_decisions_list
 
 
 class StorageBackend(Protocol):
@@ -100,7 +100,9 @@ def persist_phase1_outputs(
                 "audio_visual_mappings": phase_1_audio.get("audio_visual_mappings") or [],
                 "span_assignments": phase_1_audio.get("span_assignments") or [],
                 "active_speakers_local": phase_1_audio.get("active_speakers_local") or [],
-                "overlap_follow_decisions": phase_1_audio.get("overlap_follow_decisions") or [],
+                "overlap_follow_decisions": normalize_overlap_follow_decisions_list(
+                    phase_1_audio.get("overlap_follow_decisions")
+                ),
             },
             "visual_tracking": {
                 "uri": visual_uri,

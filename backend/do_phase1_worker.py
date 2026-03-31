@@ -951,6 +951,9 @@ class ClyptWorker:
         dur = max(1, int(duration_ms))
         multi_shot = bool(shot_segments and len(shot_segments) > 1)
 
+        # Wave 3 (spec): signature Hungarian uses shot + temporal + spatial terms only.
+        # Wave 4: optional mask/bbox stability term via build_mask_overlap_clustering_signals
+        # when seg-derived signals make mask_ctx["active"] true — see docs/superpowers/specs/clypt_v3_refactor_spec.md
         mask_ctx = build_mask_overlap_clustering_signals(
             tracklets,
             track_identity_features if isinstance(track_identity_features, dict) else None,
@@ -2585,7 +2588,14 @@ class ClyptWorker:
         try:
             from pyannote.audio import Pipeline
         except Exception as exc:
-            print(f"[Phase 1] Audio diarization unavailable: {type(exc).__name__}: {exc}")
+            self._emit_runtime_stage_log(
+                "audio_diarization",
+                "pyannote_import_failed",
+                event="stage_warning",
+                decision_source="pyannote",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return None
 
         token = None
@@ -2600,7 +2610,15 @@ class ClyptWorker:
             else:
                 pipeline = Pipeline.from_pretrained(config["model_name"])
         except Exception as exc:
-            print(f"[Phase 1] Audio diarization model load failed: {type(exc).__name__}: {exc}")
+            self._emit_runtime_stage_log(
+                "audio_diarization",
+                "pyannote_model_load_failed",
+                event="stage_warning",
+                decision_source="pyannote",
+                model_name=str(config.get("model_name", "")),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return None
 
         self._audio_diarization_pipeline = pipeline
@@ -2793,7 +2811,14 @@ class ClyptWorker:
         try:
             diarization = pipeline(audio_path)
         except Exception as exc:
-            print(f"[Phase 1] Audio diarization execution failed: {type(exc).__name__}: {exc}")
+            self._emit_runtime_stage_log(
+                "audio_diarization",
+                "pyannote_execution_failed",
+                event="stage_warning",
+                decision_source="pyannote",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             self._record_audio_diarization_metrics(
                 enabled=True,
                 status="error",
@@ -4479,8 +4504,15 @@ class ClyptWorker:
                 worker_id=resolve_phase1_worker_id(),
                 **extras,
             )
-        except Exception as exc:
-            print(f"[phase1-runtime-log-fallback] stage={stage} reason={reason_code} err={type(exc).__name__}")
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "phase1_runtime_stage_log_failed stage=%s reason=%s",
+                stage,
+                reason_code,
+                exc_info=True,
+            )
 
     def _set_runtime_log_job_id(self, job_id: str | None) -> str:
         prev = str(getattr(self, "_runtime_log_job_id", "") or "")
@@ -4785,6 +4817,12 @@ class ClyptWorker:
         if self._shared_analysis_proxy_enabled():
             return "shared_analysis_proxy"
         return "lrasd"
+
+    @staticmethod
+    def _speaker_binding_heuristic_fallback_allowed() -> bool:
+        """v3: whole-job heuristic after LR-ASD returns None is opt-in (default off)."""
+        raw = os.getenv("CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK", "0").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _probe_video_meta(video_path: str) -> dict:
@@ -9602,7 +9640,11 @@ class ClyptWorker:
         analysis_context: dict | None = None,
         track_id_remap: dict[str, str] | None = None,
     ) -> list[dict]:
-        """Bind words to track IDs using LR-ASD, with heuristic fallback."""
+        """Bind words to track IDs using LR-ASD; optional whole-job heuristic if LR-ASD returns None.
+
+        v3 default: ``CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK=0`` — retain LR-ASD word state and
+        bindings (possibly sparse) instead of silently replacing with heuristic binding.
+        """
         protected_unknown_key = "_speaker_binding_protected_unknown"
         self._last_audio_turn_bindings = []
         self._last_speaker_candidate_debug = []
@@ -9655,6 +9697,24 @@ class ClyptWorker:
                         words,
                         field_name="speaker_track_id",
                     )
+                _clear_protected_unknown_markers(words)
+                self._last_speaker_binding_metrics = speaker_metrics
+                return bindings
+
+            if not self._speaker_binding_heuristic_fallback_allowed():
+                self._emit_runtime_stage_log(
+                    "binding",
+                    "heuristic_fallback_skipped_v3_policy",
+                    event="stage_info",
+                    decision_source="lrasd",
+                    speaker_binding_heuristic_fallback="0",
+                )
+                speaker_metrics["speaker_binding_heuristic_fallback_skipped"] = True
+                _restore_protected_unknowns(words)
+                bindings = self._build_bindings_from_word_track_field(
+                    words,
+                    field_name="speaker_track_id",
+                )
                 _clear_protected_unknown_markers(words)
                 self._last_speaker_binding_metrics = speaker_metrics
                 return bindings

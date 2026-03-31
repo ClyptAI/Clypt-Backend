@@ -61,7 +61,7 @@ Build a Phase 1 pipeline optimized for highest practical assignment quality and 
 ## Phase 1 Refactor - Explicit Non-Goals
 - Backward compatibility with v2 manifest/schema.
 - Preserve legacy heuristic-only behavior for long/complex videos.
-- Keep BoT-SORT branch as an active rollout toggle.
+- BoT-SORT as a tracking backend (implemented behavior: ByteTrack-only; invalid `CLYPT_TRACKER_BACKEND` values fail fast in `backend/do_phase1_worker.py`).
 
 ## Phase 1 Refactor - Future Note (Out of Scope for This Phase)
 - Spanner adoption instead of local graph storage is acknowledged but deferred; this document only defines Phase 1 refactor scope and interfaces.
@@ -245,7 +245,7 @@ Build a Phase 1 pipeline optimized for highest practical assignment quality and 
 - Enforce fail-fast runtime checks for required GPU dependencies.
 - Remove full-job heuristic auto-routing behavior.
 - Align env and backend policy with implementation:
-  - remove/deprecate BoT-SORT runtime path,
+  - BoT-SORT runtime path removed (worker is ByteTrack-only; see `_select_tracker_backend`),
   - remove/deprecate auto full-job heuristic binding route,
   - remove/deprecate `CLYPT_SPEAKER_BINDING_MODE=auto` semantics that can select whole-job `heuristic`,
   - deprecate `CLYPT_SPEAKER_BINDING_AUTO_*` knobs for full-job fallback routing,

@@ -3,7 +3,12 @@ from copy import deepcopy
 import pytest
 from pydantic import ValidationError
 
-from backend.pipeline.phase1_contract import JobState, Phase1Manifest
+from backend.pipeline.phase1_contract import (
+    JobState,
+    Phase1Manifest,
+    normalize_overlap_follow_decision_dict,
+    normalize_overlap_follow_decisions_list,
+)
 
 
 def _legacy_manifest_payload() -> dict:
@@ -471,6 +476,48 @@ def test_manifest_rejects_unknown_overlap_follow_decision_fields():
 
     with pytest.raises(ValidationError, match="unexpected_field"):
         Phase1Manifest.model_validate(payload)
+
+
+def test_normalize_overlap_follow_decision_strips_runtime_keys():
+    raw = {
+        "start_time_ms": 400,
+        "end_time_ms": 1100,
+        "camera_target_local_track_id": "track_1",
+        "stay_wide": False,
+        "visible_local_track_ids": ["track_1"],
+        "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+        "decision_source": "deterministic",
+        "decision_code": "deterministic_selected",
+        "evidence_context": {"foo": 1},
+    }
+    cleaned = normalize_overlap_follow_decision_dict(raw)
+    assert "decision_code" not in cleaned
+    assert "evidence_context" not in cleaned
+    assert cleaned["decision_source"] == "deterministic"
+
+
+def test_manifest_accepts_overlap_decisions_after_normalization():
+    payload = deepcopy(_legacy_manifest_payload())
+    payload["artifacts"]["transcript"]["overlap_follow_decisions"] = normalize_overlap_follow_decisions_list(
+        [
+            {
+                "start_time_ms": 400,
+                "end_time_ms": 1100,
+                "camera_target_local_track_id": "track_1",
+                "camera_target_track_id": "Global_Person_0",
+                "stay_wide": False,
+                "visible_local_track_ids": ["track_1"],
+                "offscreen_audio_speaker_ids": ["SPEAKER_01"],
+                "decision_model": "gemini-3-flash-preview",
+                "decision_source": "gemini",
+                "confidence": 0.81,
+                "decision_code": "follow_primary_speaker",
+                "evidence_context": {"adjudication_reason": "gemini"},
+            }
+        ]
+    )
+    manifest = Phase1Manifest.model_validate(payload)
+    assert manifest.artifacts.transcript.overlap_follow_decisions[0].decision_source == "gemini"
 
 
 @pytest.mark.parametrize(

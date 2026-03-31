@@ -975,6 +975,51 @@ def test_select_binding_sets_retains_raw_and_follow_streams():
     assert source == "speaker_follow_bindings"
 
 
+def test_select_binding_sets_prefers_speaker_follow_bindings_local_without_experiment(monkeypatch):
+    mod = load_module()
+    monkeypatch.delenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", raising=False)
+    audio = {
+        "speaker_bindings": [
+            {"track_id": "raw_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_follow_bindings": [
+            {"track_id": "follow_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_bindings_local": [
+            {"track_id": "local_raw_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+        "speaker_follow_bindings_local": [
+            {"track_id": "local_follow_A", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 5},
+        ],
+    }
+
+    selected, raw_bindings, follow_bindings, source = mod.select_binding_sets(audio)
+
+    assert selected[0]["track_id"] == "local_follow_A"
+    assert raw_bindings[0]["track_id"] == "local_raw_A"
+    assert follow_bindings[0]["track_id"] == "local_follow_A"
+    assert source == "speaker_follow_bindings_local"
+
+
+def test_select_render_tracks_prefers_tracks_local_when_audio_has_follow_local(monkeypatch):
+    mod = load_module()
+    monkeypatch.delenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", raising=False)
+    visual = {
+        "tracks": [{"track_id": "Global_Person_0", "frame_idx": 0}],
+        "tracks_local": [{"track_id": "local-1", "frame_idx": 0}],
+    }
+    audio = {
+        "speaker_follow_bindings_local": [
+            {"track_id": "local-1", "start_time_ms": 0, "end_time_ms": 1000, "word_count": 1},
+        ],
+    }
+
+    tracks, source = mod.select_render_tracks(visual, audio=audio)
+
+    assert tracks == [{"track_id": "local-1", "frame_idx": 0}]
+    assert source == "tracks_local"
+
+
 def test_select_binding_sets_prefers_local_follow_stream_when_experiment_enabled(monkeypatch):
     mod = load_module()
     audio = {

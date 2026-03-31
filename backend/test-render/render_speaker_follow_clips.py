@@ -2846,19 +2846,35 @@ def build_overlay_filters(overlay_paths: list[OverlayPath]) -> list[str]:
 
 
 def select_binding_sets(audio: dict) -> tuple[list[dict], list[dict], list[dict], str]:
-    use_local = os.getenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "").strip().lower() in {"1", "true", "yes", "on"}
-    if use_local:
-        raw_bindings = list(audio.get("speaker_bindings_local", []))
-        follow_bindings = list(audio.get("speaker_follow_bindings_local", []))
-        if follow_bindings:
-            return follow_bindings, raw_bindings, follow_bindings, "speaker_follow_bindings_local"
-        if raw_bindings:
-            return raw_bindings, raw_bindings, follow_bindings, "speaker_bindings_local"
-    raw_bindings = list(audio.get("speaker_bindings", []))
-    follow_bindings = list(audio.get("speaker_follow_bindings", []))
-    if follow_bindings:
-        return follow_bindings, raw_bindings, follow_bindings, "speaker_follow_bindings"
-    return raw_bindings, raw_bindings, follow_bindings, "speaker_bindings"
+    """Prefer smoothed follow bindings (local then global); fall back to raw bindings when absent."""
+    use_local_experiment = os.getenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    raw_local = list(audio.get("speaker_bindings_local", []))
+    follow_local = list(audio.get("speaker_follow_bindings_local", []))
+    raw_global = list(audio.get("speaker_bindings", []))
+    follow_global = list(audio.get("speaker_follow_bindings", []))
+
+    if use_local_experiment:
+        if follow_local:
+            return follow_local, raw_local, follow_local, "speaker_follow_bindings_local"
+        if raw_local:
+            return raw_local, raw_local, follow_local, "speaker_bindings_local"
+    else:
+        if follow_local:
+            raw_for_debug = raw_local if raw_local else raw_global
+            return follow_local, raw_for_debug, follow_local, "speaker_follow_bindings_local"
+        if follow_global:
+            return follow_global, raw_global, follow_global, "speaker_follow_bindings"
+        if raw_local:
+            return raw_local, raw_local, follow_local, "speaker_bindings_local"
+
+    if follow_global:
+        return follow_global, raw_global, follow_global, "speaker_follow_bindings"
+    return raw_global, raw_global, follow_global, "speaker_bindings"
 
 
 def select_render_bindings(audio: dict) -> list[dict]:
@@ -2866,13 +2882,25 @@ def select_render_bindings(audio: dict) -> list[dict]:
     return selected
 
 
-def select_render_tracks(visual: dict) -> tuple[list[dict], str]:
-    use_local = os.getenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "").strip().lower() in {"1", "true", "yes", "on"}
-    if use_local:
-        tracks_local = list(visual.get("tracks_local", []))
-        if tracks_local:
-            return tracks_local, "tracks_local"
-    return list(visual.get("tracks", [])), "tracks"
+def select_render_tracks(visual: dict, *, audio: dict | None = None) -> tuple[list[dict], str]:
+    """Use tracks_local when bindings are in local track-id space (experiment or v3 local follow/raw)."""
+    use_local_experiment = os.getenv("CLYPT_EXPERIMENT_LOCAL_CLIP_BINDINGS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    tracks_local = list(visual.get("tracks_local", []))
+    tracks_global = list(visual.get("tracks", []))
+
+    prefer_local_tracks = use_local_experiment
+    if not prefer_local_tracks and audio is not None:
+        _, _, _, binding_source = select_binding_sets(audio)
+        prefer_local_tracks = binding_source.endswith("_local")
+
+    if prefer_local_tracks and tracks_local:
+        return tracks_local, "tracks_local"
+    return tracks_global, "tracks"
 
 
 def _bindings_for_interval(bindings: list[dict], clip_start_s: float, clip_end_s: float) -> list[dict]:
@@ -3262,9 +3290,8 @@ def main() -> None:
     speaker_candidate_debug = list(audio.get("speaker_candidate_debug", []))
     active_speakers_local = list(audio.get("active_speakers_local", []))
     overlap_follow_decisions = list(audio.get("overlap_follow_decisions", []))
-    tracks = list(visual.get("tracks", []))
     bindings, raw_bindings, follow_bindings, binding_source = select_binding_sets(audio)
-    tracks, track_source = select_render_tracks(visual)
+    tracks, track_source = select_render_tracks(visual, audio=audio)
     if not tracks or not bindings:
         raise RuntimeError("Need non-empty tracks and speaker_bindings to render clips")
 

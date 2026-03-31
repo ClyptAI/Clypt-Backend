@@ -28,10 +28,10 @@ The active extraction system:
 1. downloads source media on the DO side
 2. converts audio to 16kHz mono WAV
 3. runs Parakeet ASR
-4. runs YOLO26s + BoT-SORT tracking
+4. runs YOLOv26-seg + ByteTrack tracking (`YOLO_WEIGHTS_PATH`, `CLYPT_TRACKER_BACKEND` in `backend/do_phase1_worker.py`)
 5. builds canonical face observations and identity features
 6. clusters tracklets into global identities
-7. runs LR-ASD or heuristic speaker binding
+7. runs speaker binding (LR-ASD and/or heuristic per `CLYPT_SPEAKER_BINDING_MODE` and `CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK`)
 8. emits `phase_1_visual` / `phase_1_audio`
 9. persists a manifest and artifacts to GCS
 

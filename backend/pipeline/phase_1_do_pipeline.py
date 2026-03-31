@@ -27,6 +27,23 @@ import yt_dlp
 from backend.pipeline.do_phase1_client import DOPhase1Client
 from backend.pipeline.phase1_contract import JobState, Phase1Manifest
 
+# Canonical v3 visual ledger keys that must be JSON lists (never null) for downstream + strict manifests.
+_PHASE1_VISUAL_LEDGER_LIST_KEYS = (
+    "tracks",
+    "shot_changes",
+    "person_detections",
+    "face_detections",
+    "object_tracking",
+    "label_detections",
+)
+
+
+def coerce_phase1_visual_ledger_list_fields(visual: dict) -> None:
+    """Mutate *visual* so required v3 list fields are lists; None or wrong types become []."""
+    for key in _PHASE1_VISUAL_LEDGER_LIST_KEYS:
+        value = visual.get(key)
+        visual[key] = list(value) if isinstance(value, list) else []
+
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
@@ -270,22 +287,7 @@ def enrich_visual_ledger_for_downstream(
     duration_ms = max(int(duration_s * 1000), audio_end_ms, 1)
 
     enriched = dict(phase_1_visual)
-    for required_key in (
-        "tracks",
-        "shot_changes",
-        "person_detections",
-        "face_detections",
-        "object_tracking",
-        "label_detections",
-    ):
-        value = enriched.get(required_key)
-        if not isinstance(value, list):
-            raise RuntimeError(
-                "DigitalOcean Phase 1 manifest must provide canonical v3 visual lists; "
-                f"missing/invalid key: {required_key}"
-            )
-    enriched["object_tracking"] = list(enriched.get("object_tracking", []))
-    enriched["label_detections"] = list(enriched.get("label_detections", []))
+    coerce_phase1_visual_ledger_list_fields(enriched)
     enriched["runtime_controls"] = runtime_controls
     enriched["video_metadata"] = {
         "width": int(w),
@@ -316,14 +318,8 @@ def write_visual_ndjson(visual_ledger: dict, path: Path):
 
 def validate_phase_handoff(visual_ledger: dict, audio_ledger: dict):
     """Fail fast when phase boundaries violate required contracts."""
-    required_visual_keys = (
-        "tracks",
-        "shot_changes",
-        "person_detections",
-        "face_detections",
-        "object_tracking",
-        "label_detections",
-    )
+    coerce_phase1_visual_ledger_list_fields(visual_ledger)
+    required_visual_keys = _PHASE1_VISUAL_LEDGER_LIST_KEYS
     for k in required_visual_keys:
         if k not in visual_ledger:
             raise RuntimeError(f"Phase 1 visual contract missing key: {k}")

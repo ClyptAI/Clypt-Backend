@@ -20,5 +20,6 @@ For **Phase 1**, the real source of truth is code, not planning prose:
 - `04-data-integrations-and-reference.md`: integrations, artifacts, and storage/runtime reference.
 
 ## Legacy Material
-- Older planning docs that described Google Video Intelligence, `phase_1a_reconcile`, TalkNet, or YOLO11 are no longer authoritative for Phase 1.
-- For current implementation decisions, use `docs/superpowers/specs/clypt_v3_refactor_spec.md`.
+- Older slides (`Clypt-V3.html`) and any copy that still mentions YOLO11, BoT-SORT, or TalkNet for Phase 1 are **not** authoritative; cross-check `backend/do_phase1_worker.py` and `docs/do_phase1_worker.md`.
+- Google Video Intelligence, `phase_1a_reconcile`, and v2 manifest shapes are not part of the active path.
+- For intended v3 refactor targets (may trail code slightly), see `docs/superpowers/specs/clypt_v3_refactor_spec.md`.

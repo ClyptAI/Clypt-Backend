@@ -1707,6 +1707,7 @@ def test_speaker_binding_mode_lrasd_still_falls_back_when_primary_returns_none(m
     calls = []
 
     monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "lrasd")
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK", "1")
     monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd") or None)
     monkeypatch.setattr(
         worker,
@@ -1723,6 +1724,34 @@ def test_speaker_binding_mode_lrasd_still_falls_back_when_primary_returns_none(m
 
     assert result == [{"track_id": "fallback"}]
     assert calls == ["lrasd", "heuristic"]
+
+
+def test_speaker_binding_mode_lrasd_skips_heuristic_when_primary_returns_none_v3_default(monkeypatch):
+    worker_cls = ClyptWorker._get_user_cls()
+    worker = worker_cls.__new__(worker_cls)
+    calls = []
+
+    monkeypatch.setenv("CLYPT_SPEAKER_BINDING_MODE", "lrasd")
+    monkeypatch.delenv("CLYPT_SPEAKER_BINDING_HEURISTIC_FALLBACK", raising=False)
+    monkeypatch.setattr(worker, "_run_lrasd_binding", lambda **kwargs: calls.append("lrasd") or None)
+    monkeypatch.setattr(
+        worker,
+        "_run_speaker_binding_heuristic",
+        lambda *args, **kwargs: calls.append("heuristic") or [{"track_id": "bad"}],
+    )
+
+    result = worker._run_speaker_binding(
+        video_path="video.mp4",
+        audio_wav_path="audio.wav",
+        tracks=[{"track_id": "t1"}],
+        words=[{"start_time_ms": 0, "end_time_ms": 100}],
+    )
+
+    assert result == []
+    assert calls == ["lrasd"]
+    metrics = getattr(worker, "_last_speaker_binding_metrics", {})
+    assert metrics.get("speaker_binding_heuristic_fallback_skipped") is True
+    assert metrics.get("speaker_binding_fallback_used") is False
 
 
 def test_run_lrasd_binding_clears_stale_candidate_debug_on_early_return(monkeypatch):
@@ -2738,7 +2767,6 @@ def test_run_lrasd_binding_uses_precomputed_feature_cache(monkeypatch, tmp_path:
     import scipy.io.wavfile as wavfile_module
 
     monkeypatch.setattr(wavfile_module, "read", lambda path: (16000, np.zeros(48000, dtype=np.int16)))
-    monkeypatch.setenv("CLYPT_ASD_PRECOMPUTED_FACE", "0")
     monkeypatch.setattr(
         worker,
         "_build_track_indexes",
