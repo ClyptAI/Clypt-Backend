@@ -38,11 +38,13 @@ To attach an **existing** droplet to this project: DigitalOcean control panel â†
 - Image name in DO UI: `NVIDIA AI/ML Ready`
 - Last known good fallback region after explicit confirmation: `nyc2`
 - Last known good deployed droplet shape: `nyc2 + gpu-h200x1-141gb + gpu-h100x1-base`
+- RTX 6000 Ada fallback size slug: `gpu-6000adax1-48gb` (available in `tor1`; $1.57/hr vs $3.44/hr for H200)
 
 Important:
 - Do **not** silently fall back to another region, another GPU type, or plain Ubuntu.
 - Re-check GPU availability immediately before creating the droplet. `atl1` may be temporarily out of GPU capacity.
 - If `atl1` is blocked and you intentionally fall back, use `nyc2` with the exact same `H200 + NVIDIA AI/ML Ready` shape.
+- **RTX 6000 Ada** (`gpu-6000adax1-48gb`, 48 GB GDDR6) is an acceptable secondary fallback for short videos (<10 min). Expect ~2-3x slower wall-clock on LR-ASD-heavy stages due to lower memory bandwidth (~960 GB/s vs ~3.35 TB/s on H200). VRAM is not a concern at this duration. When using the RTX 6000, lower `CLYPT_LRASD_BATCH_SIZE` to 16-24 (default tuned for H200 at 48) to avoid OOM on longer clips.
 
 ## Preflight Checks
 
@@ -168,7 +170,7 @@ From the droplet repo checkout:
 
 ```bash
 sudo REPO_DIR=/opt/clypt-phase1/repo \
-  BRANCH=codex/balanced-hybrid-phase1-contract \
+  BRANCH=main \
   ENV_FILE=/etc/clypt-phase1/do-phase1.env \
   REQUIREMENTS_FILE=requirements-do-phase1.txt \
   bash scripts/do_phase1/deploy_phase1_service.sh

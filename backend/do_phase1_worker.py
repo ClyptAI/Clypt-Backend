@@ -20,8 +20,8 @@ TRACKING_VOLUME = _TrackingVolume()
 ASR_MODEL_NAME = "nvidia/parakeet-tdt-1.1b"
 LRASD_MODEL_PATH = "/root/.cache/clypt/finetuning_TalkSet.model"
 LRASD_REPO_ROOT = "/root/lrasd"
-YOLO_WEIGHTS_PATH = "yolo26m-seg.pt"
-YOLO_MANIFEST_MODEL_NAME = "yolo26m-seg"
+YOLO_WEIGHTS_PATH = "yolo26m.pt"
+YOLO_MANIFEST_MODEL_NAME = "yolo26m"
 PHASE1_SCHEMA_VERSION = "3.0.0"
 PHASE1_TASK_TYPE = "person_tracking"
 PHASE1_COORDINATE_SPACE = "absolute_original_frame_xyxy"
@@ -212,66 +212,6 @@ class ClyptWorker:
         union = max(1.0, (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter)
         return float(inter / union)
 
-    @staticmethod
-    def _yolo_instance_seg_proxies(
-        r,
-        inst_idx: int,
-        x1: float,
-        y1: float,
-        x2: float,
-        y2: float,
-        frame_w: int,
-        frame_h: int,
-    ) -> dict | None:
-        """Compact mask-derived scalars from Ultralytics seg output (no raster persistence)."""
-        masks = getattr(r, "masks", None)
-        if masks is None:
-            return None
-        data = getattr(masks, "data", None)
-        if data is None:
-            return None
-        try:
-            import numpy as np
-
-            if hasattr(data, "detach"):
-                t = np.asarray(data.detach().cpu().float().numpy())
-            else:
-                t = np.asarray(data)
-            n = int(t.shape[0])
-            if inst_idx < 0 or inst_idx >= n:
-                return None
-            mi = t[inst_idx]
-            if getattr(mi, "ndim", None) != 2:
-                return None
-            mh, mw = int(mi.shape[0]), int(mi.shape[1])
-            fw = max(1, int(frame_w))
-            fh = max(1, int(frame_h))
-            vals = mi.astype(np.float64, copy=False)
-            vmax = float(vals.max())
-            vmin = float(vals.min())
-            if vmax > 1.0 or vmin < 0.0:
-                vals = 1.0 / (1.0 + np.exp(-vals))
-            binary = (vals > 0.5).astype(np.float64)
-            mask_pixels = float(binary.sum())
-            cell_area_orig = (fw / max(1, mw)) * (fh / max(1, mh))
-            mask_area_orig = mask_pixels * cell_area_orig
-            bbox_area = max(1.0, (float(x2) - float(x1)) * (float(y2) - float(y1)))
-            fill_ratio = mask_area_orig / bbox_area
-            fill_ratio = min(2.0, max(0.0, fill_ratio))
-            if mask_pixels > 0:
-                mean_conf = float(vals[binary > 0].mean())
-            else:
-                mean_conf = float(vals.mean())
-            return {
-                "mask_area_in_bbox_ratio": round(fill_ratio, 6),
-                "mask_mean_confidence": round(mean_conf, 6),
-                "mask_grid_h": mh,
-                "mask_grid_w": mw,
-                "signal_provenance": "yolo_instance_mask_tensor",
-                "seg_model_manifest": YOLO_MANIFEST_MODEL_NAME,
-            }
-        except Exception:
-            return None
 
     @staticmethod
     def _compute_mask_stability_signals(
@@ -398,63 +338,6 @@ class ClyptWorker:
             "coordinate_space": PHASE1_COORDINATE_SPACE,
         }
 
-        def _fill_ratio_to_stability(fill_f: float, has_face_overlap: bool) -> float:
-            base = (float(fill_f) - 0.12) / 0.78
-            base = min(1.0, max(0.0, base))
-            if has_face_overlap:
-                base = min(1.0, 0.22 + 0.78 * base)
-            return round(base, 6)
-
-        entries: list[dict[str, object]] = []
-        per_track_fills: dict[str, list[float]] = defaultdict(list)
-        consistency_vals: list[float] = []
-        for tid in sorted(track_to_dets.keys()):
-            window_dets = [
-                d
-                for d in track_to_dets[tid]
-                if win_start <= int(d.get("frame_idx", -1)) <= win_end
-            ]
-            window_dets.sort(key=lambda x: int(x["frame_idx"]))
-            prev_fill: float | None = None
-            for d in window_dets:
-                fi = int(d.get("frame_idx", -1))
-                sm = d.get("seg_mask_proxies")
-                if not isinstance(sm, dict):
-                    prev_fill = None
-                    continue
-                raw_fill = sm.get("mask_area_in_bbox_ratio")
-                if raw_fill is None:
-                    prev_fill = None
-                    continue
-                try:
-                    fill_f = float(raw_fill)
-                except (TypeError, ValueError):
-                    prev_fill = None
-                    continue
-                per_track_fills[str(tid)].append(fill_f)
-                if prev_fill is not None:
-                    mx = max(prev_fill, fill_f, 1e-6)
-                    mn = min(prev_fill, fill_f)
-                    consistency_vals.append(mn / mx)
-                prev_fill = fill_f
-                has_face = (str(tid), fi) in overlap_pf
-                stab = _fill_ratio_to_stability(fill_f, has_face)
-                entry: dict[str, object] = {
-                    "frame_idx": fi,
-                    "track_id": str(tid),
-                    "stability": stab,
-                    "mask_area_in_bbox_ratio": round(fill_f, 6),
-                    "signal_provenance": str(sm.get("signal_provenance") or "yolo_instance_mask_tensor"),
-                }
-                bbn = d.get("bbox_norm_xywh")
-                if isinstance(bbn, dict):
-                    try:
-                        entry["x_center"] = float(bbn["x_center"])
-                        entry["y_center"] = float(bbn["y_center"])
-                    except (KeyError, TypeError, ValueError):
-                        pass
-                entries.append(entry)
-
         base_payload: dict[str, object] = {
             "signal_version": "worker_bbox_v3",
             "iou_continuity_proxy": {
@@ -471,29 +354,6 @@ class ClyptWorker:
             "short_term_stability_memory": short_term_stability_memory,
             "mask_signal_meta": mask_signal_meta,
         }
-
-        if not entries:
-            return base_payload
-
-        mask_signal_meta["segmentation_provenance"] = f"yolo_seg_masks:{YOLO_MANIFEST_MODEL_NAME}"
-        all_fills = [v for vs in per_track_fills.values() for v in vs]
-        mean_fill = float(fmean(all_fills)) if all_fills else 0.0
-        mean_cons = float(fmean(consistency_vals)) if consistency_vals else mean_fill
-        per_track_summary: dict[str, dict[str, float | int]] = {}
-        for tid, fills in sorted(per_track_fills.items()):
-            per_track_summary[tid] = {
-                "mean_mask_area_in_bbox_ratio": round(float(fmean(fills)), 6),
-                "frames_with_seg_proxy": int(len(fills)),
-            }
-
-        base_payload["segmentation_mask_proxies"] = {
-            "active": True,
-            "mean_mask_area_in_bbox_ratio": round(mean_fill, 6),
-            "mean_consecutive_mask_fill_consistency": round(mean_cons, 6),
-            "detections_with_seg_proxy": int(len(entries)),
-            "per_track": per_track_summary,
-        }
-        base_payload["entries"] = sorted(entries, key=lambda e: (int(e["frame_idx"]), str(e["track_id"])))
         return base_payload
 
     @classmethod
@@ -3079,6 +2939,111 @@ class ClyptWorker:
             )
         return out
 
+    def _detect_faces_in_person_roi(self, frame_rgb, person_det: dict) -> list[dict]:
+        import cv2
+        import numpy as np
+        from insightface.app.common import Face
+
+        detector, recognizer = self._get_thread_face_runtime()
+        if detector is None or recognizer is None:
+            raise RuntimeError("ROI face detection requires SCRFD + ArcFace runtime.")
+
+        if frame_rgb is None:
+            return []
+        fh, fw = frame_rgb.shape[:2]
+        if fh <= 0 or fw <= 0:
+            return []
+
+        px1 = float(person_det.get("x1", 0.0))
+        py1 = float(person_det.get("y1", 0.0))
+        px2 = float(person_det.get("x2", px1 + 1.0))
+        py2 = float(person_det.get("y2", py1 + 1.0))
+        pw = max(1.0, px2 - px1)
+        ph = max(1.0, py2 - py1)
+
+        pad_ratio = float(os.getenv("CLYPT_FACE_ROI_PAD", "0.12"))
+        rx1 = max(0, int(round(px1 - (pad_ratio * pw))))
+        ry1 = max(0, int(round(py1 - (pad_ratio * ph))))
+        rx2 = min(fw, int(round(px2 + (pad_ratio * pw))))
+        ry2 = min(fh, int(round(py2 + (pad_ratio * ph))))
+        if rx2 <= rx1 or ry2 <= ry1:
+            return []
+
+        roi_rgb = frame_rgb[ry1:ry2, rx1:rx2]
+        if roi_rgb is None or roi_rgb.size == 0:
+            return []
+
+        roi_bgr = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR)
+        max_faces = int(os.getenv("CLYPT_FACE_ROI_MAX_PER_PERSON", "2") or 2)
+        try:
+            det, kpss = detector.detect(
+                roi_bgr,
+                input_size=tuple(getattr(self, "_face_detector_input_size", (640, 640))),
+                max_num=max(0, max_faces),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"ROI face detection failed for track_id={person_det.get('track_id')} "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
+
+        if det is None or len(det) == 0:
+            return []
+
+        out: list[dict] = []
+        min_face_size = float(os.getenv("CLYPT_FACE_ROI_MIN_SIZE", "10"))
+        for idx, row in enumerate(np.asarray(det)):
+            if len(row) < 5:
+                continue
+            x1, y1, x2, y2, score = [float(v) for v in row[:5]]
+            bw = max(0.0, x2 - x1)
+            bh = max(0.0, y2 - y1)
+            if min(bw, bh) < min_face_size:
+                continue
+
+            x1 = max(0.0, min(float(max(0, roi_rgb.shape[1] - 1)), x1))
+            y1 = max(0.0, min(float(max(0, roi_rgb.shape[0] - 1)), y1))
+            x2 = max(x1 + 1.0, min(float(max(1, roi_rgb.shape[1])), x2))
+            y2 = max(y1 + 1.0, min(float(max(1, roi_rgb.shape[0])), y2))
+
+            kps = None if kpss is None or idx >= len(kpss) else np.asarray(kpss[idx], dtype=np.float32)
+            embedding_vec = None
+            if kps is not None and kps.size > 0:
+                try:
+                    face = Face(
+                        bbox=np.asarray([x1, y1, x2, y2], dtype=np.float32),
+                        kps=kps,
+                        det_score=float(score),
+                    )
+                    emb = recognizer.get(roi_bgr, face)
+                    emb_arr = np.asarray(emb, dtype=np.float32)
+                    if emb_arr.size > 0:
+                        embedding_vec = emb_arr
+                except Exception:
+                    embedding_vec = None
+
+            gx1 = float(x1 + rx1)
+            gy1 = float(y1 + ry1)
+            gx2 = float(x2 + rx1)
+            gy2 = float(y2 + ry1)
+            gkps = None
+            if kps is not None:
+                gkps = kps.astype(np.float32).copy()
+                gkps[:, 0] += float(rx1)
+                gkps[:, 1] += float(ry1)
+
+            out.append(
+                {
+                    "bbox_xyxy": (gx1, gy1, gx2, gy2),
+                    "det_score": float(score),
+                    "kps": gkps,
+                    "embedding": embedding_vec,
+                    "source": "face_detector_roi",
+                    "provenance": "scrfd_roi_only",
+                }
+            )
+        return out
+
     def _merge_track_identity_feature_sets(self, feature_maps: list[dict[str, dict]]) -> dict[str, dict]:
         import numpy as np
 
@@ -3171,19 +3136,15 @@ class ClyptWorker:
                 py2 = float(det.get("y2", py1 + 1.0))
                 pw = max(1.0, px2 - px1)
                 ph = max(1.0, py2 - py1)
-                if not (px1 - 0.05 * pw <= fcx <= px2 + 0.05 * pw):
-                    continue
-                if not (py1 - 0.08 * ph <= fcy <= py1 + 0.68 * ph):
-                    continue
-                head_box = (
+                person_box = (
                     px1,
-                    max(0.0, py1 - 0.04 * ph),
+                    py1,
                     px2,
-                    py1 + (0.62 * ph),
+                    py2,
                 )
-                iou = self._bbox_iou_xyxy((fx1, fy1, fx2, fy2), head_box)
+                iou = self._bbox_iou_xyxy((fx1, fy1, fx2, fy2), person_box)
                 center_x_bonus = 1.0 - min(1.0, abs(fcx - (0.5 * (px1 + px2))) / max(1.0, 0.55 * pw))
-                center_y_bonus = 1.0 - min(1.0, abs(fcy - (py1 + 0.26 * ph)) / max(1.0, 0.32 * ph))
+                center_y_bonus = 1.0 - min(1.0, abs(fcy - (0.5 * (py1 + py2))) / max(1.0, 0.50 * ph))
                 score = (0.55 * iou) + (0.25 * center_x_bonus) + (0.20 * center_y_bonus)
                 if score >= min_match_score:
                     score_matrix[face_idx, det_idx] = float(score)
@@ -3271,8 +3232,16 @@ class ClyptWorker:
             frame_rgb = frame_map.get(frame_idx)
             if frame_rgb is None:
                 continue
-            detections = list(self._detect_faces_full_frame(frame_rgb))
-            assignments = self._associate_faces_to_person_dets(detections, dets)
+            detections: list[dict] = []
+            for person_det in dets:
+                associated_track_id = str(person_det.get("track_id", "") or "")
+                if not associated_track_id:
+                    continue
+                roi_detections = self._detect_faces_in_person_roi(frame_rgb, person_det)
+                for roi_detection in roi_detections:
+                    row = dict(roi_detection)
+                    row["associated_track_id"] = associated_track_id
+                    detections.append(row)
 
             if not detections:
                 # retire stale tracks even on empty frames
@@ -3329,7 +3298,7 @@ class ClyptWorker:
                         output_frame_height=out_h,
                         inv_scale_x=inv_scale_x,
                         inv_scale_y=inv_scale_y,
-                        associated_track_id=assignments[c_i],
+                        associated_track_id=str(detection.get("associated_track_id", "") or "") or None,
                     )
                     track["observations"].append(obs)
                     if obs.get("associated_track_id"):
@@ -3364,7 +3333,7 @@ class ClyptWorker:
                     output_frame_height=out_h,
                     inv_scale_x=inv_scale_x,
                     inv_scale_y=inv_scale_y,
-                    associated_track_id=assignments[det_idx],
+                    associated_track_id=str(detection.get("associated_track_id", "") or "") or None,
                 )
                 track["observations"].append(obs)
                 if obs.get("associated_track_id"):
@@ -3759,6 +3728,9 @@ class ClyptWorker:
 
         face_track_features = self._merge_face_track_feature_sets(
             [result.get("face_track_features", {}) for result in segment_results]
+        )
+        face_track_features = self._propagate_face_observation_medium_gaps(
+            face_track_features, fps=fps
         )
         track_identity_features = self._derive_track_identity_features_from_face_tracks(face_track_features)
         metrics = {
@@ -4232,6 +4204,15 @@ class ClyptWorker:
         from ultralytics import YOLO
         from omegaconf import open_dict
 
+        os.environ["CLYPT_LRASD_GPU_DECODE"] = "1"
+        os.environ["CLYPT_LRASD_GPU_PREPROCESS"] = "1"
+        os.environ["CLYPT_LRASD_GPU_DECODE_STRICT"] = "1"
+        os.environ["CLYPT_LRASD_BATCH_SIZE"] = "64"
+        os.environ["CLYPT_LRASD_MAX_INFLIGHT"] = "6"
+        os.environ["CLYPT_LRASD_PREP_WORKERS"] = "8"
+        os.environ.setdefault("CLYPT_TRACKING_MODE", "direct")
+        os.environ.setdefault("CLYPT_TRACK_CHUNK_WORKERS", "1")
+
         self.model_debug = os.getenv("CLYPT_MODEL_DEBUG", "0") == "1"
         self.model_debug_every = int(os.getenv("CLYPT_MODEL_DEBUG_EVERY", "20"))
         self._lrasd_debug_calls = 0
@@ -4453,7 +4434,7 @@ class ClyptWorker:
             requested = int(os.getenv("CLYPT_TRACK_CHUNK_WORKERS", "1"))
         except Exception:
             requested = 1
-        return max(1, min(3, requested))
+        return max(1, min(4, requested))
 
     def _get_tracking_model(self):
         model = getattr(self, "_shared_tracking_model", None)
@@ -4525,22 +4506,9 @@ class ClyptWorker:
 
     def _select_tracking_mode(self) -> str:
         requested_mode = os.getenv("CLYPT_TRACKING_MODE", "direct").strip().lower()
-        if requested_mode in {"direct", "chunked"}:
+        if requested_mode in {"direct", "chunked", "shared_analysis_proxy"}:
             return requested_mode
-        if requested_mode == "shared_analysis_proxy":
-            return requested_mode
-        if requested_mode not in {"", "auto"}:
-            self._emit_runtime_stage_log(
-                "tracking",
-                "unknown_tracking_mode",
-                event="config_warning",
-                tracking_mode=requested_mode,
-            )
-            requested_mode = "auto"
-        if requested_mode == "":
-            # Compatibility: an explicitly empty env var behaves like "auto".
-            requested_mode = "auto"
-        if requested_mode == "auto":
+        if requested_mode in {"", "auto"}:
             if self._shared_analysis_proxy_enabled():
                 return "shared_analysis_proxy"
             return "direct" if self._tracking_chunk_workers() == 1 else "chunked"
@@ -5204,6 +5172,126 @@ class ClyptWorker:
                     )
         return out
 
+    @staticmethod
+    def _propagate_face_observation_medium_gaps(
+        face_track_features: dict[str, dict],
+        fps: float,
+    ) -> dict[str, dict]:
+        """Extend each face track with synthetic observations across medium frame gaps.
+
+        For gaps between consecutive real observations in the range
+        [CLYPT_FACE_OBS_MEDIUM_GAP_MIN, CLYPT_FACE_OBS_MEDIUM_GAP_MAX], synthetic
+        observations are created by linear bbox interpolation with exponential confidence
+        decay.  A hard cutoff stops propagation when synthetic confidence drops below
+        CLYPT_FACE_OBS_MEDIUM_GAP_MIN_CONF.  Observations are marked
+        source=propagated_medium_gap / provenance=tracklet_interpolation so downstream
+        stages can weight them appropriately.
+
+        Shot-boundary gating for cross-identity propagation is handled separately in
+        _propagate_face_identity_across_short_gaps; here we operate within already-identified
+        face tracks so intra-track interpolation is always identity-consistent.
+        """
+        import os
+
+        gap_min = int(os.getenv("CLYPT_FACE_OBS_MEDIUM_GAP_MIN", "3"))
+        gap_max = int(os.getenv("CLYPT_FACE_OBS_MEDIUM_GAP_MAX", "30"))
+        decay = float(os.getenv("CLYPT_FACE_OBS_MEDIUM_GAP_DECAY", "0.88"))
+        min_conf = float(os.getenv("CLYPT_FACE_OBS_MEDIUM_GAP_MIN_CONF", "0.10"))
+
+        if gap_max < gap_min or gap_max <= 0:
+            return face_track_features
+
+        updated: dict[str, dict] = {}
+        total_synthetic = 0
+
+        for face_track_id, feature in face_track_features.items():
+            observations = sorted(
+                feature.get("face_observations", []),
+                key=lambda obs: int(obs.get("frame_idx", -1)),
+            )
+            if len(observations) < 2:
+                updated[face_track_id] = feature
+                continue
+
+            existing_frames = {int(obs.get("frame_idx", -1)) for obs in observations}
+            synthetic: list[dict] = []
+
+            for left_obs, right_obs in zip(observations, observations[1:]):
+                lf = int(left_obs.get("frame_idx", -1))
+                rf = int(right_obs.get("frame_idx", -1))
+                gap = rf - lf - 1
+                if gap < gap_min or gap > gap_max:
+                    continue
+
+                lc = float(left_obs.get("confidence", 0.0))
+                rc = float(right_obs.get("confidence", 0.0))
+                base_conf = min(lc, rc)
+                if base_conf <= 0.0:
+                    continue
+
+                l_bbox = left_obs.get("bounding_box", {})
+                r_bbox = right_obs.get("bounding_box", {})
+                ll = float(l_bbox.get("left", 0.0))
+                lt = float(l_bbox.get("top", 0.0))
+                lr = float(l_bbox.get("right", 1.0))
+                lb = float(l_bbox.get("bottom", 1.0))
+                rl = float(r_bbox.get("left", 0.0))
+                rt = float(r_bbox.get("top", 0.0))
+                rr = float(r_bbox.get("right", 1.0))
+                rb = float(r_bbox.get("bottom", 1.0))
+
+                for step in range(1, gap + 1):
+                    fi = lf + step
+                    if fi in existing_frames:
+                        continue
+                    # Hard confidence cutoff — stop this pair's propagation if below threshold
+                    conf = base_conf * (decay ** step)
+                    if conf < min_conf:
+                        break
+                    alpha = step / float(rf - lf)
+                    interp_left = (1.0 - alpha) * ll + alpha * rl
+                    interp_top = (1.0 - alpha) * lt + alpha * rt
+                    interp_right = (1.0 - alpha) * lr + alpha * rr
+                    interp_bottom = (1.0 - alpha) * lb + alpha * rb
+                    time_ms = int(round(fi / max(1e-6, fps) * 1000.0))
+                    synthetic.append(
+                        {
+                            "frame_idx": int(fi),
+                            "time_ms": time_ms,
+                            "bounding_box": {
+                                "left": float(interp_left),
+                                "top": float(interp_top),
+                                "right": float(max(interp_left, interp_right)),
+                                "bottom": float(max(interp_top, interp_bottom)),
+                            },
+                            "confidence": float(conf),
+                            "quality": float(conf),
+                            "source": "propagated_medium_gap",
+                            "provenance": "tracklet_interpolation",
+                            "associated_track_id": left_obs.get("associated_track_id"),
+                        }
+                    )
+
+            if not synthetic:
+                updated[face_track_id] = feature
+                continue
+
+            total_synthetic += len(synthetic)
+            all_obs = sorted(
+                observations + synthetic,
+                key=lambda obs: (int(obs.get("frame_idx", -1)), obs.get("source", "") != "propagated_medium_gap"),
+            )
+            updated[face_track_id] = {
+                **feature,
+                "face_observations": all_obs,
+                "face_observation_count": len(all_obs),
+            }
+
+        if total_synthetic:
+            print(f"  Face medium-gap propagation: {total_synthetic} synthetic observations added")
+
+        return updated
+
     def _track_single_chunk(
         self,
         video_path: str,
@@ -5337,11 +5425,6 @@ class ClyptWorker:
                     pts = obb_polys[i].reshape(-1, 2).tolist()
                     out["geometry_type"] = "obb"
                     out["polygon"] = [[float(px), float(py)] for px, py in pts]
-                seg_px = self._yolo_instance_seg_proxies(
-                    r, i, x1, y1, x2, y2, width, height
-                )
-                if seg_px is not None:
-                    out["seg_mask_proxies"] = seg_px
                 analysis_tracks.append(dict(out))
                 tracks.append(
                     self._scale_detection_geometry(
@@ -5572,11 +5655,6 @@ class ClyptWorker:
                         pts = obb_polys[i].reshape(-1, 2).tolist()
                         out["geometry_type"] = "obb"
                         out["polygon"] = [[float(px), float(py)] for px, py in pts]
-                    seg_px = self._yolo_instance_seg_proxies(
-                        r, i, x1, y1, x2, y2, width, height
-                    )
-                    if seg_px is not None:
-                        out["seg_mask_proxies"] = seg_px
                     frame_face_dets.append(dict(out))
                     projected_out = self._scale_detection_geometry(
                         out,
@@ -6034,8 +6112,8 @@ class ClyptWorker:
             "chunk_processed_frames": int(total_processed_frames),
             "chunk_elapsed_s": float(total_chunk_elapsed),
             "chunk_throughput_fps": float(chunk_throughput_fps),
-            "tracker_backend": str(backend_info["backend"]),
-            "tracking_provenance": str(backend_info["provenance"]),
+            "tracker_backend": "bytetrack",
+            "tracking_provenance": self._tracking_provenance_tag(),
         }
         if stitched_track_identity_features:
             metrics["track_identity_features"] = stitched_track_identity_features
@@ -6370,15 +6448,28 @@ class ClyptWorker:
                 return max(0, a_start - b_end)
             return 0
 
+        # Precompute shot boundary frames for shot-bounded identity propagation.
+        # A gap that crosses a cut must not receive cross-tracklet label assignment.
+        _shot_cut_frames: frozenset[int] = frozenset()
+        if len(shot_timeline_for_cluster) > 1:
+            _boundaries = []
+            for _s in shot_timeline_for_cluster[:-1]:
+                _end_ms = float(_s.get("end_time_ms", 0))
+                _boundaries.append(int(round(_end_ms / 1000.0 * cluster_video_fps)))
+            _shot_cut_frames = frozenset(_boundaries)
+
         def _propagate_face_identity_across_short_gaps() -> int:
             max_gap_frames = max(0, int(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_MAX_GAP_FRAMES", "48")))
             max_sig_dist = float(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_MAX_SIG_DIST", "0.18"))
             ambiguity_margin = float(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_AMBIGUITY_MARGIN", "0.08"))
+            max_combined_score = float(os.getenv("CLYPT_FACE_TRACK_PROPAGATE_MAX_COMBINED_SCORE", "1.50"))
             pending_tids = [tid for tid in unique_ids if tid not in seed_label_by_tid and tid not in embeddings]
             if not pending_tids or not seed_label_by_tid:
                 return 0
 
             propagated = 0
+            shot_cut_rejected = 0
+            score_cut_rejected = 0
             seed_signature_by_tid = {
                 tid: _track_signature(tid)
                 for tid in seed_label_by_tid.keys()
@@ -6403,10 +6494,34 @@ class ClyptWorker:
                     gap_frames = _track_boundary_gap_frames(tid, seeded_tid)
                     if gap_frames > max_gap_frames:
                         continue
+                    # Shot-boundary gate: reject if the gap between tracklets crosses a cut.
+                    if _shot_cut_frames and gap_frames > 0:
+                        dets_tid = tracklets.get(tid, [])
+                        dets_seed = tracklets.get(seeded_tid, [])
+                        if dets_tid and dets_seed:
+                            t_end = max(int(d.get("frame_idx", -1)) for d in dets_tid)
+                            s_end = max(int(d.get("frame_idx", -1)) for d in dets_seed)
+                            t_start = min(int(d.get("frame_idx", -1)) for d in dets_tid)
+                            s_start = min(int(d.get("frame_idx", -1)) for d in dets_seed)
+                            if s_end < t_start:
+                                gap_lo, gap_hi = s_end, t_start
+                            elif t_end < s_start:
+                                gap_lo, gap_hi = t_end, s_start
+                            else:
+                                gap_lo, gap_hi = None, None
+                            if gap_lo is not None and any(
+                                gap_lo < sb < gap_hi for sb in _shot_cut_frames
+                            ):
+                                shot_cut_rejected += 1
+                                continue
                     sig_dist = _sig_dist(sig, seeded_sig)
                     if sig_dist > max_sig_dist:
                         continue
                     score = (gap_frames / max(1.0, float(max_gap_frames or 1))) + sig_dist
+                    # Hard combined-score cutoff: reject low-quality propagation candidates.
+                    if score > max_combined_score:
+                        score_cut_rejected += 1
+                        continue
                     candidates.append((score, gap_frames, sig_dist, seeded_tid))
                 if not candidates:
                     continue
@@ -6428,6 +6543,11 @@ class ClyptWorker:
                 if source_embedding is not None:
                     seed_embedding_by_tid[tid] = np.asarray(source_embedding, dtype=np.float32)
                 propagated += 1
+            if shot_cut_rejected or score_cut_rejected:
+                print(
+                    f"  Face-track gap propagation: shot_cut_rejected={shot_cut_rejected}, "
+                    f"score_cut_rejected={score_cut_rejected}"
+                )
             return propagated
 
         if face_track_seeded_tracklets:
@@ -7121,6 +7241,19 @@ class ClyptWorker:
                     fps=fps,
                 )
                 if not ranked:
+                    debug_rows.append(
+                        {
+                            "speaker_id": str(turn.get("speaker_id", "") or ""),
+                            "start_time_ms": int(span_start_ms),
+                            "end_time_ms": int(span_end_ms),
+                            "top_k": int(top_k),
+                            "top_k_enabled": bool(top_k_enabled),
+                            "overlap_active_count": 0,
+                            "selected_local_track_ids": [],
+                            "candidates": [],
+                            "reject_reason": "no_usable_visual_candidates",
+                        }
+                    )
                     continue
 
                 overlap_active_count = sum(
@@ -8044,6 +8177,41 @@ class ClyptWorker:
             eligible_tracks=int(len(eligible_lrasd_track_ids)),
             total_tracks=int(len(track_to_dets)),
         )
+        candidate_rejection_counts: dict[str, int] = {}
+        candidate_rejection_samples: list[dict[str, object]] = []
+        for tid, meta in (lrasd_candidate_debug or {}).items():
+            reason = str(meta.get("reject_reason") or "eligible")
+            candidate_rejection_counts[reason] = int(candidate_rejection_counts.get(reason, 0) + 1)
+            if reason == "eligible":
+                continue
+            if len(candidate_rejection_samples) >= 12:
+                continue
+            candidate_rejection_samples.append(
+                {
+                    "local_track_id": str(tid),
+                    "reject_reason": reason,
+                    "visible_frames": int(meta.get("visible_frames", 0) or 0),
+                    "overlap_frames": int(meta.get("overlap_frames", 0) or 0),
+                    "median_area_norm": round(float(meta.get("median_area_norm", 0.0) or 0.0), 6),
+                    "track_quality": round(float(meta.get("track_quality", 0.0) or 0.0), 6),
+                    "hard_reject_ratio": round(float(meta.get("hard_reject_ratio", 0.0) or 0.0), 6),
+                }
+            )
+        self._emit_runtime_stage_log(
+            "binding",
+            "candidate_pruning_reasons",
+            decision_source="lrasd",
+            event="runtime_info",
+            rejection_counts=dict(candidate_rejection_counts),
+            sample_rejections=candidate_rejection_samples,
+            thresholds={
+                "min_visible_frames": int(self._lrasd_min_candidate_visible_frames()),
+                "min_overlap_frames": int(self._lrasd_min_candidate_overlap_frames()),
+                "min_median_area_norm": float(self._lrasd_min_candidate_median_area_norm()),
+                "min_track_quality": float(self._lrasd_min_candidate_track_quality()),
+                "max_hard_reject_ratio": float(self._lrasd_max_candidate_hard_reject_ratio()),
+            },
+        )
         selected_turn_candidates, lrasd_turn_candidate_debug = self._select_lrasd_turn_topk_track_ids(
             audio_speaker_turns=audio_speaker_turns,
             words=words,
@@ -8057,6 +8225,27 @@ class ClyptWorker:
             fps=fps,
         )
         self._last_lrasd_turn_candidate_debug = [dict(row) for row in lrasd_turn_candidate_debug]
+        no_visual_rows = [
+            row
+            for row in (lrasd_turn_candidate_debug or [])
+            if str(row.get("reject_reason", "")) == "no_usable_visual_candidates"
+        ]
+        if no_visual_rows:
+            self._emit_runtime_stage_log(
+                "binding",
+                "no_usable_visual_evidence",
+                decision_source="lrasd",
+                event="runtime_info",
+                no_visual_windows=int(len(no_visual_rows)),
+                sampled_windows=[
+                    {
+                        "speaker_id": str(row.get("speaker_id", "") or ""),
+                        "start_time_ms": int(row.get("start_time_ms", 0) or 0),
+                        "end_time_ms": int(row.get("end_time_ms", 0) or 0),
+                    }
+                    for row in no_visual_rows[:12]
+                ],
+            )
         selected_turn_track_union = {
             str(tid)
             for turn_row in selected_turn_candidates
@@ -8636,6 +8825,8 @@ class ClyptWorker:
         words_with_frame = 0
         words_with_dets = 0
         words_with_scored_candidate = 0
+        gate_rejection_counts: dict[str, int] = {}
+        gate_rejection_samples: list[dict[str, object]] = []
         local_candidate_evidence: list[dict] = []
         word_candidate_rows: list[dict] = []
         for w in words:
@@ -8942,6 +9133,19 @@ class ClyptWorker:
                 speaker_candidate_debug[-1]["active_audio_speaker_ids"] = active_audio_speaker_ids
                 speaker_candidate_debug[-1]["active_audio_local_track_ids"] = active_audio_local_track_ids
 
+        def _record_gate_rejection(word: dict, reason: str) -> None:
+            normalized_reason = str(reason or "unknown")
+            gate_rejection_counts[normalized_reason] = int(gate_rejection_counts.get(normalized_reason, 0) + 1)
+            if len(gate_rejection_samples) < 16:
+                gate_rejection_samples.append(
+                    {
+                        "reason": normalized_reason,
+                        "word": str(word.get("text") or word.get("word") or ""),
+                        "start_time_ms": int(word.get("start_time_ms", 0) or 0),
+                        "end_time_ms": int(word.get("end_time_ms", 0) or 0),
+                    }
+                )
+
         for row in word_candidate_rows:
             w = row["word"]
             scored_candidates = [dict(candidate) for candidate in row["scored_candidates"]]
@@ -8966,6 +9170,7 @@ class ClyptWorker:
                 and _turn_is_high_ambiguity(active_turn)
             )
             if not scored_candidates:
+                _record_gate_rejection(w, "no_candidates")
                 _append_speaker_candidate_debug(
                     word=w,
                     scored_candidates=[],
@@ -9015,6 +9220,7 @@ class ClyptWorker:
                 _mark_protected_unknown(w)
                 w["calibrated_confidence"] = _cal_a
                 w["abstention_reason"] = "audio_turn_abstain"
+                _record_gate_rejection(w, "audio_turn_abstain")
                 continue
 
             best_candidate = scored_candidates[0]
@@ -9082,6 +9288,7 @@ class ClyptWorker:
                     _mark_protected_unknown(w)
                     w["calibrated_confidence"] = _cal_b
                     w["abstention_reason"] = abstention_reason
+                    _record_gate_rejection(w, abstention_reason)
                     continue
                 strong_turn_owner = bool(
                     not bool(active_turn_binding.get("ambiguous", False))
@@ -9196,6 +9403,19 @@ class ClyptWorker:
                 _clear_word_assignment(w)
                 w["calibrated_confidence"] = _cal_word
                 w["abstention_reason"] = _abstention
+                rejection_reason = str(_abstention or "policy_reject")
+                if rejection_reason in {"unknown", "", "none"}:
+                    if best_prob is None:
+                        rejection_reason = "no_asd_prob"
+                    elif float(best_prob) < float(min_lrasd_prob):
+                        rejection_reason = "low_prob"
+                    elif top_margin is None:
+                        rejection_reason = "no_margin"
+                    elif float(top_margin) < float(min_assignment_margin):
+                        rejection_reason = "low_margin"
+                    else:
+                        rejection_reason = "policy_reject"
+                _record_gate_rejection(w, rejection_reason)
 
             _append_speaker_candidate_debug(
                 word=w,
@@ -9226,6 +9446,15 @@ class ClyptWorker:
             }
             for entry in speaker_candidate_debug
         ]
+        if gate_rejection_counts:
+            self._emit_runtime_stage_log(
+                "binding",
+                "assignment_gate_rejections",
+                decision_source="lrasd",
+                event="runtime_info",
+                rejection_counts=dict(gate_rejection_counts),
+                sample_rejections=gate_rejection_samples,
+            )
 
         apply_turn_consistency_smoothing(
             words,
@@ -10064,11 +10293,34 @@ class ClyptWorker:
             word["requires_hard_disambiguation"] = bool(
                 matched_span.get("require_hard_disambiguation", False)
             )
+        local_follow_active_ms = sum(
+            max(
+                0,
+                int(binding.get("end_time_ms", 0) or 0)
+                - int(binding.get("start_time_ms", 0) or 0),
+            )
+            for binding in speaker_follow_bindings_local
+        )
+        local_follow_active_s = round(local_follow_active_ms / 1000.0, 3)
+        local_follow_active_frames = int(
+            round((local_follow_active_ms / 1000.0) * float(cluster_video_fps or 25.0))
+        )
+        cluster_duration_ms_int = int(cluster_duration_ms or 0)
+        local_follow_coverage_ratio = (
+            round(float(local_follow_active_ms / cluster_duration_ms_int), 4)
+            if cluster_duration_ms_int > 0
+            else 0.0
+        )
+
         speaker_binding_elapsed_s = time.perf_counter() - speaker_binding_started_at
         metrics["speaker_binding_wallclock_s"] = round(speaker_binding_elapsed_s, 3)
         metrics["speaker_follow_binding_segment_count"] = len(speaker_follow_bindings)
         metrics["speaker_binding_local_segment_count"] = len(speaker_bindings_local)
         metrics["speaker_follow_binding_local_segment_count"] = len(speaker_follow_bindings_local)
+        metrics["speaker_follow_binding_local_active_ms"] = local_follow_active_ms
+        metrics["speaker_follow_binding_local_active_s"] = local_follow_active_s
+        metrics["speaker_follow_binding_local_active_frames"] = local_follow_active_frames
+        metrics["speaker_follow_binding_local_coverage_ratio"] = local_follow_coverage_ratio
         metrics["audio_visual_mapping_count"] = len(audio_visual_mappings)
         metrics["span_assignment_count"] = len(span_assignments_sorted)
         last_binding_metrics = getattr(self, "_last_speaker_binding_metrics", None)

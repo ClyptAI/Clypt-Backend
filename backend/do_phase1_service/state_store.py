@@ -9,6 +9,9 @@ from uuid import uuid4
 from backend.do_phase1_service.models import JobRecord
 
 
+SOURCE_PATH_SENTINEL_PREFIX = "source_path://"
+
+
 class SQLiteJobStore:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
@@ -26,7 +29,8 @@ class SQLiteJobStore:
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_id TEXT PRIMARY KEY,
-                    source_url TEXT NOT NULL,
+                    source_url TEXT,
+                    source_path TEXT,
                     runtime_controls_json TEXT,
                     status TEXT NOT NULL,
                     retries INTEGER NOT NULL DEFAULT 0,
@@ -49,6 +53,8 @@ class SQLiteJobStore:
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
             }
+            if "source_path" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN source_path TEXT")
             if "claim_token" not in columns:
                 connection.execute("ALTER TABLE jobs ADD COLUMN claim_token TEXT")
             if "runtime_controls_json" not in columns:
@@ -105,7 +111,8 @@ class SQLiteJobStore:
         self,
         *,
         job_id: str,
-        source_url: str,
+        source_url: str | None = None,
+        source_path: str | None = None,
         runtime_controls: dict | None = None,
         status: str,
         retries: int = 0,
@@ -125,16 +132,20 @@ class SQLiteJobStore:
         now = datetime.now(UTC)
         created = created_at or now
         updated = updated_at or now
+        persisted_source_url = source_url if source_url is not None else _source_path_sentinel(source_path)
+        if persisted_source_url is None:
+            raise ValueError("save_job requires source_url or source_path")
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, source_url, runtime_controls_json, status, retries, claim_token, manifest_json, manifest_uri,
+                    job_id, source_url, source_path, runtime_controls_json, status, retries, claim_token, manifest_json, manifest_uri,
                     failure_json, current_step, progress_message, progress_pct, log_path,
                     created_at, updated_at, started_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     source_url=excluded.source_url,
+                    source_path=excluded.source_path,
                     runtime_controls_json=excluded.runtime_controls_json,
                     status=excluded.status,
                     retries=excluded.retries,
@@ -153,7 +164,8 @@ class SQLiteJobStore:
                 """,
                 (
                     job_id,
-                    source_url,
+                    persisted_source_url,
+                    source_path,
                     json.dumps(runtime_controls) if runtime_controls is not None else None,
                     status,
                     retries,
@@ -341,9 +353,14 @@ class SQLiteJobStore:
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> JobRecord:
+        source_url, source_path = _decode_source_fields(
+            row["source_url"],
+            row["source_path"],
+        )
         return JobRecord(
             job_id=row["job_id"],
-            source_url=row["source_url"],
+            source_url=source_url,
+            source_path=source_path,
             runtime_controls=_load_json_object(row["runtime_controls_json"], field_name="runtime_controls_json"),
             status=row["status"],
             retries=int(row["retries"]),
@@ -367,6 +384,22 @@ def _parse_db_datetime(value: str) -> datetime:
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value)
+
+
+def _source_path_sentinel(source_path: str | None) -> str | None:
+    if not source_path:
+        return None
+    return f"{SOURCE_PATH_SENTINEL_PREFIX}{source_path}"
+
+
+def _decode_source_fields(source_url: str | None, source_path: str | None) -> tuple[str | None, str | None]:
+    if source_path:
+        if source_url and source_url.startswith(SOURCE_PATH_SENTINEL_PREFIX):
+            return None, source_path
+        return source_url, source_path
+    if source_url and source_url.startswith(SOURCE_PATH_SENTINEL_PREFIX):
+        return None, source_url[len(SOURCE_PATH_SENTINEL_PREFIX) :]
+    return source_url, source_path
 
 
 def _load_json_object(value: str | None, *, field_name: str) -> dict | None:

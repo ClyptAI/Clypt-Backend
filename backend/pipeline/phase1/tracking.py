@@ -65,7 +65,11 @@ def run_tracking_stage(worker: Any, video_path: str, ctx: Phase1AnalysisContext)
     metrics = dict(metrics or {})
     metrics.setdefault("tracking_mode", mode)
     metrics["analysis_context"] = analysis_context
-    metrics["phase1_decode_context"] = ctx
+    metrics["phase1_decode_context"] = {
+        "prepare_elapsed_ms": round(float(ctx.prepare_elapsed_ms), 3),
+        "prepare_invocations": int(ctx.prepare_invocations),
+        "cache_hits": int(ctx.cache_hits),
+    }
     metrics.update(_decode_metrics_from_context(ctx, analysis_context))
     return tracks, metrics
 

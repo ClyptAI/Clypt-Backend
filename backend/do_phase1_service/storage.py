@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from google.cloud import storage as gcs_storage
 
@@ -114,7 +114,7 @@ def persist_phase1_outputs(
                 "geometry_type": phase_1_visual["geometry_type"],
                 "class_taxonomy": phase_1_visual["class_taxonomy"],
                 "tracking_metrics": phase_1_visual["tracking_metrics"],
-                "tracks": phase_1_visual["tracks"],
+                "tracks": _sanitize_visual_tracks_for_manifest(phase_1_visual.get("tracks") or []),
                 "tracks_local": phase_1_visual.get("tracks_local") or [],
                 "face_detections": phase_1_visual["face_detections"],
                 "person_detections": phase_1_visual["person_detections"],
@@ -147,6 +147,14 @@ def persist_phase1_outputs(
     validated = Phase1Manifest.model_validate(manifest_payload)
     manifest_uri = _upload_json(storage, validated.model_dump(mode="json"), f"phase_1/jobs/{job_id}/manifest.json")
     return PersistedPhase1Manifest.model_validate({**validated.model_dump(mode="json"), "manifest_uri": manifest_uri})
+
+
+def _sanitize_visual_tracks_for_manifest(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for track in tracks:
+        row = dict(track or {})
+        sanitized.append(row)
+    return sanitized
 
 
 def _upload_json(storage: StorageBackend, payload: dict, object_name: str) -> str:

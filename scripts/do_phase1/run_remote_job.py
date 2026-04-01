@@ -203,16 +203,25 @@ def upload_video_to_droplet(local_path: Path, video_id: str) -> None:
         raise UserFacingError("failed to upload relay video to droplet")
 
 
-def submit_job(source_url: str) -> str:
+def submit_job(*, source_url: str | None = None, source_path: str | None = None) -> str:
+    if bool(source_url) == bool(source_path):
+        raise UserFacingError("Provide exactly one of source_url or source_path")
+
     script = """
 python3 - <<'PY'
 import json
 import os
 import urllib.request
 
+payload = {}
+if os.environ.get("SOURCE_URL"):
+    payload["source_url"] = os.environ["SOURCE_URL"]
+if os.environ.get("SOURCE_PATH"):
+    payload["source_path"] = os.environ["SOURCE_PATH"]
+
 req = urllib.request.Request(
     os.environ["REMOTE_API_URL"] + "/jobs",
-    data=json.dumps({"source_url": os.environ["SOURCE_URL"]}).encode("utf-8"),
+    data=json.dumps(payload).encode("utf-8"),
     headers={"Content-Type": "application/json"},
     method="POST",
 )
@@ -220,7 +229,12 @@ with urllib.request.urlopen(req, timeout=30) as resp:
     print(resp.read().decode("utf-8"))
 PY
 """
-    result = run_remote_bash(script, env={"SOURCE_URL": source_url, "REMOTE_API_URL": REMOTE_API_URL})
+    env = {
+        "REMOTE_API_URL": REMOTE_API_URL,
+        "SOURCE_URL": source_url or "",
+        "SOURCE_PATH": source_path or "",
+    }
+    result = run_remote_bash(script, env=env)
     try:
         payload = json.loads(result.stdout.strip())
         return str(payload["job_id"])
@@ -267,12 +281,9 @@ def run_job_flow(url: str) -> int:
         print(f"Uploading {local_video.name} to droplet relay...")
         upload_video_to_droplet(local_video, video_id)
 
-    print("Ensuring droplet relay is running...")
-    ensure_remote_relay(video_id)
-
-    relay_url = remote_relay_source_url(video_id)
-    print(f"Submitting job for {relay_url}")
-    job_id = submit_job(relay_url)
+    source_path = remote_relay_path(video_id)
+    print(f"Submitting job for source_path={source_path}")
+    job_id = submit_job(source_path=source_path)
     print(f"Started job: {job_id}")
 
     tail_proc = start_log_tail(job_id)

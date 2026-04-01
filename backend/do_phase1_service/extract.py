@@ -3,12 +3,15 @@ from __future__ import annotations
 import importlib
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterator, TextIO
+from urllib.parse import quote
 
 import fcntl
 
@@ -17,8 +20,12 @@ from backend.do_phase1_service.storage import GCSStorage, StorageBackend, persis
 from backend.do_phase1_worker import ClyptWorker, LRASD_MODEL_PATH, LRASD_REPO_ROOT
 from backend.pipeline import phase_1_do_pipeline as phase1_pipeline
 from backend.pipeline.phase_1_do_pipeline import (
+    ALLOW_LOW_RES_VIDEO,
+    YTDLP_MIN_LONG_EDGE,
     download_media,
     enrich_visual_ledger_for_downstream,
+    ensure_h264_local,
+    probe_video_stream,
     validate_phase_handoff,
 )
 
@@ -47,7 +54,8 @@ ProgressCallback = Callable[[str, str | None, float | None], None]
 
 def run_extraction_job(
     *,
-    source_url: str,
+    source_url: str | None = None,
+    source_path: str | None = None,
     job_id: str,
     runtime_controls: dict[str, object] | None = None,
     output_dir: str | Path,
@@ -56,6 +64,9 @@ def run_extraction_job(
     log_path: str | Path | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> PersistedPhase1Manifest:
+    if bool(source_url) == bool(source_path):
+        raise ValueError("Provide exactly one of source_url or source_path")
+
     storage = storage or GCSStorage()
     output_dir = Path(output_dir)
     job_output_dir = output_dir / job_id
@@ -69,8 +80,15 @@ def run_extraction_job(
 
     with _job_pipeline_workspace(job_output_dir):
         with _capture_job_logs(log_path, on_line=lambda line: _forward_progress_line(line, progress)):
-            print(f"[DO Phase 1] Starting job {job_id} for {source_url}")
-            video_path, audio_path = download_media(source_url)
+            source_label = source_url or source_path or "<unknown>"
+            print(f"[DO Phase 1] Starting job {job_id} for {source_label}")
+            if source_path:
+                video_path, audio_path = _prepare_local_source_media(source_path)
+                effective_source_url = _local_source_reference_url(source_path)
+            else:
+                assert source_url is not None
+                video_path, audio_path = download_media(source_url)
+                effective_source_url = source_url
             processing_started_at = time.perf_counter()
             progress("awaiting_gpu_slot", "Waiting for a GPU extraction slot", 0.08)
             with host_extraction_slot(host_lock_path or DEFAULT_HOST_LOCK_PATH):
@@ -79,7 +97,7 @@ def run_extraction_job(
                     extraction_result = execute_local_extraction(
                         video_path=video_path,
                         audio_path=audio_path,
-                        youtube_url=source_url,
+                        youtube_url=effective_source_url,
                     )
                 if extraction_result.get("status") != "success":
                     raise RuntimeError(extraction_result.get("message", "phase 1 extraction failed"))
@@ -103,7 +121,7 @@ def run_extraction_job(
                 storage=storage,
                 output_dir=job_output_dir,
                 job_id=job_id,
-                source_url=source_url,
+                source_url=effective_source_url,
                 canonical_video_uri=canonical_video_uri,
                 phase_1_audio=phase_1_audio,
                 phase_1_visual=phase_1_visual,
@@ -117,6 +135,55 @@ def run_extraction_job(
     progress("complete", "Phase 1 job succeeded", 1.0)
 
     return manifest
+
+
+def _prepare_local_source_media(source_path: str) -> tuple[str, str]:
+    source_file = Path(source_path).expanduser().resolve()
+    if not source_file.exists():
+        raise FileNotFoundError(f"source_path does not exist: {source_file}")
+    if not source_file.is_file():
+        raise ValueError(f"source_path must be a file: {source_file}")
+
+    phase1_pipeline.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    copied_video_path = phase1_pipeline.DOWNLOAD_DIR / "video.mp4"
+    shutil.copy2(source_file, copied_video_path)
+    log_path = ensure_h264_local(str(copied_video_path))
+
+    w, h, fps = probe_video_stream(log_path)
+    long_edge = max(w, h)
+    if not ALLOW_LOW_RES_VIDEO and long_edge < YTDLP_MIN_LONG_EDGE:
+        raise RuntimeError(
+            f"Video resolution too low for 9:16 reframing: {w}x{h}. "
+            f"Set ALLOW_LOW_RES_VIDEO=1 to override."
+        )
+
+    audio_path = str(phase1_pipeline.DOWNLOAD_DIR / "audio_16k.wav")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            log_path,
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            audio_path,
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print(
+        f"[DO Phase 1] Local source prepared: {log_path} ({Path(log_path).stat().st_size / 1e6:.1f} MB, "
+        f"{w}x{h}, fps={fps})"
+    )
+    return log_path, audio_path
+
+
+def _local_source_reference_url(source_path: str) -> str:
+    basename = quote(Path(source_path).name)
+    return f"http://localhost/local-source/{basename}"
 
 
 def execute_local_extraction(*, video_path: str, audio_path: str, youtube_url: str) -> dict:

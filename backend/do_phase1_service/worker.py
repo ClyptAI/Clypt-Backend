@@ -77,6 +77,7 @@ def run_worker_once(
         failed_step = "extraction"
         manifest = run_extraction_job(
             source_url=job.source_url,
+            source_path=job.source_path,
             job_id=job.job_id,
             runtime_controls=job.runtime_controls,
             output_dir=output_root,

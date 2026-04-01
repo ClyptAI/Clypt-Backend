@@ -38,7 +38,8 @@ class Phase1JobRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     job_id: str
-    source_url: str
+    source_url: str | None = None
+    source_path: str | None = None
     runtime_controls: dict[str, Any] | None = None
     status: JobState
     retries: int = 0
@@ -95,11 +96,18 @@ class DOPhase1Client:
 
     async def submit_job(
         self,
-        source_url: str,
+        source_url: str | None = None,
         *,
+        source_path: str | None = None,
         runtime_controls: dict[str, Any] | None = None,
     ) -> Phase1JobSubmission:
-        payload: dict[str, Any] = {"source_url": source_url}
+        if bool(source_url) == bool(source_path):
+            raise ValueError("Provide exactly one of source_url or source_path")
+        payload: dict[str, Any] = {}
+        if source_url is not None:
+            payload["source_url"] = source_url
+        if source_path is not None:
+            payload["source_path"] = source_path
         if runtime_controls is not None:
             payload["runtime_controls"] = runtime_controls
         response = await self._client.post("/jobs", json=payload)

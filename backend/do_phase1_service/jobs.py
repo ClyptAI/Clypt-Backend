@@ -11,6 +11,7 @@ def create_job(store: SQLiteJobStore, payload: JobCreatePayload) -> JobRecord:
     now = datetime.now(UTC)
     record = JobRecord(
         source_url=payload.source_url,
+        source_path=payload.source_path,
         runtime_controls=payload.runtime_controls,
         status="queued",
         created_at=now,
@@ -19,6 +20,7 @@ def create_job(store: SQLiteJobStore, payload: JobCreatePayload) -> JobRecord:
     return store.save_job(
         job_id=record.job_id,
         source_url=record.source_url,
+        source_path=record.source_path,
         runtime_controls=record.runtime_controls,
         status=record.status,
         retries=record.retries,
@@ -32,10 +34,16 @@ def create_job(store: SQLiteJobStore, payload: JobCreatePayload) -> JobRecord:
 
 
 def enqueue_job(store: SQLiteJobStore, *, job_id: str, payload: dict) -> JobRecord:
+    source_url = payload.get("source_url")
+    source_path = payload.get("source_path")
+    if bool(source_url) == bool(source_path):
+        raise ValueError("payload must provide exactly one of source_url or source_path")
+
     now = datetime.now(UTC)
     return store.save_job(
         job_id=job_id,
-        source_url=str(payload["source_url"]),
+        source_url=str(source_url) if source_url else None,
+        source_path=str(source_path) if source_path else None,
         runtime_controls=dict(payload.get("runtime_controls") or {}) or None,
         status="queued",
         retries=0,
@@ -60,6 +68,7 @@ def mark_running(store: SQLiteJobStore, job_id: str) -> JobRecord:
     return store.save_job(
         job_id=job.job_id,
         source_url=job.source_url,
+        source_path=job.source_path,
         runtime_controls=job.runtime_controls,
         status="running",
         retries=job.retries + 1,

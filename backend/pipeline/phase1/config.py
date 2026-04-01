@@ -47,7 +47,7 @@ class Phase1Config:
 
 def get_phase1_config() -> Phase1Config:
     return Phase1Config(
-        yolo_weights_path=_get_str("YOLO_WEIGHTS_PATH", "yolo26m-seg.pt"),
+        yolo_weights_path=_get_str("YOLO_WEIGHTS_PATH", "yolo26m.pt"),
         yolo_imgsz=_get_int("CLYPT_YOLO_IMGSZ", 1080, min_value=320),
         shot_scene_threshold=_get_float("CLYPT_SHOT_SCENE_THRESHOLD", 0.35, min_value=0.0),
         cluster_attach_max_gap_frames=_get_int("CLYPT_CLUSTER_ATTACH_MAX_GAP_FRAMES", 180, min_value=0),
