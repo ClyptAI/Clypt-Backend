@@ -80,13 +80,20 @@ class Phase1JobRunner:
         )
         logger.info("[gcs]    uploaded → %s (%.1f s)", video_gcs_uri, time.perf_counter() - t_upload)
 
-        # Pyannote cloud requires an HTTPS URL — generate one from the GCS URI.
-        video_https_url = self.storage_client.get_https_url(video_gcs_uri, expiry_hours=24)
+        # Upload the extracted audio for Pyannote — WAV is smaller and unambiguously audio.
+        t_audio_upload = time.perf_counter()
+        logger.info("[gcs]    uploading audio to GCS ...")
+        audio_gcs_uri = self.storage_client.upload_file(
+            local_path=workspace.audio_path,
+            object_name=f"phase1/{job_id}/source_audio.wav",
+        )
+        audio_https_url = self.storage_client.get_https_url(audio_gcs_uri, expiry_hours=24)
+        logger.info("[gcs]    audio uploaded → %s (%.1f s)", audio_gcs_uri, time.perf_counter() - t_audio_upload)
 
         source_ref = source_url or str(source_path)
         phase1_outputs = run_phase1_sidecars(
             source_url=source_ref,
-            video_gcs_uri=video_https_url,
+            video_gcs_uri=audio_https_url,
             workspace=workspace,
             pyannote_client=self.pyannote_client,
             visual_extractor=self.visual_extractor,

@@ -125,7 +125,20 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
     tracker = ByteTrackTrackerRuntime(config)
 
     detector.load()
-    tracker.initialize()
+
+    # Determine actual video fps for ByteTrack's lost-track timer
+    _fps = 30.0
+    try:
+        import cv2 as _cv2
+        _cap2 = _cv2.VideoCapture(str(video_path))
+        _raw_fps = _cap2.get(_cv2.CAP_PROP_FPS)
+        _cap2.release()
+        if _raw_fps and _raw_fps > 0:
+            _fps = float(_raw_fps)
+    except Exception:
+        pass
+
+    tracker.initialize(frame_rate=_fps)
 
     all_track_rows: list[dict] = []
     pipeline_start = time.perf_counter()

@@ -33,7 +33,7 @@ class VisualPipelineConfig:
             tracker_backend=_env("CLYPT_PHASE1_VISUAL_TRACKER", "bytetrack"),
             tracker_lost_buffer=int(_env("CLYPT_PHASE1_VISUAL_TRACKER_BUFFER", "30")),
             tracker_match_threshold=float(
-                _env("CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH", "0.8")
+                _env("CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH", "0.7")
             ),
             frame_decode_backend=_env("CLYPT_PHASE1_VISUAL_DECODE", "cpu"),
             tensorrt_engine_dir=_env(

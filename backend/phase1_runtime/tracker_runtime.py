@@ -64,7 +64,7 @@ class ByteTrackTrackerRuntime:
     def metrics(self) -> TrackerMetrics:
         return self._metrics
 
-    def initialize(self) -> None:
+    def initialize(self, *, frame_rate: float = 30.0) -> None:
         try:
             from trackers import ByteTrackTracker
         except ImportError as exc:
@@ -73,10 +73,18 @@ class ByteTrackTrackerRuntime:
                 "Install with: pip install trackers"
             ) from exc
 
-        self._tracker = ByteTrackTracker()
+        self._tracker = ByteTrackTracker(
+            lost_track_buffer=self._config.tracker_lost_buffer,
+            frame_rate=frame_rate,
+            # track_activation_threshold: min confidence to activate a new track
+            track_activation_threshold=self._config.tracker_match_threshold,
+        )
         logger.info(
-            "ByteTrackTracker initialized (backend=%s)",
+            "ByteTrackTracker initialized (backend=%s, lost_buffer=%d, fps=%.2f, activation_thresh=%.2f)",
             self._config.tracker_backend,
+            self._config.tracker_lost_buffer,
+            frame_rate,
+            self._config.tracker_match_threshold,
         )
 
     def update(self, *, frame_idx: int, detections: sv.Detections) -> list[TrackRow]:
