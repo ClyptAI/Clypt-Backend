@@ -48,6 +48,12 @@ class YouTubeDownloader:
         else:
             logger.info("[yt-dlp]  no cookies file — may fail on bot-detection")
 
+        # JS runtime for EJS n-challenge solver (e.g. "node:/usr/bin/node", "deno", "bun")
+        _js_runtime = os.environ.get("CLYPT_YOUTUBE_JS_RUNTIMES")
+        if _js_runtime:
+            options["jsc_providers"] = _js_runtime
+            logger.info("[yt-dlp]  JS runtime: %s", _js_runtime)
+
         with yt_dlp.YoutubeDL(options) as ydl:
             ydl.download([source_url])
         return output_path
