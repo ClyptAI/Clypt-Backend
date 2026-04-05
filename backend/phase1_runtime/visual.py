@@ -130,6 +130,20 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
     all_track_rows: list[dict] = []
     pipeline_start = time.perf_counter()
 
+    # Estimate total frames for progress display
+    total_frames: int | None = None
+    try:
+        import cv2 as _cv2
+        _cap = _cv2.VideoCapture(str(video_path))
+        total_frames = int(_cap.get(_cv2.CAP_PROP_FRAME_COUNT)) or None
+        _cap.release()
+    except Exception:
+        pass
+
+    _log_interval = max(1, (total_frames or 500) // 20)  # ~20 progress lines per video
+    _frames_seen = 0
+    _last_log_frame = -1
+
     try:
         frame_stream = decode_video_frames(video_path=video_path)
         for frame_batch in batch_frames(frame_stream, batch_size=config.detector_batch_size):
@@ -165,6 +179,25 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
                             "geometry_type": "aabb",
                         }
                     )
+                _frames_seen += 1
+
+            # Progress log every ~5% of video
+            if _frames_seen - _last_log_frame >= _log_interval:
+                elapsed = time.perf_counter() - pipeline_start
+                fps_live = _frames_seen / elapsed if elapsed > 0 else 0.0
+                if total_frames:
+                    pct = _frames_seen / total_frames * 100
+                    eta_s = (total_frames - _frames_seen) / fps_live if fps_live > 0 else 0.0
+                    logger.info(
+                        "[visual]  RF-DETR %d/%d frames  (%.0f%%)  %.1f fps  ETA %.0f s",
+                        _frames_seen, total_frames, pct, fps_live, eta_s,
+                    )
+                else:
+                    logger.info(
+                        "[visual]  RF-DETR %d frames processed  %.1f fps",
+                        _frames_seen, fps_live,
+                    )
+                _last_log_frame = _frames_seen
     finally:
         detector.unload()
 
@@ -402,8 +435,21 @@ class V31VisualExtractor:
     def extract(self, *, video_path: Path, workspace) -> dict:
         self._last_runtime_metrics: dict[str, Any] = {}
 
+        logger.info("[visual]  probing metadata: %s", video_path.name)
         metadata = dict(self._metadata_probe(video_path=video_path))
         duration_ms = int(metadata.get("duration_ms") or 0)
+        fps = float(metadata.get("fps") or 30.0)
+        logger.info(
+            "[visual]  video: %dx%d  %.2f fps  %.1f s  (%.0f est. frames)",
+            metadata.get("width", 0),
+            metadata.get("height", 0),
+            fps,
+            duration_ms / 1000.0,
+            duration_ms / 1000.0 * fps,
+        )
+
+        logger.info("[visual]  detecting shot boundaries ...")
+        t_shots = time.perf_counter()
         boundaries_ms = list(
             self._shot_detector(
                 video_path=video_path,
@@ -413,6 +459,12 @@ class V31VisualExtractor:
         shot_changes = _build_shot_segments(
             boundaries_ms=boundaries_ms,
             duration_ms=duration_ms,
+        )
+        logger.info(
+            "[visual]  %d shot boundaries → %d segments (%.1f s)",
+            len(boundaries_ms),
+            len(shot_changes),
+            time.perf_counter() - t_shots,
         )
 
         if self._tracker_runner is not None:
@@ -427,9 +479,15 @@ class V31VisualExtractor:
         tracks, split_metrics = split_tracks_at_shot_boundaries(
             normalized_tracks,
             shot_timeline_ms=shot_changes,
-            video_fps=float(metadata.get("fps") or 30.0),
+            video_fps=fps,
         )
         person_detections = _build_person_detections(tracks=tracks, metadata=metadata)
+        logger.info(
+            "[visual]  done — %d raw track rows → %d tracks → %d person segments",
+            len(raw_tracks),
+            len(tracks),
+            len(person_detections),
+        )
 
         tracking_metrics = {
             "tracker_backend": "rfdetr_large_bytetrack",

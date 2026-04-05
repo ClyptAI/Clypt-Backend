@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import subprocess
 
+logger = logging.getLogger(__name__)
+
 
 def _default_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
+    logger.info("[media]  extracting 16kHz mono audio from %s ...", video_path.name)
+    t0 = time.perf_counter()
     subprocess.run(
         [
             "ffmpeg",
@@ -23,6 +29,7 @@ def _default_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    logger.info("[media]  audio ready: %s (%.1f s)", audio_path.name, time.perf_counter() - t0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,9 +50,20 @@ def prepare_workspace_media(
         raise ValueError("Provide exactly one of source_url or source_path")
 
     if source_path is not None:
+        logger.info("[media]  copying local file: %s", source_path)
         shutil.copy2(source_path, workspace.video_path)
+        logger.info("[media]  copied → %s", workspace.video_path)
     else:
+        logger.info("[media]  downloading: %s", source_url)
+        t0 = time.perf_counter()
         downloader.download(source_url=source_url, output_path=workspace.video_path)
+        size_mb = workspace.video_path.stat().st_size / 1_048_576
+        logger.info(
+            "[media]  download done — %.1f MB in %.1f s → %s",
+            size_mb,
+            time.perf_counter() - t0,
+            workspace.video_path,
+        )
 
     extractor = audio_extractor or _default_audio_extractor
     extractor(video_path=workspace.video_path, audio_path=workspace.audio_path)

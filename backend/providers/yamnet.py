@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _build_default_runner(*, device: str = "gpu"):
@@ -25,13 +29,18 @@ def _build_default_runner(*, device: str = "gpu"):
         raise RuntimeError("YAMNet was configured for GPU but no TensorFlow GPU device is available.")
     compute_device = "/GPU:0" if normalized_device == "gpu" else "/CPU:0"
 
+    logger.info("[yamnet]  loading YAMNet from TF Hub (%s) ...", compute_device)
+    t_load = time.perf_counter()
     model = hub.load("https://tfhub.dev/google/yamnet/1")
     class_map_path = model.class_map_path().numpy().decode("utf-8")
     with tf.io.gfile.GFile(class_map_path, "r") as handle:
         reader = csv.DictReader(io.StringIO(handle.read()))
         class_names = [row["display_name"] for row in reader]
+    logger.info("[yamnet]  model ready in %.1f s (%d classes)", time.perf_counter() - t_load, len(class_names))
 
     def _runner(*, audio_path: Path):
+        logger.info("[yamnet]  running inference on %s ...", audio_path.name)
+        t_inf = time.perf_counter()
         with tf.device(compute_device):
             file_bytes = tf.io.read_file(str(audio_path))
             waveform, sample_rate = tf.audio.decode_wav(
@@ -43,6 +52,7 @@ def _build_default_runner(*, device: str = "gpu"):
             if sample_rate != 16000:
                 raise ValueError("YAMNet expects 16kHz mono audio input.")
             scores, _, _ = model(waveform)
+        logger.info("[yamnet]  inference done in %.1f s", time.perf_counter() - t_inf)
         scores_np = scores.numpy()
         patch_hop_ms = 480
         patch_window_ms = 960

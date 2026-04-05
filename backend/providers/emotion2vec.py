@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 import subprocess
 import tempfile
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _default_turn_clipper(*, audio_path: Path, start_ms: int, end_ms: int) -> Path:
@@ -39,7 +43,11 @@ def _build_default_model():
         raise RuntimeError(
             "funasr is required for live emotion2vec+ execution."
         ) from exc
-    return AutoModel(model="iic/emotion2vec_plus_large")
+    logger.info("[emotion2vec] loading iic/emotion2vec_plus_large ...")
+    t0 = time.perf_counter()
+    model = AutoModel(model="iic/emotion2vec_plus_large")
+    logger.info("[emotion2vec] model loaded in %.1f s", time.perf_counter() - t0)
+    return model
 
 
 def _normalize_emotion_result(result: Any) -> tuple[list[str], list[float], dict[str, float]]:
@@ -79,7 +87,10 @@ class Emotion2VecPlusProvider:
     def run(self, *, audio_path: Path, turns: list[dict]) -> dict:
         model = self._ensure_model()
         segments: list[dict] = []
-        for turn in turns:
+        total = len(turns)
+        _log_every = max(1, total // 10)  # log ~every 10% of turns
+        t_run = time.perf_counter()
+        for i, turn in enumerate(turns):
             clip_path = self._clipper(
                 audio_path=audio_path,
                 start_ms=int(turn["start_ms"]),
@@ -95,6 +106,18 @@ class Emotion2VecPlusProvider:
                     "per_class_scores": per_class_scores,
                 }
             )
+            done = i + 1
+            if done == 1 or done % _log_every == 0 or done == total:
+                logger.info(
+                    "[emotion2vec] %d/%d turns  (top: %s %.2f)",
+                    done, total,
+                    labels[0] if labels else "?",
+                    scores[0] if scores else 0.0,
+                )
+        logger.info(
+            "[emotion2vec] all %d turns done in %.1f s",
+            total, time.perf_counter() - t_run,
+        )
         return {"segments": segments}
 
 

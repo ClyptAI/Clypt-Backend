@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -8,6 +10,8 @@ from backend.phase1_runtime.extract import run_phase1_sidecars
 from backend.phase1_runtime.media import prepare_workspace_media
 from backend.phase1_runtime.models import Phase1Workspace
 from backend.providers.youtube import YouTubeDownloader
+
+logger = logging.getLogger(__name__)
 
 
 def _jsonable(value):
@@ -56,6 +60,9 @@ class Phase1JobRunner:
     ) -> dict[str, Any]:
         runtime_controls = dict(runtime_controls or {})
         workspace = Phase1Workspace.create(root=self.working_root, run_id=job_id)
+        logger.info("[media]  workspace: %s", workspace.root)
+
+        t_media = time.perf_counter()
         prepare_workspace_media(
             source_url=source_url,
             source_path=source_path,
@@ -63,10 +70,15 @@ class Phase1JobRunner:
             downloader=self.downloader,
             audio_extractor=self.audio_extractor,
         )
+        logger.info("[media]  download + audio prep done in %.1f s", time.perf_counter() - t_media)
+
+        t_upload = time.perf_counter()
+        logger.info("[gcs]    uploading video to GCS ...")
         video_gcs_uri = self.storage_client.upload_file(
             local_path=workspace.video_path,
             object_name=f"phase1/{job_id}/source_video.mp4",
         )
+        logger.info("[gcs]    uploaded → %s (%.1f s)", video_gcs_uri, time.perf_counter() - t_upload)
 
         source_ref = source_url or str(source_path)
         phase1_outputs = run_phase1_sidecars(
@@ -84,12 +96,15 @@ class Phase1JobRunner:
             "phase1": _jsonable(phase1_outputs),
         }
         if runtime_controls.get("run_phase14") and self.phase14_runner is not None:
+            logger.info("[phase14] starting Phases 2-4 ...")
+            t_p14 = time.perf_counter()
             summary = self.phase14_runner.run(
                 run_id=job_id,
                 source_url=source_ref,
                 phase1_outputs=phase1_outputs,
             )
             result["summary"] = _jsonable(summary)
+            logger.info("[phase14] done in %.1f s", time.perf_counter() - t_p14)
         return result
 
 
