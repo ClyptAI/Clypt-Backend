@@ -70,7 +70,13 @@ class PyannoteCloudClient:
         return self._wait_for_output(job_id=job_id, label="identify")
 
     def _submit_job(self, *, endpoint: str, payload: dict[str, Any]) -> str:
+        logger.info("[pyannote] POST %s  payload=%s", endpoint, payload)
         response = self._http.post(endpoint, json=payload)
+        if not response.is_success:
+            logger.error(
+                "[pyannote] %s returned %d: %s",
+                endpoint, response.status_code, response.text[:500],
+            )
         response.raise_for_status()
         data = response.json()
         job_id = (

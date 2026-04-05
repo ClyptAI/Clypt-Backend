@@ -29,7 +29,7 @@ class VisualPipelineConfig:
             detector_backend=_env("CLYPT_PHASE1_VISUAL_BACKEND", "pytorch_cuda_fp16"),
             detector_batch_size=int(_env("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "4")),
             detection_threshold=float(_env("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.35")),
-            detector_resolution=int(_env("CLYPT_PHASE1_VISUAL_SHAPE", "560")),
+            detector_resolution=int(_env("CLYPT_PHASE1_VISUAL_SHAPE", "640")),
             tracker_backend=_env("CLYPT_PHASE1_VISUAL_TRACKER", "bytetrack"),
             tracker_lost_buffer=int(_env("CLYPT_PHASE1_VISUAL_TRACKER_BUFFER", "30")),
             tracker_match_threshold=float(
