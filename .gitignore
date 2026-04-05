@@ -21,23 +21,12 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
-# Node / frontend build artifacts
-node_modules/
-.next/
-frontend/dist/
-dist/
-build/
-
-# Local pipeline outputs/artifacts
-backend/downloads/
+# Local outputs/artifacts
 backend/outputs/
-backend/test-render/downloads/
-backend/test-render/outputs/
-backend/.parallel_runs/
 .parallel_runs/
 
 # Logs
 *.log
 
 .worktrees/
-cookies.txt
+docs/planning/lovable_prompts/

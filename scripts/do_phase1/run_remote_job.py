@@ -1,339 +1,80 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
-import json
-import shlex
-import shutil
-import signal
-import subprocess
-import sys
+import argparse
 import time
-from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+
+import httpx
 
 
-DROPLET_HOST = "root@165.245.134.154"
-SSH_KEY_PATH = Path.home() / ".ssh" / "clypt_do_ed25519"
-REMOTE_RELAY_DIR = "/opt/clypt-phase1/relay"
-REMOTE_RELAY_PORT = 8091
-REMOTE_API_URL = "http://127.0.0.1:8080"
-REMOTE_LOG_ROOT = "/var/lib/clypt/do_phase1_service/workdir/logs"
-LOCAL_CACHE_DIR = Path(__file__).resolve().parents[2] / ".tmp" / "do-phase1-relay"
-YTDLP_FORMAT = "bv*[vcodec~='^avc1']+ba[ext=m4a]/b[ext=mp4]/b"
+class Phase1RemoteClient:
+    def __init__(self, *, base_url: str, http_client: httpx.Client | None = None) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._client = http_client or httpx.Client(timeout=30.0)
 
+    @property
+    def jobs_url(self) -> str:
+        return f"{self.base_url}/jobs"
 
-class UserFacingError(RuntimeError):
-    pass
+    def job_url(self, *, job_id: str) -> str:
+        return f"{self.base_url}/jobs/{job_id}"
 
+    def logs_url(self, *, job_id: str, tail_lines: int = 200) -> str:
+        return f"{self.job_url(job_id=job_id)}/logs?tail_lines={int(tail_lines)}"
 
-def _yt_dlp_command() -> list[str] | None:
-    yt_dlp_bin = shutil.which("yt-dlp")
-    if yt_dlp_bin:
-        return [yt_dlp_bin]
-
-    python3_bin = shutil.which("python3")
-    if python3_bin:
-        probe = subprocess.run(
-            [python3_bin, "-m", "yt_dlp", "--version"],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if probe.returncode == 0:
-            return [python3_bin, "-m", "yt_dlp"]
-
-    return None
-
-
-def extract_youtube_video_id(url: str) -> str:
-    parsed = urlparse(url.strip())
-    host = parsed.netloc.lower()
-    path = parsed.path.strip("/")
-    if host in {"youtu.be", "www.youtu.be"}:
-        if path:
-            return path.split("/")[0]
-        raise ValueError("Missing YouTube video id")
-    if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
-        if path == "watch":
-            video_id = parse_qs(parsed.query).get("v", [""])[0].strip()
-            if video_id:
-                return video_id
-        if path.startswith("shorts/") or path.startswith("embed/"):
-            parts = path.split("/")
-            if len(parts) >= 2 and parts[1]:
-                return parts[1]
-    raise ValueError("Please enter a valid YouTube URL")
-
-
-def relay_filename(video_id: str) -> str:
-    return f"{video_id}.mp4"
-
-
-def remote_relay_path(video_id: str) -> str:
-    return f"{REMOTE_RELAY_DIR}/{relay_filename(video_id)}"
-
-
-def remote_relay_source_url(video_id: str) -> str:
-    return f"http://127.0.0.1:{REMOTE_RELAY_PORT}/{relay_filename(video_id)}"
-
-
-def remote_job_log_path(job_id: str) -> str:
-    return f"{REMOTE_LOG_ROOT}/{job_id}.log"
-
-
-def local_cache_path(video_id: str) -> Path:
-    return LOCAL_CACHE_DIR / relay_filename(video_id)
-
-
-def _ssh_base() -> list[str]:
-    return ["ssh", "-i", str(SSH_KEY_PATH), DROPLET_HOST]
-
-
-def run_remote_bash(script: str, *, env: dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
-    exports = ""
-    if env:
-        exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items()) + " "
-    remote_command = f"{exports}bash -lc {shlex.quote(script)}"
-    result = subprocess.run(
-        _ssh_base() + [remote_command],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if check and result.returncode != 0:
-        raise UserFacingError((result.stderr or result.stdout or "remote command failed").strip())
-    return result
-
-
-def remote_file_exists(video_id: str) -> bool:
-    result = run_remote_bash(f"test -s {shlex.quote(remote_relay_path(video_id))}", check=False)
-    return result.returncode == 0
-
-
-def ensure_remote_relay(video_id: str) -> None:
-    server_pattern = f"python3 -m http.server {REMOTE_RELAY_PORT} --bind 127.0.0.1"
-    script = f"""
-set -euo pipefail
-mkdir -p {shlex.quote(REMOTE_RELAY_DIR)}
-if ! pgrep -f {shlex.quote(server_pattern)} >/dev/null 2>&1; then
-  nohup bash -lc 'cd {shlex.quote(REMOTE_RELAY_DIR)} && exec python3 -m http.server {REMOTE_RELAY_PORT} --bind 127.0.0.1' \\
-    >/tmp/clypt_phase1_relay.log 2>&1 &
-fi
-sleep 1
-for _ in $(seq 1 30); do
-  if curl -sfI {shlex.quote(remote_relay_source_url(video_id))} >/dev/null 2>&1; then
-    exit 0
-  fi
-  sleep 1
-done
-echo "relay check failed" >&2
-pgrep -af {shlex.quote(server_pattern)} >&2 || true
-tail -n 50 /tmp/clypt_phase1_relay.log >&2 || true
-exit 1
-"""
-    run_remote_bash(script)
-
-
-def download_video_locally(url: str, video_id: str) -> Path:
-    LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    target = local_cache_path(video_id)
-    if target.exists() and target.stat().st_size > 0:
-        return target
-
-    for stale in LOCAL_CACHE_DIR.glob(f"{video_id}.*"):
-        stale.unlink()
-
-    outtmpl = str(LOCAL_CACHE_DIR / f"{video_id}.%(ext)s")
-    try:
-        import yt_dlp
-    except ImportError:
-        yt_dlp = None
-
-    if yt_dlp is not None:
-        opts = {
-            "format": YTDLP_FORMAT,
-            "outtmpl": outtmpl,
-            "merge_output_format": "mp4",
-            "quiet": False,
-            "noprogress": False,
+    def submit_job(self, *, source_url: str | None, source_path: str | None = None, run_phase14: bool = False) -> dict:
+        payload = {
+            "source_url": source_url,
+            "source_path": source_path,
+            "runtime_controls": {
+                "run_phase14": bool(run_phase14),
+            },
         }
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.extract_info(url, download=True)
-        except Exception as exc:  # pragma: no cover - network/tool failure
-            raise UserFacingError(f"yt-dlp download failed: {exc}") from exc
-    else:
-        yt_dlp_cmd = _yt_dlp_command()
-        if yt_dlp_cmd is None:  # pragma: no cover
-            raise UserFacingError(
-                "yt-dlp is not available in the repo virtualenv or on your PATH"
-            )
-        cmd = [
-            *yt_dlp_cmd,
-            "--format",
-            YTDLP_FORMAT,
-            "--output",
-            outtmpl,
-            "--merge-output-format",
-            "mp4",
-            url,
-        ]
-        result = subprocess.run(cmd, text=True, check=False)
-        if result.returncode != 0:  # pragma: no cover - network/tool failure
-            raise UserFacingError("yt-dlp download failed")
+        response = self._client.post(self.jobs_url, json=payload)
+        response.raise_for_status()
+        return response.json()
 
-    if target.exists() and target.stat().st_size > 0:
-        return target
-    matches = sorted(LOCAL_CACHE_DIR.glob(f"{video_id}.*"))
-    if not matches:
-        raise UserFacingError("download completed but no relay file was created")
-    matches[0].rename(target)
-    return target
+    def get_job(self, *, job_id: str) -> dict:
+        response = self._client.get(self.job_url(job_id=job_id))
+        response.raise_for_status()
+        return response.json()
+
+    def get_logs(self, *, job_id: str, tail_lines: int = 200) -> dict:
+        response = self._client.get(self.logs_url(job_id=job_id, tail_lines=tail_lines))
+        response.raise_for_status()
+        return response.json()
 
 
-def upload_video_to_droplet(local_path: Path, video_id: str) -> None:
-    run_remote_bash(f"mkdir -p {shlex.quote(REMOTE_RELAY_DIR)}")
-    remote_target = f"{DROPLET_HOST}:{remote_relay_path(video_id)}"
-    result = subprocess.run(
-        ["scp", "-i", str(SSH_KEY_PATH), str(local_path), remote_target],
-        text=True,
-        check=False,
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Submit a V3.1 Phase 1 remote job and tail logs.")
+    parser.add_argument("--base-url", required=True, help="Phase 1 service base URL, e.g. http://HOST:8080")
+    parser.add_argument("--source-url", required=True, help="YouTube or direct source URL")
+    parser.add_argument("--run-phase14", action="store_true", help="Continue into live Phases 2-4 after Phase 1")
+    parser.add_argument("--poll-interval-s", type=float, default=5.0)
+    parser.add_argument("--tail-lines", type=int, default=200)
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    client = Phase1RemoteClient(base_url=args.base_url)
+    job = client.submit_job(
+        source_url=args.source_url,
+        run_phase14=bool(args.run_phase14),
     )
-    if result.returncode != 0:
-        raise UserFacingError("failed to upload relay video to droplet")
-
-
-def submit_job(*, source_url: str | None = None, source_path: str | None = None) -> str:
-    if bool(source_url) == bool(source_path):
-        raise UserFacingError("Provide exactly one of source_url or source_path")
-
-    script = """
-python3 - <<'PY'
-import json
-import os
-import urllib.request
-
-payload = {}
-if os.environ.get("SOURCE_URL"):
-    payload["source_url"] = os.environ["SOURCE_URL"]
-if os.environ.get("SOURCE_PATH"):
-    payload["source_path"] = os.environ["SOURCE_PATH"]
-
-req = urllib.request.Request(
-    os.environ["REMOTE_API_URL"] + "/jobs",
-    data=json.dumps(payload).encode("utf-8"),
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-with urllib.request.urlopen(req, timeout=30) as resp:
-    print(resp.read().decode("utf-8"))
-PY
-"""
-    env = {
-        "REMOTE_API_URL": REMOTE_API_URL,
-        "SOURCE_URL": source_url or "",
-        "SOURCE_PATH": source_path or "",
-    }
-    result = run_remote_bash(script, env=env)
-    try:
-        payload = json.loads(result.stdout.strip())
-        return str(payload["job_id"])
-    except Exception as exc:
-        raise UserFacingError(f"could not parse job submission response: {result.stdout.strip()}") from exc
-
-
-def get_job_status(job_id: str) -> str:
-    script = """
-python3 - <<'PY'
-import json
-import os
-import urllib.request
-
-with urllib.request.urlopen(os.environ["REMOTE_API_URL"] + "/jobs/" + os.environ["JOB_ID"], timeout=30) as resp:
-    payload = json.loads(resp.read().decode("utf-8"))
-print(payload["status"])
-PY
-"""
-    result = run_remote_bash(script, env={"JOB_ID": job_id, "REMOTE_API_URL": REMOTE_API_URL})
-    return result.stdout.strip()
-
-
-def start_log_tail(job_id: str) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(_ssh_base() + [f"tail -n +1 -F {shlex.quote(remote_job_log_path(job_id))}"])
-
-
-def prompt_for_url() -> str:
-    url = input("YouTube URL: ").strip()
-    if not url:
-        raise UserFacingError("You must provide a YouTube URL")
-    return url
-
-
-def run_job_flow(url: str) -> int:
-    video_id = extract_youtube_video_id(url)
-    print(f"Video id: {video_id}")
-
-    if remote_file_exists(video_id):
-        print("Using cached relay video on droplet.")
-    else:
-        print("Droplet relay cache miss. Downloading locally...")
-        local_video = download_video_locally(url, video_id)
-        print(f"Uploading {local_video.name} to droplet relay...")
-        upload_video_to_droplet(local_video, video_id)
-
-    source_path = remote_relay_path(video_id)
-    print(f"Submitting job for source_path={source_path}")
-    job_id = submit_job(source_path=source_path)
-    print(f"Started job: {job_id}")
-
-    tail_proc = start_log_tail(job_id)
-
-    def _cleanup(*_args: object) -> None:
-        if tail_proc.poll() is None:
-            tail_proc.terminate()
-            try:
-                tail_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                tail_proc.kill()
-        raise SystemExit(130)
-
-    old_int = signal.signal(signal.SIGINT, _cleanup)
-    old_term = signal.signal(signal.SIGTERM, _cleanup)
-    try:
-        while True:
-            status = get_job_status(job_id)
-            if status == "succeeded":
-                if tail_proc.poll() is None:
-                    tail_proc.terminate()
-                    tail_proc.wait(timeout=5)
-                print(f"\nJob {job_id} succeeded")
-                return 0
-            if status == "failed":
-                if tail_proc.poll() is None:
-                    tail_proc.terminate()
-                    tail_proc.wait(timeout=5)
-                print(f"\nJob {job_id} failed")
-                return 1
-            time.sleep(2)
-    finally:
-        signal.signal(signal.SIGINT, old_int)
-        signal.signal(signal.SIGTERM, old_term)
-        if tail_proc.poll() is None:
-            tail_proc.terminate()
-            try:
-                tail_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                tail_proc.kill()
-
-
-def main(argv: list[str] | None = None) -> int:
-    argv = argv or sys.argv[1:]
-    url = argv[0].strip() if argv else prompt_for_url()
-    try:
-        return run_job_flow(url)
-    except (UserFacingError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+    job_id = job["job_id"]
+    last_lines: list[str] = []
+    while True:
+        status = client.get_job(job_id=job_id)
+        logs = client.get_logs(job_id=job_id, tail_lines=args.tail_lines)
+        lines = list(logs.get("lines") or [])
+        new_lines = lines[len(last_lines):] if len(lines) >= len(last_lines) else lines
+        for line in new_lines:
+            print(line)
+        last_lines = lines
+        if status.get("status") in {"succeeded", "failed"}:
+            print(f"[phase1-remote] job {job_id} finished with status={status['status']}")
+            return 0 if status["status"] == "succeeded" else 1
+        time.sleep(max(0.5, float(args.poll_interval_s)))
 
 
 if __name__ == "__main__":
