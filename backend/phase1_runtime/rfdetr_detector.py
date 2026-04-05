@@ -144,7 +144,14 @@ class RFDETRPersonDetector:
 
             for det in raw:
                 person_mask = det.class_id == COCO_PERSON_CLASS_ID
-                filtered = det[person_mask]
+                # Build a fresh Detections with only the per-box fields we need.
+                # Using det[mask] fails when det.data contains non-per-detection
+                # arrays (e.g. image metadata sized by height/width).
+                filtered = sv.Detections(
+                    xyxy=det.xyxy[person_mask],
+                    confidence=det.confidence[person_mask] if det.confidence is not None else None,
+                    class_id=det.class_id[person_mask] if det.class_id is not None else None,
+                )
                 all_detections.append(filtered)
 
             self._metrics.frames_processed += len(batch)
