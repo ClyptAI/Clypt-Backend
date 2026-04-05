@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-COCO_PERSON_CLASS_ID = 0
+# rfdetr uses 1-indexed COCO class IDs (COCO_CLASSES = {1: "person", 2: "bicycle", ...})
+COCO_PERSON_CLASS_ID = 1
 
 
 @dataclass(slots=True)

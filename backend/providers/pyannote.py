@@ -109,7 +109,9 @@ class PyannoteCloudClient:
                 last_status = status
 
             if status in _TERMINAL_SUCCESS:
-                turns_out = len(list((payload.get("output") or payload).get("turns") or []))
+                out = payload.get("output") or payload
+                # Pyannote returns speaker turns under "diarization"; fall back to "turns"
+                turns_out = len(list(out.get("diarization") or out.get("turns") or []))
                 logger.info(
                     "[pyannote] %s complete in %.0f s — %d turns",
                     label, elapsed, turns_out,
