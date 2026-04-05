@@ -14,9 +14,15 @@ class YouTubeDownloader:
         format_selector: str | None = None,
         cookies_file: str | Path | None = None,
     ) -> None:
+        # Prefer H.264 (avc1) — AV1/VP9 often fail with OpenCV on headless servers.
         self.format_selector = (
             format_selector
-            or "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+            or (
+                "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]"
+                "/bestvideo[height<=1080][vcodec^=avc]+bestaudio"
+                "/bestvideo[height<=1080]+bestaudio"
+                "/best[height<=1080]/best"
+            )
         )
         # Resolve cookies file: constructor arg > env var
         _cookies = cookies_file or os.environ.get("CLYPT_YOUTUBE_COOKIES_FILE")
