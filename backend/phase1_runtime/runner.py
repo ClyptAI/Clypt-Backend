@@ -80,10 +80,13 @@ class Phase1JobRunner:
         )
         logger.info("[gcs]    uploaded → %s (%.1f s)", video_gcs_uri, time.perf_counter() - t_upload)
 
+        # Pyannote cloud requires an HTTPS URL — generate one from the GCS URI.
+        video_https_url = self.storage_client.get_https_url(video_gcs_uri, expiry_hours=24)
+
         source_ref = source_url or str(source_path)
         phase1_outputs = run_phase1_sidecars(
             source_url=source_ref,
-            video_gcs_uri=video_gcs_uri,
+            video_gcs_uri=video_https_url,
             workspace=workspace,
             pyannote_client=self.pyannote_client,
             visual_extractor=self.visual_extractor,
