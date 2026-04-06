@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_phase1_job_runner_prepares_media_runs_sidecars_and_optional_pipeline(tmp_path: Path):
+def test_phase1_job_runner_injected_providers_still_run_serial_sidecars_and_optional_pipeline(
+    tmp_path: Path,
+):
     from backend.phase1_runtime.runner import Phase1JobRunner
 
     calls: list[str] = []
@@ -77,9 +79,23 @@ def test_phase1_job_runner_prepares_media_runs_sidecars_and_optional_pipeline(tm
         runtime_controls={"run_phase14": True},
     )
 
+    phase1 = result["phase1"]
+
     assert result["phase1"]["phase1_audio"]["video_gcs_uri"] == "gs://bucket/phase1/job_001/source_video.mp4"
+    assert set(phase1) == {
+        "phase1_audio",
+        "diarization_payload",
+        "phase1_visual",
+        "emotion2vec_payload",
+        "yamnet_payload",
+    }
+    assert phase1["phase1_visual"]["video_metadata"]["fps"] == 30.0
+    assert phase1["diarization_payload"]["turns"][0]["speaker_id"] == "SPEAKER_0"
+    assert phase1["emotion2vec_payload"]["segments"] == []
+    assert phase1["yamnet_payload"]["events"] == []
     assert result["summary"]["artifact_paths"]["clip_candidates"] == "x.json"
-    assert calls == [
+    assert len(calls) == 9
+    assert set(calls) == {
         "download:https://youtube.com/watch?v=test",
         "audio:source_video.mp4",
         "upload:phase1/job_001/source_video.mp4",
@@ -89,4 +105,4 @@ def test_phase1_job_runner_prepares_media_runs_sidecars_and_optional_pipeline(tm
         "emotion:1",
         "yamnet",
         "phase14:job_001",
-    ]
+    }
