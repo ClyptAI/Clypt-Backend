@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -120,3 +121,40 @@ def test_phase1_worker_writes_job_log_file(tmp_path):
     assert updated is not None
     assert updated.log_path is not None
     assert Path(updated.log_path).read_text(encoding="utf-8").strip() == f"processing {job.job_id}"
+
+
+def test_phase1_worker_persists_branch_failure_context(tmp_path):
+    from backend.phase1_runtime.coordinator import Phase1BranchFailure
+    from backend.phase1_runtime.jobs import create_job
+    from backend.phase1_runtime.models import Phase1JobCreatePayload
+    from backend.phase1_runtime.state_store import SQLiteJobStore
+    from backend.phase1_runtime.worker import Phase1Worker
+
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    logs_root = tmp_path / "logs"
+    job = create_job(
+        store,
+        Phase1JobCreatePayload(source_url="https://youtube.com/watch?v=test"),
+    )
+
+    def fake_runner(*, job_id: str, source_url: str | None, source_path: str | None, runtime_controls: dict | None):
+        raise Phase1BranchFailure(
+            "audio failed",
+            failing_branch="audio",
+            branch_log_path="/tmp/run_001/branches/audio/branch.log",
+        )
+
+    worker = Phase1Worker(store=store, run_job=fake_runner, logs_root=logs_root)
+
+    with pytest.raises(Phase1BranchFailure, match="audio failed"):
+        worker.run_next_job_once()
+
+    updated = store.get_job(job.job_id)
+    assert updated is not None
+    assert updated.status == "failed"
+    assert updated.failure == {
+        "error_type": "Phase1BranchFailure",
+        "error_message": "audio failed",
+        "failing_branch": "audio",
+        "branch_log_path": "/tmp/run_001/branches/audio/branch.log",
+    }

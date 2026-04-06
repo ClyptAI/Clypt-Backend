@@ -66,13 +66,20 @@ class Phase1Worker:
             return True
         except Exception as exc:
             log_path.write_text(stream.getvalue(), encoding="utf-8")
+            failure = {
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            }
+            failing_branch = getattr(exc, "failing_branch", None)
+            branch_log_path = getattr(exc, "branch_log_path", None)
+            if failing_branch is not None:
+                failure["failing_branch"] = str(failing_branch)
+            if branch_log_path is not None:
+                failure["branch_log_path"] = str(branch_log_path)
             self.store.fail_job(
                 job_id=job.job_id,
                 claim_token=job.claim_token or "",
-                failure={
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                },
+                failure=failure,
             )
             raise
 

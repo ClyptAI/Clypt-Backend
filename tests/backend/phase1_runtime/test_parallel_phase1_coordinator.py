@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from backend.phase1_runtime.branch_io import read_branch_request
+from backend.phase1_runtime.branch_io import read_branch_request, write_branch_status
 from backend.phase1_runtime.branch_models import BranchKind, BranchResultEnvelope
 from backend.phase1_runtime.models import Phase1Workspace
 
@@ -107,6 +108,11 @@ def fake_branch_runner(monkeypatch):
         request = read_branch_request(request_path)
         branch = request.branch.value
         config = behavior[branch]
+        if config.get("status_state") is not None:
+            write_branch_status(
+                request_path.parent / "status.json",
+                config["status_state"],
+            )
         launched.append(
             {
                 "branch": branch,
@@ -242,6 +248,12 @@ def test_coordinator_times_out_branch_and_kills_siblings(tmp_path: Path, fake_br
             poll_interval_s=0.0,
         )
 
+    summary_path = workspace.metadata_dir / "branch_summary.json"
+    assert summary_path.exists()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["failed_branch"] == "audio"
+    assert summary["branches"]["audio"]["termination"]["pid"] == fake_branch_runner["processes"]["audio"].pid
+
     processes = fake_branch_runner["processes"]
     assert processes["visual"].terminate_called is False
     assert processes["yamnet"].terminate_called is True
@@ -249,6 +261,7 @@ def test_coordinator_times_out_branch_and_kills_siblings(tmp_path: Path, fake_br
 
 def test_coordinator_treats_missing_result_json_as_hard_failure(tmp_path: Path, fake_branch_runner) -> None:
     from backend.phase1_runtime.extract import run_parallel_phase1_sidecars
+    import backend.phase1_runtime.coordinator as coordinator
 
     fake_branch_runner["configure"]("visual", exit_codes=[0], skip_result_write=True)
     fake_branch_runner["configure"]("audio", exit_codes=[None, None, None, None])
@@ -256,7 +269,7 @@ def test_coordinator_treats_missing_result_json_as_hard_failure(tmp_path: Path, 
 
     workspace = _build_workspace(tmp_path)
 
-    with pytest.raises(RuntimeError, match="visual"):
+    with pytest.raises(coordinator.Phase1BranchFailure, match="visual") as exc_info:
         run_parallel_phase1_sidecars(
             source_url="https://youtube.com/watch?v=demo",
             video_gcs_uri="gs://bucket/source.mp4",
@@ -264,6 +277,81 @@ def test_coordinator_treats_missing_result_json_as_hard_failure(tmp_path: Path, 
             branch_timeout_s=30.0,
             poll_interval_s=0.0,
         )
+
+    assert exc_info.value.failing_branch == "visual"
+    assert exc_info.value.branch_log_path.endswith("branches/visual/branch.log")
+
+
+def test_coordinator_persists_branch_status_and_log_paths_on_failure(
+    tmp_path: Path,
+    fake_branch_runner,
+) -> None:
+    from backend.phase1_runtime.extract import run_parallel_phase1_sidecars
+    from backend.phase1_runtime.branch_models import BranchStatus
+
+    fake_branch_runner["configure"](
+        "audio",
+        exit_codes=[1],
+        ok=False,
+        error={"error_type": "RuntimeError", "error_message": "audio failed"},
+        status_state=BranchStatus(
+            branch=BranchKind.AUDIO,
+            state="failed",
+            message="audio failed",
+            pid=2002,
+            started_at="2026-04-06T10:00:00+00:00",
+            updated_at="2026-04-06T10:00:01+00:00",
+            completed_at="2026-04-06T10:00:01+00:00",
+        ),
+    )
+    fake_branch_runner["configure"](
+        "visual",
+        exit_codes=[None, None, None, None],
+        status_state=BranchStatus(
+            branch=BranchKind.VISUAL,
+            state="running",
+            message="visual running",
+            pid=2001,
+            started_at="2026-04-06T10:00:00+00:00",
+            updated_at="2026-04-06T10:00:00+00:00",
+        ),
+    )
+    fake_branch_runner["configure"](
+        "yamnet",
+        exit_codes=[None, None, None, None],
+        status_state=BranchStatus(
+            branch=BranchKind.YAMNET,
+            state="running",
+            message="yamnet running",
+            pid=2003,
+            started_at="2026-04-06T10:00:00+00:00",
+            updated_at="2026-04-06T10:00:00+00:00",
+        ),
+    )
+
+    workspace = _build_workspace(tmp_path)
+
+    with pytest.raises(RuntimeError, match="audio failed"):
+        run_parallel_phase1_sidecars(
+            source_url="https://youtube.com/watch?v=demo",
+            video_gcs_uri="gs://bucket/source.mp4",
+            workspace=workspace,
+            branch_timeout_s=30.0,
+            poll_interval_s=0.0,
+        )
+
+    summary_path = workspace.metadata_dir / "branch_summary.json"
+    assert summary_path.exists()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["run_id"] == "run_001"
+    assert summary["failed_branch"] == "audio"
+    assert summary["branches"]["audio"]["termination"]["pid"] == fake_branch_runner["processes"]["audio"].pid
+    assert summary["branches"]["audio"]["status"]["state"] == "failed"
+    assert summary["branches"]["audio"]["log_path"].endswith("branches/audio/branch.log")
+    assert summary["branches"]["visual"]["status"]["state"] == "running"
+    assert summary["branches"]["yamnet"]["status"]["state"] == "running"
+    assert summary["branches"]["visual"]["termination"]["pid"] == fake_branch_runner["processes"]["visual"].pid
+    assert summary["branches"]["yamnet"]["termination"]["pid"] == fake_branch_runner["processes"]["yamnet"].pid
 
     processes = fake_branch_runner["processes"]
     assert processes["audio"].terminate_called is True
@@ -272,6 +360,7 @@ def test_coordinator_treats_missing_result_json_as_hard_failure(tmp_path: Path, 
 
 def test_coordinator_treats_malformed_result_json_as_hard_failure(tmp_path: Path, fake_branch_runner) -> None:
     from backend.phase1_runtime.extract import run_parallel_phase1_sidecars
+    import backend.phase1_runtime.coordinator as coordinator
 
     fake_branch_runner["configure"]("visual", exit_codes=[0], write_raw_result="{not-json")
     fake_branch_runner["configure"]("audio", exit_codes=[None, None, None, None])
@@ -279,7 +368,7 @@ def test_coordinator_treats_malformed_result_json_as_hard_failure(tmp_path: Path
 
     workspace = _build_workspace(tmp_path)
 
-    with pytest.raises(RuntimeError, match="visual"):
+    with pytest.raises(coordinator.Phase1BranchFailure, match="visual") as exc_info:
         run_parallel_phase1_sidecars(
             source_url="https://youtube.com/watch?v=demo",
             video_gcs_uri="gs://bucket/source.mp4",
@@ -287,6 +376,9 @@ def test_coordinator_treats_malformed_result_json_as_hard_failure(tmp_path: Path
             branch_timeout_s=30.0,
             poll_interval_s=0.0,
         )
+
+    assert exc_info.value.failing_branch == "visual"
+    assert exc_info.value.branch_log_path.endswith("branches/visual/branch.log")
 
     processes = fake_branch_runner["processes"]
     assert processes["audio"].terminate_called is True
@@ -318,6 +410,17 @@ def test_coordinator_cleans_up_already_started_branches_when_launch_fails(
     assert [item["branch"] for item in launched] == ["visual", "audio"]
     assert processes["visual"].terminate_called is True
     assert launched[0]["stdout"].closed is True
+
+    summary_path = workspace.metadata_dir / "branch_summary.json"
+    assert summary_path.exists()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["run_id"] == "run_001"
+    assert summary["failed_branch"] == "audio"
+    assert summary["branches"]["visual"]["termination"]["pid"] == fake_branch_runner["processes"]["visual"].pid
+    assert summary["branches"]["visual"]["termination"]["reason"] == "audio failed to launch"
+    assert summary["branches"]["visual"]["log_path"].endswith("branches/visual/branch.log")
+    assert summary["branches"]["audio"]["log_path"].endswith("branches/audio/branch.log")
+    assert summary["branches"]["audio"]["status"]["state"] == "failed"
 
 
 def test_run_phase1_sidecars_preserves_legacy_provider_injection(tmp_path: Path) -> None:

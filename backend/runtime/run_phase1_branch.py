@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,35 +115,39 @@ def run_branch_request(*, request_path: Path) -> int:
     try:
         dependencies = build_branch_dependencies(request=request, workspace=workspace)
         result = _run_requested_branch(request=request, workspace=workspace, dependencies=dependencies)
-        envelope = BranchResultEnvelope(branch=request.branch, ok=True, result=result)
-        write_branch_result(paths.result_path, envelope)
+    except Exception as exc:
         _write_status(
             paths=paths,
             branch=request.branch,
-            state="succeeded",
-            message="branch succeeded",
+            state="failed",
+            message=str(exc) or type(exc).__name__,
+            pid=os.getpid(),
             started_at=started_at,
         )
-        return 0
-    except Exception as exc:
         envelope = BranchResultEnvelope(
             branch=request.branch,
             ok=False,
             error={
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
+                "branch": request.branch.value,
+                "branch_log_path": str(paths.log_path),
             },
         )
         write_branch_result(paths.result_path, envelope)
-        _write_status(
-            paths=paths,
-            branch=request.branch,
-            state="failed",
-            message=str(exc) or type(exc).__name__,
-            started_at=started_at,
-        )
         logger.exception("Phase 1 branch %s failed", request.branch.value)
         return 1
+
+    envelope = BranchResultEnvelope(branch=request.branch, ok=True, result=result)
+    write_branch_result(paths.result_path, envelope)
+    _write_status(
+        paths=paths,
+        branch=request.branch,
+        state="succeeded",
+        message="branch succeeded",
+        started_at=started_at,
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
