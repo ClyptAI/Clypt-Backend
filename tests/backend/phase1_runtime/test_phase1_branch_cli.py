@@ -179,3 +179,77 @@ def test_branch_cli_does_not_clobber_success_result_when_success_status_write_fa
     result = json.loads(paths.result_path.read_text(encoding="utf-8"))
     assert result["ok"] is True
     assert result["result"]["phase1_visual"]["tracks"] == [{"track_id": "t777"}]
+
+
+def test_build_branch_dependencies_propagates_configured_vibevoice_settings(monkeypatch):
+    from backend.phase1_runtime.branch_models import BranchKind, BranchRequest
+    from backend.phase1_runtime.models import Phase1Workspace
+    from backend.providers.config import (
+        Phase1RuntimeSettings,
+        ProviderSettings,
+        StorageSettings,
+        VibeVoiceSettings,
+        VertexSettings,
+    )
+    import backend.runtime.run_phase1_branch as cli
+
+    workspace = Phase1Workspace.create(root=Path("/tmp"), run_id="run_cfg")
+    request = BranchRequest(
+        job_id="job_cfg",
+        run_id="run_cfg",
+        branch=BranchKind.AUDIO,
+        source_path="/tmp/source.wav",
+    )
+
+    settings = ProviderSettings(
+        vibevoice=VibeVoiceSettings(
+            backend="native",
+            native_venv_python="/opt/clypt/.venv-vibevoice-native/bin/python",
+            model_id="microsoft/VibeVoice-ASR",
+            flash_attention=False,
+            liger_kernel=False,
+            hotwords_context="alice,bob",
+            system_prompt="",
+            max_new_tokens=1234,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.8,
+            repetition_penalty=1.1,
+            num_beams=2,
+            attn_implementation="sdpa",
+            subprocess_timeout_s=321,
+        ),
+        vertex=VertexSettings(project="clypt-v3"),
+        storage=StorageSettings(gcs_bucket="bucket"),
+        phase1_runtime=Phase1RuntimeSettings(),
+    )
+
+    seen: dict[str, object] = {}
+
+    class _FakeVibeVoiceProvider:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(cli, "load_provider_settings", lambda: settings)
+    monkeypatch.setattr(cli, "VibeVoiceASRProvider", _FakeVibeVoiceProvider)
+
+    dependencies = cli.build_branch_dependencies(request=request, workspace=workspace)
+
+    assert "vibevoice_provider" in dependencies
+    assert seen == {
+        "backend": "native",
+        "native_venv_python": "/opt/clypt/.venv-vibevoice-native/bin/python",
+        "model_id": "microsoft/VibeVoice-ASR",
+        "flash_attention": False,
+        "liger_kernel": False,
+        "hotwords_context": "alice,bob",
+        "system_prompt": None,
+        "max_new_tokens": 1234,
+        "do_sample": True,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "repetition_penalty": 1.1,
+        "num_beams": 2,
+        "attn_implementation": "sdpa",
+        "subprocess_timeout_s": 321,
+    }

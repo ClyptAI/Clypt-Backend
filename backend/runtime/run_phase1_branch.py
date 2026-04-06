@@ -21,7 +21,7 @@ from backend.phase1_runtime.branches.yamnet_branch import run_yamnet_branch
 from backend.phase1_runtime.models import Phase1Workspace
 from backend.phase1_runtime.visual import SimpleVisualExtractor
 from backend.phase1_runtime.visual_config import VisualPipelineConfig
-from backend.providers import ForcedAlignmentProvider, VibeVoiceASRProvider
+from backend.providers import ForcedAlignmentProvider, VibeVoiceASRProvider, load_provider_settings
 from backend.providers.emotion2vec import Emotion2VecPlusProvider
 from backend.providers.yamnet import YAMNetProvider
 
@@ -46,7 +46,24 @@ def build_branch_dependencies(*, request, workspace: Phase1Workspace) -> dict[st
             visual_config=VisualPipelineConfig.from_env()
         )
     elif request.branch == BranchKind.AUDIO:
-        dependencies["vibevoice_provider"] = VibeVoiceASRProvider()
+        settings = load_provider_settings()
+        dependencies["vibevoice_provider"] = VibeVoiceASRProvider(
+            backend=settings.vibevoice.backend,
+            native_venv_python=settings.vibevoice.native_venv_python or None,
+            model_id=settings.vibevoice.model_id,
+            flash_attention=settings.vibevoice.flash_attention,
+            liger_kernel=settings.vibevoice.liger_kernel,
+            hotwords_context=settings.vibevoice.hotwords_context,
+            system_prompt=settings.vibevoice.system_prompt or None,
+            max_new_tokens=settings.vibevoice.max_new_tokens,
+            do_sample=settings.vibevoice.do_sample,
+            temperature=settings.vibevoice.temperature,
+            top_p=settings.vibevoice.top_p,
+            repetition_penalty=settings.vibevoice.repetition_penalty,
+            num_beams=settings.vibevoice.num_beams,
+            attn_implementation=settings.vibevoice.attn_implementation,
+            subprocess_timeout_s=settings.vibevoice.subprocess_timeout_s,
+        )
         dependencies["forced_aligner"] = ForcedAlignmentProvider()
         dependencies["emotion_provider"] = Emotion2VecPlusProvider()
     elif request.branch == BranchKind.YAMNET:

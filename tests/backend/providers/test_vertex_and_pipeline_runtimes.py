@@ -93,7 +93,7 @@ def test_vertex_clients_generate_json_and_embed_texts():
         ]
     )
 
-    assert media_embeddings == [[0.1, 0.2, 0.3], [0.1, 0.2, 0.3]]
+    assert media_embeddings == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
     assert sdk_client.models.embed_calls[1]["model"] == settings.embedding_model
 
 
