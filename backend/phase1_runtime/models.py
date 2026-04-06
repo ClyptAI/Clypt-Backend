@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from .branch_models import BranchKind, BranchRequest, BranchResultEnvelope, BranchStatus
 
 
 class Phase1JobCreatePayload(BaseModel):
@@ -76,6 +78,10 @@ class Phase1SidecarOutputs:
 
 
 __all__ = [
+    "BranchKind",
+    "BranchRequest",
+    "BranchResultEnvelope",
+    "BranchStatus",
     "Phase1JobCreatePayload",
     "Phase1JobRecord",
     "Phase1SidecarOutputs",
