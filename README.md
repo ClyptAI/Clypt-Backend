@@ -14,7 +14,7 @@ The implementation source of truth is:
 
 ## Repository Scope
 
-This repository intentionally excludes the previous backend runtime, LR-ASD paths, DigitalOcean worker/service code, old semantic pipeline scripts, old render code, and old frontend code.
+This repository intentionally excludes the previous backend runtime, LR-ASD paths, old semantic pipeline scripts, old render code, and old frontend code.
 
 What remains is the clean V3.1 Phase 1-4 backend under:
 
@@ -38,30 +38,30 @@ Implemented:
 - typed Phase 1-4 contracts
 - run-scoped artifact helpers
 - Phase 1 timeline transforms
-- Phase 1 sidecar orchestration for pyannote + local worker tasks
+- Phase 1 sidecar orchestration for local GPU-backed audio + visual tasks
 - Phase 1 operational runtime shell:
   - media preparation
-  - ffmpeg shot detection + Ultralytics/ByteTrack visual extraction
+  - ffmpeg shot detection + RF-DETR Large + ByteTrack visual extraction
   - shot-local track splitting
   - person detection ledger generation
   - SQLite-backed job store
   - FastAPI Phase 1 service shell
   - local Phase 1 job runner
   - remote job submission/log tailing shell
-- live provider config for pyannote cloud, Vertex AI, and GCS
-- provider adapters for pyannote cloud, Vertex Gemini, Vertex embeddings, emotion2vec+, and YAMNet
+- live provider config for VibeVoice, Vertex AI, and GCS
+- provider adapters for native / HF VibeVoice, NeMo Forced Aligner, Vertex Gemini, Vertex embeddings, emotion2vec+, and YAMNet
 - Phase 2 turn-neighborhood batching, merge/classify adaptation, and boundary reconciliation
 - Phase 3 structural edges, local semantic edges, long-range edge adjudication, and deterministic reconciliation
 - Phase 4 prompt generation, seed retrieval, local subgraph construction, subgraph review adaptation, candidate dedupe, and pooled final review
 - a Phase 1-4 orchestrator with provider-injected inputs
 - a live Phase 1-4 runner for provider-backed Phases 2-4
+- first validated native VibeVoice GPU path on DigitalOcean using a second venv, `flash_attention_2`, and `microsoft/VibeVoice-ASR`
 
 Not implemented yet on this branch:
 
 - Phase 5 participation grounding
 - Phase 6 camera intent and render planning
 - face/identity-oriented visual ledgers beyond person tracking
-- first live DigitalOcean deployment and bring-up of the new worker/service
 - comment/trend/onboarding integrations
 - frontend integration
 
@@ -69,10 +69,19 @@ Not implemented yet on this branch:
 
 Minimal Python dependencies are listed in [requirements.txt](/Users/rithvik/Clypt-V3/requirements.txt).
 
+The Phase 1 worker now uses two Python environments in production:
+
+- primary worker env: RF-DETR, runtime orchestration, Phases 2-4
+- secondary native VibeVoice env: `microsoft/VibeVoice-ASR` subprocess worker
+
+See [requirements-vibevoice-native.txt](/Users/rithvik/Clypt-V3/requirements-vibevoice-native.txt) and [docs/deployment/v3.1_phase1_digitalocean.md](/Users/rithvik/Clypt-V3/docs/deployment/v3.1_phase1_digitalocean.md) for the validated GPU bring-up path.
+
 Core environment variables:
 
 - `CLYPT_V31_OUTPUT_ROOT`
-- `PYANNOTE_API_KEY`
+- `VIBEVOICE_BACKEND`
+- `VIBEVOICE_NATIVE_VENV_PYTHON`
+- `VIBEVOICE_MODEL_ID`
 - `GOOGLE_CLOUD_PROJECT`
 - `GOOGLE_CLOUD_LOCATION`
 - `GCS_BUCKET`
@@ -85,6 +94,15 @@ Additional defaults and runtime knobs live in [.env.example](/Users/rithvik/Clyp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+For the native production ASR path, create the second venv separately:
+
+```bash
+python3 -m venv .venv-vibevoice-native
+source .venv-vibevoice-native/bin/activate
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements-vibevoice-native.txt
 ```
 
 ## Running Tests
@@ -128,4 +146,12 @@ Local Phase 1 CLI:
 ```bash
 source .venv/bin/activate
 python -m backend.runtime.run_phase1 --job-id demo_run --source-url "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+Native VibeVoice-only smoke test:
+
+```bash
+source .venv/bin/activate
+export PYTHONPATH=.
+python scripts/run_vibevoice_only.py --audio /path/to/file.wav
 ```
