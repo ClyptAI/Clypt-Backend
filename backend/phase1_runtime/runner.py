@@ -6,7 +6,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from backend.phase1_runtime.extract import run_phase1_sidecars
+from backend.phase1_runtime.extract import run_phase1_sidecars as run_phase1_sidecars_default
 from backend.phase1_runtime.media import prepare_workspace_media
 from backend.phase1_runtime.models import Phase1Workspace
 from backend.providers.youtube import YouTubeDownloader
@@ -39,6 +39,7 @@ class Phase1JobRunner:
         visual_extractor: Any,
         emotion_provider: Any,
         yamnet_provider: Any,
+        run_phase1_sidecars=None,
         phase14_runner: Any | None = None,
     ) -> None:
         self.working_root = Path(working_root)
@@ -50,7 +51,26 @@ class Phase1JobRunner:
         self.visual_extractor = visual_extractor
         self.emotion_provider = emotion_provider
         self.yamnet_provider = yamnet_provider
+        self.run_phase1_sidecars = run_phase1_sidecars or self._run_phase1_sidecars
         self.phase14_runner = phase14_runner
+
+    def _run_phase1_sidecars(
+        self,
+        *,
+        source_url: str,
+        video_gcs_uri: str,
+        workspace: Phase1Workspace,
+    ):
+        return run_phase1_sidecars_default(
+            source_url=source_url,
+            video_gcs_uri=video_gcs_uri,
+            workspace=workspace,
+            vibevoice_provider=self.vibevoice_provider,
+            forced_aligner=self.forced_aligner,
+            visual_extractor=self.visual_extractor,
+            emotion_provider=self.emotion_provider,
+            yamnet_provider=self.yamnet_provider,
+        )
 
     def run_job(
         self,
@@ -83,15 +103,10 @@ class Phase1JobRunner:
         logger.info("[gcs]    uploaded → %s (%.1f s)", video_gcs_uri, time.perf_counter() - t_upload)
 
         source_ref = source_url or str(source_path)
-        phase1_outputs = run_phase1_sidecars(
+        phase1_outputs = self.run_phase1_sidecars(
             source_url=source_ref,
             video_gcs_uri=video_gcs_uri,
             workspace=workspace,
-            vibevoice_provider=self.vibevoice_provider,
-            forced_aligner=self.forced_aligner,
-            visual_extractor=self.visual_extractor,
-            emotion_provider=self.emotion_provider,
-            yamnet_provider=self.yamnet_provider,
         )
 
         result: dict[str, Any] = {

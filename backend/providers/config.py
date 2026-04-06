@@ -26,6 +26,13 @@ def _read_env(*names: str) -> str | None:
     return None
 
 
+def _read_bool_env(*names: str, default: bool) -> bool:
+    value = _read_env(*names)
+    if value is None:
+        return default
+    return value == "1"
+
+
 def _discover_gcloud_project() -> str | None:
     try:
         result = subprocess.run(
@@ -97,7 +104,11 @@ class Phase1RuntimeSettings:
             os.getenv("CLYPT_PHASE1_WORK_ROOT", "backend/outputs/v3_1_phase1_work")
         )
     )
-    run_yamnet_on_gpu: bool = True
+    branch_timeout_s: float = 1800.0
+    branch_poll_interval_s: float = 0.1
+    phase1_parallel_enabled: bool = True
+    phase1_parallel_gpu_branch_limit: int = 2
+    yamnet_branch_device: str = "cpu"
     keep_workdir: bool = False
 
 
@@ -129,6 +140,16 @@ def load_provider_settings() -> ProviderSettings:
 
     model_default = (
         "microsoft/VibeVoice-ASR-HF" if backend == "hf" else "microsoft/VibeVoice-ASR"
+    )
+    yamnet_branch_device = (
+        _read_env("CLYPT_PHASE1_YAMNET_BRANCH_DEVICE", "CLYPT_PHASE1_YAMNET_DEVICE") or "cpu"
+    ).lower()
+    if yamnet_branch_device not in {"cpu", "gpu"}:
+        raise ValueError("CLYPT_PHASE1_YAMNET_BRANCH_DEVICE must be 'cpu' or 'gpu'.")
+
+    phase1_parallel_enabled = _read_bool_env("CLYPT_PHASE1_PARALLEL_ENABLED", default=True)
+    phase1_parallel_gpu_branch_limit = int(
+        _read_env("CLYPT_PHASE1_PARALLEL_GPU_BRANCH_LIMIT") or "2"
     )
 
     return ProviderSettings(
@@ -164,8 +185,13 @@ def load_provider_settings() -> ProviderSettings:
             working_root=Path(
                 _read_env("CLYPT_PHASE1_WORK_ROOT") or "backend/outputs/v3_1_phase1_work"
             ),
-            run_yamnet_on_gpu=(_read_env("CLYPT_PHASE1_YAMNET_DEVICE") or "gpu").lower()
-            == "gpu",
+            branch_timeout_s=float(_read_env("CLYPT_PHASE1_BRANCH_TIMEOUT_S") or "1800"),
+            branch_poll_interval_s=float(
+                _read_env("CLYPT_PHASE1_BRANCH_POLL_INTERVAL_S") or "0.1"
+            ),
+            phase1_parallel_enabled=phase1_parallel_enabled,
+            phase1_parallel_gpu_branch_limit=phase1_parallel_gpu_branch_limit,
+            yamnet_branch_device=yamnet_branch_device,
             keep_workdir=(_read_env("CLYPT_PHASE1_KEEP_WORKDIR") or "0") == "1",
         ),
     )
