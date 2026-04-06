@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from backend.pipeline.timeline.pyannote_merge import merge_pyannote_outputs
+from backend.pipeline.timeline.vibevoice_merge import merge_vibevoice_outputs
 
 from .models import Phase1SidecarOutputs, Phase1Workspace
 
@@ -17,51 +16,94 @@ def run_phase1_sidecars(
     source_url: str,
     video_gcs_uri: str,
     workspace: Phase1Workspace,
-    pyannote_client: Any,
+    vibevoice_provider: Any,
+    forced_aligner: Any,
     visual_extractor: Any,
     emotion_provider: Any,
     yamnet_provider: Any,
-    identify_voiceprints: list[str] | None = None,
 ) -> Phase1SidecarOutputs:
-    logger.info("[extract] submitting pyannote diarization (parallel) ...")
-    logger.info("[extract] starting visual extraction (main thread) ...")
-    t_sidecars = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        diarize_future = executor.submit(
-            pyannote_client.run_diarize,
-            media_url=video_gcs_uri,
-        )
-        t_visual = time.perf_counter()
-        phase1_visual = visual_extractor.extract(
-            video_path=workspace.video_path,
-            workspace=workspace,
-        )
-        logger.info(
-            "[extract] visual extraction done in %.1f s — waiting for pyannote ...",
-            time.perf_counter() - t_visual,
-        )
-        pyannote_payload = diarize_future.result()
+    """
+    Run all Phase 1 sidecar tasks serially on the GPU.
 
-    turns_count = len(list((pyannote_payload or {}).get("turns") or []))
+    Serial order (all on the GPU, no thread contention):
+      1. Visual extraction (RF-DETR + ByteTrack)
+      2. VibeVoice ASR (diarization + transcription)
+      3. NeMo Forced Aligner (word-level timestamps)
+      4. emotion2vec+
+      5. YAMNet
+    """
+    t_total = time.perf_counter()
+
+    # --- 1. Visual extraction --------------------------------------------
+    logger.info("[extract] starting visual extraction ...")
+    t_visual = time.perf_counter()
+    phase1_visual = visual_extractor.extract(
+        video_path=workspace.video_path,
+        workspace=workspace,
+    )
+    logger.info("[extract] visual extraction done in %.1f s", time.perf_counter() - t_visual)
+
+    # --- 2. VibeVoice ASR ------------------------------------------------
+    logger.info("[extract] starting VibeVoice ASR ...")
+    t_vv = time.perf_counter()
+    vibevoice_turns = vibevoice_provider.run(audio_path=workspace.audio_path)
     logger.info(
-        "[extract] pyannote done — %d turns — total parallel phase: %.1f s",
-        turns_count,
-        time.perf_counter() - t_sidecars,
+        "[extract] VibeVoice done in %.1f s — %d turns",
+        time.perf_counter() - t_vv,
+        len(vibevoice_turns),
     )
 
-    identify_payload = None
-    if identify_voiceprints:
-        logger.info("[extract] running pyannote identify (%d voiceprints) ...", len(identify_voiceprints))
-        identify_payload = pyannote_client.run_identify(
-            media_url=video_gcs_uri,
-            voiceprint_ids=identify_voiceprints,
+    # --- 3. ctc-forced-aligner -------------------------------------------
+    # Build preliminary turn dicts for the aligner so it gets start_ms/end_ms/transcript_text
+    prelim_turns = []
+    for idx, t in enumerate(vibevoice_turns, start=1):
+        prelim_turns.append(
+            {
+                "turn_id": f"t_{idx:06d}",
+                "speaker_id": f"SPEAKER_{int(t.get('Speaker') or 0)}",
+                "start_ms": int(round(float(t.get("Start") or 0) * 1000)),
+                "end_ms": int(round(float(t.get("End") or 0) * 1000)),
+                "transcript_text": str(t.get("Content") or "").strip(),
+            }
         )
 
-    merged = merge_pyannote_outputs(
-        diarize_payload=pyannote_payload,
-        identify_payload=identify_payload,
+    logger.info("[extract] starting forced-alignment on %d turns ...", len(prelim_turns))
+    t_fa = time.perf_counter()
+    word_alignments = forced_aligner.run(
+        audio_path=workspace.audio_path,
+        turns=prelim_turns,
+    )
+    logger.info(
+        "[extract] forced-alignment done in %.1f s — %d words",
+        time.perf_counter() - t_fa,
+        len(word_alignments),
+    )
+
+    # --- Merge VibeVoice + alignments into canonical {words, turns} ------
+    merged = merge_vibevoice_outputs(
+        vibevoice_turns=vibevoice_turns,
+        word_alignments=word_alignments,
     )
     turns = list(merged.get("turns") or [])
+
+    # Build diarization_payload in a shape downstream can use
+    diarization_payload: dict[str, Any] = {
+        "turns": [
+            {
+                "turn_id": t["turn_id"],
+                "speaker_id": t["speaker_id"],
+                "start_ms": t["start_ms"],
+                "end_ms": t["end_ms"],
+                "transcript_text": t["transcript_text"],
+                "word_ids": t.get("word_ids", []),
+                "identification_match": None,
+            }
+            for t in turns
+        ],
+        "words": merged.get("words", []),
+    }
+
+    # --- 4. emotion2vec+ -------------------------------------------------
     logger.info("[extract] starting emotion2vec+ on %d turns ...", len(turns))
     t_emotion = time.perf_counter()
     emotion2vec_payload = emotion_provider.run(
@@ -70,6 +112,7 @@ def run_phase1_sidecars(
     )
     logger.info("[extract] emotion2vec+ done in %.1f s", time.perf_counter() - t_emotion)
 
+    # --- 5. YAMNet -------------------------------------------------------
     logger.info("[extract] starting YAMNet ...")
     t_yamnet = time.perf_counter()
     yamnet_payload = yamnet_provider.run(audio_path=workspace.audio_path)
@@ -80,6 +123,8 @@ def run_phase1_sidecars(
         yamnet_event_count,
     )
 
+    logger.info("[extract] all sidecars done in %.1f s", time.perf_counter() - t_total)
+
     return Phase1SidecarOutputs(
         phase1_audio={
             "source_audio": source_url,
@@ -87,8 +132,7 @@ def run_phase1_sidecars(
             "local_video_path": str(workspace.video_path),
             "local_audio_path": str(workspace.audio_path),
         },
-        pyannote_payload=pyannote_payload,
-        identify_payload=identify_payload,
+        diarization_payload=diarization_payload,
         phase1_visual=phase1_visual,
         emotion2vec_payload=emotion2vec_payload,
         yamnet_payload=yamnet_payload,

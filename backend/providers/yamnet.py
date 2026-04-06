@@ -92,6 +92,7 @@ class YAMNetProvider:
         runner = self._ensure_runner()
         raw_events = list(runner(audio_path=audio_path) or [])
         if not raw_events:
+            logger.info("[yamnet]  0 events detected — returning empty")
             return {"events": []}
 
         ordered = sorted(
@@ -125,6 +126,11 @@ class YAMNetProvider:
                     )
             else:
                 merged.append(normalized)
+        logger.info(
+            "[yamnet]  %d raw events → %d merged events",
+            len(raw_events),
+            len(merged),
+        )
         return {"events": merged}
 
 

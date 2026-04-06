@@ -34,7 +34,8 @@ class Phase1JobRunner:
         downloader=None,
         audio_extractor=None,
         storage_client: Any,
-        pyannote_client: Any,
+        vibevoice_provider: Any,
+        forced_aligner: Any,
         visual_extractor: Any,
         emotion_provider: Any,
         yamnet_provider: Any,
@@ -44,7 +45,8 @@ class Phase1JobRunner:
         self.downloader = downloader or YouTubeDownloader()
         self.audio_extractor = audio_extractor
         self.storage_client = storage_client
-        self.pyannote_client = pyannote_client
+        self.vibevoice_provider = vibevoice_provider
+        self.forced_aligner = forced_aligner
         self.visual_extractor = visual_extractor
         self.emotion_provider = emotion_provider
         self.yamnet_provider = yamnet_provider
@@ -80,26 +82,16 @@ class Phase1JobRunner:
         )
         logger.info("[gcs]    uploaded → %s (%.1f s)", video_gcs_uri, time.perf_counter() - t_upload)
 
-        # Upload the extracted audio for Pyannote — WAV is smaller and unambiguously audio.
-        t_audio_upload = time.perf_counter()
-        logger.info("[gcs]    uploading audio to GCS ...")
-        audio_gcs_uri = self.storage_client.upload_file(
-            local_path=workspace.audio_path,
-            object_name=f"phase1/{job_id}/source_audio.wav",
-        )
-        audio_https_url = self.storage_client.get_https_url(audio_gcs_uri, expiry_hours=24)
-        logger.info("[gcs]    audio uploaded → %s (%.1f s)", audio_gcs_uri, time.perf_counter() - t_audio_upload)
-
         source_ref = source_url or str(source_path)
         phase1_outputs = run_phase1_sidecars(
             source_url=source_ref,
-            video_gcs_uri=audio_https_url,
+            video_gcs_uri=video_gcs_uri,
             workspace=workspace,
-            pyannote_client=self.pyannote_client,
+            vibevoice_provider=self.vibevoice_provider,
+            forced_aligner=self.forced_aligner,
             visual_extractor=self.visual_extractor,
             emotion_provider=self.emotion_provider,
             yamnet_provider=self.yamnet_provider,
-            identify_voiceprints=list(runtime_controls.get("identify_voiceprints") or []),
         )
 
         result: dict[str, Any] = {

@@ -68,24 +68,24 @@ def test_orchestrator_runs_phases_1_to_4_and_writes_artifacts(tmp_path: Path):
                     {"frame_idx": 13, "track_id": "Global_Person_1", "x1": 100.0, "y1": 120.0, "x2": 140.0, "y2": 180.0},
                 ],
             },
-            pyannote_payload={
-                "wordLevelTranscription": [
-                    {"word": "I", "start": 0.0, "end": 0.2, "speaker": "S1"},
-                    {"word": "thought", "start": 0.2, "end": 0.4, "speaker": "S1"},
-                    {"word": "this", "start": 0.4, "end": 0.55, "speaker": "S1"},
-                    {"word": "would", "start": 0.55, "end": 0.7, "speaker": "S1"},
-                    {"word": "fail", "start": 0.7, "end": 0.9, "speaker": "S1"},
-                    {"word": "yeah", "start": 1.0, "end": 1.1, "speaker": "S2"},
-                    {"word": "but", "start": 1.2, "end": 1.35, "speaker": "S1"},
-                    {"word": "it", "start": 1.35, "end": 1.45, "speaker": "S1"},
-                    {"word": "worked", "start": 1.45, "end": 1.75, "speaker": "S1"},
-                    {"word": "wow", "start": 1.9, "end": 2.0, "speaker": "S2"},
+            diarization_payload={
+                "words": [
+                    {"word_id": "w_000001", "text": "I", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000002", "text": "thought", "start_ms": 200, "end_ms": 400, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000003", "text": "this", "start_ms": 400, "end_ms": 550, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000004", "text": "would", "start_ms": 550, "end_ms": 700, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000005", "text": "fail", "start_ms": 700, "end_ms": 900, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000006", "text": "yeah", "start_ms": 1000, "end_ms": 1100, "speaker_id": "SPEAKER_1"},
+                    {"word_id": "w_000007", "text": "but", "start_ms": 1200, "end_ms": 1350, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000008", "text": "it", "start_ms": 1350, "end_ms": 1450, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000009", "text": "worked", "start_ms": 1450, "end_ms": 1750, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000010", "text": "wow", "start_ms": 1900, "end_ms": 2000, "speaker_id": "SPEAKER_1"},
                 ],
-                "diarization": [
-                    {"speaker": "S1", "start": 0.0, "end": 0.9},
-                    {"speaker": "S2", "start": 1.0, "end": 1.1},
-                    {"speaker": "S1", "start": 1.2, "end": 1.75},
-                    {"speaker": "S2", "start": 1.9, "end": 2.0},
+                "turns": [
+                    {"turn_id": "t_000001", "speaker_id": "SPEAKER_0", "start_ms": 0, "end_ms": 900, "transcript_text": "I thought this would fail", "word_ids": ["w_000001", "w_000002", "w_000003", "w_000004", "w_000005"], "identification_match": None},
+                    {"turn_id": "t_000002", "speaker_id": "SPEAKER_1", "start_ms": 1000, "end_ms": 1100, "transcript_text": "yeah", "word_ids": ["w_000006"], "identification_match": None},
+                    {"turn_id": "t_000003", "speaker_id": "SPEAKER_0", "start_ms": 1200, "end_ms": 1750, "transcript_text": "but it worked", "word_ids": ["w_000007", "w_000008", "w_000009"], "identification_match": None},
+                    {"turn_id": "t_000004", "speaker_id": "SPEAKER_1", "start_ms": 1900, "end_ms": 2000, "transcript_text": "wow", "word_ids": ["w_000010"], "identification_match": None},
                 ],
             },
             emotion2vec_payload={

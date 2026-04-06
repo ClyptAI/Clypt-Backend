@@ -2,50 +2,43 @@ from __future__ import annotations
 
 from backend.pipeline.timeline.audio_events import build_audio_event_timeline
 from backend.pipeline.timeline.emotion_events import build_speech_emotion_timeline
-from backend.pipeline.timeline.pyannote_merge import merge_pyannote_outputs
+from backend.pipeline.timeline.vibevoice_merge import merge_vibevoice_outputs
 from backend.pipeline.timeline.timeline_builder import build_canonical_timeline
 from backend.pipeline.timeline.tracklets import build_tracklet_artifacts
 
 
-def test_merge_pyannote_outputs_normalizes_words_turns_and_identification():
-    diarize_payload = {
-        "wordLevelTranscription": [
-            {"word": "Hello", "start": 0.0, "end": 0.4, "speaker": "SPEAKER_00"},
-            {"word": "world", "start": 0.4, "end": 0.8, "speaker": "SPEAKER_00"},
-        ],
-        "turnLevelTranscription": [
-            {
-                "speaker": "SPEAKER_00",
-                "start": 0.0,
-                "end": 0.8,
-                "text": "Hello world.",
-            }
-        ],
-        "diarization": [
-            {"speaker": "SPEAKER_00", "start": 0.0, "end": 0.8},
-        ],
-    }
-    identify_payload = {
-        "identification": [
-            {
-                "diarizationSpeaker": "SPEAKER_00",
-                "match": "Sam",
-                "start": 0.0,
-                "end": 0.8,
-            }
-        ]
-    }
+def test_merge_vibevoice_outputs_normalizes_words_and_turns():
+    vibevoice_turns = [
+        {"Start": 0.0, "End": 0.8, "Speaker": 0, "Content": "Hello world"},
+        {"Start": 1.0, "End": 1.4, "Speaker": 1, "Content": "Again"},
+    ]
+    word_alignments = [
+        {"word_id": "w_000001", "text": "Hello", "start_ms": 0, "end_ms": 400, "speaker_id": "SPEAKER_0"},
+        {"word_id": "w_000002", "text": "world", "start_ms": 400, "end_ms": 800, "speaker_id": "SPEAKER_0"},
+        {"word_id": "w_000003", "text": "Again", "start_ms": 1000, "end_ms": 1400, "speaker_id": "SPEAKER_1"},
+    ]
 
-    merged = merge_pyannote_outputs(
-        diarize_payload=diarize_payload,
-        identify_payload=identify_payload,
+    merged = merge_vibevoice_outputs(
+        vibevoice_turns=vibevoice_turns,
+        word_alignments=word_alignments,
     )
 
     assert merged["words"][0]["text"] == "Hello"
-    assert merged["words"][0]["speaker_id"] == "SPEAKER_00"
-    assert merged["turns"][0]["speaker_id"] == "SPEAKER_00"
-    assert merged["turns"][0]["transcript_text"] == "Hello world."
-    assert merged["turns"][0]["identification_match"] == "Sam"
+    assert merged["words"][0]["speaker_id"] == "SPEAKER_0"
+    assert merged["turns"][0]["speaker_id"] == "SPEAKER_0"
+    assert merged["turns"][0]["transcript_text"] == "Hello world"
+    assert merged["turns"][0]["identification_match"] is None
+    assert merged["turns"][1]["speaker_id"] == "SPEAKER_1"
+
+
+def test_merge_vibevoice_outputs_falls_back_to_token_split_without_alignments():
+    vibevoice_turns = [
+        {"Start": 0.0, "End": 1.0, "Speaker": 0, "Content": "Hello world"},
+    ]
+    merged = merge_vibevoice_outputs(vibevoice_turns=vibevoice_turns, word_alignments=[])
+    assert len(merged["words"]) == 2
+    assert merged["words"][0]["text"] == "Hello"
+    assert merged["turns"][0]["speaker_id"] == "SPEAKER_0"
 
 
 def test_build_canonical_timeline_builds_word_ids_and_turn_text():
@@ -53,21 +46,38 @@ def test_build_canonical_timeline_builds_word_ids_and_turn_text():
         "source_audio": "https://example.com/video",
         "video_gcs_uri": "gs://bucket/video.mp4",
     }
-    pyannote_payload = {
-        "wordLevelTranscription": [
-            {"word": "Hello", "start": 0.0, "end": 0.4, "speaker": "SPEAKER_00"},
-            {"word": "world", "start": 0.4, "end": 0.8, "speaker": "SPEAKER_00"},
-            {"word": "Again", "start": 1.0, "end": 1.4, "speaker": "SPEAKER_01"},
+    # diarization_payload is the merged {words, turns} dict from extract.py
+    diarization_payload = {
+        "words": [
+            {"word_id": "w_000001", "text": "Hello", "start_ms": 0, "end_ms": 400, "speaker_id": "SPEAKER_0"},
+            {"word_id": "w_000002", "text": "world", "start_ms": 400, "end_ms": 800, "speaker_id": "SPEAKER_0"},
+            {"word_id": "w_000003", "text": "Again", "start_ms": 1000, "end_ms": 1400, "speaker_id": "SPEAKER_1"},
         ],
-        "diarization": [
-            {"speaker": "SPEAKER_00", "start": 0.0, "end": 0.8},
-            {"speaker": "SPEAKER_01", "start": 1.0, "end": 1.4},
+        "turns": [
+            {
+                "turn_id": "t_000001",
+                "speaker_id": "SPEAKER_0",
+                "start_ms": 0,
+                "end_ms": 800,
+                "transcript_text": "Hello world",
+                "word_ids": ["w_000001", "w_000002"],
+                "identification_match": None,
+            },
+            {
+                "turn_id": "t_000002",
+                "speaker_id": "SPEAKER_1",
+                "start_ms": 1000,
+                "end_ms": 1400,
+                "transcript_text": "Again",
+                "word_ids": ["w_000003"],
+                "identification_match": None,
+            },
         ],
     }
 
     timeline = build_canonical_timeline(
         phase1_audio=phase1_audio,
-        pyannote_payload=pyannote_payload,
+        diarization_payload=diarization_payload,
     )
 
     assert timeline.source_video_url == "https://example.com/video"
@@ -77,7 +87,7 @@ def test_build_canonical_timeline_builds_word_ids_and_turn_text():
     assert timeline.turns[0].turn_id == "t_000001"
     assert timeline.turns[0].word_ids == ["w_000001", "w_000002"]
     assert timeline.turns[0].transcript_text == "Hello world"
-    assert timeline.turns[1].speaker_id == "SPEAKER_01"
+    assert timeline.turns[1].speaker_id == "SPEAKER_1"
 
 
 def test_build_speech_emotion_timeline_normalizes_emotion2vec_plus_output():

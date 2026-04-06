@@ -43,23 +43,25 @@ def test_gcs_storage_client_uploads_with_expected_blob_name(tmp_path: Path):
     }
 
 
-def test_run_phase1_sidecars_overlaps_pyannote_with_local_worker_tasks(tmp_path: Path):
+def test_run_phase1_sidecars_runs_vibevoice_and_local_worker_tasks_serially(tmp_path: Path):
     from backend.phase1_runtime.extract import run_phase1_sidecars
     from backend.phase1_runtime.models import Phase1Workspace
 
     call_order: list[str] = []
 
-    class _FakePyannote:
-        def run_diarize(self, *, media_url: str):
-            call_order.append(f"pyannote:{media_url}")
-            return {
-                "wordLevelTranscription": [
-                    {"word": "hello", "start": 0.0, "end": 0.3, "speaker": "S1"}
-                ],
-                "diarization": [
-                    {"speaker": "S1", "start": 0.0, "end": 0.3}
-                ],
-            }
+    class _FakeVibeVoice:
+        def run(self, *, audio_path: Path, context_info=None):
+            call_order.append(f"vibevoice:{audio_path.name}")
+            return [
+                {"Start": 0.0, "End": 0.3, "Speaker": 0, "Content": "hello"},
+            ]
+
+    class _FakeForcedAligner:
+        def run(self, *, audio_path: Path, turns: list[dict]):
+            call_order.append(f"forced_aligner:{audio_path.name}:{len(turns)}")
+            return [
+                {"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 300, "speaker_id": "SPEAKER_0"},
+            ]
 
     class _FakeVisualExtractor:
         def extract(self, *, video_path: Path, workspace: Phase1Workspace):
@@ -97,20 +99,24 @@ def test_run_phase1_sidecars_overlaps_pyannote_with_local_worker_tasks(tmp_path:
         source_url="https://youtube.com/watch?v=demo",
         video_gcs_uri="gs://bucket/source.mp4",
         workspace=workspace,
-        pyannote_client=_FakePyannote(),
+        vibevoice_provider=_FakeVibeVoice(),
+        forced_aligner=_FakeForcedAligner(),
         visual_extractor=_FakeVisualExtractor(),
         emotion_provider=_FakeEmotionProvider(),
         yamnet_provider=_FakeYamnetProvider(),
     )
 
     assert outputs.phase1_audio["source_audio"] == "https://youtube.com/watch?v=demo"
-    assert outputs.pyannote_payload["diarization"][0]["speaker"] == "S1"
+    assert outputs.diarization_payload["turns"][0]["speaker_id"] == "SPEAKER_0"
+    assert outputs.diarization_payload["words"][0]["text"] == "hello"
     assert outputs.phase1_visual["video_metadata"]["fps"] == 10.0
     assert outputs.emotion2vec_payload["segments"][0]["labels"] == ["neutral"]
     assert outputs.yamnet_payload["events"] == []
+    # Serial order: visual → vibevoice → forced_aligner → emotion → yamnet
     assert call_order == [
-        "pyannote:gs://bucket/source.mp4",
         "visual:source_video.mp4",
+        "vibevoice:source_audio.wav",
+        "forced_aligner:source_audio.wav:1",
         "emotion:source_audio.wav:1",
         "yamnet:source_audio.wav",
     ]

@@ -1,20 +1,24 @@
 from .config import (
+    Phase1RuntimeSettings,
     ProviderSettings,
-    PyannoteSettings,
     StorageSettings,
     VertexSettings,
+    VibeVoiceSettings,
     load_provider_settings,
 )
-from .pyannote import PyannoteCloudClient
+from .forced_aligner import ForcedAlignmentProvider
+from .vibevoice import VibeVoiceASRProvider
 from .vertex import VertexEmbeddingClient, VertexGeminiClient
 
 __all__ = [
+    "ForcedAlignmentProvider",
+    "Phase1RuntimeSettings",
     "ProviderSettings",
-    "PyannoteCloudClient",
-    "PyannoteSettings",
     "StorageSettings",
     "VertexEmbeddingClient",
     "VertexGeminiClient",
     "VertexSettings",
+    "VibeVoiceASRProvider",
+    "VibeVoiceSettings",
     "load_provider_settings",
 ]

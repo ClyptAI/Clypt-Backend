@@ -69,8 +69,7 @@ class Phase1Workspace:
 @dataclass(frozen=True, slots=True)
 class Phase1SidecarOutputs:
     phase1_audio: dict
-    pyannote_payload: dict
-    identify_payload: dict | None
+    diarization_payload: dict
     phase1_visual: dict
     emotion2vec_payload: dict
     yamnet_payload: dict

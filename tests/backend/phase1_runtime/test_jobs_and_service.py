@@ -24,8 +24,7 @@ def test_phase1_worker_processes_one_job_to_success(tmp_path):
         return {
             "phase1": Phase1SidecarOutputs(
                 phase1_audio={"source_audio": source_url, "video_gcs_uri": "gs://bucket/source.mp4"},
-                pyannote_payload={"diarization": []},
-                identify_payload=None,
+                diarization_payload={"turns": [], "words": []},
                 phase1_visual={"video_metadata": {"fps": 30.0}, "shot_changes": [], "tracks": []},
                 emotion2vec_payload={"segments": []},
                 yamnet_payload={"events": []},

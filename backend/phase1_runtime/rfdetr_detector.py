@@ -135,6 +135,13 @@ class RFDETRPersonDetector:
 
         for batch_start in range(0, len(frames), batch_size):
             batch = frames[batch_start : batch_start + batch_size]
+            real_count = len(batch)
+
+            # torch.compile fixes the batch size — pad the tail batch with
+            # copies of the last frame so it matches the compiled batch size.
+            if real_count < batch_size:
+                pad = [batch[-1]] * (batch_size - real_count)
+                batch = batch + pad
 
             t0 = time.perf_counter()
             raw = self._model.predict(batch, threshold=self._config.detection_threshold)
@@ -143,7 +150,8 @@ class RFDETRPersonDetector:
             if not isinstance(raw, list):
                 raw = [raw]
 
-            for det in raw:
+            # Only keep detections for the real (non-padded) frames
+            for det in raw[:real_count]:
                 person_mask = det.class_id == COCO_PERSON_CLASS_ID
                 # Build a fresh Detections with only the per-box fields we need.
                 # Using det[mask] fails when det.data contains non-per-detection
@@ -155,7 +163,7 @@ class RFDETRPersonDetector:
                 )
                 all_detections.append(filtered)
 
-            self._metrics.frames_processed += len(batch)
+            self._metrics.frames_processed += real_count
             self._metrics.total_detector_ms += elapsed_ms
 
         return all_detections

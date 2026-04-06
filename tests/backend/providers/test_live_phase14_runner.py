@@ -42,15 +42,15 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
                     "seed_node_id": "node_t_000001__t_000002",
                     "reject_all": False,
                     "reject_reason": "",
-                        "candidates": [
-                            {
-                                "node_ids": ["node_t_000001__t_000002"],
-                                "start_ms": 0,
-                                "end_ms": 1000,
-                                "score": 8.2,
-                                "rationale": "Strong standalone thought.",
-                            }
-                        ],
+                    "candidates": [
+                        {
+                            "node_ids": ["node_t_000001__t_000002"],
+                            "start_ms": 0,
+                            "end_ms": 1600,
+                            "score": 8.2,
+                            "rationale": "Strong standalone thought.",
+                        }
+                    ],
                 }
             if "Review this candidate pool" in prompt:
                 return {
@@ -92,20 +92,20 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
                 "video_gcs_uri": "gs://bucket/video.mp4",
                 "local_video_path": str(tmp_path / "source_video.mp4"),
             },
-            pyannote_payload={
-                "wordLevelTranscription": [
-                    {"word": "hello", "start": 0.0, "end": 0.4, "speaker": "S1"},
-                    {"word": "world", "start": 0.6, "end": 1.0, "speaker": "S1"},
+            diarization_payload={
+                "words": [
+                    {"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 400, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000002", "text": "world", "start_ms": 600, "end_ms": 1000, "speaker_id": "SPEAKER_0"},
+                    {"word_id": "w_000003", "text": "goodbye", "start_ms": 1200, "end_ms": 1600, "speaker_id": "SPEAKER_1"},
                 ],
-                "diarization": [
-                    {"speaker": "S1", "start": 0.0, "end": 0.4},
-                    {"speaker": "S1", "start": 0.6, "end": 1.0},
+                "turns": [
+                    {"turn_id": "t_000001", "speaker_id": "SPEAKER_0", "start_ms": 0, "end_ms": 1000, "transcript_text": "hello world", "word_ids": ["w_000001", "w_000002"], "identification_match": None},
+                    {"turn_id": "t_000002", "speaker_id": "SPEAKER_1", "start_ms": 1200, "end_ms": 1600, "transcript_text": "goodbye", "word_ids": ["w_000003"], "identification_match": None},
                 ],
             },
-            identify_payload=None,
             phase1_visual={
                 "video_metadata": {"fps": 10.0},
-                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1200}],
+                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 2000}],
                 "tracks": [],
             },
             emotion2vec_payload={
@@ -115,7 +115,13 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
                         "labels": ["neutral"],
                         "scores": [0.7],
                         "per_class_scores": {"neutral": 0.7},
-                    }
+                    },
+                    {
+                        "turn_id": "t_000002",
+                        "labels": ["happy"],
+                        "scores": [0.8],
+                        "per_class_scores": {"happy": 0.8},
+                    },
                 ]
             },
             yamnet_payload={"events": []},

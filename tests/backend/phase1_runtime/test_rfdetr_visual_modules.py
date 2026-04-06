@@ -32,7 +32,7 @@ class TestVisualPipelineConfig:
         assert config.detector_backend == "pytorch_cuda_fp16"
         assert config.detector_batch_size == 4
         assert config.detection_threshold == pytest.approx(0.35)
-        assert config.detector_resolution == 560
+        assert config.detector_resolution == 640
         assert config.tracker_backend == "bytetrack"
         assert config.frame_decode_backend == "cpu"
         assert config.use_fp16 is True

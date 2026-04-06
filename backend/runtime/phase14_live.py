@@ -104,8 +104,7 @@ class V31LivePhase14Runner:
     def run_phase_1(self, *, paths: V31RunPaths, phase1_outputs: Phase1SidecarOutputs) -> dict[str, Any]:
         canonical_timeline = build_canonical_timeline(
             phase1_audio=phase1_outputs.phase1_audio,
-            pyannote_payload=phase1_outputs.pyannote_payload,
-            identify_payload=phase1_outputs.identify_payload,
+            diarization_payload=phase1_outputs.diarization_payload,
         )
         speech_emotion_timeline = build_speech_emotion_timeline(
             emotion2vec_payload=phase1_outputs.emotion2vec_payload,

@@ -50,9 +50,14 @@ def prepare_workspace_media(
         raise ValueError("Provide exactly one of source_url or source_path")
 
     if source_path is not None:
-        logger.info("[media]  copying local file: %s", source_path)
-        shutil.copy2(source_path, workspace.video_path)
-        logger.info("[media]  copied → %s", workspace.video_path)
+        src = Path(source_path).resolve()
+        dst = Path(workspace.video_path).resolve()
+        if src == dst:
+            logger.info("[media]  source_path is already the workspace video — skipping copy")
+        else:
+            logger.info("[media]  copying local file: %s", source_path)
+            shutil.copy2(src, dst)
+            logger.info("[media]  copied → %s", workspace.video_path)
     else:
         logger.info("[media]  downloading: %s", source_url)
         t0 = time.perf_counter()

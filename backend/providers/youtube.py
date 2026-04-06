@@ -35,6 +35,10 @@ class YouTubeDownloader:
             raise RuntimeError("yt-dlp is required for V3.1 source download.") from exc
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Use android_vr as the primary player client — it bypasses YouTube bot-detection
+        # without requiring cookies, and is yt-dlp's own fallback when no JS engine is
+        # present. tv_downgraded is appended as a secondary fallback when cookies are
+        # available (yt-dlp uses this automatically for logged-in accounts).
         options = {
             "format": self.format_selector,
             "outtmpl": str(output_path),
@@ -42,6 +46,7 @@ class YouTubeDownloader:
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
+            "extractor_args": {"youtube": {"player_client": ["android_vr", "tv_downgraded"]}},
         }
         if self.cookies_file is not None:
             if not self.cookies_file.exists():
@@ -52,15 +57,15 @@ class YouTubeDownloader:
             options["cookiefile"] = str(self.cookies_file)
             logger.info("[yt-dlp]  using cookies file: %s", self.cookies_file)
         else:
-            logger.info("[yt-dlp]  no cookies file — may fail on bot-detection")
+            logger.info("[yt-dlp]  no cookies file — falling back to android_vr client only")
 
         # JS runtime for EJS n-challenge solver.
-        # Env var format: "node:/usr/bin/node" or "deno" or "bun"
-        # Maps to yt-dlp's js_runtimes dict: {"node": {"path": "/usr/bin/node"}}
+        # Env var format: "bun:/root/.bun/bin/bun" or "node:/usr/bin/node" or "deno"
+        # Maps to yt-dlp's --js-runtimes option (key: js_runtimes, value: list of strings).
         _js_runtime = os.environ.get("CLYPT_YOUTUBE_JS_RUNTIMES")
         if _js_runtime:
             runtime, _, path = _js_runtime.partition(":")
-            options["js_runtimes"] = {runtime.lower(): {"path": path or None}}
+            options["js_runtimes"] = {runtime.lower(): {"path": path} if path else {}}
             logger.info("[yt-dlp]  JS runtime: %s (path=%s)", runtime, path or "auto")
 
         with yt_dlp.YoutubeDL(options) as ydl:

@@ -23,13 +23,15 @@ def test_phase1_job_runner_prepares_media_runs_sidecars_and_optional_pipeline(tm
             calls.append(f"upload:{object_name}")
             return f"gs://bucket/{object_name}"
 
-    class _FakePyannote:
-        def run_diarize(self, *, media_url: str):
-            calls.append(f"pyannote:{media_url}")
-            return {
-                "wordLevelTranscription": [{"word": "hello", "start": 0.0, "end": 0.2, "speaker": "S1"}],
-                "diarization": [{"speaker": "S1", "start": 0.0, "end": 0.2}],
-            }
+    class _FakeVibeVoice:
+        def run(self, *, audio_path: Path, context_info=None):
+            calls.append(f"vibevoice:{audio_path.name}")
+            return [{"Start": 0.0, "End": 0.2, "Speaker": 0, "Content": "hello"}]
+
+    class _FakeForcedAligner:
+        def run(self, *, audio_path: Path, turns: list[dict]):
+            calls.append(f"forced_aligner:{len(turns)}")
+            return [{"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"}]
 
     class _FakeVisual:
         def extract(self, *, video_path: Path, workspace):
@@ -60,7 +62,8 @@ def test_phase1_job_runner_prepares_media_runs_sidecars_and_optional_pipeline(tm
         downloader=_FakeDownloader(),
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        pyannote_client=_FakePyannote(),
+        vibevoice_provider=_FakeVibeVoice(),
+        forced_aligner=_FakeForcedAligner(),
         visual_extractor=_FakeVisual(),
         emotion_provider=_FakeEmotion(),
         yamnet_provider=_FakeYamnet(),
@@ -80,8 +83,9 @@ def test_phase1_job_runner_prepares_media_runs_sidecars_and_optional_pipeline(tm
         "download:https://youtube.com/watch?v=test",
         "audio:source_video.mp4",
         "upload:phase1/job_001/source_video.mp4",
-        "pyannote:gs://bucket/phase1/job_001/source_video.mp4",
         "visual:source_video.mp4",
+        "vibevoice:source_audio.wav",
+        "forced_aligner:1",
         "emotion:1",
         "yamnet",
         "phase14:job_001",

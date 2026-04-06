@@ -35,9 +35,8 @@ from .candidates.review_candidate_pool import review_candidate_pool
 @dataclass(slots=True)
 class V31Phase14RunInputs:
     phase1_audio: dict[str, Any]
-    pyannote_payload: dict[str, Any]
+    diarization_payload: dict[str, Any]
     phase1_visual: dict[str, Any] | None = None
-    identify_payload: dict[str, Any] | None = None
     emotion2vec_payload: dict[str, Any] | None = None
     yamnet_payload: dict[str, Any] | None = None
     phase2_target_turn_count: int = 8
@@ -74,8 +73,7 @@ class V31Phase14Orchestrator:
     def run_phase_1(self, *, run_id: str, source_url: str, paths: V31RunPaths, inputs: V31Phase14RunInputs) -> dict[str, Any]:
         canonical_timeline = build_canonical_timeline(
             phase1_audio=inputs.phase1_audio,
-            pyannote_payload=inputs.pyannote_payload,
-            identify_payload=inputs.identify_payload,
+            diarization_payload=inputs.diarization_payload,
         )
         speech_emotion_timeline = build_speech_emotion_timeline(emotion2vec_payload=inputs.emotion2vec_payload or {})
         audio_event_timeline = build_audio_event_timeline(yamnet_payload=inputs.yamnet_payload or {})

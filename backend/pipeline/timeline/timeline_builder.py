@@ -1,22 +1,24 @@
 from __future__ import annotations
 
 from ..contracts import CanonicalTimeline, CanonicalTurn, TranscriptWord
-from .pyannote_merge import merge_pyannote_outputs
-
-from ..contracts import CanonicalTimeline
+from .vibevoice_merge import merge_vibevoice_outputs
 
 
 def build_canonical_timeline(
     *,
     phase1_audio: dict,
-    pyannote_payload: dict,
-    identify_payload: dict | None = None,
+    diarization_payload: dict,
 ) -> CanonicalTimeline:
     """Build the canonical transcript/timing backbone for V3.1."""
-    merged = merge_pyannote_outputs(
-        diarize_payload=pyannote_payload,
-        identify_payload=identify_payload,
-    )
+    # diarization_payload already contains {words, turns} from extract.py
+    # If it arrived directly from the merged output, use it as-is.
+    # If it arrived as a raw VibeVoice turns list, merge it (fallback path).
+    if "turns" in diarization_payload and "words" in diarization_payload:
+        merged = diarization_payload
+    else:
+        # Fallback: treat the whole payload as raw VibeVoice turns with no word alignment
+        raw_turns = diarization_payload.get("vibevoice_turns") or []
+        merged = merge_vibevoice_outputs(vibevoice_turns=raw_turns, word_alignments=[])
 
     words = [
         TranscriptWord(

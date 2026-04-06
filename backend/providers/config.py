@@ -5,6 +5,18 @@ from pathlib import Path
 import os
 import subprocess
 
+# Gradio-style list (comma-separated in .env); matches playground hotword usage.
+_DEFAULT_HOTWORDS = (
+    "I, you, he, she, it, we, they, me, him, her, us, them, "
+    "my, your, his, hers, its, our, their, mine, yours, ours, theirs, "
+    "this, that, these, those, who, whom, whose, which, what, "
+    "and, but, or, nor, for, so, yet, after, although, as, because, before, if, since, "
+    "that, though, unless, until, when, whenever, where, whereas, while, however, therefore, "
+    "moreover, furthermore, also, additionally, meanwhile, consequently, otherwise, nevertheless, "
+    "for example, in addition, on the other hand, similarly, likewise, in contrast, thus, hence, "
+    "indeed, finally, first, second, third"
+)
+
 
 def _read_env(*names: str) -> str | None:
     for name in names:
@@ -44,13 +56,24 @@ def _load_local_env_files() -> None:
 
 
 @dataclass(slots=True)
-class PyannoteSettings:
-    api_key: str
-    base_url: str = "https://api.pyannote.ai"
-    diarize_model: str = "precision-2"
-    transcription_model: str = "parakeet-tdt-0.6b-v3"
-    poll_interval_s: float = 2.0
-    timeout_s: float = 1800.0
+class VibeVoiceSettings:
+    """VibeVoice ASR: native ~7B subprocess (Gradio parity) or in-process HF 9B."""
+
+    backend: str = "native"
+    native_venv_python: str = ""
+    model_id: str = "microsoft/VibeVoice-ASR"
+    flash_attention: bool = True
+    liger_kernel: bool = True
+    hotwords_context: str = _DEFAULT_HOTWORDS
+    system_prompt: str = ""
+    max_new_tokens: int = 32768
+    do_sample: bool = False
+    temperature: float = 0.0
+    top_p: float = 1.0
+    repetition_penalty: float = 1.0
+    num_beams: int = 1
+    attn_implementation: str = "flash_attention_2"
+    subprocess_timeout_s: int = 7200
 
 
 @dataclass(slots=True)
@@ -80,7 +103,7 @@ class Phase1RuntimeSettings:
 
 @dataclass(slots=True)
 class ProviderSettings:
-    pyannote: PyannoteSettings
+    vibevoice: VibeVoiceSettings
     vertex: VertexSettings
     storage: StorageSettings
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
@@ -88,10 +111,6 @@ class ProviderSettings:
 
 def load_provider_settings() -> ProviderSettings:
     _load_local_env_files()
-
-    pyannote_api_key = _read_env("PYANNOTE_API_KEY")
-    if not pyannote_api_key:
-        raise ValueError("PYANNOTE_API_KEY is required for V3.1 cloud pyannote.")
 
     vertex_project = _read_env("GOOGLE_CLOUD_PROJECT") or _discover_gcloud_project()
     if not vertex_project:
@@ -103,15 +122,33 @@ def load_provider_settings() -> ProviderSettings:
     if not gcs_bucket:
         raise ValueError("GCS_BUCKET or CLYPT_GCS_BUCKET is required for Phase 1 storage.")
 
+    hotwords_context = _read_env("VIBEVOICE_HOTWORDS_CONTEXT") or _DEFAULT_HOTWORDS
+    backend = (_read_env("VIBEVOICE_BACKEND") or "native").lower()
+    if backend not in ("native", "hf"):
+        backend = "native"
+
+    model_default = (
+        "microsoft/VibeVoice-ASR-HF" if backend == "hf" else "microsoft/VibeVoice-ASR"
+    )
+
     return ProviderSettings(
-        pyannote=PyannoteSettings(
-            api_key=pyannote_api_key,
-            base_url=_read_env("PYANNOTE_BASE_URL") or "https://api.pyannote.ai",
-            diarize_model=_read_env("PYANNOTE_DIARIZE_MODEL") or "precision-2",
-            transcription_model=_read_env("PYANNOTE_TRANSCRIPTION_MODEL")
-            or "parakeet-tdt-0.6b-v3",
-            poll_interval_s=float(_read_env("PYANNOTE_POLL_INTERVAL_S") or "2.0"),
-            timeout_s=float(_read_env("PYANNOTE_TIMEOUT_S") or "1800"),
+        vibevoice=VibeVoiceSettings(
+            backend=backend,
+            native_venv_python=_read_env("VIBEVOICE_NATIVE_VENV_PYTHON") or "",
+            model_id=_read_env("VIBEVOICE_MODEL_ID") or model_default,
+            flash_attention=(_read_env("VIBEVOICE_FLASH_ATTN") or "1") == "1",
+            liger_kernel=(_read_env("VIBEVOICE_LIGER") or "1") == "1",
+            hotwords_context=hotwords_context,
+            system_prompt=_read_env("VIBEVOICE_SYSTEM_PROMPT") or "",
+            max_new_tokens=int(_read_env("VIBEVOICE_MAX_NEW_TOKENS") or "32768"),
+            do_sample=(_read_env("VIBEVOICE_DO_SAMPLE") or "0") == "1",
+            temperature=float(_read_env("VIBEVOICE_TEMPERATURE") or "0"),
+            top_p=float(_read_env("VIBEVOICE_TOP_P") or "1"),
+            repetition_penalty=float(_read_env("VIBEVOICE_REPETITION_PENALTY") or "1"),
+            num_beams=int(_read_env("VIBEVOICE_NUM_BEAMS") or "1"),
+            attn_implementation=_read_env("VIBEVOICE_ATTN_IMPLEMENTATION")
+            or "flash_attention_2",
+            subprocess_timeout_s=int(_read_env("VIBEVOICE_SUBPROCESS_TIMEOUT_S") or "7200"),
         ),
         vertex=VertexSettings(
             project=vertex_project,
@@ -137,8 +174,8 @@ def load_provider_settings() -> ProviderSettings:
 __all__ = [
     "Phase1RuntimeSettings",
     "ProviderSettings",
-    "PyannoteSettings",
     "StorageSettings",
     "VertexSettings",
+    "VibeVoiceSettings",
     "load_provider_settings",
 ]
