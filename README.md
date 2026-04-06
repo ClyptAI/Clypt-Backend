@@ -38,9 +38,10 @@ Implemented:
 - typed Phase 1-4 contracts
 - run-scoped artifact helpers
 - Phase 1 timeline transforms
-- Phase 1 sidecar orchestration for local GPU-backed audio + visual tasks
+- Phase 1 parent coordinator + branch runtime for local GPU-backed audio + visual tasks
 - Phase 1 operational runtime shell:
   - media preparation
+  - parent-coordinated `visual` / `audio` / `yamnet` branch execution
   - ffmpeg shot detection + RF-DETR Large + ByteTrack visual extraction
   - shot-local track splitting
   - person detection ledger generation
@@ -72,13 +73,27 @@ Minimal Python dependencies are listed in [requirements.txt](/Users/rithvik/Clyp
 The Phase 1 worker now uses two Python environments in production:
 
 - primary worker env: RF-DETR, runtime orchestration, Phases 2-4
-- secondary native VibeVoice env: `microsoft/VibeVoice-ASR` subprocess worker
+- secondary native VibeVoice env: `microsoft/VibeVoice-ASR` subprocess worker inside the `audio` branch
 
 See [requirements-vibevoice-native.txt](/Users/rithvik/Clypt-V3/requirements-vibevoice-native.txt) and [docs/deployment/v3.1_phase1_digitalocean.md](/Users/rithvik/Clypt-V3/docs/deployment/v3.1_phase1_digitalocean.md) for the validated GPU bring-up path.
+
+Current Phase 1 runtime shape:
+
+- parent coordinator launches three child branches per run
+- `visual` and `audio` are the two GPU-heavy branches and may overlap
+- `yamnet` is CPU-only in V1
+- the `audio` branch still nests the validated native VibeVoice subprocess rather than moving VibeVoice into the main worker env
+- each branch writes `request.json`, `status.json`, `branch.log`, and `result.json` (success payload or failure envelope), plus the run writes `metadata/branch_summary.json`
 
 Core environment variables:
 
 - `CLYPT_V31_OUTPUT_ROOT`
+- `CLYPT_PHASE1_WORK_ROOT`
+- `CLYPT_PHASE1_PARALLEL_ENABLED`
+- `CLYPT_PHASE1_BRANCH_TIMEOUT_S`
+- `CLYPT_PHASE1_BRANCH_POLL_INTERVAL_S`
+- `CLYPT_PHASE1_PARALLEL_GPU_BRANCH_LIMIT`
+- `CLYPT_PHASE1_YAMNET_BRANCH_DEVICE`
 - `VIBEVOICE_BACKEND`
 - `VIBEVOICE_NATIVE_VENV_PYTHON`
 - `VIBEVOICE_MODEL_ID`
@@ -134,6 +149,8 @@ Key entrypoint:
 The Phase 1 sidecar runtime/orchestration lives in:
 
 - [backend/phase1_runtime/extract.py](/Users/rithvik/Clypt-V3/backend/phase1_runtime/extract.py)
+- [backend/phase1_runtime/coordinator.py](/Users/rithvik/Clypt-V3/backend/phase1_runtime/coordinator.py)
+- [backend/runtime/run_phase1_branch.py](/Users/rithvik/Clypt-V3/backend/runtime/run_phase1_branch.py)
 
 Useful docs:
 
