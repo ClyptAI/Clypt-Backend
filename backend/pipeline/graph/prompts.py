@@ -3,6 +3,56 @@ from __future__ import annotations
 import json
 
 
+LOCAL_SEMANTIC_EDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "edges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source_node_id": {"type": "string"},
+                    "target_node_id": {"type": "string"},
+                    "edge_type": {
+                        "type": "string",
+                        "enum": ["answers", "challenges", "contradicts", "supports",
+                                 "elaborates", "setup_for", "payoff_of", "reaction_to", "escalates"],
+                    },
+                    "rationale": {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["source_node_id", "target_node_id", "edge_type"],
+            },
+        },
+    },
+    "required": ["edges"],
+}
+
+LONG_RANGE_EDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "edges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source_node_id": {"type": "string"},
+                    "target_node_id": {"type": "string"},
+                    "edge_type": {
+                        "type": "string",
+                        "enum": ["callback_to", "topic_recurrence"],
+                    },
+                    "rationale": {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["source_node_id", "target_node_id", "edge_type"],
+            },
+        },
+    },
+    "required": ["edges"],
+}
+
+
 def build_local_semantic_edge_prompt(*, batch_payload: dict) -> str:
     return (
         "You are analyzing a batch of semantic graph nodes from a long-form conversation.\n\n"
@@ -71,6 +121,8 @@ def build_long_range_edge_prompt(*, pair_payload: dict) -> str:
 
 
 __all__ = [
+    "LOCAL_SEMANTIC_EDGE_SCHEMA",
+    "LONG_RANGE_EDGE_SCHEMA",
     "build_local_semantic_edge_prompt",
     "build_long_range_edge_prompt",
 ]

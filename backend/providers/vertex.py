@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterable
 
 from .config import VertexSettings
@@ -9,6 +10,11 @@ try:
     from google.genai import types
 except ImportError:
     types = None
+
+_PRIORITY_PAYGO_HEADERS = {
+    "X-Vertex-AI-LLM-Shared-Request-Type": "priority",
+    "X-Vertex-AI-LLM-Request-Type": "shared",
+}
 
 
 def _extract_embedding_values(item: Any) -> list[float]:
@@ -20,18 +26,22 @@ def _extract_embedding_values(item: Any) -> list[float]:
     return [float(value) for value in values]
 
 
-def _build_default_sdk_client(*, settings: VertexSettings, location: str):
+def _build_default_sdk_client(*, settings: VertexSettings, location: str, headers: dict | None = None):
     try:
         from google import genai
     except ImportError as exc:
         raise RuntimeError(
             "google-genai is required for live Vertex AI execution."
         ) from exc
-    return genai.Client(
-        vertexai=True,
-        project=settings.project,
-        location=location,
-    )
+    try:
+        from google.genai.types import HttpOptions
+        http_options = HttpOptions(headers=headers or {})
+    except Exception:
+        http_options = None
+    kwargs = dict(vertexai=True, project=settings.project, location=location)
+    if http_options is not None:
+        kwargs["http_options"] = http_options
+    return genai.Client(**kwargs)
 
 
 class VertexGeminiClient:
@@ -40,6 +50,7 @@ class VertexGeminiClient:
         self._sdk = sdk_client or _build_default_sdk_client(
             settings=settings,
             location=settings.generation_location,
+            headers=_PRIORITY_PAYGO_HEADERS,
         )
 
     def generate_json(
@@ -48,17 +59,26 @@ class VertexGeminiClient:
         prompt: str,
         model: str | None = None,
         temperature: float = 0.0,
+        response_schema: dict | None = None,
+        max_output_tokens: int | None = None,
     ) -> dict[str, Any]:
         if types is not None:
-            _config = types.GenerateContentConfig(
+            config_kwargs: dict[str, Any] = dict(
                 temperature=temperature,
                 response_mime_type="application/json",
             )
+            # Explicitly disable thinking for Flash and Pro — use model defaults
+            try:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+            except Exception:
+                pass
+            if response_schema is not None:
+                config_kwargs["response_schema"] = response_schema
+            if max_output_tokens is not None:
+                config_kwargs["max_output_tokens"] = max_output_tokens
+            _config = types.GenerateContentConfig(**config_kwargs)
         else:
-            _config = {
-                "temperature": temperature,
-                "response_mime_type": "application/json",
-            }
+            _config = {"temperature": temperature, "response_mime_type": "application/json"}
         response = self._sdk.models.generate_content(
             model=model or self.settings.generation_model,
             contents=prompt,
@@ -92,18 +112,21 @@ class VertexEmbeddingClient:
         # returning 1 embedding for the whole batch. Call once per text instead.
         _model = model or self.settings.embedding_model
         config = {"task_type": task_type} if task_type else None
-        results: list[list[float]] = []
-        for text in text_list:
+
+        def _embed_one(text):
             response = self._sdk.models.embed_content(
                 model=_model,
                 contents=text,
                 config=config,
             )
-            raw_embeddings = getattr(response, "embeddings", None)
-            if raw_embeddings is None:
+            raw = getattr(response, "embeddings", None)
+            if raw is None:
                 raise ValueError("Vertex embeddings response is missing embeddings")
-            results.append(_extract_embedding_values(raw_embeddings[0]))
-        return results
+            return _extract_embedding_values(raw[0])
+
+        with ThreadPoolExecutor(max_workers=min(len(text_list), 10)) as pool:
+            futures = [pool.submit(_embed_one, t) for t in text_list]
+            return [f.result() for f in futures]
 
     def embed_media_uris(
         self,
@@ -115,23 +138,23 @@ class VertexEmbeddingClient:
         if not items:
             return []
         try:
-            from google.genai import types
+            from google.genai import types as _types
         except ImportError:
-            types = None
+            _types = None
 
         # The embedding API only accepts 1 video/media part per call.
         # Call once per item and collect results.
         _model = model or self.settings.embedding_model
-        results: list[list[float]] = []
-        for item in items:
+
+        def _embed_one(item):
             if item.get("file_uri"):
-                if types is None:
+                if _types is None:
                     content: Any = {
                         "file_uri": item["file_uri"],
                         "mime_type": item.get("mime_type") or "application/octet-stream",
                     }
                 else:
-                    content = types.Part.from_uri(
+                    content = _types.Part.from_uri(
                         file_uri=item["file_uri"],
                         mime_type=item.get("mime_type") or "application/octet-stream",
                     )
@@ -139,17 +162,19 @@ class VertexEmbeddingClient:
                 content = str(item["descriptor"])
             else:
                 raise ValueError("each media embedding item must include file_uri or descriptor")
-
             response = self._sdk.models.embed_content(
                 model=_model,
                 contents=content,
                 config=None,
             )
-            raw_embeddings = getattr(response, "embeddings", None)
-            if raw_embeddings is None:
+            raw = getattr(response, "embeddings", None)
+            if raw is None:
                 raise ValueError("Vertex embeddings response is missing embeddings")
-            results.append(_extract_embedding_values(raw_embeddings[0]))
-        return results
+            return _extract_embedding_values(raw[0])
+
+        with ThreadPoolExecutor(max_workers=min(len(items), 10)) as pool:
+            futures = [pool.submit(_embed_one, item) for item in items]
+            return [f.result() for f in futures]
 
 
 __all__ = [

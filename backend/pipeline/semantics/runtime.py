@@ -9,6 +9,8 @@ from .media_embeddings import prepare_node_media_embeddings
 from .merge_and_classify import merge_and_classify_neighborhood
 from .node_embeddings import build_semantic_embedding_payload
 from .prompts import (
+    BOUNDARY_RECONCILIATION_SCHEMA,
+    MERGE_AND_CLASSIFY_SCHEMA,
     build_boundary_reconciliation_prompt,
     build_merge_and_classify_prompt,
 )
@@ -40,7 +42,7 @@ def run_merge_and_classify_batches(
     debug: list[dict[str, Any]] = []
     for neighborhood in neighborhoods:
         prompt = build_merge_and_classify_prompt(neighborhood_payload=neighborhood)
-        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
+        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=MERGE_AND_CLASSIFY_SCHEMA, max_output_tokens=2048)
         merged_nodes = merge_and_classify_neighborhood(
             neighborhood_payload=neighborhood,
             gemini_response=response,
@@ -93,7 +95,7 @@ def run_merge_classify_and_reconcile(
 
     def _call_merge(neighborhood):
         prompt = build_merge_and_classify_prompt(neighborhood_payload=neighborhood)
-        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
+        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=MERGE_AND_CLASSIFY_SCHEMA, max_output_tokens=2048)
         return merge_and_classify_neighborhood(
             neighborhood_payload=neighborhood, gemini_response=response
         ), {"batch_id": neighborhood["batch_id"], "prompt": prompt, "response": response}
@@ -160,7 +162,7 @@ def run_boundary_reconciliation(
         "right_batch_nodes": [node.model_dump(mode="json") for node in right_batch_nodes],
     }
     prompt = build_boundary_reconciliation_prompt(overlap_payload=overlap_payload)
-    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
+    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=BOUNDARY_RECONCILIATION_SCHEMA, max_output_tokens=1024)
     reconciled = reconcile_boundary_nodes(
         left_batch_nodes=left_batch_nodes,
         right_batch_nodes=right_batch_nodes,

@@ -3,6 +3,70 @@ from __future__ import annotations
 import json
 
 
+META_PROMPT_GENERATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "prompts": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["prompts"],
+}
+
+SUBGRAPH_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "subgraph_id": {"type": "string"},
+        "seed_node_id": {"type": "string"},
+        "reject_all": {"type": "boolean"},
+        "reject_reason": {"type": "string"},
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "node_ids": {"type": "array", "items": {"type": "string"}},
+                    "start_ms": {"type": "integer"},
+                    "end_ms": {"type": "integer"},
+                    "score": {"type": "number"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["node_ids", "start_ms", "end_ms", "score", "rationale"],
+            },
+        },
+    },
+    "required": ["subgraph_id", "seed_node_id", "reject_all", "candidates"],
+}
+
+POOL_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ranked_candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "candidate_temp_id": {"type": "string"},
+                    "keep": {"type": "boolean"},
+                    "pool_rank": {"type": "integer"},
+                    "score": {"type": "number"},
+                    "score_breakdown": {
+                        "type": "object",
+                        "properties": {
+                            "virality": {"type": "number"},
+                            "coherence": {"type": "number"},
+                            "engagement": {"type": "number"},
+                        },
+                    },
+                    "rationale": {"type": "string"},
+                },
+                "required": ["candidate_temp_id", "keep", "pool_rank", "score", "rationale"],
+            },
+        },
+        "dropped_candidate_temp_ids": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["ranked_candidates", "dropped_candidate_temp_ids"],
+}
+
+
 def build_subgraph_review_prompt(*, subgraph_payload: dict) -> str:
     return (
         "You are selecting clip candidates from a local semantic subgraph of a long-form video or podcast.\n\n"
@@ -101,6 +165,9 @@ def build_meta_prompt_generation_prompt(*, node_summaries: list[dict], target_co
 
 
 __all__ = [
+    "META_PROMPT_GENERATION_SCHEMA",
+    "POOL_REVIEW_SCHEMA",
+    "SUBGRAPH_REVIEW_SCHEMA",
     "build_meta_prompt_generation_prompt",
     "build_pooled_candidate_review_prompt",
     "build_subgraph_review_prompt",

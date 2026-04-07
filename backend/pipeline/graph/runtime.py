@@ -6,7 +6,7 @@ from typing import Any
 
 from .local_semantic_edges import build_local_semantic_edges
 from .long_range_edges import build_long_range_edges, shortlist_long_range_pairs
-from .prompts import build_local_semantic_edge_prompt, build_long_range_edge_prompt
+from .prompts import LOCAL_SEMANTIC_EDGE_SCHEMA, LONG_RANGE_EDGE_SCHEMA, build_local_semantic_edge_prompt, build_long_range_edge_prompt
 from .reconcile_edges import reconcile_semantic_edges
 from ..contracts import SemanticGraphEdge, SemanticGraphNode
 
@@ -66,7 +66,7 @@ def run_local_semantic_edge_batches(
 
     def _call_batch(batch):
         prompt = build_local_semantic_edge_prompt(batch_payload=batch)
-        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
+        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=LOCAL_SEMANTIC_EDGE_SCHEMA, max_output_tokens=2048)
         return batch, prompt, response
 
     with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
@@ -103,7 +103,7 @@ def run_long_range_edge_adjudication(
 ) -> tuple[list[SemanticGraphEdge], dict[str, Any]]:
     pairs = shortlist_long_range_pairs(nodes=nodes, top_k=top_k)
     prompt = build_long_range_edge_prompt(pair_payload={"candidate_pairs": pairs})
-    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
+    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=LONG_RANGE_EDGE_SCHEMA, max_output_tokens=1024)
     edges = build_long_range_edges(candidate_pairs=pairs, gemini_response=response)
     return edges, {
         "candidate_pairs": pairs,

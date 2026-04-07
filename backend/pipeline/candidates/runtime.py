@@ -4,6 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .prompts import (
+    META_PROMPT_GENERATION_SCHEMA,
+    POOL_REVIEW_SCHEMA,
+    SUBGRAPH_REVIEW_SCHEMA,
     build_meta_prompt_generation_prompt,
     build_pooled_candidate_review_prompt,
     build_subgraph_review_prompt,
@@ -57,7 +60,7 @@ def generate_meta_prompts_live(
         node_summaries=node_summaries,
         target_count=target_count,
     )
-    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
+    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=META_PROMPT_GENERATION_SCHEMA, max_output_tokens=1024)
     prompts = response.get("prompts") or []
     if not prompts or not isinstance(prompts, list):
         raise ValueError(
@@ -91,7 +94,7 @@ def run_subgraph_reviews(
     def _call_review(subgraph):
         payload = subgraph.model_dump(mode="json")
         prompt = build_subgraph_review_prompt(subgraph_payload=payload)
-        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
+        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=SUBGRAPH_REVIEW_SCHEMA, max_output_tokens=1024)
         return review_local_subgraph(subgraph=subgraph, gemini_response=response), {
             "subgraph_id": subgraph.subgraph_id,
             "prompt": prompt,
@@ -119,7 +122,7 @@ def run_candidate_pool_review(
         "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
     }
     prompt = build_pooled_candidate_review_prompt(candidate_payload=payload)
-    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
+    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=POOL_REVIEW_SCHEMA, max_output_tokens=4096)
     return review_candidate_pool(candidates=candidates, gemini_response=response)
 
 

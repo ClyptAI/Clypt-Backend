@@ -3,6 +3,64 @@ from __future__ import annotations
 import json
 
 
+MERGE_AND_CLASSIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "merged_nodes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source_turn_ids": {"type": "array", "items": {"type": "string"}},
+                    "node_type": {
+                        "type": "string",
+                        "enum": ["claim", "explanation", "example", "anecdote",
+                                 "reaction_beat", "qa_exchange", "challenge_exchange",
+                                 "setup_payoff", "reveal", "transition"],
+                    },
+                    "node_flags": {"type": "array", "items": {"type": "string"}},
+                    "summary": {"type": "string"},
+                },
+                "required": ["source_turn_ids", "node_type", "node_flags", "summary"],
+            },
+        },
+    },
+    "required": ["merged_nodes"],
+}
+
+BOUNDARY_RECONCILIATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "resolution": {"type": "string", "enum": ["keep_both", "merge"]},
+        "nodes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "existing_node_id": {"type": "string"},
+                    "source_turn_ids": {"type": "array", "items": {"type": "string"}},
+                    "node_type": {"type": "string"},
+                    "node_flags": {"type": "array", "items": {"type": "string"}},
+                    "summary": {"type": "string"},
+                },
+                "required": ["existing_node_id", "source_turn_ids", "node_type", "node_flags", "summary"],
+            },
+        },
+        "merged_node": {
+            "type": "object",
+            "properties": {
+                "source_turn_ids": {"type": "array", "items": {"type": "string"}},
+                "node_type": {"type": "string"},
+                "node_flags": {"type": "array", "items": {"type": "string"}},
+                "summary": {"type": "string"},
+            },
+            "required": ["source_turn_ids", "node_type", "node_flags", "summary"],
+        },
+    },
+    "required": ["resolution"],
+}
+
+
 _NODE_TYPES = (
     '"claim"          — a factual assertion or opinion stated directly\n'
     '"explanation"    — elaboration or reasoning supporting a prior point\n'
@@ -94,3 +152,11 @@ def build_boundary_reconciliation_prompt(*, overlap_payload: dict) -> str:
         f"Valid node_flags: topic_pivot, callback_candidate, high_resonance_candidate, backchannel_dense, interruption_heavy, overlap_heavy, resumed_topic\n\n"
         f"Boundary payload:\n{json.dumps(overlap_payload, ensure_ascii=True, indent=2)}"
     )
+
+
+__all__ = [
+    "BOUNDARY_RECONCILIATION_SCHEMA",
+    "MERGE_AND_CLASSIFY_SCHEMA",
+    "build_boundary_reconciliation_prompt",
+    "build_merge_and_classify_prompt",
+]
