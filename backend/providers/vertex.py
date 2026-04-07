@@ -116,37 +116,37 @@ class VertexEmbeddingClient:
         except ImportError:
             types = None
 
-        contents: list[Any] = []
+        # The embedding API only accepts 1 video/media part per call.
+        # Call once per item and collect results.
+        _model = model or self.settings.embedding_model
+        results: list[list[float]] = []
         for item in items:
             if item.get("file_uri"):
                 if types is None:
-                    contents.append(
-                        {
-                            "file_uri": item["file_uri"],
-                            "mime_type": item.get("mime_type") or "application/octet-stream",
-                        }
-                    )
+                    content: Any = {
+                        "file_uri": item["file_uri"],
+                        "mime_type": item.get("mime_type") or "application/octet-stream",
+                    }
                 else:
-                    contents.append(
-                        types.Part.from_uri(
-                            file_uri=item["file_uri"],
-                            mime_type=item.get("mime_type") or "application/octet-stream",
-                        )
+                    content = types.Part.from_uri(
+                        file_uri=item["file_uri"],
+                        mime_type=item.get("mime_type") or "application/octet-stream",
                     )
             elif item.get("descriptor"):
-                contents.append(str(item["descriptor"]))
+                content = str(item["descriptor"])
             else:
                 raise ValueError("each media embedding item must include file_uri or descriptor")
 
-        response = self._sdk.models.embed_content(
-            model=model or self.settings.embedding_model,
-            contents=contents,
-            config=None,
-        )
-        raw_embeddings = getattr(response, "embeddings", None)
-        if raw_embeddings is None:
-            raise ValueError("Vertex embeddings response is missing embeddings")
-        return [_extract_embedding_values(item) for item in raw_embeddings]
+            response = self._sdk.models.embed_content(
+                model=_model,
+                contents=content,
+                config=None,
+            )
+            raw_embeddings = getattr(response, "embeddings", None)
+            if raw_embeddings is None:
+                raise ValueError("Vertex embeddings response is missing embeddings")
+            results.append(_extract_embedding_values(raw_embeddings[0]))
+        return results
 
 
 __all__ = [
