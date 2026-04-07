@@ -225,7 +225,7 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
 
     runtime_metrics = {
         "detector_backend": config.detector_backend,
-        "detector_model": "rfdetr_large",
+        "detector_model": "rfdetr_small",
         "tracker_backend": f"bytetrack",
         "inference_backend": config.detector_backend,
         "batch_size": config.detector_batch_size,
@@ -503,7 +503,7 @@ class V31VisualExtractor:
         )
 
         tracking_metrics = {
-            "tracker_backend": "rfdetr_large_bytetrack",
+            "tracker_backend": "rfdetr_small_bytetrack",
             "input_track_rows": len(raw_tracks),
             "emitted_track_rows": len(tracks),
             "emitted_person_detection_segments": len(person_detections),

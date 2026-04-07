@@ -77,7 +77,7 @@ class TestVisualPipelineConfig:
             frame_decode_backend="cpu",
             tensorrt_engine_dir="/tmp/engines",
         )
-        expected = Path("/tmp/engines/rfdetr_large_b4_r560_fp16.engine")
+        expected = Path("/tmp/engines/rfdetr_small_b4_r560_fp16.engine")
         assert config.tensorrt_engine_path == expected
 
     def test_tensorrt_engine_dir_from_env(self, monkeypatch):
@@ -329,7 +329,7 @@ class TestVisualExtractorArtifactContract:
 
         ext = self._make_extractor(tracks=[])
         payload = ext.extract(video_path=workspace.video_path, workspace=workspace)
-        assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_large_bytetrack"
+        assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_small_bytetrack"
 
     def test_person_detections_schema_stable(self, tmp_path: Path):
         from backend.phase1_runtime.models import Phase1Workspace

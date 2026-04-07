@@ -57,7 +57,7 @@ class VisualPipelineConfig:
     @property
     def tensorrt_engine_path(self) -> Path:
         name = (
-            f"rfdetr_large_b{self.detector_batch_size}"
+            f"rfdetr_small_b{self.detector_batch_size}"
             f"_r{self.detector_resolution}"
             f"_fp16.engine"
         )

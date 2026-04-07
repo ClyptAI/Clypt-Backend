@@ -1,7 +1,7 @@
-"""TensorRT-based RF-DETR Large person detector for Phase 1 visual extraction.
+"""TensorRT-based RF-DETR Small person detector for Phase 1 visual extraction.
 
 Full pipeline:
-1. Export RFDETRLarge to ONNX via rfdetr's model.export()
+1. Export RFDETRSmall to ONNX via rfdetr's model.export()
 2. Convert ONNX to TensorRT engine via trtexec (must run on target GPU)
 3. Load the .engine and run native TensorRT FP16 inference
 4. Post-process raw outputs into sv.Detections filtered to person class
@@ -64,16 +64,16 @@ class TensorRTDetector:
         onnx_path = onnx_dir / "inference_model.onnx"
 
         if not onnx_path.exists():
-            logger.info("Exporting RFDETRLarge to ONNX at %s ...", onnx_path)
+            logger.info("Exporting RFDETRSmall to ONNX at %s ...", onnx_path)
             try:
-                from rfdetr import RFDETRLarge
+                from rfdetr import RFDETRSmall
             except ImportError as exc:
                 raise RuntimeError(
                     "rfdetr is required for TensorRT engine build. "
                     "Install with: pip install 'rfdetr[onnx]'"
                 ) from exc
 
-            model = RFDETRLarge(resolution=self._config.detector_resolution)
+            model = RFDETRSmall(resolution=self._config.detector_resolution)
             model.export(
                 output_dir=str(onnx_dir),
                 batch_size=self._config.detector_batch_size,
