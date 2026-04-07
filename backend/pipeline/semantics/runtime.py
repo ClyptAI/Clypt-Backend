@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .boundary_reconciliation import reconcile_boundary_nodes
@@ -60,69 +62,87 @@ def run_merge_classify_and_reconcile(
     speech_emotion_timeline: SpeechEmotionTimeline | None,
     audio_event_timeline: AudioEventTimeline | None,
     llm_client: Any,
-    target_turn_count: int = 8,
-    halo_turn_count: int = 2,
+    target_batch_count: int = 5,
+    max_turns_per_batch: int = 25,
     model: str | None = None,
+    max_concurrent: int = 5,
 ) -> tuple[list[SemanticGraphNode], list[dict[str, Any]], list[dict[str, Any]]]:
     """Full Phase 2A + 2B: merge/classify per neighborhood batch, then boundary
-    reconciliation between every adjacent batch pair.
+    reconciliation between every adjacent batch pair.  Calls are dispatched in
+    parallel via ThreadPoolExecutor.
 
     Returns (final_nodes, merge_debug, boundary_debug).
     merge_debug: one entry per neighborhood batch.
     boundary_debug: one entry per reconciled batch seam (len = batches - 1).
     """
+    total_turns = len(canonical_timeline.turns)
+    batch_size = (
+        min(math.ceil(total_turns / target_batch_count), max_turns_per_batch)
+        if total_turns > 0
+        else max_turns_per_batch
+    )
+    halo_size = max(1, batch_size // 7)
+
     neighborhoods = build_turn_neighborhoods(
         canonical_timeline=canonical_timeline,
         speech_emotion_timeline=speech_emotion_timeline,
         audio_event_timeline=audio_event_timeline,
-        target_turn_count=target_turn_count,
-        halo_turn_count=halo_turn_count,
+        target_turn_count=batch_size,
+        halo_turn_count=halo_size,
     )
 
-    batch_nodes: list[list[SemanticGraphNode]] = []
-    merge_debug: list[dict[str, Any]] = []
-
-    for neighborhood in neighborhoods:
+    def _call_merge(neighborhood):
         prompt = build_merge_and_classify_prompt(neighborhood_payload=neighborhood)
         response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
-        merged_nodes = merge_and_classify_neighborhood(
-            neighborhood_payload=neighborhood,
-            gemini_response=response,
-        )
-        batch_nodes.append(merged_nodes)
-        merge_debug.append(
-            {
-                "batch_id": neighborhood["batch_id"],
-                "prompt": prompt,
-                "response": response,
-            }
-        )
+        return merge_and_classify_neighborhood(
+            neighborhood_payload=neighborhood, gemini_response=response
+        ), {"batch_id": neighborhood["batch_id"], "prompt": prompt, "response": response}
+
+    with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+        merge_futures = [pool.submit(_call_merge, n) for n in neighborhoods]
+        batch_results = [f.result() for f in merge_futures]  # preserves order
+
+    batch_nodes = [r[0] for r in batch_results]
+    merge_debug = [r[1] for r in batch_results]
 
     if not batch_nodes:
         return [], merge_debug, []
 
-    # Stitch batches together with a Gemini boundary-reconciliation call at each seam
+    # Parallel boundary reconciliation at each seam
+    def _call_boundary(idx):
+        left = [batch_nodes[idx - 1][-1]]
+        right = [batch_nodes[idx][0]]
+        reconciled, debug = run_boundary_reconciliation(
+            left_batch_nodes=left,
+            right_batch_nodes=right,
+            llm_client=llm_client,
+            model=model,
+        )
+        return idx, reconciled, {
+            "left_batch_id": neighborhoods[idx - 1]["batch_id"],
+            "right_batch_id": neighborhoods[idx]["batch_id"],
+            **debug,
+        }
+
+    seam_indices = range(1, len(batch_nodes))
+    seam_results: dict[int, tuple] = {}
+    if seam_indices:
+        with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+            seam_futures = {pool.submit(_call_boundary, i): i for i in seam_indices}
+            for f in as_completed(seam_futures):
+                idx, reconciled, debug = f.result()
+                seam_results[idx] = (reconciled, debug)
+
+    # Stitch in order
     final_nodes: list[SemanticGraphNode] = list(batch_nodes[0])
     boundary_debug: list[dict[str, Any]] = []
-
     for idx in range(1, len(batch_nodes)):
         next_nodes = batch_nodes[idx]
         if not next_nodes or not final_nodes:
             final_nodes.extend(next_nodes)
             continue
-        reconciled, br_debug = run_boundary_reconciliation(
-            left_batch_nodes=[final_nodes[-1]],
-            right_batch_nodes=[next_nodes[0]],
-            llm_client=llm_client,
-            model=model,
-        )
-        boundary_debug.append(
-            {
-                "left_batch_id": neighborhoods[idx - 1]["batch_id"],
-                "right_batch_id": neighborhoods[idx]["batch_id"],
-                **br_debug,
-            }
-        )
+        reconciled, br_debug = seam_results[idx]
+        boundary_debug.append(br_debug)
         final_nodes = [*final_nodes[:-1], *reconciled, *next_nodes[1:]]
 
     return final_nodes, merge_debug, boundary_debug

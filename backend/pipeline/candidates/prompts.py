@@ -74,7 +74,34 @@ def build_pooled_candidate_review_prompt(*, candidate_payload: dict) -> str:
     )
 
 
+def build_meta_prompt_generation_prompt(*, node_summaries: list[dict], target_count: int) -> str:
+    return (
+        "You are designing retrieval queries to find the best short-form clip candidates in a long-form video.\n\n"
+        "You have analyzed the video's semantic structure. Each node below represents a coherent semantic unit "
+        "(a claim, anecdote, reveal, qa_exchange, etc.) with its type, flags, and a one-sentence summary.\n\n"
+        f"TASK: generate exactly {target_count} targeted retrieval prompts specific to THIS video's content "
+        "that would surface the strongest, most shareable clip moments. Each prompt will be used as a "
+        "semantic similarity query against node embeddings.\n\n"
+        "RULES:\n"
+        "- Write prompts that reflect what you can actually see in the nodes (topics, themes, moment types present)\n"
+        "- Do NOT write prompts so generic they could apply to any video\n"
+        "- Only generate prompts for moment types you see clear evidence of\n"
+        "- Each prompt must be a single sentence starting with \"Find\"\n"
+        f"- Return EXACTLY {target_count} prompts — no more, no fewer\n\n"
+        "OUTPUT: Return ONLY this JSON object, no other text:\n"
+        "{\n"
+        '  "prompts": [\n'
+        '    "Find the moment where ...",\n'
+        '    "Find the strongest ...",\n'
+        "    ...\n"
+        "  ]\n"
+        "}\n\n"
+        f"Semantic node summaries:\n{json.dumps(node_summaries, ensure_ascii=True, indent=2)}"
+    )
+
+
 __all__ = [
+    "build_meta_prompt_generation_prompt",
     "build_pooled_candidate_review_prompt",
     "build_subgraph_review_prompt",
 ]

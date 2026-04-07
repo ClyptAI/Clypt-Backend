@@ -5,6 +5,11 @@ from typing import Any, Iterable
 
 from .config import VertexSettings
 
+try:
+    from google.genai import types
+except ImportError:
+    types = None
+
 
 def _extract_embedding_values(item: Any) -> list[float]:
     values = getattr(item, "values", None)
@@ -44,13 +49,23 @@ class VertexGeminiClient:
         model: str | None = None,
         temperature: float = 0.0,
     ) -> dict[str, Any]:
+        if types is not None:
+            _config = types.GenerateContentConfig(
+                temperature=temperature,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(
+                    thinking_level=types.ThinkingLevel.HIGH,
+                ),
+            )
+        else:
+            _config = {
+                "temperature": temperature,
+                "response_mime_type": "application/json",
+            }
         response = self._sdk.models.generate_content(
             model=model or self.settings.generation_model,
             contents=prompt,
-            config={
-                "temperature": temperature,
-                "response_mime_type": "application/json",
-            },
+            config=_config,
         )
         text = (getattr(response, "text", None) or "").strip()
         if not text:

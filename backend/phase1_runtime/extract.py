@@ -106,6 +106,7 @@ def run_phase1_sidecars(
     visual_extractor: Any,
     emotion_provider: Any,
     yamnet_provider: Any,
+    on_audio_chain_complete: Any | None = None,
 ) -> Phase1SidecarOutputs:
     """
     Run all Phase 1 sidecar tasks on the GPU.
@@ -175,10 +176,30 @@ def run_phase1_sidecars(
                     )
                 # visual completing here is fine — just let the loop continue.
 
-            phase1_visual = visual_future.result()
+            # Get audio chain result first so we can fire the callback immediately
             diarization_payload, emotion2vec_payload, yamnet_payload = (
                 audio_chain_future.result()
             )
+
+            if on_audio_chain_complete is not None:
+                _partial = Phase1SidecarOutputs(
+                    phase1_audio={
+                        "source_audio": source_url,
+                        "video_gcs_uri": video_gcs_uri,
+                        "local_video_path": str(workspace.video_path),
+                        "local_audio_path": str(workspace.audio_path),
+                    },
+                    diarization_payload=diarization_payload,
+                    phase1_visual={},
+                    emotion2vec_payload=emotion2vec_payload,
+                    yamnet_payload=yamnet_payload,
+                )
+                on_audio_chain_complete(_partial)
+                logger.info(
+                    "[extract] audio-chain callback fired — Phases 2-4 starting while RF-DETR finishes"
+                )
+
+            phase1_visual = visual_future.result()
 
         logger.info(
             "[extract] visual + audio chain both done in %.1f s",

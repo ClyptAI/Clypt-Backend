@@ -34,6 +34,21 @@ class V31Config:
     )
     phase4_budget: Phase4BudgetConfig = field(default_factory=Phase4BudgetConfig)
     phase4_subgraphs: Phase4SubgraphConfig = field(default_factory=Phase4SubgraphConfig)
+    phase2_target_batch_count: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE2_TARGET_BATCH_COUNT") or "5")
+    )
+    phase2_max_turns_per_batch: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE2_MAX_TURNS_PER_BATCH") or "25")
+    )
+    phase3_target_batch_count: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_TARGET_BATCH_COUNT") or "5")
+    )
+    phase3_max_nodes_per_batch: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_MAX_NODES_PER_BATCH") or "15")
+    )
+    gemini_max_concurrent: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_GEMINI_MAX_CONCURRENT") or "5")
+    )
 
 
 def get_v31_config() -> V31Config:

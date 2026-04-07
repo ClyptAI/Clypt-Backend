@@ -95,6 +95,7 @@ class VertexSettings:
     embedding_location: str = "us-central1"
     generation_model: str = "gemini-3.1-pro-preview"
     embedding_model: str = "gemini-embedding-2-preview"
+    flash_model: str = "gemini-3-flash-preview"
 
 
 @dataclass(slots=True)
@@ -192,6 +193,7 @@ def load_provider_settings() -> ProviderSettings:
             embedding_location=_read_env("VERTEX_EMBEDDING_LOCATION") or "us-central1",
             generation_model=_read_env("VERTEX_GEMINI_MODEL") or "gemini-3.1-pro-preview",
             embedding_model=_read_env("VERTEX_EMBEDDING_MODEL") or "gemini-embedding-2-preview",
+            flash_model=_read_env("VERTEX_FLASH_MODEL") or "gemini-3-flash-preview",
         ),
         storage=StorageSettings(gcs_bucket=gcs_bucket),
         phase1_runtime=Phase1RuntimeSettings(

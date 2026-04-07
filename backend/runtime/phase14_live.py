@@ -8,9 +8,9 @@ from backend.phase1_runtime.models import Phase1SidecarOutputs
 from backend.pipeline.artifacts import V31RunPaths, build_run_paths, save_json
 from backend.pipeline.candidates.build_local_subgraphs import build_local_subgraphs
 from backend.pipeline.candidates.dedupe_candidates import dedupe_clip_candidates
-from backend.pipeline.candidates.prompt_sources import build_meta_prompts
 from backend.pipeline.candidates.runtime import (
     embed_prompt_texts_live,
+    generate_meta_prompts_live,
     run_candidate_pool_review,
     run_subgraph_reviews,
 )
@@ -37,8 +37,9 @@ from backend.pipeline.timeline.tracklets import build_tracklet_artifacts
 @dataclass(slots=True)
 class V31LivePhase14Runner:
     config: V31Config
-    llm_client: Any
+    llm_client: Any          # Pro — for high-stakes single calls
     embedding_client: Any
+    flash_model: str = "gemini-3-flash-preview"   # Flash — for high-volume batch calls
     storage_client: Any | None = None
     node_media_preparer: Any | None = None
 
@@ -48,12 +49,14 @@ class V31LivePhase14Runner:
         *,
         llm_client: Any,
         embedding_client: Any,
+        flash_model: str = "gemini-3-flash-preview",
         storage_client: Any | None = None,
     ) -> "V31LivePhase14Runner":
         return cls(
             config=get_v31_config(),
             llm_client=llm_client,
             embedding_client=embedding_client,
+            flash_model=flash_model,
             storage_client=storage_client,
         )
 
@@ -66,10 +69,6 @@ class V31LivePhase14Runner:
         run_id: str,
         source_url: str,
         phase1_outputs: Phase1SidecarOutputs,
-        phase2_target_turn_count: int = 8,
-        phase2_halo_turn_count: int = 2,
-        phase3_local_target_node_count: int = 8,
-        phase3_local_halo_node_count: int = 2,
         phase3_long_range_top_k: int = 3,
         phase4_extra_prompt_texts: list[str] | None = None,
     ) -> Phase14RunSummary:
@@ -81,14 +80,10 @@ class V31LivePhase14Runner:
             canonical_timeline=phase1["canonical_timeline"],
             speech_emotion_timeline=phase1["speech_emotion_timeline"],
             audio_event_timeline=phase1["audio_event_timeline"],
-            target_turn_count=phase2_target_turn_count,
-            halo_turn_count=phase2_halo_turn_count,
         )
         phase3 = self.run_phase_3(
             paths=paths,
             nodes=phase2["nodes"],
-            target_node_count=phase3_local_target_node_count,
-            halo_node_count=phase3_local_halo_node_count,
             long_range_top_k=phase3_long_range_top_k,
         )
         self.run_phase_4(
@@ -136,8 +131,6 @@ class V31LivePhase14Runner:
         canonical_timeline,
         speech_emotion_timeline,
         audio_event_timeline,
-        target_turn_count: int,
-        halo_turn_count: int,
     ) -> dict[str, Any]:
         # Phase 2A (merge/classify) + Phase 2B (boundary reconciliation) in one pass
         nodes, merge_debug, boundary_debug = run_merge_classify_and_reconcile(
@@ -145,8 +138,10 @@ class V31LivePhase14Runner:
             speech_emotion_timeline=speech_emotion_timeline,
             audio_event_timeline=audio_event_timeline,
             llm_client=self.llm_client,
-            target_turn_count=target_turn_count,
-            halo_turn_count=halo_turn_count,
+            target_batch_count=self.config.phase2_target_batch_count,
+            max_turns_per_batch=self.config.phase2_max_turns_per_batch,
+            model=self.flash_model,
+            max_concurrent=self.config.gemini_max_concurrent,
         )
         if self.node_media_preparer is not None:
             multimodal_media = self.node_media_preparer(nodes=nodes, paths=paths, phase1_outputs=phase1_outputs)
@@ -180,21 +175,22 @@ class V31LivePhase14Runner:
         *,
         paths: V31RunPaths,
         nodes: list[SemanticGraphNode],
-        target_node_count: int,
-        halo_node_count: int,
         long_range_top_k: int,
     ) -> dict[str, Any]:
         structural_edges = build_structural_edges(nodes=nodes)
         local_edges, local_debug = run_local_semantic_edge_batches(
             nodes=nodes,
             llm_client=self.llm_client,
-            target_node_count=target_node_count,
-            halo_node_count=halo_node_count,
+            target_batch_count=self.config.phase3_target_batch_count,
+            max_nodes_per_batch=self.config.phase3_max_nodes_per_batch,
+            model=self.flash_model,
+            max_concurrent=self.config.gemini_max_concurrent,
         )
         long_range_edges, long_range_debug = run_long_range_edge_adjudication(
             nodes=nodes,
             llm_client=self.llm_client,
             top_k=long_range_top_k,
+            model=self.flash_model,
         )
         reconciled_semantic_edges = reconcile_semantic_edges(edges=[*local_edges, *long_range_edges])
         final_edges: list[SemanticGraphEdge] = [*structural_edges, *reconciled_semantic_edges]
@@ -216,7 +212,13 @@ class V31LivePhase14Runner:
         duration_s = 0.0
         if canonical_timeline.turns:
             duration_s = canonical_timeline.turns[-1].end_ms / 1000.0
-        prompt_texts = [*build_meta_prompts(video_duration_s=duration_s), *extra_prompt_texts]
+        dynamic_prompts = generate_meta_prompts_live(
+            nodes=nodes,
+            llm_client=self.llm_client,
+            model=self.flash_model,
+            duration_s=duration_s,
+        )
+        prompt_texts = [*dynamic_prompts, *extra_prompt_texts]
         embedded_prompts = embed_prompt_texts_live(
             prompts=prompt_texts,
             embedding_client=self.embedding_client,
@@ -235,6 +237,8 @@ class V31LivePhase14Runner:
         reviews, subgraph_debug = run_subgraph_reviews(
             subgraphs=subgraphs,
             llm_client=self.llm_client,
+            model=self.flash_model,
+            max_concurrent=self.config.gemini_max_concurrent,
         )
         raw_candidates: list[ClipCandidate] = []
         for review in reviews:
@@ -264,6 +268,7 @@ class V31LivePhase14Runner:
                     )
                 )
 
+        save_json(paths.candidates_dir / "meta_prompts_debug.json", {"dynamic_prompts": dynamic_prompts, "extra_prompt_texts": extra_prompt_texts})
         save_json(paths.retrieval_prompts_debug, embedded_prompts)
         save_json(paths.seed_nodes_debug, seeds)
         save_json(paths.local_subgraphs_debug, [subgraph.model_dump(mode="json") for subgraph in subgraphs])
