@@ -150,19 +150,27 @@ Controlled by `VIBEVOICE_BACKEND` env var:
 
 **vLLM backend (concurrent):**
 ```
-visual extraction ──┐
-                    ├── both run in parallel via ThreadPoolExecutor
-ASR (vLLM HTTP) ────┘
-    ↓ (both complete)
-NeMo Forced Aligner → emotion2vec+ → YAMNet   (always serial, GPU)
+visual extraction ──────────────────────────────────┐
+                                                     ├── both done → complete
+ASR (vLLM HTTP) ────┘                               │
+    ↓ immediately (RF-DETR still running)            │
+NeMo Forced Aligner → emotion2vec+ → YAMNet ────────┘
+    (serial with each other; concurrent with RF-DETR)
 ```
+
+ASR typically finishes in ~30–60s (RTF 0.07–0.08x). NFA+emotion2vec++YAMNet
+complete ~35s later. RF-DETR takes ~150–300s. Audio chain artifacts are ready
+well before visual finishes, allowing Phases 2–4 to start earlier.
 
 **native / hf backends (serial):**
 ```
 visual → ASR → NFA → emotion2vec+ → YAMNet
 ```
 
-The serial constraint for forced alignment, emotion2vec+, and YAMNet is intentional — they share the GPU and running them concurrently causes CUDA memory contention and graph conflicts.
+NFA, emotion2vec+, and YAMNet are always serial with each other — they share
+the GPU and running them concurrently causes CUDA memory contention and graph
+conflicts. Concurrency with RF-DETR (vLLM path only) is safe because RF-DETR's
+torch.compile CUDA graphs are captured during warmup, not inference replay.
 
 ## Environment
 

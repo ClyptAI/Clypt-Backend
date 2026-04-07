@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from backend.pipeline.timeline.vibevoice_merge import merge_vibevoice_outputs
@@ -12,92 +12,23 @@ from .models import Phase1SidecarOutputs, Phase1Workspace
 logger = logging.getLogger(__name__)
 
 
-def run_phase1_sidecars(
+def _run_audio_chain(
     *,
-    source_url: str,
-    video_gcs_uri: str,
     workspace: Phase1Workspace,
-    vibevoice_provider: Any,
+    vibevoice_turns: list[dict],
     forced_aligner: Any,
-    visual_extractor: Any,
     emotion_provider: Any,
     yamnet_provider: Any,
-) -> Phase1SidecarOutputs:
+) -> tuple[dict, Any, Any]:
     """
-    Run all Phase 1 sidecar tasks on the GPU.
+    NFA → emotion2vec+ → YAMNet, always serial with each other to avoid
+    CUDA graph conflicts between them.  Returns (diarization_payload,
+    emotion2vec_payload, yamnet_payload).
 
-    Serial order (native/hf backends — all GPU, no thread contention):
-      1. Visual extraction (RF-DETR + ByteTrack)
-      2. VibeVoice ASR (diarization + transcription)
-      3. NeMo Forced Aligner (word-level timestamps)
-      4. emotion2vec+
-      5. YAMNet
-
-    Overlapped order (vLLM backend — ASR is an HTTP call, not a GPU op):
-      1a. Visual extraction  ─┐ concurrent
-      1b. vLLM ASR           ─┘
-      2.  NeMo Forced Aligner (needs ASR output)
-      3.  emotion2vec+        (needs ASR output)
-      4.  YAMNet
+    On the vLLM path this runs in a ThreadPoolExecutor worker thread while
+    RF-DETR visual extraction is still running on the main GPU stream.
     """
-    t_total = time.perf_counter()
-
-    # VibeVoiceVLLMProvider sets supports_concurrent_visual=True because it
-    # calls a persistent HTTP service rather than the local GPU, so there is
-    # no CUDA memory contention with visual extraction.
-    _overlap = getattr(vibevoice_provider, "supports_concurrent_visual", False)
-
-    if _overlap:
-        # --- Overlapped: visual ∥ ASR ----------------------------------------
-        logger.info("[extract] starting visual extraction + vLLM ASR in parallel ...")
-        t_overlap = time.perf_counter()
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            visual_future = pool.submit(
-                visual_extractor.extract,
-                video_path=workspace.video_path,
-                workspace=workspace,
-            )
-            asr_future = pool.submit(
-                vibevoice_provider.run,
-                audio_path=workspace.audio_path,
-            )
-            # .result() re-raises any exception from the worker thread.
-            # If visual raises first, the pool __exit__ waits for ASR to
-            # finish before propagating — acceptable since ASR is an HTTP
-            # call and doesn't block the GPU.
-            phase1_visual = visual_future.result()
-            vibevoice_turns = asr_future.result()
-
-        logger.info(
-            "[extract] visual + ASR both done in %.1f s — %d turns",
-            time.perf_counter() - t_overlap,
-            len(vibevoice_turns),
-        )
-
-    else:
-        # --- Serial: visual then ASR -----------------------------------------
-        logger.info("[extract] starting visual extraction ...")
-        t_visual = time.perf_counter()
-        phase1_visual = visual_extractor.extract(
-            video_path=workspace.video_path,
-            workspace=workspace,
-        )
-        logger.info(
-            "[extract] visual extraction done in %.1f s", time.perf_counter() - t_visual
-        )
-
-        logger.info("[extract] starting VibeVoice ASR ...")
-        t_vv = time.perf_counter()
-        vibevoice_turns = vibevoice_provider.run(audio_path=workspace.audio_path)
-        logger.info(
-            "[extract] VibeVoice done in %.1f s — %d turns",
-            time.perf_counter() - t_vv,
-            len(vibevoice_turns),
-        )
-
-    # --- 3. ctc-forced-aligner -------------------------------------------
-    # Build preliminary turn dicts for the aligner so it gets start_ms/end_ms/transcript_text
+    # Build prelim turns for the aligner
     prelim_turns = []
     for idx, t in enumerate(vibevoice_turns, start=1):
         prelim_turns.append(
@@ -122,14 +53,12 @@ def run_phase1_sidecars(
         len(word_alignments),
     )
 
-    # --- Merge VibeVoice + alignments into canonical {words, turns} ------
     merged = merge_vibevoice_outputs(
         vibevoice_turns=vibevoice_turns,
         word_alignments=word_alignments,
     )
     turns = list(merged.get("turns") or [])
 
-    # Build diarization_payload in a shape downstream can use
     diarization_payload: dict[str, Any] = {
         "turns": [
             {
@@ -146,7 +75,6 @@ def run_phase1_sidecars(
         "words": merged.get("words", []),
     }
 
-    # --- 4. emotion2vec+ -------------------------------------------------
     logger.info("[extract] starting emotion2vec+ on %d turns ...", len(turns))
     t_emotion = time.perf_counter()
     emotion2vec_payload = emotion_provider.run(
@@ -155,7 +83,6 @@ def run_phase1_sidecars(
     )
     logger.info("[extract] emotion2vec+ done in %.1f s", time.perf_counter() - t_emotion)
 
-    # --- 5. YAMNet -------------------------------------------------------
     logger.info("[extract] starting YAMNet ...")
     t_yamnet = time.perf_counter()
     yamnet_payload = yamnet_provider.run(audio_path=workspace.audio_path)
@@ -165,6 +92,127 @@ def run_phase1_sidecars(
         time.perf_counter() - t_yamnet,
         yamnet_event_count,
     )
+
+    return diarization_payload, emotion2vec_payload, yamnet_payload
+
+
+def run_phase1_sidecars(
+    *,
+    source_url: str,
+    video_gcs_uri: str,
+    workspace: Phase1Workspace,
+    vibevoice_provider: Any,
+    forced_aligner: Any,
+    visual_extractor: Any,
+    emotion_provider: Any,
+    yamnet_provider: Any,
+) -> Phase1SidecarOutputs:
+    """
+    Run all Phase 1 sidecar tasks on the GPU.
+
+    Serial order (native/hf backends — all GPU, no thread contention):
+      1. Visual extraction (RF-DETR + ByteTrack)
+      2. VibeVoice ASR (diarization + transcription)
+      3. NeMo Forced Aligner (word-level timestamps)
+      4. emotion2vec+
+      5. YAMNet
+
+    Overlapped order (vLLM backend — ASR is an HTTP call, not a GPU op):
+      1a. Visual extraction  ─┐ concurrent via ThreadPoolExecutor(max_workers=3)
+      1b. vLLM ASR           ─┘
+          ↓ ASR done — audio chain starts immediately, visual still running
+      2.  NeMo Forced Aligner  ─┐
+      3.  emotion2vec+          ├─ concurrent with RF-DETR, serial with each other
+      4.  YAMNet               ─┘
+
+    Phases 2–4 only need the audio chain outputs (canonical_timeline,
+    speech_emotion_timeline, audio_event_timeline).  RF-DETR output is only
+    needed by Phase 5.  Starting the audio chain as soon as ASR finishes
+    means Phases 2–4 artifacts are ready ~230 s earlier on a ~13-min clip.
+    """
+    t_total = time.perf_counter()
+
+    # VibeVoiceVLLMProvider sets supports_concurrent_visual=True because it
+    # calls a persistent HTTP service rather than the local GPU, so there is
+    # no CUDA memory contention with visual extraction.
+    _overlap = getattr(vibevoice_provider, "supports_concurrent_visual", False)
+
+    if _overlap:
+        # --- Overlapped: visual ∥ ASR, then audio chain immediately after ASR -
+        logger.info("[extract] starting visual extraction + vLLM ASR in parallel ...")
+        t_overlap = time.perf_counter()
+
+        audio_chain_future = None
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            visual_future = pool.submit(
+                visual_extractor.extract,
+                video_path=workspace.video_path,
+                workspace=workspace,
+            )
+            asr_future = pool.submit(
+                vibevoice_provider.run,
+                audio_path=workspace.audio_path,
+            )
+
+            # Watch both futures; the moment ASR completes, submit the audio
+            # chain as a third worker so it runs while RF-DETR is still active.
+            for completed_fut in as_completed([visual_future, asr_future]):
+                if completed_fut is asr_future:
+                    vibevoice_turns = completed_fut.result()  # re-raises on error
+                    logger.info(
+                        "[extract] ASR done (%d turns) — starting audio chain "
+                        "while RF-DETR still running ...",
+                        len(vibevoice_turns),
+                    )
+                    audio_chain_future = pool.submit(
+                        _run_audio_chain,
+                        workspace=workspace,
+                        vibevoice_turns=vibevoice_turns,
+                        forced_aligner=forced_aligner,
+                        emotion_provider=emotion_provider,
+                        yamnet_provider=yamnet_provider,
+                    )
+                # visual completing here is fine — just let the loop continue.
+
+            phase1_visual = visual_future.result()
+            diarization_payload, emotion2vec_payload, yamnet_payload = (
+                audio_chain_future.result()
+            )
+
+        logger.info(
+            "[extract] visual + audio chain both done in %.1f s",
+            time.perf_counter() - t_overlap,
+        )
+
+    else:
+        # --- Serial: visual → ASR → audio chain ------------------------------
+        logger.info("[extract] starting visual extraction ...")
+        t_visual = time.perf_counter()
+        phase1_visual = visual_extractor.extract(
+            video_path=workspace.video_path,
+            workspace=workspace,
+        )
+        logger.info(
+            "[extract] visual extraction done in %.1f s", time.perf_counter() - t_visual
+        )
+
+        logger.info("[extract] starting VibeVoice ASR ...")
+        t_vv = time.perf_counter()
+        vibevoice_turns = vibevoice_provider.run(audio_path=workspace.audio_path)
+        logger.info(
+            "[extract] VibeVoice done in %.1f s — %d turns",
+            time.perf_counter() - t_vv,
+            len(vibevoice_turns),
+        )
+
+        diarization_payload, emotion2vec_payload, yamnet_payload = _run_audio_chain(
+            workspace=workspace,
+            vibevoice_turns=vibevoice_turns,
+            forced_aligner=forced_aligner,
+            emotion_provider=emotion_provider,
+            yamnet_provider=yamnet_provider,
+        )
 
     logger.info("[extract] all sidecars done in %.1f s", time.perf_counter() - t_total)
 
