@@ -88,16 +88,22 @@ class VertexEmbeddingClient:
         text_list = [str(text) for text in texts]
         if not text_list:
             return []
+        # embed_content treats a list of strings as a single multimodal document,
+        # returning 1 embedding for the whole batch. Call once per text instead.
+        _model = model or self.settings.embedding_model
         config = {"task_type": task_type} if task_type else None
-        response = self._sdk.models.embed_content(
-            model=model or self.settings.embedding_model,
-            contents=text_list,
-            config=config,
-        )
-        raw_embeddings = getattr(response, "embeddings", None)
-        if raw_embeddings is None:
-            raise ValueError("Vertex embeddings response is missing embeddings")
-        return [_extract_embedding_values(item) for item in raw_embeddings]
+        results: list[list[float]] = []
+        for text in text_list:
+            response = self._sdk.models.embed_content(
+                model=_model,
+                contents=text,
+                config=config,
+            )
+            raw_embeddings = getattr(response, "embeddings", None)
+            if raw_embeddings is None:
+                raise ValueError("Vertex embeddings response is missing embeddings")
+            results.append(_extract_embedding_values(raw_embeddings[0]))
+        return results
 
     def embed_media_uris(
         self,
