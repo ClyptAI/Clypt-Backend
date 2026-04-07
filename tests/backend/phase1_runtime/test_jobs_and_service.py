@@ -1,8 +1,51 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import time
 
 from fastapi.testclient import TestClient
+
+
+def test_run_phase1_service_uses_explicit_db_and_logs_paths(monkeypatch, tmp_path):
+    from backend.runtime import run_phase1_service
+
+    db_path = tmp_path / "service" / "jobs.db"
+    logs_root = tmp_path / "service" / "logs"
+    captured: dict[str, object] = {}
+
+    def fake_run(app, *, host, port, reload):
+        captured["app"] = app
+        captured["host"] = host
+        captured["port"] = port
+        captured["reload"] = reload
+
+    monkeypatch.setattr(run_phase1_service.uvicorn, "run", fake_run)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_phase1_service.py",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9090",
+            "--db-path",
+            str(db_path),
+            "--logs-root",
+            str(logs_root),
+        ],
+    )
+
+    exit_code = run_phase1_service.main()
+
+    assert exit_code == 0
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 9090
+    assert captured["reload"] is False
+
+    app = captured["app"]
+    assert app.state.store.db_path == db_path
+    assert app.state.logs_root == logs_root
 
 
 def test_phase1_worker_processes_one_job_to_success(tmp_path):
@@ -120,3 +163,79 @@ def test_phase1_worker_writes_job_log_file(tmp_path):
     assert updated is not None
     assert updated.log_path is not None
     assert Path(updated.log_path).read_text(encoding="utf-8").strip() == f"processing {job.job_id}"
+
+
+def test_phase1_worker_captures_python_logging_in_job_log(tmp_path):
+    import logging
+
+    from backend.phase1_runtime.jobs import create_job
+    from backend.phase1_runtime.models import Phase1JobCreatePayload
+    from backend.phase1_runtime.state_store import SQLiteJobStore
+    from backend.phase1_runtime.worker import Phase1Worker
+
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    logs_root = tmp_path / "logs"
+    job = create_job(
+        store,
+        Phase1JobCreatePayload(source_url="https://youtube.com/watch?v=test"),
+    )
+
+    logger = logging.getLogger("test.phase1.worker")
+    logger.setLevel(logging.INFO)
+
+    def fake_runner(*, job_id: str, source_url: str | None, source_path: str | None, runtime_controls: dict | None):
+        logger.info("log-event %s", job_id)
+        return {"ok": True}
+
+    worker = Phase1Worker(store=store, run_job=fake_runner, logs_root=logs_root)
+    worker.run_next_job_once()
+
+    updated = store.get_job(job.job_id)
+    assert updated is not None
+    assert updated.log_path is not None
+    contents = Path(updated.log_path).read_text(encoding="utf-8")
+    assert "log-event" in contents
+    assert job.job_id in contents
+
+
+def test_phase1_worker_creates_live_log_file_while_job_is_running(tmp_path):
+    from backend.phase1_runtime.jobs import create_job
+    from backend.phase1_runtime.models import Phase1JobCreatePayload
+    from backend.phase1_runtime.state_store import SQLiteJobStore
+    from backend.phase1_runtime.worker import Phase1Worker
+
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    logs_root = tmp_path / "logs"
+    job = create_job(
+        store,
+        Phase1JobCreatePayload(source_url="https://youtube.com/watch?v=test"),
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_runner(*, job_id: str, source_url: str | None, source_path: str | None, runtime_controls: dict | None):
+        print(f"processing {job_id}", flush=True)
+        started.set()
+        assert release.wait(timeout=5), "test runner timed out waiting to release fake job"
+        return {"ok": True}
+
+    worker = Phase1Worker(store=store, run_job=fake_runner, logs_root=logs_root)
+    thread = threading.Thread(target=worker.run_next_job_once, daemon=True)
+    thread.start()
+
+    assert started.wait(timeout=2), "worker never started fake job"
+    updated = store.get_job(job.job_id)
+    assert updated is not None
+    assert updated.log_path is not None
+
+    log_path = Path(updated.log_path)
+    deadline = time.time() + 2
+    while time.time() < deadline and not log_path.exists():
+        time.sleep(0.05)
+
+    assert log_path.exists()
+    assert "processing" in log_path.read_text(encoding="utf-8")
+
+    release.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()

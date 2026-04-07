@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 from backend.phase1_runtime.factory import build_default_phase1_job_runner
 from backend.phase1_runtime.state_store import SQLiteJobStore
 from backend.phase1_runtime.worker import Phase1Worker
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    configure_logging()
     args = build_parser().parse_args()
     store = SQLiteJobStore(args.db_path)
     job_runner = build_default_phase1_job_runner()

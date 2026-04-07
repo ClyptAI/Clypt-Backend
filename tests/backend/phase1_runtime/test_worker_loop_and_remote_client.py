@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 
@@ -31,3 +32,49 @@ def test_remote_job_client_builds_submit_and_logs_urls():
     assert client.jobs_url == "http://127.0.0.1:8080/jobs"
     assert client.job_url(job_id="job_123") == "http://127.0.0.1:8080/jobs/job_123"
     assert client.logs_url(job_id="job_123", tail_lines=50) == "http://127.0.0.1:8080/jobs/job_123/logs?tail_lines=50"
+
+
+def test_run_phase1_worker_configures_info_logging(monkeypatch, tmp_path):
+    from backend.runtime import run_phase1_worker
+
+    captured: dict[str, object] = {}
+
+    def fake_basic_config(**kwargs):
+        captured.update(kwargs)
+
+    class _FakeWorker:
+        def __init__(self, *, store, run_job, logs_root):
+            self.store = store
+            self.run_job = run_job
+            self.logs_root = logs_root
+
+        def run_forever(self, *, poll_interval_s: float):
+            captured["poll_interval_s"] = poll_interval_s
+
+    class _FakeRunner:
+        def __init__(self):
+            self.run_job = lambda **_: {"ok": True}
+
+    monkeypatch.setattr(run_phase1_worker.logging, "basicConfig", fake_basic_config)
+    monkeypatch.setattr(run_phase1_worker, "SQLiteJobStore", lambda path: ("store", path))
+    monkeypatch.setattr(run_phase1_worker, "build_default_phase1_job_runner", lambda: _FakeRunner())
+    monkeypatch.setattr(run_phase1_worker, "Phase1Worker", _FakeWorker)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_phase1_worker.py",
+            "--db-path",
+            str(tmp_path / "jobs.db"),
+            "--logs-root",
+            str(tmp_path / "logs"),
+            "--poll-interval-s",
+            "0.5",
+        ],
+    )
+
+    exit_code = run_phase1_worker.main()
+
+    assert exit_code == 0
+    assert captured["level"] == logging.INFO
+    assert "format" in captured
+    assert captured["poll_interval_s"] == 0.5

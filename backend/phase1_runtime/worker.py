@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+import logging
 from pathlib import Path
 import io
 import time
 from typing import Any, Callable
 
 from .state_store import SQLiteJobStore
+
+
+def _build_job_log_handler(log_path: Path) -> logging.Handler:
+    handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    )
+    return handler
 
 
 class Phase1Worker:
@@ -47,15 +60,40 @@ class Phase1Worker:
             completed_at=job.completed_at,
         )
         stream = io.StringIO()
+
+        class _TeeStream:
+            def __init__(self, *streams: io.TextIOBase):
+                self._streams = streams
+
+            def write(self, data: str) -> int:
+                for stream_obj in self._streams:
+                    stream_obj.write(data)
+                    stream_obj.flush()
+                return len(data)
+
+            def flush(self) -> None:
+                for stream_obj in self._streams:
+                    stream_obj.flush()
+
         try:
-            with redirect_stdout(stream), redirect_stderr(stream):
-                result = self.run_job(
-                    job_id=job.job_id,
-                    source_url=job.source_url,
-                    source_path=job.source_path,
-                    runtime_controls=job.runtime_controls,
-                )
-            log_path.write_text(stream.getvalue(), encoding="utf-8")
+            with log_path.open("w", encoding="utf-8", buffering=1) as log_file:
+                tee = _TeeStream(stream, log_file)
+                root_logger = logging.getLogger()
+                job_log_handler = _build_job_log_handler(log_path)
+                root_logger.addHandler(job_log_handler)
+                try:
+                    with redirect_stdout(tee), redirect_stderr(tee):
+                        result = self.run_job(
+                            job_id=job.job_id,
+                            source_url=job.source_url,
+                            source_path=job.source_path,
+                            runtime_controls=job.runtime_controls,
+                        )
+                finally:
+                    root_logger.removeHandler(job_log_handler)
+                    job_log_handler.flush()
+                    job_log_handler.close()
+                tee.flush()
             completed = self.store.complete_job(
                 job_id=job.job_id,
                 claim_token=job.claim_token or "",
@@ -65,7 +103,8 @@ class Phase1Worker:
                 raise RuntimeError(f"could not complete claimed job {job.job_id}")
             return True
         except Exception as exc:
-            log_path.write_text(stream.getvalue(), encoding="utf-8")
+            if not log_path.exists():
+                log_path.write_text(stream.getvalue(), encoding="utf-8")
             self.store.fail_job(
                 job_id=job.job_id,
                 claim_token=job.claim_token or "",

@@ -6,6 +6,8 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/clypt-phase1/repo
 EnvironmentFile=/etc/clypt-phase1/v3_1_phase1.env
+Environment=HOME=/opt/clypt-phase1
+Environment=PYTORCH_KERNEL_CACHE_PATH=/opt/clypt-phase1/.cache/torch/kernels
 ExecStart=/opt/clypt-phase1/repo/.venv/bin/python -m backend.runtime.run_phase1_worker --db-path /var/lib/clypt/v3_1_phase1_service/jobs.db --logs-root /var/log/clypt/v3_1_phase1
 Restart=always
 RestartSec=3

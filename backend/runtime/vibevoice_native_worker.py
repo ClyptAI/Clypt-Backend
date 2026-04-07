@@ -110,6 +110,11 @@ def _transcribe(
 ) -> tuple[list[dict[str, Any]], str]:
     import torch
 
+    logger.info(
+        "Preparing processor inputs (audio=%s, context_chars=%d)",
+        Path(audio_path).name,
+        len(context_info or ""),
+    )
     inputs = processor(
         audio=audio_path,
         sampling_rate=None,
@@ -121,6 +126,10 @@ def _transcribe(
         k: v.to(device) if isinstance(v, torch.Tensor) else v
         for k, v in inputs.items()
     }
+    logger.info(
+        "Processor inputs ready (prompt_tokens=%d)",
+        int(inputs["input_ids"].shape[1]),
+    )
 
     generation_config: dict[str, Any] = {
         "max_new_tokens": max_new_tokens,
@@ -135,6 +144,12 @@ def _transcribe(
     generation_config = {k: v for k, v in generation_config.items() if v is not None}
 
     t0 = time.perf_counter()
+    logger.info(
+        "Starting generate() (max_new_tokens=%d, do_sample=%s, num_beams=%d)",
+        max_new_tokens,
+        do_sample,
+        num_beams,
+    )
     with torch.no_grad():
         output_ids = model.generate(**inputs, **generation_config)
     logger.info("generate() finished in %.1f s", time.perf_counter() - t0)
@@ -150,6 +165,12 @@ def _transcribe(
         segments = []
 
     turns = _segments_to_turns(segments)
+    logger.info(
+        "post_process_transcription produced %d segments / %d turns (raw_text_chars=%d)",
+        len(segments),
+        len(turns),
+        len(generated_text),
+    )
     return turns, generated_text
 
 
@@ -220,6 +241,13 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
     attn_implementation = str(job.get("attn_implementation") or "flash_attention_2")
 
     device_s = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(
+        "Received job (audio=%s, model=%s, context_chars=%d, max_new_tokens=%d)",
+        p.name,
+        model_path,
+        len(context_info or "") if isinstance(context_info, str) else 0,
+        max_new_tokens,
+    )
     logger.info(
         "loading model %s (attn=%s, device=%s) ...",
         model_path, attn_implementation, device_s,

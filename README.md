@@ -41,7 +41,7 @@ Implemented:
 - Phase 1 sidecar orchestration for local GPU-backed audio + visual tasks
 - Phase 1 operational runtime shell:
   - media preparation
-  - ffmpeg shot detection + RF-DETR Large + ByteTrack visual extraction
+  - ffmpeg shot detection + RF-DETR Small + ByteTrack visual extraction
   - shot-local track splitting
   - person detection ledger generation
   - SQLite-backed job store
@@ -56,6 +56,11 @@ Implemented:
 - a Phase 1-4 orchestrator with provider-injected inputs
 - a live Phase 1-4 runner for provider-backed Phases 2-4
 - first validated native VibeVoice GPU path on DigitalOcean using a second venv, `flash_attention_2`, and `microsoft/VibeVoice-ASR`
+- serial worker logging that streams app logs, native-worker stderr, and per-job output into live job log files
+- deterministic native VibeVoice deploy path on DO:
+  - main worker env pinned to CUDA 12.4 PyTorch wheels
+  - native VibeVoice env built separately
+  - `flash-attn==2.8.3` rebuilt from source in the native env
 
 Not implemented yet on this branch:
 
@@ -64,6 +69,49 @@ Not implemented yet on this branch:
 - face/identity-oriented visual ledgers beyond person tracking
 - comment/trend/onboarding integrations
 - frontend integration
+
+## Current Working Setup
+
+The current working setup on this branch is the **serial** Phase 1 runtime:
+
+1. download or copy media
+2. extract WAV audio locally
+3. upload the source video to GCS
+4. visual extraction with **RF-DETR Small + ByteTrack**
+5. native VibeVoice ASR in a **second venv**
+6. NeMo forced alignment
+7. `emotion2vec+`
+8. `YAMNet`
+
+Important runtime facts:
+
+- default visual backend: `pytorch_cuda_fp16`
+- optimized visual backend: `tensorrt_fp16`
+- default ASR backend: `VIBEVOICE_BACKEND=native`
+- main worker env is pinned to:
+  - `torch==2.6.0+cu124`
+  - `torchvision==0.21.0+cu124`
+  - `torchaudio==2.6.0+cu124`
+- native VibeVoice env uses:
+  - `microsoft/VibeVoice-ASR`
+  - `flash_attention_2`
+  - Liger enabled
+- API and worker share the same SQLite DB and log root on the droplet
+- worker systemd env sets:
+  - `HOME=/opt/clypt-phase1`
+  - `PYTORCH_KERNEL_CACHE_PATH=/opt/clypt-phase1/.cache/torch/kernels`
+
+Validated on this branch:
+
+- native VibeVoice-only runs succeeded on:
+  - `60s` Joe Rogan slice
+  - `300s` Joe Rogan slice
+  - `540s` Joe Rogan slice
+  - full `392.9s` MrBeast clip
+
+Not yet freshly revalidated after the latest subprocess and logging fixes:
+
+- one full end-to-end serial Phase 1 rerun on the full `788.7s` Joe Rogan clip
 
 ## Environment
 

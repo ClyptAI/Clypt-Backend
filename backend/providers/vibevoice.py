@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,33 @@ _DEFAULT_HOTWORDS = (
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def validate_torchaudio_runtime() -> dict[str, str]:
+    """Validate the main-worker torchaudio install before Phase 1 starts.
+
+    The native VibeVoice model runs in its own venv, but the main worker still
+    probes WAV metadata via ``torchaudio.info`` before launching the subprocess.
+    Fail fast during deploy if that API is missing from the worker venv.
+    """
+    try:
+        import torchaudio
+    except ImportError as exc:
+        raise RuntimeError(
+            "torchaudio is required in the main worker environment."
+        ) from exc
+
+    info_fn = getattr(torchaudio, "info", None)
+    if not callable(info_fn):
+        version = getattr(torchaudio, "__version__", "unknown")
+        raise RuntimeError(
+            f"torchaudio.info is required in the main worker environment; "
+            f"found torchaudio {version!s} without a callable info() API."
+        )
+
+    return {
+        "torchaudio_version": str(getattr(torchaudio, "__version__", "unknown")),
+    }
 
 
 def _probe_audio_duration_s(audio_path: Path) -> float:
@@ -268,38 +296,90 @@ class VibeVoiceASRProvider:
         }
         env = os.environ.copy()
         env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONIOENCODING"] = "utf-8"
         cmd = [self.native_venv_python, "-m", "backend.runtime.vibevoice_native_worker"]
         logger.info("[vibevoice] spawning native worker: %s", " ".join(cmd))
+
+        stdout_chunks: list[str] = []
+        stderr_lines: list[str] = []
+
+        def _drain_stdout(pipe: Any) -> None:
+            if pipe is None:
+                return
+            data = pipe.read()
+            if data:
+                stdout_chunks.append(data)
+
+        def _drain_stderr(pipe: Any) -> None:
+            if pipe is None:
+                return
+            for line in pipe:
+                cleaned = line.rstrip()
+                if not cleaned:
+                    continue
+                stderr_lines.append(cleaned)
+                logger.info("[vibevoice-native] %s", cleaned)
+
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                input=json.dumps(job),
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
                 cwd=str(root),
                 env=env,
-                timeout=float(self.subprocess_timeout_s),
             )
+        except Exception as exc:
+            raise RuntimeError(f"[vibevoice] failed to spawn native worker: {exc}") from exc
+
+        stdout_thread = threading.Thread(
+            target=_drain_stdout,
+            args=(proc.stdout,),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_drain_stderr,
+            args=(proc.stderr,),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        try:
+            if proc.stdin is None:
+                raise RuntimeError("[vibevoice] native worker missing stdin pipe")
+            proc.stdin.write(json.dumps(job))
+            proc.stdin.close()
+            proc.wait(timeout=float(self.subprocess_timeout_s))
         except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
             raise RuntimeError(
                 f"[vibevoice] native worker exceeded {self.subprocess_timeout_s}s timeout"
             ) from None
+        finally:
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
 
-        if proc.stderr:
-            for line in proc.stderr.splitlines()[-30:]:
-                logger.info("[vibevoice-native] %s", line)
+        stdout_text = "".join(stdout_chunks)
+        stderr_text = "\n".join(stderr_lines)
 
         if proc.returncode not in (0, 2):
-            err = (proc.stderr or "") + "\n" + (proc.stdout or "")
+            err = stderr_text + "\n" + stdout_text
             raise RuntimeError(
                 f"[vibevoice] native worker failed (code={proc.returncode}): {err[-4000:]}"
             )
 
         try:
-            payload = json.loads(proc.stdout.strip())
+            payload = json.loads(stdout_text.strip())
         except json.JSONDecodeError as e:
             raise RuntimeError(
-                f"[vibevoice] invalid JSON from native worker: {e}\n{proc.stdout[:2000]}"
+                f"[vibevoice] invalid JSON from native worker: {e}\n{stdout_text[:2000]}"
             ) from e
 
         err = payload.get("error")

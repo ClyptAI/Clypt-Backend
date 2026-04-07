@@ -4,7 +4,7 @@ This module orchestrates:
 1. video metadata probing
 2. shot boundary detection
 3. frame decoding (CPU)
-4. RF-DETR Large person detection (GPU)
+4. RF-DETR Small person detection (GPU)
 5. ByteTrack tracking
 6. post-processing into the canonical artifact schemas
 

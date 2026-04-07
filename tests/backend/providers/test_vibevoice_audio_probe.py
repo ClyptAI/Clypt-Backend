@@ -40,3 +40,24 @@ def test_probe_short_wav_matches_torchaudio(tmp_path: Path) -> None:
     d = _probe_audio_duration_s(p)
     assert d is not None
     assert abs(d - 200 / 16000.0) < 0.001
+
+
+def test_validate_torchaudio_runtime_rejects_missing_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.providers import vibevoice
+
+    class _FakeTorchAudio:
+        __version__ = "broken"
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object):
+        if name == "torchaudio":
+            return _FakeTorchAudio()
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(RuntimeError, match="torchaudio.info"):
+        vibevoice.validate_torchaudio_runtime()

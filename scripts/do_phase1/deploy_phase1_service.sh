@@ -30,10 +30,18 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r "$REQUIREMENTS_FILE"
+python - <<'PY'
+from backend.providers.vibevoice import validate_torchaudio_runtime
+
+meta = validate_torchaudio_runtime()
+print(f"[deploy] main worker torchaudio OK: {meta['torchaudio_version']}")
+PY
 
 if [[ "$INSTALL_NATIVE_VIBEVOICE" == "1" ]]; then
   REPO_DIR="$REPO_DIR" bash scripts/do_phase1/install_native_vibevoice_env.sh
 fi
+
+install -d -m 0755 /opt/clypt-phase1/.cache/torch/kernels
 
 install -D -m 0644 scripts/do_phase1/systemd/clypt-v31-phase1-api.service /etc/systemd/system/clypt-v31-phase1-api.service
 install -D -m 0644 scripts/do_phase1/systemd/clypt-v31-phase1-worker.service /etc/systemd/system/clypt-v31-phase1-worker.service

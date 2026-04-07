@@ -33,7 +33,7 @@ _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 class TensorRTDetector:
-    """Runs RF-DETR Large person detection via a native TensorRT engine."""
+    """Runs RF-DETR Small person detection via a native TensorRT engine."""
 
     def __init__(self, config: VisualPipelineConfig) -> None:
         self._config = config
