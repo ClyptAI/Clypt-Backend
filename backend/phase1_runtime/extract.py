@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from backend.pipeline.timeline.vibevoice_merge import merge_vibevoice_outputs
@@ -143,8 +143,6 @@ def run_phase1_sidecars(
         logger.info("[extract] starting visual extraction + vLLM ASR in parallel ...")
         t_overlap = time.perf_counter()
 
-        audio_chain_future = None
-
         with ThreadPoolExecutor(max_workers=3) as pool:
             visual_future = pool.submit(
                 visual_extractor.extract,
@@ -156,27 +154,25 @@ def run_phase1_sidecars(
                 audio_path=workspace.audio_path,
             )
 
-            # Watch both futures; the moment ASR completes, submit the audio
-            # chain as a third worker so it runs while RF-DETR is still active.
-            for completed_fut in as_completed([visual_future, asr_future]):
-                if completed_fut is asr_future:
-                    vibevoice_turns = completed_fut.result()  # re-raises on error
-                    logger.info(
-                        "[extract] ASR done (%d turns) — starting audio chain "
-                        "while RF-DETR still running ...",
-                        len(vibevoice_turns),
-                    )
-                    audio_chain_future = pool.submit(
-                        _run_audio_chain,
-                        workspace=workspace,
-                        vibevoice_turns=vibevoice_turns,
-                        forced_aligner=forced_aligner,
-                        emotion_provider=emotion_provider,
-                        yamnet_provider=yamnet_provider,
-                    )
-                # visual completing here is fine — just let the loop continue.
+            # Block until ASR completes, then immediately start the audio chain
+            # as a third worker — RF-DETR is still running concurrently.
+            vibevoice_turns = asr_future.result()
+            logger.info(
+                "[extract] ASR done (%d turns) — starting audio chain "
+                "while RF-DETR still running ...",
+                len(vibevoice_turns),
+            )
+            audio_chain_future = pool.submit(
+                _run_audio_chain,
+                workspace=workspace,
+                vibevoice_turns=vibevoice_turns,
+                forced_aligner=forced_aligner,
+                emotion_provider=emotion_provider,
+                yamnet_provider=yamnet_provider,
+            )
 
-            # Get audio chain result first so we can fire the callback immediately
+            # Block until audio chain completes — fire callback immediately,
+            # before waiting for RF-DETR.
             diarization_payload, emotion2vec_payload, yamnet_payload = (
                 audio_chain_future.result()
             )
@@ -199,6 +195,7 @@ def run_phase1_sidecars(
                     "[extract] audio-chain callback fired — Phases 2-4 starting while RF-DETR finishes"
                 )
 
+            # Now wait for RF-DETR (may already be done if it finished first).
             phase1_visual = visual_future.result()
 
         logger.info(
