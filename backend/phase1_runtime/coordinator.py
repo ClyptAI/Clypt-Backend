@@ -90,6 +90,8 @@ def _build_branch_env(*, branch: BranchKind) -> dict[str, str]:
     env = os.environ.copy()
     if branch is BranchKind.YAMNET:
         env = {key: value for key, value in env.items() if key not in _YAMNET_STRIPPED_ENV_KEYS}
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["NVIDIA_VISIBLE_DEVICES"] = "void"
     return env
 
 

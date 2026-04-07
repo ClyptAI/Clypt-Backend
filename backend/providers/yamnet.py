@@ -24,6 +24,13 @@ def _build_default_runner(*, device: str = "gpu"):
     if normalized_device not in {"gpu", "cpu"}:
         raise ValueError("YAMNet device must be 'gpu' or 'cpu'.")
 
+    if normalized_device == "cpu":
+        try:
+            tf.config.set_visible_devices([], "GPU")
+        except Exception:
+            # Ignore if TF already initialized devices; env-level isolation should still apply.
+            pass
+
     physical_gpus = list(tf.config.list_physical_devices("GPU"))
     if normalized_device == "gpu" and not physical_gpus:
         raise RuntimeError("YAMNet was configured for GPU but no TensorFlow GPU device is available.")
