@@ -4,10 +4,12 @@ from .config import (
     StorageSettings,
     VertexSettings,
     VibeVoiceSettings,
+    VibeVoiceVLLMSettings,
     load_provider_settings,
 )
 from .forced_aligner import ForcedAlignmentProvider
 from .vibevoice import VibeVoiceASRProvider
+from .vibevoice_vllm import VibeVoiceVLLMProvider
 from .vertex import VertexEmbeddingClient, VertexGeminiClient
 
 __all__ = [
@@ -20,5 +22,7 @@ __all__ = [
     "VertexSettings",
     "VibeVoiceASRProvider",
     "VibeVoiceSettings",
+    "VibeVoiceVLLMProvider",
+    "VibeVoiceVLLMSettings",
     "load_provider_settings",
 ]

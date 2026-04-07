@@ -68,33 +68,51 @@ def main() -> int:
 
     from backend.providers.config import load_provider_settings
     from backend.providers.vibevoice import VibeVoiceASRProvider
+    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
 
     settings = load_provider_settings()
     v = settings.vibevoice
-    provider = VibeVoiceASRProvider(
-        backend=v.backend,
-        native_venv_python=v.native_venv_python or None,
-        model_id=v.model_id,
-        flash_attention=v.flash_attention,
-        liger_kernel=v.liger_kernel,
-        hotwords_context=v.hotwords_context,
-        system_prompt=v.system_prompt or None,
-        max_new_tokens=v.max_new_tokens,
-        do_sample=v.do_sample,
-        temperature=v.temperature,
-        top_p=v.top_p,
-        repetition_penalty=v.repetition_penalty,
-        num_beams=v.num_beams,
-        attn_implementation=v.attn_implementation,
-        subprocess_timeout_s=v.subprocess_timeout_s,
-    )
 
-    logger.info(
-        "backend=%s model_id=%s audio=%s",
-        v.backend,
-        v.model_id,
-        audio,
-    )
+    if v.backend == "vllm":
+        if settings.vllm_vibevoice is None:
+            logger.error("VIBEVOICE_BACKEND=vllm but VIBEVOICE_VLLM_BASE_URL is not set.")
+            return 2
+        vv = settings.vllm_vibevoice
+        provider = VibeVoiceVLLMProvider(
+            base_url=vv.base_url,
+            model=vv.model,
+            timeout_s=vv.timeout_s,
+            healthcheck_path=vv.healthcheck_path,
+            max_retries=vv.max_retries,
+            audio_mode=vv.audio_mode,
+            hotwords_context=v.hotwords_context,
+            max_new_tokens=v.max_new_tokens,
+            do_sample=v.do_sample,
+            temperature=v.temperature,
+            top_p=v.top_p,
+            repetition_penalty=v.repetition_penalty,
+            num_beams=v.num_beams,
+        )
+        logger.info("backend=vllm model=%s url=%s audio=%s", vv.model, vv.base_url, audio)
+    else:
+        provider = VibeVoiceASRProvider(
+            backend=v.backend,
+            native_venv_python=v.native_venv_python or None,
+            model_id=v.model_id,
+            flash_attention=v.flash_attention,
+            liger_kernel=v.liger_kernel,
+            hotwords_context=v.hotwords_context,
+            system_prompt=v.system_prompt or None,
+            max_new_tokens=v.max_new_tokens,
+            do_sample=v.do_sample,
+            temperature=v.temperature,
+            top_p=v.top_p,
+            repetition_penalty=v.repetition_penalty,
+            num_beams=v.num_beams,
+            attn_implementation=v.attn_implementation,
+            subprocess_timeout_s=v.subprocess_timeout_s,
+        )
+        logger.info("backend=%s model_id=%s audio=%s", v.backend, v.model_id, audio)
     t0 = time.perf_counter()
     provider.load()
     turns = provider.run(audio_path=audio)

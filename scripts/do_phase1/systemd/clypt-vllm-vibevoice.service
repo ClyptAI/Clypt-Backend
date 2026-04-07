@@ -1,0 +1,30 @@
+[Unit]
+Description=Clypt vLLM VibeVoice ASR Service
+Documentation=https://github.com/microsoft/VibeVoice
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker stop clypt-vllm-vibevoice
+ExecStartPre=-/usr/bin/docker rm   clypt-vllm-vibevoice
+ExecStart=/usr/bin/docker run \
+    --name clypt-vllm-vibevoice \
+    --gpus all \
+    --ipc=host \
+    -p 127.0.0.1:8000:8000 \
+    -e VIBEVOICE_FFMPEG_MAX_CONCURRENCY=64 \
+    -e PYTORCH_ALLOC_CONF=expandable_segments:True \
+    -v /opt/clypt-phase1/vibevoice-repo:/app \
+    -v /opt/clypt-phase1/hf-cache:/root/.cache/huggingface \
+    -w /app \
+    --entrypoint bash \
+    clypt-vllm-vibevoice:latest \
+    -c "python3 /app/vllm_plugin/scripts/start_server.py"
+ExecStop=/usr/bin/docker stop clypt-vllm-vibevoice
+Restart=always
+RestartSec=10
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

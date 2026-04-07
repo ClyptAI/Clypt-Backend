@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from backend.pipeline.timeline.vibevoice_merge import merge_vibevoice_outputs
@@ -23,35 +24,77 @@ def run_phase1_sidecars(
     yamnet_provider: Any,
 ) -> Phase1SidecarOutputs:
     """
-    Run all Phase 1 sidecar tasks serially on the GPU.
+    Run all Phase 1 sidecar tasks on the GPU.
 
-    Serial order (all on the GPU, no thread contention):
+    Serial order (native/hf backends — all GPU, no thread contention):
       1. Visual extraction (RF-DETR + ByteTrack)
       2. VibeVoice ASR (diarization + transcription)
       3. NeMo Forced Aligner (word-level timestamps)
       4. emotion2vec+
       5. YAMNet
+
+    Overlapped order (vLLM backend — ASR is an HTTP call, not a GPU op):
+      1a. Visual extraction  ─┐ concurrent
+      1b. vLLM ASR           ─┘
+      2.  NeMo Forced Aligner (needs ASR output)
+      3.  emotion2vec+        (needs ASR output)
+      4.  YAMNet
     """
     t_total = time.perf_counter()
 
-    # --- 1. Visual extraction --------------------------------------------
-    logger.info("[extract] starting visual extraction ...")
-    t_visual = time.perf_counter()
-    phase1_visual = visual_extractor.extract(
-        video_path=workspace.video_path,
-        workspace=workspace,
-    )
-    logger.info("[extract] visual extraction done in %.1f s", time.perf_counter() - t_visual)
+    # VibeVoiceVLLMProvider sets supports_concurrent_visual=True because it
+    # calls a persistent HTTP service rather than the local GPU, so there is
+    # no CUDA memory contention with visual extraction.
+    _overlap = getattr(vibevoice_provider, "supports_concurrent_visual", False)
 
-    # --- 2. VibeVoice ASR ------------------------------------------------
-    logger.info("[extract] starting VibeVoice ASR ...")
-    t_vv = time.perf_counter()
-    vibevoice_turns = vibevoice_provider.run(audio_path=workspace.audio_path)
-    logger.info(
-        "[extract] VibeVoice done in %.1f s — %d turns",
-        time.perf_counter() - t_vv,
-        len(vibevoice_turns),
-    )
+    if _overlap:
+        # --- Overlapped: visual ∥ ASR ----------------------------------------
+        logger.info("[extract] starting visual extraction + vLLM ASR in parallel ...")
+        t_overlap = time.perf_counter()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            visual_future = pool.submit(
+                visual_extractor.extract,
+                video_path=workspace.video_path,
+                workspace=workspace,
+            )
+            asr_future = pool.submit(
+                vibevoice_provider.run,
+                audio_path=workspace.audio_path,
+            )
+            # .result() re-raises any exception from the worker thread.
+            # If visual raises first, the pool __exit__ waits for ASR to
+            # finish before propagating — acceptable since ASR is an HTTP
+            # call and doesn't block the GPU.
+            phase1_visual = visual_future.result()
+            vibevoice_turns = asr_future.result()
+
+        logger.info(
+            "[extract] visual + ASR both done in %.1f s — %d turns",
+            time.perf_counter() - t_overlap,
+            len(vibevoice_turns),
+        )
+
+    else:
+        # --- Serial: visual then ASR -----------------------------------------
+        logger.info("[extract] starting visual extraction ...")
+        t_visual = time.perf_counter()
+        phase1_visual = visual_extractor.extract(
+            video_path=workspace.video_path,
+            workspace=workspace,
+        )
+        logger.info(
+            "[extract] visual extraction done in %.1f s", time.perf_counter() - t_visual
+        )
+
+        logger.info("[extract] starting VibeVoice ASR ...")
+        t_vv = time.perf_counter()
+        vibevoice_turns = vibevoice_provider.run(audio_path=workspace.audio_path)
+        logger.info(
+            "[extract] VibeVoice done in %.1f s — %d turns",
+            time.perf_counter() - t_vv,
+            len(vibevoice_turns),
+        )
 
     # --- 3. ctc-forced-aligner -------------------------------------------
     # Build preliminary turn dicts for the aligner so it gets start_ms/end_ms/transcript_text

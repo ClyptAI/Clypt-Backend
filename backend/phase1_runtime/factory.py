@@ -5,6 +5,7 @@ from pathlib import Path
 from backend.providers import (
     ForcedAlignmentProvider,
     VibeVoiceASRProvider,
+    VibeVoiceVLLMProvider,
     VertexEmbeddingClient,
     VertexGeminiClient,
     load_provider_settings,
@@ -21,23 +22,48 @@ from .visual_config import VisualPipelineConfig
 
 def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -> Phase1JobRunner:
     settings = load_provider_settings()
-    vibevoice_provider = VibeVoiceASRProvider(
-        backend=settings.vibevoice.backend,
-        native_venv_python=settings.vibevoice.native_venv_python or None,
-        model_id=settings.vibevoice.model_id,
-        flash_attention=settings.vibevoice.flash_attention,
-        liger_kernel=settings.vibevoice.liger_kernel,
-        hotwords_context=settings.vibevoice.hotwords_context,
-        system_prompt=settings.vibevoice.system_prompt or None,
-        max_new_tokens=settings.vibevoice.max_new_tokens,
-        do_sample=settings.vibevoice.do_sample,
-        temperature=settings.vibevoice.temperature,
-        top_p=settings.vibevoice.top_p,
-        repetition_penalty=settings.vibevoice.repetition_penalty,
-        num_beams=settings.vibevoice.num_beams,
-        attn_implementation=settings.vibevoice.attn_implementation,
-        subprocess_timeout_s=settings.vibevoice.subprocess_timeout_s,
-    )
+
+    if settings.vibevoice.backend == "vllm":
+        if settings.vllm_vibevoice is None:
+            # Should not happen — load_provider_settings raises if base_url is missing.
+            raise RuntimeError(
+                "VIBEVOICE_BACKEND=vllm but vllm_vibevoice settings were not loaded."
+            )
+        vv = settings.vllm_vibevoice
+        vibevoice_provider = VibeVoiceVLLMProvider(
+            base_url=vv.base_url,
+            model=vv.model,
+            timeout_s=vv.timeout_s,
+            healthcheck_path=vv.healthcheck_path,
+            max_retries=vv.max_retries,
+            audio_mode=vv.audio_mode,
+            hotwords_context=settings.vibevoice.hotwords_context,
+            max_new_tokens=settings.vibevoice.max_new_tokens,
+            do_sample=settings.vibevoice.do_sample,
+            temperature=settings.vibevoice.temperature,
+            top_p=settings.vibevoice.top_p,
+            repetition_penalty=settings.vibevoice.repetition_penalty,
+            num_beams=settings.vibevoice.num_beams,
+        )
+    else:
+        vibevoice_provider = VibeVoiceASRProvider(
+            backend=settings.vibevoice.backend,
+            native_venv_python=settings.vibevoice.native_venv_python or None,
+            model_id=settings.vibevoice.model_id,
+            flash_attention=settings.vibevoice.flash_attention,
+            liger_kernel=settings.vibevoice.liger_kernel,
+            hotwords_context=settings.vibevoice.hotwords_context,
+            system_prompt=settings.vibevoice.system_prompt or None,
+            max_new_tokens=settings.vibevoice.max_new_tokens,
+            do_sample=settings.vibevoice.do_sample,
+            temperature=settings.vibevoice.temperature,
+            top_p=settings.vibevoice.top_p,
+            repetition_penalty=settings.vibevoice.repetition_penalty,
+            num_beams=settings.vibevoice.num_beams,
+            attn_implementation=settings.vibevoice.attn_implementation,
+            subprocess_timeout_s=settings.vibevoice.subprocess_timeout_s,
+        )
+
     forced_aligner = ForcedAlignmentProvider()
     embedding_client = VertexEmbeddingClient(settings=settings.vertex)
     llm_client = VertexGeminiClient(settings=settings.vertex)
