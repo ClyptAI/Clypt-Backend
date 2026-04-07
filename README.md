@@ -15,15 +15,18 @@ Phases 5–6 (speaker participation grounding, render/9:16 output) are not yet i
 
 ## Current Working Setup
 
-Phase 1 runs visual extraction and ASR **concurrently**, then forced alignment / emotion2vec+ / YAMNet serially:
+Phase 1 runs visual extraction and ASR **concurrently**. The audio chain (NFA → emotion2vec+ → YAMNet) starts immediately when ASR finishes — without waiting for RF-DETR:
 
 ```
-visual (RF-DETR Small + ByteTrack) ──┐
-                                      ├── parallel via ThreadPoolExecutor
-ASR (VibeVoice vLLM HTTP) ───────────┘
-    ↓
-NFA → emotion2vec+ → YAMNet   (serial, GPU)
+visual (RF-DETR + ByteTrack) ───────────────────────┐
+                               ThreadPoolExecutor    ├── both done
+ASR (VibeVoice vLLM HTTP) ───┘  (max_workers=3)     │
+    ↓ immediately (RF-DETR still running)            │
+NFA → emotion2vec+ → YAMNet ────────────────────────┘
+    (serial with each other; concurrent with RF-DETR)
 ```
+
+Audio artifacts ready ~230s before RF-DETR finishes on a 13-min clip.
 
 - **ASR:** `VibeVoiceVLLMProvider` — HTTP calls to `clypt-vllm-vibevoice.service` (Docker-managed vLLM container)
 - **Visual:** RF-DETR Small + ByteTrack (`pytorch_cuda_fp16` default)
