@@ -26,7 +26,7 @@ from backend.pipeline.graph.structural_edges import build_structural_edges
 from backend.pipeline.semantics.runtime import (
     embed_semantic_nodes_live,
     prepare_node_media_embeddings,
-    run_merge_and_classify_batches,
+    run_merge_classify_and_reconcile,
 )
 from backend.pipeline.timeline.audio_events import build_audio_event_timeline
 from backend.pipeline.timeline.emotion_events import build_speech_emotion_timeline
@@ -139,7 +139,8 @@ class V31LivePhase14Runner:
         target_turn_count: int,
         halo_turn_count: int,
     ) -> dict[str, Any]:
-        nodes, merge_debug = run_merge_and_classify_batches(
+        # Phase 2A (merge/classify) + Phase 2B (boundary reconciliation) in one pass
+        nodes, merge_debug, boundary_debug = run_merge_classify_and_reconcile(
             canonical_timeline=canonical_timeline,
             speech_emotion_timeline=speech_emotion_timeline,
             audio_event_timeline=audio_event_timeline,
@@ -171,6 +172,7 @@ class V31LivePhase14Runner:
         save_json(paths.merge_debug, merge_debug)
         save_json(paths.classification_debug, [node.model_dump(mode="json") for node in embedded_nodes])
         save_json(paths.semantics_dir / "node_media_debug.json", multimodal_media)
+        save_json(paths.semantics_dir / "boundary_reconciliation_debug.json", boundary_debug)
         return {"nodes": embedded_nodes}
 
     def run_phase_3(

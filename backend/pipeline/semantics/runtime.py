@@ -24,6 +24,9 @@ def run_merge_and_classify_batches(
     halo_turn_count: int = 2,
     model: str | None = None,
 ) -> tuple[list[SemanticGraphNode], list[dict[str, Any]]]:
+    """Merge/classify per neighborhood batch only (no boundary reconciliation).
+    Used by tests and the injected path. Live path should use
+    run_merge_classify_and_reconcile() instead."""
     neighborhoods = build_turn_neighborhoods(
         canonical_timeline=canonical_timeline,
         speech_emotion_timeline=speech_emotion_timeline,
@@ -49,6 +52,80 @@ def run_merge_and_classify_batches(
             }
         )
     return nodes, debug
+
+
+def run_merge_classify_and_reconcile(
+    *,
+    canonical_timeline: CanonicalTimeline,
+    speech_emotion_timeline: SpeechEmotionTimeline | None,
+    audio_event_timeline: AudioEventTimeline | None,
+    llm_client: Any,
+    target_turn_count: int = 8,
+    halo_turn_count: int = 2,
+    model: str | None = None,
+) -> tuple[list[SemanticGraphNode], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Full Phase 2A + 2B: merge/classify per neighborhood batch, then boundary
+    reconciliation between every adjacent batch pair.
+
+    Returns (final_nodes, merge_debug, boundary_debug).
+    merge_debug: one entry per neighborhood batch.
+    boundary_debug: one entry per reconciled batch seam (len = batches - 1).
+    """
+    neighborhoods = build_turn_neighborhoods(
+        canonical_timeline=canonical_timeline,
+        speech_emotion_timeline=speech_emotion_timeline,
+        audio_event_timeline=audio_event_timeline,
+        target_turn_count=target_turn_count,
+        halo_turn_count=halo_turn_count,
+    )
+
+    batch_nodes: list[list[SemanticGraphNode]] = []
+    merge_debug: list[dict[str, Any]] = []
+
+    for neighborhood in neighborhoods:
+        prompt = build_merge_and_classify_prompt(neighborhood_payload=neighborhood)
+        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0)
+        merged_nodes = merge_and_classify_neighborhood(
+            neighborhood_payload=neighborhood,
+            gemini_response=response,
+        )
+        batch_nodes.append(merged_nodes)
+        merge_debug.append(
+            {
+                "batch_id": neighborhood["batch_id"],
+                "prompt": prompt,
+                "response": response,
+            }
+        )
+
+    if not batch_nodes:
+        return [], merge_debug, []
+
+    # Stitch batches together with a Gemini boundary-reconciliation call at each seam
+    final_nodes: list[SemanticGraphNode] = list(batch_nodes[0])
+    boundary_debug: list[dict[str, Any]] = []
+
+    for idx in range(1, len(batch_nodes)):
+        next_nodes = batch_nodes[idx]
+        if not next_nodes or not final_nodes:
+            final_nodes.extend(next_nodes)
+            continue
+        reconciled, br_debug = run_boundary_reconciliation(
+            left_batch_nodes=[final_nodes[-1]],
+            right_batch_nodes=[next_nodes[0]],
+            llm_client=llm_client,
+            model=model,
+        )
+        boundary_debug.append(
+            {
+                "left_batch_id": neighborhoods[idx - 1]["batch_id"],
+                "right_batch_id": neighborhoods[idx]["batch_id"],
+                **br_debug,
+            }
+        )
+        final_nodes = [*final_nodes[:-1], *reconciled, *next_nodes[1:]]
+
+    return final_nodes, merge_debug, boundary_debug
 
 
 def run_boundary_reconciliation(
@@ -112,4 +189,5 @@ __all__ = [
     "prepare_node_media_embeddings",
     "run_boundary_reconciliation",
     "run_merge_and_classify_batches",
+    "run_merge_classify_and_reconcile",
 ]
