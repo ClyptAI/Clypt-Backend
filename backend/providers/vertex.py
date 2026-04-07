@@ -53,9 +53,6 @@ class VertexGeminiClient:
             _config = types.GenerateContentConfig(
                 temperature=temperature,
                 response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(
-                    thinking_level=types.ThinkingLevel.HIGH,
-                ),
             )
         else:
             _config = {
