@@ -2,13 +2,9 @@
 # The main Phase 1 worker uses transformers>=5.x for RF-DETR; this venv must stay on
 # transformers<5 per https://github.com/microsoft/VibeVoice/blob/main/pyproject.toml
 #
-# Bring-up (example):
-#   python3 -m venv .venv-vibevoice-native
-#   source .venv-vibevoice-native/bin/activate
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-#   pip install -r requirements-vibevoice-native.txt
-#
-# flash-attn: optional; if install fails, set VIBEVOICE_ATTN_IMPLEMENTATION=sdpa on the worker job.
-flash-attn
+# Bring-up is handled by scripts/do_phase1/install_native_vibevoice_env.sh so the
+# droplet always installs the validated CUDA 12.4 / torch cu124 stack and then
+# builds flash-attn from source. Do not re-add flash-attn here; a plain pip install
+# path is what triggered the wheel ABI mismatch on the H200 worker.
 liger-kernel
 git+https://github.com/microsoft/VibeVoice.git

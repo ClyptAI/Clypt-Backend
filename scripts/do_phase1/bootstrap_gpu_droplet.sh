@@ -3,6 +3,8 @@ set -euo pipefail
 
 apt-get update
 apt-get install -y \
+  build-essential \
+  cuda-toolkit-12-4 \
   ffmpeg \
   git \
   python3 \

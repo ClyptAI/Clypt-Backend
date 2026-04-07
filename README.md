@@ -99,10 +99,7 @@ pip install -r requirements.txt
 For the native production ASR path, create the second venv separately:
 
 ```bash
-python3 -m venv .venv-vibevoice-native
-source .venv-vibevoice-native/bin/activate
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements-vibevoice-native.txt
+bash scripts/do_phase1/install_native_vibevoice_env.sh
 ```
 
 ## Running Tests
