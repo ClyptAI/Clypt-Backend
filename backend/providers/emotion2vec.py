@@ -50,6 +50,14 @@ def _build_default_model():
     return model
 
 
+def _clean_label(raw: str) -> str:
+    """emotion2vec+ may return '生气/angry' style labels — keep only the English part."""
+    raw = str(raw).strip()
+    if "/" in raw:
+        return raw.split("/", 1)[-1].strip().lower()
+    return raw.lower()
+
+
 def _normalize_emotion_result(result: Any) -> tuple[list[str], list[float], dict[str, float]]:
     if isinstance(result, list):
         if not result:
@@ -58,10 +66,10 @@ def _normalize_emotion_result(result: Any) -> tuple[list[str], list[float], dict
     if not isinstance(result, dict):
         raise ValueError("emotion2vec+ result must be a dict or list[dict]")
 
-    labels = [str(label) for label in (result.get("labels") or [])]
+    labels = [_clean_label(label) for label in (result.get("labels") or [])]
     scores = [float(score) for score in (result.get("scores") or [])]
     per_class_scores = {
-        str(label): float(score)
+        _clean_label(label): float(score)
         for label, score in dict(result.get("per_class_scores") or {}).items()
     }
 
