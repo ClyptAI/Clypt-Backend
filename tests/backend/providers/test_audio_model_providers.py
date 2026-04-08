@@ -42,6 +42,37 @@ def test_emotion2vec_plus_provider_clips_turns_and_normalizes_segments(tmp_path:
     assert payload["segments"][1]["scores"] == [0.91]
 
 
+def test_emotion2vec_plus_provider_logs_true_top_label_for_unsorted_scores(tmp_path: Path, caplog):
+    from backend.providers.emotion2vec import Emotion2VecPlusProvider
+
+    def fake_clipper(*, audio_path: Path, start_ms: int, end_ms: int) -> Path:
+        clip_path = tmp_path / f"{start_ms}_{end_ms}.wav"
+        clip_path.write_text("clip", encoding="utf-8")
+        return clip_path
+
+    class _FakeModel:
+        def generate(self, *, input, granularity="utterance"):
+            return [
+                {
+                    "labels": ["angry", "neutral"],
+                    "scores": [0.0, 0.87],
+                    "per_class_scores": {"angry": 0.0, "neutral": 0.87},
+                }
+            ]
+
+    caplog.set_level("INFO", logger="backend.providers.emotion2vec")
+    provider = Emotion2VecPlusProvider(model=_FakeModel(), clipper=fake_clipper)
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_text("audio", encoding="utf-8")
+
+    provider.run(
+        audio_path=audio_path,
+        turns=[{"turn_id": "t_000001", "start_ms": 0, "end_ms": 1200}],
+    )
+
+    assert "top: neutral 0.87" in caplog.text
+
+
 def test_yamnet_provider_merges_adjacent_patch_events():
     from backend.providers.yamnet import YAMNetProvider
 

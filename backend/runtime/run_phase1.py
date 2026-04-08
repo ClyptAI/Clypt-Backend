@@ -49,7 +49,10 @@ def main() -> int:
     )
     elapsed = time.perf_counter() - t0
     logger.info("=" * 60)
-    logger.info("Phase 1 complete in %.1f s (%.1f min)", elapsed, elapsed / 60)
+    if args.run_phase14:
+        logger.info("Phase 1-4 run complete in %.1f s (%.1f min)", elapsed, elapsed / 60)
+    else:
+        logger.info("Phase 1 complete in %.1f s (%.1f min)", elapsed, elapsed / 60)
     logger.info("=" * 60)
 
     print(json.dumps(result, indent=2, ensure_ascii=True))

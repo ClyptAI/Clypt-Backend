@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
+import time
 from typing import Any
 
 from backend.phase1_runtime.models import Phase1SidecarOutputs
@@ -32,6 +34,8 @@ from backend.pipeline.timeline.audio_events import build_audio_event_timeline
 from backend.pipeline.timeline.emotion_events import build_speech_emotion_timeline
 from backend.pipeline.timeline.timeline_builder import build_canonical_timeline
 from backend.pipeline.timeline.tracklets import build_tracklet_artifacts
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -74,6 +78,10 @@ class V31LivePhase14Runner:
     ) -> Phase14RunSummary:
         paths = self.build_run_paths(run_id=run_id)
         phase1 = self.run_phase_1(paths=paths, phase1_outputs=phase1_outputs)
+
+        t_phases_24 = time.perf_counter()
+        logger.info("[phase14] starting Phase 2 ...")
+        t_phase2 = time.perf_counter()
         phase2 = self.run_phase_2(
             paths=paths,
             phase1_outputs=phase1_outputs,
@@ -81,11 +89,27 @@ class V31LivePhase14Runner:
             speech_emotion_timeline=phase1["speech_emotion_timeline"],
             audio_event_timeline=phase1["audio_event_timeline"],
         )
+        logger.info(
+            "[phase14] Phase 2 done in %.1f s (nodes=%d)",
+            time.perf_counter() - t_phase2,
+            len(phase2["nodes"]),
+        )
+
+        logger.info("[phase14] starting Phase 3 ...")
+        t_phase3 = time.perf_counter()
         phase3 = self.run_phase_3(
             paths=paths,
             nodes=phase2["nodes"],
             long_range_top_k=phase3_long_range_top_k,
         )
+        logger.info(
+            "[phase14] Phase 3 done in %.1f s (edges=%d)",
+            time.perf_counter() - t_phase3,
+            len(phase3["edges"]),
+        )
+
+        logger.info("[phase14] starting Phase 4 ...")
+        t_phase4 = time.perf_counter()
         self.run_phase_4(
             paths=paths,
             source_url=source_url,
@@ -94,6 +118,8 @@ class V31LivePhase14Runner:
             edges=phase3["edges"],
             extra_prompt_texts=phase4_extra_prompt_texts or [],
         )
+        logger.info("[phase14] Phase 4 done in %.1f s", time.perf_counter() - t_phase4)
+        logger.info("[phase14] Phases 2-4 done in %.1f s", time.perf_counter() - t_phases_24)
         return Phase14RunSummary(run_id=run_id, artifact_paths=paths.to_dict())
 
     def run_phase_1(self, *, paths: V31RunPaths, phase1_outputs: Phase1SidecarOutputs) -> dict[str, Any]:

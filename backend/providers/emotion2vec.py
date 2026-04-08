@@ -77,9 +77,28 @@ def _normalize_emotion_result(result: Any) -> tuple[list[str], list[float], dict
         raise ValueError("emotion2vec+ result is missing labels")
     if not scores:
         raise ValueError("emotion2vec+ result is missing scores")
+    if len(labels) != len(scores):
+        pair_count = min(len(labels), len(scores))
+        if pair_count == 0:
+            raise ValueError("emotion2vec+ result labels/scores are mismatched")
+        labels = labels[:pair_count]
+        scores = scores[:pair_count]
     if not per_class_scores:
         per_class_scores = {labels[0]: scores[0]}
     return labels, scores, per_class_scores
+
+
+def _top_label_score(
+    *, labels: list[str], scores: list[float], per_class_scores: dict[str, float]
+) -> tuple[str, float]:
+    pair_count = min(len(labels), len(scores))
+    if pair_count > 0:
+        top_idx = max(range(pair_count), key=lambda idx: scores[idx])
+        return labels[top_idx], float(scores[top_idx])
+    if per_class_scores:
+        top_label, top_score = max(per_class_scores.items(), key=lambda item: item[1])
+        return str(top_label), float(top_score)
+    return "?", 0.0
 
 
 class Emotion2VecPlusProvider:
@@ -116,11 +135,16 @@ class Emotion2VecPlusProvider:
             )
             done = i + 1
             if done == 1 or done % _log_every == 0 or done == total:
+                top_label, top_score = _top_label_score(
+                    labels=labels,
+                    scores=scores,
+                    per_class_scores=per_class_scores,
+                )
                 logger.info(
                     "[emotion2vec] %d/%d turns  (top: %s %.2f)",
                     done, total,
-                    labels[0] if labels else "?",
-                    scores[0] if scores else 0.0,
+                    top_label,
+                    top_score,
                 )
         logger.info(
             "[emotion2vec] all %d turns done in %.1f s",

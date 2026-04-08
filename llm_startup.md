@@ -83,6 +83,9 @@ sudo journalctl -u clypt-v31-phase1-worker -f
 
 # phase1 job logs
 tail -f /var/log/clypt/v3_1_phase1/<job_log>.log
+
+# phase timing gates only
+tail -f /var/log/clypt/v3_1_phase1/<job_log>.log | grep --line-buffered -E "Phase 2 done|Phase 3 done|Phase 4 done|Phases 2-4 done|Phase 1-4 run complete"
 ```
 
 ## Key Paths
@@ -100,7 +103,9 @@ tail -f /var/log/clypt/v3_1_phase1/<job_log>.log
 - `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required even for VibeVoice-only smoke runs
 - Keep `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1` (strict)
 - Keep `CLYPT_PHASE1_YAMNET_DEVICE=cpu`
-- Keep cache env aligned to `/opt/clypt-phase1/.cache` roots (`TORCH_HOME`, `HF_HOME`, `MODELSCOPE_CACHE`, etc.)
+- Keep cache env aligned to `/opt/clypt-phase1/.cache` roots (`TORCH_HOME`, `HF_HOME`; `MODELSCOPE_CACHE` is optional compatibility only)
+- Keep `VIBEVOICE_VLLM_MAX_RETRIES=1` (single-attempt behavior; no automatic retry policy yet)
+- Keep deploy prewarm enabled (`PREWARM_PHASE1_MODELS=1`, default)
 
 ## Important Gotchas
 
@@ -108,6 +113,7 @@ tail -f /var/log/clypt/v3_1_phase1/<job_log>.log
 - Do not use `file://` with `--source-url`; use `--source-path` for local files.
 - First vLLM start may take 15-30 min due model download; later starts are much faster (cached).
 - If deployment pip resolver backtracks/fails on old `datasets/pyarrow`, deploy script auto-fallbacks to legacy resolver; this is expected.
+- emotion2vec progress logs now report true argmax top labels; old logs with `top: angry 0.00` were a logging artifact, not necessarily inference failure.
 
 ## Session Checklist For Any LLM
 

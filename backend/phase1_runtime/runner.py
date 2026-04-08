@@ -143,7 +143,10 @@ class Phase1JobRunner:
 
             result["phase1"] = _jsonable(phase1_outputs)
             result["summary"] = _jsonable(summary)
-            logger.info("[phase14] Phases 2-4 done in %.1f s", time.perf_counter() - t_p14)
+            logger.info(
+                "[phase14] Phase 2-4 branch joined in %.1f s (includes overlap with Phase 1 sidecars)",
+                time.perf_counter() - t_p14,
+            )
         else:
             # Original path: run sidecars, no phases 2-4
             phase1_outputs = run_phase1_sidecars(

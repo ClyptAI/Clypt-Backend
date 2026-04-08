@@ -62,6 +62,11 @@ All Gemini calls (Phases 2–4) use the following optimizations:
 
 ASR RTF ~0.07x on the validated GPU droplets. Full Phase 1–4 pipeline is **0.64× real-time** on a 6.5-min clip.
 
+Operational updates (2026-04-08):
+- Fresh `ai/ml` base-image redeploy run (`run_20260408_095543_mrbeastflagrant`) completed in ~4m34s wall time with **Phases 2-4 = 271.8s**.
+- Live logs now include explicit timing gates: `Phase 2 done`, `Phase 3 done`, `Phase 4 done`, and `Phases 2-4 done`.
+- emotion2vec progress logging now reports the true top class via score argmax (older logs could show misleading entries like `top: angry 0.00`).
+
 **429 note:** Longer videos (200+ turns) can hit `RESOURCE_EXHAUSTED` on Phase 3 local-edge batches. No automatic retry is implemented yet — rerun with a new job ID. See [Known Issues](#known-issues).
 
 ## Environment
@@ -89,7 +94,7 @@ CLYPT_PHASE1_CACHE_HOME=/opt/clypt-phase1/.cache
 XDG_CACHE_HOME=/opt/clypt-phase1/.cache
 TORCH_HOME=/opt/clypt-phase1/.cache/torch
 HF_HOME=/opt/clypt-phase1/.cache/huggingface
-MODELSCOPE_CACHE=/opt/clypt-phase1/.cache/modelscope
+MODELSCOPE_CACHE=/opt/clypt-phase1/.cache/modelscope   # optional compatibility cache; HF is the default download hub
 ```
 
 Full config in [.env.example](/Users/rithvik/Clypt-V3/.env.example).
