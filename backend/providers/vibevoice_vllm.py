@@ -36,7 +36,9 @@ _MIME_MAP = {
     ".opus": "audio/ogg",
 }
 
-_SHOW_KEYS = ["Start time", "End time", "Speaker ID", "Content"]
+_TURN_SHOW_KEYS = ["Start time", "End time", "Speaker ID", "Content"]
+_WORD_SHOW_KEYS = ["start_ms", "end_ms", "speaker_id", "word"]
+_VALID_OUTPUT_MODES = {"turns", "words"}
 
 _SYSTEM_PROMPT = (
     "You are a helpful assistant that transcribes audio input into text output in JSON format."
@@ -52,7 +54,9 @@ class VibeVoiceVLLMProvider:
     Video files (MP4 etc.) are extracted to MP3 before sending.
     No native subprocess, no HF in-process loading, no fallback — fail fast.
 
-    Outputs: ``[{"Start": float, "End": float, "Speaker": int, "Content": str}, ...]``
+    Outputs:
+      - ``output_mode=turns``: ``[{"Start": float, "End": float, "Speaker": int, "Content": str}, ...]``
+      - ``output_mode=words``: ``[{"start_ms": int, "end_ms": int, "speaker_id": int, "word": str}, ...]``
     """
 
     # Signals to extract.py that ASR calls an HTTP service (not the GPU),
@@ -69,6 +73,8 @@ class VibeVoiceVLLMProvider:
         max_retries: int = 1,
         audio_mode: str = "base64",
         hotwords_context: str | None = None,
+        output_mode: str = "turns",
+        word_turn_gap_ms: int = 900,
         max_new_tokens: int = 32768,
         do_sample: bool = False,
         temperature: float = 0.0,
@@ -89,6 +95,12 @@ class VibeVoiceVLLMProvider:
         self.hotwords_context = (
             hotwords_context if hotwords_context is not None else _DEFAULT_HOTWORDS
         )
+        self.output_mode = str(output_mode or "turns").lower()
+        if self.output_mode not in _VALID_OUTPUT_MODES:
+            raise RuntimeError(
+                f"Unsupported VIBEVOICE_OUTPUT_MODE={output_mode!r}; expected one of {_VALID_OUTPUT_MODES}."
+            )
+        self.word_turn_gap_ms = max(0, int(word_turn_gap_ms))
         self.max_new_tokens = max_new_tokens
         self.do_sample = do_sample
         self.temperature = temperature
@@ -135,15 +147,16 @@ class VibeVoiceVLLMProvider:
         try:
             duration_s = self._probe_duration(audio_for_req)
             logger.info(
-                "[vibevoice-vllm] ASR request: model=%s url=%s audio=%s (%.1f s) context=%d chars",
+                "[vibevoice-vllm] ASR request: model=%s url=%s audio=%s (%.1f s) output_mode=%s context=%d chars",
                 self.model,
                 self.base_url,
                 audio_path.name,
                 duration_s,
+                self.output_mode,
                 len(context),
             )
             t0 = time.perf_counter()
-            turns = self._request_with_retry(audio_for_req, context, duration_s)
+            entries = self._request_with_retry(audio_for_req, context, duration_s)
             elapsed = time.perf_counter() - t0
         finally:
             if is_temp:
@@ -152,14 +165,16 @@ class VibeVoiceVLLMProvider:
                 except Exception:
                     pass
 
+        item_kind = "words" if self.output_mode == "words" else "turns"
         rtf = elapsed / duration_s if duration_s > 0 else 0.0
         logger.info(
-            "[vibevoice-vllm] done in %.1f s — %d turns (RTF %.2fx)",
+            "[vibevoice-vllm] done in %.1f s — %d %s (RTF %.2fx)",
             elapsed,
-            len(turns),
+            len(entries),
+            item_kind,
             rtf,
         )
-        return turns
+        return entries
 
     def _extract_audio_if_needed(self, audio_path: Path) -> tuple[Path, bool]:
         """Extract video files to MP3. Returns (path_to_use, is_temp)."""
@@ -270,16 +285,34 @@ class VibeVoiceVLLMProvider:
         audio_b64 = base64.b64encode(audio_path.read_bytes()).decode("ascii")
         mime = _MIME_MAP.get(audio_path.suffix.lower(), "audio/wav")
 
+        if self.output_mode == "words":
+            output_instructions = (
+                "Return only a JSON array. Do not wrap in markdown.\n"
+                "Each item must be exactly: "
+                '{"start_ms": <int>, "end_ms": <int>, "speaker_id": <int>, "word": <string>}.\n'
+                "Use one spoken word per item, in chronological order.\n"
+                "Times must be milliseconds from start of audio and satisfy start_ms < end_ms."
+            )
+            keys_hint = ", ".join(_WORD_SHOW_KEYS)
+        else:
+            output_instructions = (
+                "Return only a JSON array. Do not wrap in markdown.\n"
+                "Each item must contain these keys: " + ", ".join(_TURN_SHOW_KEYS) + "."
+            )
+            keys_hint = ", ".join(_TURN_SHOW_KEYS)
+
         if context.strip():
             prompt_text = (
                 f"This is a {duration_s:.2f} seconds audio, "
                 f"with extra info: {context.strip()}\n\n"
-                f"Please transcribe it with these keys: " + ", ".join(_SHOW_KEYS)
+                f"Please transcribe it with these keys: {keys_hint}\n\n"
+                f"{output_instructions}"
             )
         else:
             prompt_text = (
                 f"This is a {duration_s:.2f} seconds audio, "
-                f"please transcribe it with these keys: " + ", ".join(_SHOW_KEYS)
+                f"please transcribe it with these keys: {keys_hint}\n\n"
+                f"{output_instructions}"
             )
 
         return {
@@ -305,57 +338,158 @@ class VibeVoiceVLLMProvider:
 
     def _parse_content(self, content: str) -> list[dict[str, Any]]:
         try:
-            raw_turns = json.loads(content)
+            raw_items = json.loads(content)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
-                f"[vibevoice-vllm] content is not parseable as turns: {exc}\n"
+                f"[vibevoice-vllm] content is not parseable as JSON: {exc}\n"
                 f"{content[:2000]}"
             ) from exc
 
-        if not isinstance(raw_turns, list):
+        if not isinstance(raw_items, list):
             raise RuntimeError(
-                f"[vibevoice-vllm] expected list of turns, got {type(raw_turns).__name__}"
+                f"[vibevoice-vllm] expected JSON list, got {type(raw_items).__name__}"
             )
 
-        turns = self._normalize_turns(raw_turns)
+        if self.output_mode == "words":
+            words = self._normalize_words(raw_items)
+            if not words:
+                raise RuntimeError(
+                    "[vibevoice-vllm] zero usable words in response for output_mode=words."
+                )
+            return words
+
+        turns = self._normalize_turns(raw_items)
         if not turns:
             raise RuntimeError(
-                "[vibevoice-vllm] zero usable turns in response — "
-                "the audio may be silent or the model output is malformed."
+                "[vibevoice-vllm] zero usable turns in response for output_mode=turns."
             )
         return turns
 
+    @staticmethod
+    def _to_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _to_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _parse_speaker_id(value: Any) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.upper().startswith("SPEAKER_"):
+                stripped = stripped.split("_", 1)[1]
+            return VibeVoiceVLLMProvider._to_int(stripped, default=0)
+        return VibeVoiceVLLMProvider._to_int(value, default=0)
+
     def _normalize_turns(self, raw_turns: list[Any]) -> list[dict[str, Any]]:
-        normalized = []
+        normalized: list[dict[str, Any]] = []
         for item in raw_turns:
             if not isinstance(item, dict):
                 continue
-            sp = item.get("Speaker")
-            if sp is None:
-                sp = item.get("speaker") or item.get("speaker_id")
+            sp = (
+                item.get("Speaker")
+                or item.get("speaker")
+                or item.get("speaker_id")
+                or item.get("Speaker ID")
+            )
+            start_s = self._to_float(
+                item.get("Start")
+                or item.get("start")
+                or item.get("start_time")
+                or item.get("Start time")
+                or 0.0
+            )
+            end_s = self._to_float(
+                item.get("End")
+                or item.get("end")
+                or item.get("end_time")
+                or item.get("End time")
+                or 0.0
+            )
+            content = str(
+                item.get("Content")
+                or item.get("content")
+                or item.get("text")
+                or item.get("transcript")
+                or ""
+            ).strip()
+            if not content or end_s <= start_s:
+                continue
             normalized.append(
                 {
-                    "Start": float(
-                        item.get("Start")
-                        or item.get("start")
-                        or item.get("start_time")
-                        or 0.0
-                    ),
-                    "End": float(
-                        item.get("End")
-                        or item.get("end")
-                        or item.get("end_time")
-                        or 0.0
-                    ),
-                    "Speaker": int(sp or 0),
-                    "Content": str(
-                        item.get("Content")
-                        or item.get("content")
-                        or item.get("text")
-                        or ""
-                    ).strip(),
+                    "Start": start_s,
+                    "End": end_s,
+                    "Speaker": self._parse_speaker_id(sp),
+                    "Content": content,
                 }
             )
+        normalized.sort(key=lambda t: (t["Start"], t["End"]))
+        return normalized
+
+    def _normalize_words(self, raw_words: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in raw_words:
+            if not isinstance(item, dict):
+                continue
+            start_ms_raw = (
+                item.get("start_ms")
+                or item.get("startMs")
+                or item.get("StartMs")
+                or item.get("start_ms_time")
+            )
+            end_ms_raw = (
+                item.get("end_ms")
+                or item.get("endMs")
+                or item.get("EndMs")
+                or item.get("end_ms_time")
+            )
+            if start_ms_raw is None:
+                start_s_raw = item.get("start") or item.get("Start") or item.get("start_time")
+                start_ms = int(round(self._to_float(start_s_raw, default=0.0) * 1000))
+            else:
+                start_ms = self._to_int(start_ms_raw, default=0)
+
+            if end_ms_raw is None:
+                end_s_raw = item.get("end") or item.get("End") or item.get("end_time")
+                end_ms = int(round(self._to_float(end_s_raw, default=0.0) * 1000))
+            else:
+                end_ms = self._to_int(end_ms_raw, default=0)
+
+            speaker = self._parse_speaker_id(
+                item.get("speaker_id")
+                or item.get("speaker")
+                or item.get("Speaker")
+                or item.get("Speaker ID")
+            )
+            word = str(
+                item.get("word")
+                or item.get("Word")
+                or item.get("text")
+                or item.get("Text")
+                or item.get("token")
+                or item.get("Content")
+                or ""
+            ).strip()
+            if not word or end_ms <= start_ms:
+                continue
+            normalized.append(
+                {
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "speaker_id": speaker,
+                    "word": word,
+                }
+            )
+        normalized.sort(key=lambda w: (w["start_ms"], w["end_ms"]))
         return normalized
 
     def teardown(self) -> None:

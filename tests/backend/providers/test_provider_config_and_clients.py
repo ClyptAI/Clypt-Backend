@@ -30,6 +30,8 @@ def test_load_provider_settings_uses_env_and_gcloud_fallback(
 
     assert settings.vllm_vibevoice.base_url == "http://127.0.0.1:8000"
     assert settings.vllm_vibevoice.model == "vibevoice"
+    assert settings.vibevoice.output_mode == "turns"
+    assert settings.vibevoice.word_turn_gap_ms == 900
     assert settings.vibevoice.max_new_tokens == 32768
     assert settings.vibevoice.do_sample is False
     assert settings.vertex.project == "clypt-v3"
@@ -55,6 +57,7 @@ def test_load_provider_settings_vllm_defaults(tmp_path: Path, monkeypatch: pytes
 
     assert settings.vllm_vibevoice.base_url == "http://127.0.0.1:8000"
     assert settings.vllm_vibevoice.model == "vibevoice"
+    assert settings.vibevoice.output_mode == "turns"
     assert settings.vibevoice.max_new_tokens == 32768
     assert settings.vibevoice.do_sample is False
 
@@ -127,6 +130,39 @@ def test_load_provider_settings_vibevoice_custom_hotwords(
     settings = load_provider_settings()
 
     assert settings.vibevoice.hotwords_context == "hello, world"
+
+
+def test_load_provider_settings_vibevoice_word_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("VIBEVOICE_OUTPUT_MODE", "words")
+    monkeypatch.setenv("VIBEVOICE_WORD_TURN_GAP_MS", "1200")
+
+    settings = load_provider_settings()
+
+    assert settings.vibevoice.output_mode == "words"
+    assert settings.vibevoice.word_turn_gap_ms == 1200
+
+
+def test_load_provider_settings_rejects_invalid_vibevoice_output_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("VIBEVOICE_OUTPUT_MODE", "segments")
+
+    with pytest.raises(ValueError, match="VIBEVOICE_OUTPUT_MODE"):
+        load_provider_settings()
 
 
 def test_load_provider_settings_rejects_non_vllm_backend(

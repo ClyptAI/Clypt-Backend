@@ -60,6 +60,8 @@ class VibeVoiceSettings:
     """Shared generation controls for the vLLM VibeVoice ASR path."""
 
     hotwords_context: str = _DEFAULT_HOTWORDS
+    output_mode: str = "turns"
+    word_turn_gap_ms: int = 900
     max_new_tokens: int = 32768
     do_sample: bool = False
     temperature: float = 0.0
@@ -129,6 +131,14 @@ def load_provider_settings() -> ProviderSettings:
         raise ValueError("GCS_BUCKET or CLYPT_GCS_BUCKET is required for Phase 1 storage.")
 
     hotwords_context = _read_env("VIBEVOICE_HOTWORDS_CONTEXT") or _DEFAULT_HOTWORDS
+    output_mode = (_read_env("VIBEVOICE_OUTPUT_MODE") or "turns").lower()
+    if output_mode not in {"turns", "words"}:
+        raise ValueError(
+            f"Unsupported VIBEVOICE_OUTPUT_MODE={output_mode!r}; expected 'turns' or 'words'."
+        )
+    word_turn_gap_ms = int(_read_env("VIBEVOICE_WORD_TURN_GAP_MS") or "900")
+    if word_turn_gap_ms < 0:
+        raise ValueError("VIBEVOICE_WORD_TURN_GAP_MS must be >= 0.")
     backend = (_read_env("VIBEVOICE_BACKEND") or "vllm").lower()
     if backend != "vllm":
         raise ValueError(
@@ -150,6 +160,8 @@ def load_provider_settings() -> ProviderSettings:
     return ProviderSettings(
         vibevoice=VibeVoiceSettings(
             hotwords_context=hotwords_context,
+            output_mode=output_mode,
+            word_turn_gap_ms=word_turn_gap_ms,
             max_new_tokens=int(_read_env("VIBEVOICE_MAX_NEW_TOKENS") or "32768"),
             do_sample=(_read_env("VIBEVOICE_DO_SAMPLE") or "0") == "1",
             temperature=float(_read_env("VIBEVOICE_TEMPERATURE") or "0"),

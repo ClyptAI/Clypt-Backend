@@ -131,6 +131,75 @@ def test_run_phase1_sidecars_runs_vllm_and_audio_chain(tmp_path: Path):
     assert i_vv < i_fa < i_em < i_yn
 
 
+def test_run_phase1_sidecars_words_mode_skips_forced_alignment(tmp_path: Path):
+    from backend.phase1_runtime.extract import run_phase1_sidecars
+    from backend.phase1_runtime.models import Phase1Workspace
+
+    call_order: list[str] = []
+
+    class _FakeVibeVoice:
+        supports_concurrent_visual = True
+        output_mode = "words"
+        word_turn_gap_ms = 500
+
+        def run(self, *, audio_path: Path, context_info=None):
+            call_order.append(f"vibevoice:{audio_path.name}")
+            return [
+                {"start_ms": 0, "end_ms": 120, "speaker_id": 0, "word": "hello"},
+                {"start_ms": 130, "end_ms": 260, "speaker_id": 0, "word": "world"},
+                {"start_ms": 900, "end_ms": 1100, "speaker_id": 1, "word": "again"},
+            ]
+
+    class _FakeForcedAligner:
+        def run(self, *, audio_path: Path, turns: list[dict]):
+            raise AssertionError("forced aligner should not run when output_mode=words")
+
+    class _FakeVisualExtractor:
+        def extract(self, *, video_path: Path, workspace: Phase1Workspace):
+            call_order.append(f"visual:{video_path.name}")
+            return {
+                "video_metadata": {"fps": 10.0},
+                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+                "tracks": [],
+            }
+
+    class _FakeEmotionProvider:
+        def run(self, *, audio_path: Path, turns: list[dict]):
+            call_order.append(f"emotion:{audio_path.name}:{len(turns)}")
+            return {"segments": []}
+
+    class _FakeYamnetProvider:
+        def run(self, *, audio_path: Path):
+            call_order.append(f"yamnet:{audio_path.name}")
+            return {"events": []}
+
+    workspace = Phase1Workspace.create(root=tmp_path, run_id="run_001")
+    workspace.video_path.write_text("video-bytes", encoding="utf-8")
+    workspace.audio_path.write_text("audio-bytes", encoding="utf-8")
+
+    outputs = run_phase1_sidecars(
+        source_url="https://youtube.com/watch?v=demo",
+        video_gcs_uri="gs://bucket/source.mp4",
+        workspace=workspace,
+        vibevoice_provider=_FakeVibeVoice(),
+        forced_aligner=_FakeForcedAligner(),
+        visual_extractor=_FakeVisualExtractor(),
+        emotion_provider=_FakeEmotionProvider(),
+        yamnet_provider=_FakeYamnetProvider(),
+    )
+
+    assert [w["text"] for w in outputs.diarization_payload["words"]] == ["hello", "world", "again"]
+    assert len(outputs.diarization_payload["turns"]) == 2
+    assert outputs.diarization_payload["turns"][0]["transcript_text"] == "hello world"
+    assert outputs.diarization_payload["turns"][1]["speaker_id"] == "SPEAKER_1"
+    assert set(call_order) == {
+        "visual:source_video.mp4",
+        "vibevoice:source_audio.wav",
+        "emotion:source_audio.wav:2",
+        "yamnet:source_audio.wav",
+    }
+
+
 def test_run_phase1_sidecars_fails_when_forced_alignment_returns_zero_words(
     tmp_path: Path,
     monkeypatch,
@@ -232,4 +301,4 @@ def test_run_phase1_sidecars_can_bypass_forced_alignment_zero_words_with_env_ove
         emotion_provider=_FakeEmotionProvider(),
         yamnet_provider=_FakeYamnetProvider(),
     )
-    assert outputs.diarization_payload["words"] == []
+    assert [w["text"] for w in outputs.diarization_payload["words"]] == ["hello"]

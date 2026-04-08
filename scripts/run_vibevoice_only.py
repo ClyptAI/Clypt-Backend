@@ -47,7 +47,11 @@ def main() -> int:
         "--output-json",
         type=Path,
         default=None,
-        help="Optional path to write turns JSON (same shape as Phase 1: Start/End/Speaker/Content).",
+        help=(
+            "Optional path to write VibeVoice JSON. "
+            "Shape depends on VIBEVOICE_OUTPUT_MODE "
+            "(turns: Start/End/Speaker/Content, words: start_ms/end_ms/speaker_id/word)."
+        ),
     )
     parser.add_argument(
         "--indent",
@@ -80,6 +84,8 @@ def main() -> int:
         max_retries=vv.max_retries,
         audio_mode=vv.audio_mode,
         hotwords_context=v.hotwords_context,
+        output_mode=v.output_mode,
+        word_turn_gap_ms=v.word_turn_gap_ms,
         max_new_tokens=v.max_new_tokens,
         do_sample=v.do_sample,
         temperature=v.temperature,
@@ -87,14 +93,21 @@ def main() -> int:
         repetition_penalty=v.repetition_penalty,
         num_beams=v.num_beams,
     )
-    logger.info("backend=vllm model=%s url=%s audio=%s", vv.model, vv.base_url, audio)
+    logger.info(
+        "backend=vllm model=%s url=%s output_mode=%s audio=%s",
+        vv.model,
+        vv.base_url,
+        v.output_mode,
+        audio,
+    )
     t0 = time.perf_counter()
     provider.load()
-    turns = provider.run(audio_path=audio)
+    outputs = provider.run(audio_path=audio)
     elapsed = time.perf_counter() - t0
-    logger.info("Done in %.1f s — %d turns", elapsed, len(turns))
+    item_kind = "words" if v.output_mode == "words" else "turns"
+    logger.info("Done in %.1f s — %d %s", elapsed, len(outputs), item_kind)
 
-    text = json.dumps(turns, indent=args.indent if args.indent > 0 else None, ensure_ascii=True)
+    text = json.dumps(outputs, indent=args.indent if args.indent > 0 else None, ensure_ascii=True)
     print(text)
     if args.output_json:
         args.output_json.write_text(text + "\n", encoding="utf-8")
