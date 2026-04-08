@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -14,6 +15,94 @@ def _to_ms(value: Any) -> int:
 
 def _overlap_ms(start_a: int, end_a: int, start_b: int, end_b: int) -> int:
     return max(0, min(end_a, end_b) - max(start_a, start_b))
+
+
+_TOKEN_NORMALIZE_RE = re.compile(r"[^a-z0-9']+")
+
+
+def _normalize_token(token: str) -> str:
+    return _TOKEN_NORMALIZE_RE.sub("", token.lower())
+
+
+def _tokenize_for_alignment(text: str) -> list[str]:
+    out: list[str] = []
+    for raw in text.split():
+        norm = _normalize_token(raw)
+        if norm:
+            out.append(norm)
+    return out
+
+
+def _assign_word_ids_by_transcript(
+    *,
+    turns: list[dict[str, Any]],
+    words: list[dict[str, Any]],
+) -> list[list[str]]:
+    """
+    Assign aligned words to turns by monotonic transcript-token matching first,
+    with overlap fallback only for turns that still have no words.
+    """
+    word_norm = [_normalize_token(str(w.get("text") or "")) for w in words]
+    word_id_to_index = {w["word_id"]: idx for idx, w in enumerate(words)}
+    assigned_word_indices: set[int] = set()
+
+    turn_word_ids: list[list[str]] = []
+    cursor = 0
+    for turn in turns:
+        transcript_text = str(turn.get("transcript_text") or "").strip()
+        start_ms = int(turn.get("start_ms") or 0)
+        end_ms = int(turn.get("end_ms") or 0)
+        turn_tokens = _tokenize_for_alignment(transcript_text)
+
+        matched_ids: list[str] = []
+        if turn_tokens:
+            for token in turn_tokens:
+                found_index = -1
+                for idx in range(cursor, len(words)):
+                    if word_norm[idx] == token:
+                        found_index = idx
+                        break
+                if found_index < 0:
+                    continue
+                wid = words[found_index]["word_id"]
+                matched_ids.append(wid)
+                assigned_word_indices.add(found_index)
+                cursor = found_index + 1
+
+        # Fallback for unmatched turns: use unassigned words that overlap the turn.
+        if not matched_ids and end_ms > start_ms:
+            for idx, word in enumerate(words):
+                if idx in assigned_word_indices:
+                    continue
+                overlap = _overlap_ms(
+                    start_ms,
+                    end_ms,
+                    int(word.get("start_ms") or 0),
+                    int(word.get("end_ms") or 0),
+                )
+                if overlap > 0:
+                    wid = word["word_id"]
+                    matched_ids.append(wid)
+                    assigned_word_indices.add(idx)
+
+        # Boundary-spill repair: drop leading words that start before turn start
+        # when they duplicate the previous turn tail.
+        if matched_ids and turn_word_ids:
+            prev_ids = turn_word_ids[-1]
+            while matched_ids and prev_ids:
+                first_curr = words[word_id_to_index[matched_ids[0]]]
+                if int(first_curr.get("start_ms") or 0) >= start_ms:
+                    break
+                prev_last = words[word_id_to_index[prev_ids[-1]]]
+                if _normalize_token(str(first_curr.get("text") or "")) != _normalize_token(
+                    str(prev_last.get("text") or "")
+                ):
+                    break
+                matched_ids.pop(0)
+
+        turn_word_ids.append(matched_ids)
+
+    return turn_word_ids
 
 
 def merge_vibevoice_outputs(
@@ -94,18 +183,6 @@ def merge_vibevoice_outputs(
         speaker_id = f"SPEAKER_{speaker_int}"
         transcript_text = str(raw_turn.get("Content") or "").strip()
 
-        # Collect word_ids whose timing overlaps this turn
-        overlapping_word_ids = [
-            word["word_id"]
-            for word in words
-            if _overlap_ms(start_ms, end_ms, word["start_ms"], word["end_ms"]) > 0
-        ]
-
-        # If the turn has no content, reconstruct from overlapping words
-        if not transcript_text and overlapping_word_ids:
-            word_map = {w["word_id"]: w["text"] for w in words}
-            transcript_text = " ".join(word_map.get(wid, "") for wid in overlapping_word_ids).strip()
-
         turns.append(
             {
                 "turn_id": f"t_{idx:06d}",
@@ -113,10 +190,27 @@ def merge_vibevoice_outputs(
                 "start_ms": start_ms,
                 "end_ms": end_ms,
                 "transcript_text": transcript_text,
-                "word_ids": overlapping_word_ids,
+                "word_ids": [],
                 "identification_match": None,  # VibeVoice does not have voiceprint ID
             }
         )
+
+    if turns and words:
+        assigned = _assign_word_ids_by_transcript(turns=turns, words=words)
+        for turn, word_ids in zip(turns, assigned):
+            turn["word_ids"] = word_ids
+
+            # If the turn has no content, reconstruct from its assigned words.
+            if not turn["transcript_text"] and word_ids:
+                word_map = {w["word_id"]: w["text"] for w in words}
+                turn["transcript_text"] = " ".join(word_map.get(wid, "") for wid in word_ids).strip()
+
+            # Keep word speaker IDs consistent with turn ownership.
+            for wid in word_ids:
+                for word in words:
+                    if word["word_id"] == wid:
+                        word["speaker_id"] = turn["speaker_id"]
+                        break
 
     return {"words": words, "turns": turns}
 

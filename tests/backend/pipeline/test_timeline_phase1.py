@@ -41,6 +41,58 @@ def test_merge_vibevoice_outputs_falls_back_to_token_split_without_alignments():
     assert merged["turns"][0]["speaker_id"] == "SPEAKER_0"
 
 
+def test_merge_vibevoice_outputs_prefers_monotonic_text_over_raw_overlap():
+    vibevoice_turns = [
+        {"Start": 0.0, "End": 2.0, "Speaker": 0, "Content": "I think"},
+        {"Start": 2.0, "End": 4.0, "Speaker": 1, "Content": "Severely claustrophobic"},
+    ]
+    # "yeah" and the overlap of "think" spill across the boundary; they should
+    # not be attached to turn 2 because turn text doesn't contain them.
+    word_alignments = [
+        {"word_id": "w_000001", "text": "I", "start_ms": 0, "end_ms": 400, "speaker_id": "UNKNOWN"},
+        {"word_id": "w_000002", "text": "think", "start_ms": 400, "end_ms": 2050, "speaker_id": "UNKNOWN"},
+        {"word_id": "w_000003", "text": "yeah", "start_ms": 2050, "end_ms": 2200, "speaker_id": "UNKNOWN"},
+        {"word_id": "w_000004", "text": "Severely", "start_ms": 2200, "end_ms": 2900, "speaker_id": "UNKNOWN"},
+        {
+            "word_id": "w_000005",
+            "text": "claustrophobic",
+            "start_ms": 2900,
+            "end_ms": 3600,
+            "speaker_id": "UNKNOWN",
+        },
+    ]
+
+    merged = merge_vibevoice_outputs(
+        vibevoice_turns=vibevoice_turns,
+        word_alignments=word_alignments,
+    )
+
+    assert merged["turns"][0]["word_ids"] == ["w_000001", "w_000002"]
+    assert merged["turns"][1]["word_ids"] == ["w_000004", "w_000005"]
+    assert merged["words"][3]["speaker_id"] == "SPEAKER_1"
+    assert merged["words"][4]["speaker_id"] == "SPEAKER_1"
+
+
+def test_merge_vibevoice_outputs_handles_repeated_tokens_monotonically():
+    vibevoice_turns = [
+        {"Start": 0.0, "End": 1.0, "Speaker": 0, "Content": "go go"},
+        {"Start": 1.0, "End": 1.5, "Speaker": 1, "Content": "go"},
+    ]
+    word_alignments = [
+        {"word_id": "w_000001", "text": "go", "start_ms": 0, "end_ms": 300, "speaker_id": "UNKNOWN"},
+        {"word_id": "w_000002", "text": "go", "start_ms": 300, "end_ms": 600, "speaker_id": "UNKNOWN"},
+        {"word_id": "w_000003", "text": "go", "start_ms": 1100, "end_ms": 1300, "speaker_id": "UNKNOWN"},
+    ]
+
+    merged = merge_vibevoice_outputs(
+        vibevoice_turns=vibevoice_turns,
+        word_alignments=word_alignments,
+    )
+
+    assert merged["turns"][0]["word_ids"] == ["w_000001", "w_000002"]
+    assert merged["turns"][1]["word_ids"] == ["w_000003"]
+
+
 def test_build_canonical_timeline_builds_word_ids_and_turn_text():
     phase1_audio = {
         "source_audio": "https://example.com/video",

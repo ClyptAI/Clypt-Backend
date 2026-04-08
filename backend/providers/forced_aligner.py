@@ -15,6 +15,10 @@ _DEFAULT_MODEL_LOAD_RETRIES = 2
 _DEFAULT_MODEL_LOAD_RETRY_BACKOFF_S = 5.0
 
 
+def _overlap_ms(start_a: int, end_a: int, start_b: int, end_b: int) -> int:
+    return max(0, min(end_a, end_b) - max(start_a, start_b))
+
+
 def _ensure_cache_env() -> None:
     """
     Ensure model caches resolve to a deterministic path across prewarm, API,
@@ -235,6 +239,253 @@ class ForcedAlignmentProvider:
             raise RuntimeError("NFA model load failed for unknown reason")
         raise last_exc
 
+    @staticmethod
+    def _iter_utt_words(utt_obj: Any, *, base_start_ms: int = 0) -> list[dict[str, Any]]:
+        from backend.providers.nfa_viterbi import Segment, Word
+
+        words: list[dict[str, Any]] = []
+        for seg_or_tok in utt_obj.segments_and_tokens:
+            if not isinstance(seg_or_tok, Segment):
+                continue
+            for wt in seg_or_tok.words_and_tokens:
+                if not isinstance(wt, Word):
+                    continue
+                word_text = (wt.text or "").strip()
+                if not word_text or wt.t_start is None or wt.t_start < 0:
+                    continue
+                start_ms = base_start_ms + int(round(wt.t_start * 1000))
+                end_ms = base_start_ms + int(round(wt.t_end * 1000))
+                if end_ms <= start_ms:
+                    continue
+                words.append(
+                    {
+                        "text": word_text,
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "speaker_id": "UNKNOWN",
+                    }
+                )
+        return words
+
+    @staticmethod
+    def _assign_word_speakers_by_time(
+        words: list[dict[str, Any]], turns: list[dict[str, Any]]
+    ) -> None:
+        if not words or not turns:
+            return
+
+        turn_windows = []
+        for turn in turns:
+            start_ms = int(turn.get("start_ms") or 0)
+            end_ms = int(turn.get("end_ms") or 0)
+            speaker_id = str(turn.get("speaker_id") or "UNKNOWN")
+            if end_ms <= start_ms:
+                continue
+            turn_windows.append((start_ms, end_ms, speaker_id))
+        if not turn_windows:
+            return
+
+        for word in words:
+            w_start = int(word.get("start_ms") or 0)
+            w_end = int(word.get("end_ms") or 0)
+            w_center = (w_start + w_end) // 2
+
+            best_idx = -1
+            best_overlap = -1
+            best_center_dist = 10**18
+            for idx, (t_start, t_end, _speaker) in enumerate(turn_windows):
+                overlap = _overlap_ms(t_start, t_end, w_start, w_end)
+                t_center = (t_start + t_end) // 2
+                center_dist = abs(w_center - t_center)
+                if overlap > best_overlap:
+                    best_idx = idx
+                    best_overlap = overlap
+                    best_center_dist = center_dist
+                elif overlap == best_overlap and center_dist < best_center_dist:
+                    best_idx = idx
+                    best_center_dist = center_dist
+
+            if best_idx >= 0:
+                word["speaker_id"] = turn_windows[best_idx][2]
+
+    def _align_global_transcript(
+        self, *, audio_path: Path, turns: list[dict[str, Any]], device: str
+    ) -> list[dict[str, Any]]:
+        import torch
+        _patch_numpy_compat()
+        from backend.providers.nfa_viterbi import (
+            add_t_start_end_to_utt_obj,
+            get_single_sample_batch_variables,
+            viterbi_decoding,
+        )
+
+        alignable_turns = [
+            t
+            for t in turns
+            if int(t.get("end_ms") or 0) > int(t.get("start_ms") or 0)
+            and str(t.get("transcript_text") or "").strip()
+        ]
+        if not alignable_turns:
+            return []
+
+        global_text = " ".join(
+            str(t.get("transcript_text") or "").strip() for t in alignable_turns
+        ).strip()
+        if not global_text:
+            return []
+
+        logger.info(
+            "[forced_aligner] global alignment mode: %d turns, %d chars of transcript",
+            len(alignable_turns),
+            len(global_text),
+        )
+
+        (
+            log_probs_batch,
+            y_batch,
+            T_batch,
+            U_batch,
+            utt_obj_batch,
+            output_timestep_duration,
+        ) = get_single_sample_batch_variables(
+            audio_filepath=str(audio_path),
+            text=global_text,
+            model=self._model,
+            output_timestep_duration=None,
+        )
+
+        alignments_batch = viterbi_decoding(
+            log_probs_batch,
+            y_batch,
+            T_batch,
+            U_batch,
+            viterbi_device=torch.device(device),
+        )
+
+        utt_obj = add_t_start_end_to_utt_obj(
+            utt_obj_batch[0],
+            alignments_batch[0],
+            output_timestep_duration,
+        )
+        words = self._iter_utt_words(utt_obj, base_start_ms=0)
+        self._assign_word_speakers_by_time(words, alignable_turns)
+
+        normalized: list[dict[str, Any]] = []
+        for idx, word in enumerate(words, start=1):
+            normalized.append(
+                {
+                    "word_id": f"w_{idx:06d}",
+                    "text": str(word.get("text") or "").strip(),
+                    "start_ms": int(word.get("start_ms") or 0),
+                    "end_ms": int(word.get("end_ms") or 0),
+                    "speaker_id": str(word.get("speaker_id") or "UNKNOWN"),
+                }
+            )
+        return normalized
+
+    def _align_per_turn_fallback(
+        self, *, audio_path: Path, turns: list[dict[str, Any]], device: str
+    ) -> list[dict[str, Any]]:
+        import torch
+        import torchaudio
+        _patch_numpy_compat()
+        from backend.providers.nfa_viterbi import (
+            add_t_start_end_to_utt_obj,
+            get_single_sample_batch_variables,
+            viterbi_decoding,
+        )
+
+        waveform, sr = torchaudio.load(str(audio_path))
+        if sr != 16000:
+            waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+            sr = 16000
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+
+        all_words: list[dict[str, Any]] = []
+        output_timestep_duration: float | None = None
+        word_idx = 1
+        tmpdir = tempfile.mkdtemp(prefix="nfa_slices_")
+        try:
+            total_turns = len(turns)
+            _log_every = max(1, total_turns // 10)
+            for turn_idx, turn in enumerate(turns, start=1):
+                turn_id = turn.get("turn_id", "")
+                speaker_id = str(turn.get("speaker_id") or "UNKNOWN")
+                start_ms = int(turn.get("start_ms") or 0)
+                end_ms = int(turn.get("end_ms") or 0)
+                text = str(turn.get("transcript_text") or "").strip()
+
+                if text and end_ms > start_ms:
+                    try:
+                        start_sample = int(start_ms / 1000 * sr)
+                        end_sample = int(end_ms / 1000 * sr)
+                        segment_wav = waveform[:, start_sample:end_sample]
+                        if segment_wav.shape[1] >= 400:
+                            slice_path = os.path.join(tmpdir, f"{turn_id}.wav")
+                            torchaudio.save(slice_path, segment_wav, sr)
+
+                            (
+                                log_probs_batch,
+                                y_batch,
+                                T_batch,
+                                U_batch,
+                                utt_obj_batch,
+                                output_timestep_duration,
+                            ) = get_single_sample_batch_variables(
+                                audio_filepath=slice_path,
+                                text=text,
+                                model=self._model,
+                                output_timestep_duration=output_timestep_duration,
+                            )
+                            alignments_batch = viterbi_decoding(
+                                log_probs_batch,
+                                y_batch,
+                                T_batch,
+                                U_batch,
+                                viterbi_device=torch.device(device),
+                            )
+                            utt_obj = add_t_start_end_to_utt_obj(
+                                utt_obj_batch[0],
+                                alignments_batch[0],
+                                output_timestep_duration,
+                            )
+                            for word in self._iter_utt_words(utt_obj, base_start_ms=start_ms):
+                                all_words.append(
+                                    {
+                                        "word_id": f"w_{word_idx:06d}",
+                                        "text": str(word.get("text") or "").strip(),
+                                        "start_ms": int(word.get("start_ms") or 0),
+                                        "end_ms": int(word.get("end_ms") or 0),
+                                        "speaker_id": speaker_id,
+                                    }
+                                )
+                                word_idx += 1
+                            try:
+                                os.unlink(slice_path)
+                            except OSError:
+                                pass
+                    except Exception as exc:
+                        logger.warning(
+                            "[forced_aligner] fallback failed for turn %s ('%s...'): %s",
+                            turn_id,
+                            text[:40],
+                            exc,
+                        )
+                if turn_idx == 1 or turn_idx % _log_every == 0 or turn_idx == total_turns:
+                    logger.info(
+                        "[forced_aligner] fallback %d/%d turns (%d words so far)",
+                        turn_idx,
+                        total_turns,
+                        len(all_words),
+                    )
+        finally:
+            try:
+                os.rmdir(tmpdir)
+            except OSError:
+                pass
+        return all_words
+
     def run(
         self,
         audio_path: str | Path,
@@ -278,146 +529,46 @@ class ForcedAlignmentProvider:
             )
             return []
 
-        all_words: list[dict[str, Any]] = []
-        global_word_idx = 1
-        total_turns = len(turns)
-        _log_every = max(1, total_turns // 10)
-
         try:
-            import torch
-            import torchaudio
-            _patch_numpy_compat()
-            from backend.providers.nfa_viterbi import (
-                Segment,
-                Word,
-                add_t_start_end_to_utt_obj,
-                get_single_sample_batch_variables,
-                viterbi_decoding,
+            all_words = self._align_global_transcript(
+                audio_path=audio_path,
+                turns=turns,
+                device=device,
+            )
+            if all_words:
+                logger.info(
+                    "[forced_aligner] global alignment succeeded — %d words",
+                    len(all_words),
+                )
+                logger.info(
+                    "[forced_aligner] alignment done in %.1f s — %d words across %d turns",
+                    time.perf_counter() - t0,
+                    len(all_words),
+                    len(turns),
+                )
+                return all_words
+            logger.warning(
+                "[forced_aligner] global alignment returned 0 words; falling back to per-turn alignment."
+            )
+        except Exception as exc:
+            logger.warning(
+                "[forced_aligner] global alignment failed (%s: %s); falling back to per-turn alignment.",
+                type(exc).__name__,
+                exc,
             )
 
-            waveform, sr = torchaudio.load(str(audio_path))
-            if sr != 16000:
-                waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
-                sr = 16000
-            if waveform.shape[0] > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
-
-            tmpdir = tempfile.mkdtemp(prefix="nfa_slices_")
-            output_timestep_duration: float | None = None
-
-            for turn_idx, turn in enumerate(turns, start=1):
-                turn_id = turn.get("turn_id", "")
-                speaker_id = str(turn.get("speaker_id") or "UNKNOWN")
-                start_ms = int(turn.get("start_ms") or 0)
-                end_ms = int(turn.get("end_ms") or 0)
-                text = str(turn.get("transcript_text") or "").strip()
-
-                if not text or end_ms <= start_ms:
-                    pass
-                else:
-                    try:
-                        start_sample = int(start_ms / 1000 * sr)
-                        end_sample = int(end_ms / 1000 * sr)
-                        segment_wav = waveform[:, start_sample:end_sample]
-
-                        if segment_wav.shape[1] < 400:
-                            pass
-                        else:
-                            slice_path = os.path.join(tmpdir, f"{turn_id}.wav")
-                            torchaudio.save(slice_path, segment_wav, sr)
-
-                            (
-                                log_probs_batch,
-                                y_batch,
-                                T_batch,
-                                U_batch,
-                                utt_obj_batch,
-                                output_timestep_duration,
-                            ) = get_single_sample_batch_variables(
-                                audio_filepath=slice_path,
-                                text=text,
-                                model=self._model,
-                                output_timestep_duration=output_timestep_duration,
-                            )
-
-                            alignments_batch = viterbi_decoding(
-                                log_probs_batch,
-                                y_batch,
-                                T_batch,
-                                U_batch,
-                                viterbi_device=torch.device(device),
-                            )
-
-                            utt_obj = add_t_start_end_to_utt_obj(
-                                utt_obj_batch[0],
-                                alignments_batch[0],
-                                output_timestep_duration,
-                            )
-
-                            for seg_or_tok in utt_obj.segments_and_tokens:
-                                if not isinstance(seg_or_tok, Segment):
-                                    continue
-                                for wt in seg_or_tok.words_and_tokens:
-                                    if not isinstance(wt, Word):
-                                        continue
-                                    word_text = (wt.text or "").strip()
-                                    if (
-                                        not word_text
-                                        or wt.t_start is None
-                                        or wt.t_start < 0
-                                    ):
-                                        continue
-                                    word_start_ms = start_ms + int(
-                                        round(wt.t_start * 1000)
-                                    )
-                                    word_end_ms = start_ms + int(
-                                        round(wt.t_end * 1000)
-                                    )
-                                    all_words.append(
-                                        {
-                                            "word_id": f"w_{global_word_idx:06d}",
-                                            "text": word_text,
-                                            "start_ms": word_start_ms,
-                                            "end_ms": word_end_ms,
-                                            "speaker_id": speaker_id,
-                                        }
-                                    )
-                                    global_word_idx += 1
-
-                            try:
-                                os.unlink(slice_path)
-                            except OSError:
-                                pass
-
-                    except Exception as e:
-                        logger.warning(
-                            "[forced_aligner] failed to align turn %s ('%s...'): %s",
-                            turn_id,
-                            text[:40],
-                            e,
-                        )
-
-                if (
-                    turn_idx == 1
-                    or turn_idx % _log_every == 0
-                    or turn_idx == total_turns
-                ):
-                    elapsed = time.perf_counter() - t0
-                    logger.info(
-                        "[forced_aligner] %d/%d turns  (%d words so far, %.1f s elapsed)",
-                        turn_idx,
-                        total_turns,
-                        len(all_words),
-                        elapsed,
-                    )
-
-            try:
-                os.rmdir(tmpdir)
-            except OSError:
-                pass
-
-        except Exception as e:
-            logger.warning("[forced_aligner] alignment failed: %s — returning partial results", e)
+        try:
+            all_words = self._align_per_turn_fallback(
+                audio_path=audio_path,
+                turns=turns,
+                device=device,
+            )
+        except Exception as exc:  # pragma: no cover - runtime dependency path
+            logger.warning(
+                "[forced_aligner] fallback alignment failed: %s — returning partial results",
+                exc,
+            )
+            all_words = []
 
         logger.info(
             "[forced_aligner] alignment done in %.1f s — %d words across %d turns",
