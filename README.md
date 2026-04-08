@@ -15,6 +15,8 @@ Phases 5–6 (speaker participation grounding, render/9:16 output) are not yet i
 
 ## Current Working Setup
 
+### Phase 1 — Concurrent extraction
+
 Phase 1 runs visual extraction and ASR **concurrently**. The audio chain (NFA → emotion2vec+ → YAMNet) starts immediately when ASR finishes — without waiting for RF-DETR:
 
 ```
@@ -26,7 +28,7 @@ NFA → emotion2vec+ → YAMNet ────────────────
     (serial with each other; concurrent with RF-DETR)
 ```
 
-Audio artifacts ready ~230s before RF-DETR finishes on a 13-min clip.
+Audio artifacts ready ~230s before RF-DETR finishes on a 13-min clip. The audio chain callback fires immediately after `asr_future.result()` — **not** inside an `as_completed` loop (that pattern caused the callback to wait for RF-DETR too, see [Known Gotchas in the deployment doc](docs/deployment/v3.1_phase1_digitalocean.md)).
 
 - **ASR:** `VibeVoiceVLLMProvider` — HTTP calls to `clypt-vllm-vibevoice.service` (Docker-managed vLLM container)
 - **Visual:** RF-DETR Small + ByteTrack (`pytorch_cuda_fp16` default)
@@ -34,12 +36,29 @@ Audio artifacts ready ~230s before RF-DETR finishes on a 13-min clip.
 - **Served model name:** `vibevoice` (not `microsoft/VibeVoice-ASR`)
 - **No second venv** — the vLLM path does not require a native VibeVoice subprocess venv
 
-### Validated runs (H100 80GB, 2026-04-07)
+### Phase 2–4 — Vertex AI performance
 
-| Clip | Duration | Turns | Wall time | RTF |
-|------|----------|-------|-----------|-----|
-| mrbeastflagrant.mp4 | 392.9s | 102 | 30.8s | 0.07x |
-| joeroganflagrant.mp4 | 788.7s | 200 | 64.3s | 0.07x |
+All Gemini calls (Phases 2–4) use the following optimizations:
+
+| Optimization | Effect |
+|---|---|
+| **Priority PayGo headers** (`X-Vertex-AI-LLM-Shared-Request-Type: priority`) | Eliminates Dynamic Shared Quota tail latency — calls 4–5 no longer queue behind earlier bursts. ~1.8× Standard price. |
+| **`thinking_budget=0`** via `ThinkingConfig` | Disables thinking token generation (was `ThinkingLevel.HIGH` — caused 90–390s per batch call). |
+| **`responseSchema` constrained decoding** | Per-phase JSON Schema passed to `GenerateContentConfig.response_schema` — faster generation, no hallucinated fields, no parse failures. |
+| **`max_output_tokens` caps** | Reduces per-slot token reservation in Vertex AI scheduler, improving throughput. |
+| **Parallel embeddings** (ThreadPoolExecutor) | `embed_texts` and `embed_media_uris` each spawn one `embed_content` call per item in parallel (API limit: 1 text doc or 1 video part per call). |
+| **Dynamic meta-prompts** (Phase 4) | Gemini Flash reads Phase 2 node summaries and generates video-specific retrieval queries. Count scales with duration: 2/4/6/8/10 prompts. No static fallback — fails fast if Gemini returns nothing. |
+
+### Validated runs (H100 80GB, 2026-04-07/08)
+
+| Clip | Duration | Turns | Phase 1 | Phases 2–4 | Total | Mode |
+|------|----------|-------|---------|-----------|-------|------|
+| mrbeastflagrant.mp4 | 392.9s (6.5 min) | 104 | 153s | 98s | **251s (4m11s)** | Full Phase 1–4 ✓ |
+| joeroganflagrant.mp4 | 788.7s (13.1 min) | 201 | 285s | — | — | Phase 1 only (Phase 3 hit 429) |
+
+ASR RTF ~0.07x on H100 for both clips. Full Phase 1–4 pipeline is **0.64× real-time** on a 6.5-min clip.
+
+**429 note:** Longer videos (200+ turns) can hit `RESOURCE_EXHAUSTED` on Phase 3 local-edge batches. No automatic retry is implemented yet — rerun with a new job ID. See [Known Issues](#known-issues).
 
 ## Environment
 
@@ -49,9 +68,16 @@ Core env vars:
 CLYPT_V31_OUTPUT_ROOT=backend/outputs/v3_1
 VIBEVOICE_BACKEND=vllm
 VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
-VIBEVOICE_VLLM_MODEL=vibevoice          # NOT "microsoft/VibeVoice-ASR" — returns 404
-GOOGLE_CLOUD_PROJECT=clypt-v3           # required even for VibeVoice-only runs
-GCS_BUCKET=clypt-storage-v3            # required even for VibeVoice-only runs
+VIBEVOICE_VLLM_MODEL=vibevoice             # NOT "microsoft/VibeVoice-ASR" — returns 404
+GOOGLE_CLOUD_PROJECT=clypt-v3              # required even for VibeVoice-only runs
+GCS_BUCKET=clypt-storage-v3               # required even for VibeVoice-only runs
+GOOGLE_CLOUD_LOCATION=global              # generation endpoint (Priority PayGo requires global)
+VERTEX_GEMINI_LOCATION=global
+VERTEX_EMBEDDING_LOCATION=us-central1     # embedding endpoint (cannot use global)
+VERTEX_GEMINI_MODEL=gemini-3.1-pro-preview
+VERTEX_FLASH_MODEL=gemini-3-flash-preview # used for dynamic meta-prompt generation (Phase 4)
+VERTEX_EMBEDDING_MODEL=gemini-embedding-2-preview
+CLYPT_PHASE1_YAMNET_DEVICE=cpu            # TF GPU fails on H100 — always cpu
 ```
 
 Full config in [.env.example](/Users/rithvik/Clypt-V3/.env.example).
@@ -136,6 +162,18 @@ python -m backend.runtime.run_phase1 \
   --job-id demo_run \
   --source-url "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
+
+## Known Issues
+
+### 429 RESOURCE_EXHAUSTED (longer videos)
+
+Longer videos (200+ speaker turns) generate more Phase 3 edge batches, which can exhaust the Vertex AI RPM/TPM rate limit. The SDK's tenacity retry exhausts and the process crashes. Priority PayGo helps but doesn't eliminate the limit for very long content.
+
+**Workaround:** rerun with a new job ID. Retry-with-backoff is not yet implemented.
+
+### Phase 3 local-edge batching vs rate limits
+
+Phase 3 sends N concurrent batches of local edge proposals to Gemini Pro. With 200+ nodes the batch count can exceed the rate limit window. Consider reducing `phase3_target_batch_count` in `V31Config` if you consistently hit 429 on Phase 3.
 
 ## Key Docs
 
