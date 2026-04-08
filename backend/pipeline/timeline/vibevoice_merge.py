@@ -26,7 +26,7 @@ def merge_vibevoice_outputs(
     {words, turns} shape expected by timeline_builder and downstream phases.
 
     Args:
-        vibevoice_turns: List of turn dicts from VibeVoiceASRProvider.run().
+        vibevoice_turns: List of turn dicts from the VibeVoice vLLM provider run().
             Each has keys: Start (float s), End (float s), Speaker (int), Content (str).
         word_alignments: List of word dicts from ForcedAlignmentProvider.run().
             Each has: word_id, text, start_ms, end_ms, speaker_id.

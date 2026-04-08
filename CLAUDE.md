@@ -15,14 +15,9 @@ Clypt V3.1 is an AI-powered video analysis and clip generation system that proce
 ### Environment Setup
 
 ```bash
-# Primary venv (used for all backends including vLLM)
+# Primary venv (vLLM pipeline)
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# Native VibeVoice venv (only needed when VIBEVOICE_BACKEND=native)
-python3 -m venv .venv-vibevoice-native && source .venv-vibevoice-native/bin/activate
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements-vibevoice-native.txt
 
 # Phase 1 GPU deployment dependencies
 pip install -r requirements-do-phase1.txt
@@ -106,12 +101,10 @@ Generates meta-prompts → embeds → retrieves seed nodes via similarity → ex
 | `backend/pipeline/_embedding_utils.py` | Fallback SHA256-based deterministic embeddings |
 | `backend/providers/config.py` | All provider env loading |
 | `backend/providers/vertex.py` | Gemini LLM + embedding calls |
-| `backend/providers/vibevoice.py` | VibeVoice ASR (native subprocess + HF in-process paths) |
 | `backend/providers/vibevoice_vllm.py` | VibeVoice ASR via persistent vLLM HTTP sidecar |
 | `backend/runtime/phase14_live.py` | `V31LivePhase14Runner` — production entry point |
-| `backend/runtime/vibevoice_native_worker.py` | Subprocess worker for native VibeVoice (flash-attn, Liger, CUDA 12.4) |
-| `backend/phase1_runtime/extract.py` | Phase 1 sidecar orchestration — serial or concurrent depending on backend |
-| `backend/phase1_runtime/factory.py` | Wires the correct VibeVoice provider based on `VIBEVOICE_BACKEND` |
+| `backend/phase1_runtime/extract.py` | Phase 1 sidecar orchestration (vLLM concurrent path) |
+| `backend/phase1_runtime/factory.py` | Wires `VibeVoiceVLLMProvider` from provider settings |
 | `backend/phase1_runtime/visual.py` | RF-DETR + ByteTrack visual extraction pipeline |
 | `backend/phase1_runtime/state_store.py` | SQLite-backed job persistence for Phase 1 worker loop |
 
@@ -139,12 +132,10 @@ The Phase 1 runtime has three runtime modes that share the same extraction logic
 
 Job state is persisted via `backend/phase1_runtime/state_store.py` (SQLite). `backend/phase1_runtime/factory.py` wires provider instances; `backend/phase1_runtime/runner.py` executes a job from a `Phase1Workspace`.
 
-### VibeVoice Backends
+### VibeVoice Backend
 
-Controlled by `VIBEVOICE_BACKEND` env var:
-- `vllm` — **current production backend**. Sends audio to a persistent Docker-managed vLLM service (`clypt-vllm-vibevoice.service`) over localhost HTTP. Uses OpenAI-compatible `/v1/chat/completions` with streaming. MP4/video inputs are automatically extracted to MP3 via ffmpeg before sending. The served model name is `vibevoice` (registered by `start_server.py --served-model-name vibevoice` — NOT the HuggingFace repo ID). Because ASR is an HTTP call and not a CUDA operation, `VibeVoiceVLLMProvider.supports_concurrent_visual = True` allows `extract.py` to run visual extraction and ASR in parallel via `ThreadPoolExecutor`.
-- `native` — runs VibeVoice in a subprocess using a separate venv (`.venv-vibevoice-native`) to isolate `transformers<5` from the main env. Path configured via `VIBEVOICE_NATIVE_VENV_PYTHON`. Runs serially after visual.
-- `hf` — runs VibeVoice directly in the main venv (in-process). Runs serially after visual.
+`main` is vLLM-only:
+- `vllm` — production backend. Sends audio to a persistent Docker-managed vLLM service (`clypt-vllm-vibevoice.service`) over localhost HTTP. Uses OpenAI-compatible `/v1/chat/completions` with streaming. MP4/video inputs are automatically extracted to MP3 via ffmpeg before sending. The served model name is `vibevoice` (registered by `start_server.py --served-model-name vibevoice` — NOT the HuggingFace repo ID). Because ASR is an HTTP call and not a CUDA operation, `VibeVoiceVLLMProvider.supports_concurrent_visual = True` allows `extract.py` to run visual extraction and ASR in parallel via `ThreadPoolExecutor`.
 
 ### Phase 1 Execution Schedule
 
@@ -161,11 +152,6 @@ NeMo Forced Aligner → emotion2vec+ → YAMNet ────────┘
 ASR typically finishes in ~30–60s (RTF 0.07–0.08x). NFA+emotion2vec++YAMNet
 complete ~35s later. RF-DETR takes ~150–300s. Audio chain artifacts are ready
 well before visual finishes, allowing Phases 2–4 to start earlier.
-
-**native / hf backends (serial):**
-```
-visual → ASR → NFA → emotion2vec+ → YAMNet
-```
 
 NFA, emotion2vec+, and YAMNet are always serial with each other — they share
 the GPU and running them concurrently causes CUDA memory contention and graph
@@ -194,7 +180,7 @@ CLYPT_PHASE1_VISUAL_BACKEND=pytorch_cuda_fp16  # or tensorrt_fp16
 
 Target: DigitalOcean GPU droplet (`gpu-h100x1-base`, Ubuntu 22.04 + CUDA 12, region `ams3` or `nyc2`).
 Deploy via `rsync` (not git). See `docs/deployment/v3.1_phase1_digitalocean.md`.
-Deployment scripts live in `scripts/do_phase1/` (bootstrap, install, deploy, systemd units).
+Deployment scripts live in `scripts/do_phase1/` (bootstrap, deploy, systemd units).
 
 The vLLM service is managed by `scripts/do_phase1/deploy_vllm_service.sh`, which:
 1. Installs Docker + nvidia-container-toolkit (if absent)

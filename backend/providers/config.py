@@ -57,23 +57,15 @@ def _load_local_env_files() -> None:
 
 @dataclass(slots=True)
 class VibeVoiceSettings:
-    """VibeVoice ASR: native ~7B subprocess (Gradio parity) or in-process HF 9B."""
+    """Shared generation controls for the vLLM VibeVoice ASR path."""
 
-    backend: str = "native"
-    native_venv_python: str = ""
-    model_id: str = "microsoft/VibeVoice-ASR"
-    flash_attention: bool = True
-    liger_kernel: bool = True
     hotwords_context: str = _DEFAULT_HOTWORDS
-    system_prompt: str = ""
     max_new_tokens: int = 32768
     do_sample: bool = False
     temperature: float = 0.0
     top_p: float = 1.0
     repetition_penalty: float = 1.0
     num_beams: int = 1
-    attn_implementation: str = "flash_attention_2"
-    subprocess_timeout_s: int = 7200
 
 
 @dataclass(slots=True)
@@ -81,7 +73,7 @@ class VibeVoiceVLLMSettings:
     """Settings for the persistent vLLM VibeVoice ASR sidecar service."""
 
     base_url: str
-    model: str = "microsoft/VibeVoice-ASR"
+    model: str = "vibevoice"
     timeout_s: float = 7200.0
     healthcheck_path: str = "/health"
     max_retries: int = 1
@@ -117,10 +109,10 @@ class Phase1RuntimeSettings:
 @dataclass(slots=True)
 class ProviderSettings:
     vibevoice: VibeVoiceSettings
+    vllm_vibevoice: VibeVoiceVLLMSettings
     vertex: VertexSettings
     storage: StorageSettings
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
-    vllm_vibevoice: VibeVoiceVLLMSettings | None = None
 
 
 def load_provider_settings() -> ProviderSettings:
@@ -137,52 +129,33 @@ def load_provider_settings() -> ProviderSettings:
         raise ValueError("GCS_BUCKET or CLYPT_GCS_BUCKET is required for Phase 1 storage.")
 
     hotwords_context = _read_env("VIBEVOICE_HOTWORDS_CONTEXT") or _DEFAULT_HOTWORDS
-    backend = (_read_env("VIBEVOICE_BACKEND") or "native").lower()
-    if backend not in ("native", "hf", "vllm"):
+    backend = (_read_env("VIBEVOICE_BACKEND") or "vllm").lower()
+    if backend != "vllm":
         raise ValueError(
-            f"Unknown VIBEVOICE_BACKEND={backend!r}; valid values: native, hf, vllm"
+            f"Unsupported VIBEVOICE_BACKEND={backend!r}; only 'vllm' is supported on main."
         )
 
-    model_default = (
-        "microsoft/VibeVoice-ASR-HF" if backend == "hf" else "microsoft/VibeVoice-ASR"
+    vllm_base_url = _read_env("VIBEVOICE_VLLM_BASE_URL")
+    if not vllm_base_url:
+        raise ValueError("VIBEVOICE_VLLM_BASE_URL is required.")
+    vllm_settings = VibeVoiceVLLMSettings(
+        base_url=vllm_base_url,
+        model=_read_env("VIBEVOICE_VLLM_MODEL") or "vibevoice",
+        timeout_s=float(_read_env("VIBEVOICE_VLLM_TIMEOUT_S") or "7200"),
+        healthcheck_path=_read_env("VIBEVOICE_VLLM_HEALTHCHECK_PATH") or "/health",
+        max_retries=int(_read_env("VIBEVOICE_VLLM_MAX_RETRIES") or "1"),
+        audio_mode=_read_env("VIBEVOICE_VLLM_AUDIO_MODE") or "base64",
     )
-
-    # vLLM backend: build VibeVoiceVLLMSettings and skip native-subprocess validation.
-    vllm_settings: VibeVoiceVLLMSettings | None = None
-    if backend == "vllm":
-        vllm_base_url = _read_env("VIBEVOICE_VLLM_BASE_URL")
-        if not vllm_base_url:
-            raise ValueError(
-                "VIBEVOICE_VLLM_BASE_URL is required when VIBEVOICE_BACKEND=vllm."
-            )
-        vllm_settings = VibeVoiceVLLMSettings(
-            base_url=vllm_base_url,
-            model=_read_env("VIBEVOICE_VLLM_MODEL") or model_default,
-            timeout_s=float(_read_env("VIBEVOICE_VLLM_TIMEOUT_S") or "7200"),
-            healthcheck_path=_read_env("VIBEVOICE_VLLM_HEALTHCHECK_PATH") or "/health",
-            max_retries=int(_read_env("VIBEVOICE_VLLM_MAX_RETRIES") or "1"),
-            audio_mode=_read_env("VIBEVOICE_VLLM_AUDIO_MODE") or "base64",
-        )
 
     return ProviderSettings(
         vibevoice=VibeVoiceSettings(
-            backend=backend,
-            # native_venv_python not required when backend=vllm
-            native_venv_python=_read_env("VIBEVOICE_NATIVE_VENV_PYTHON") or "",
-            model_id=_read_env("VIBEVOICE_MODEL_ID") or model_default,
-            flash_attention=(_read_env("VIBEVOICE_FLASH_ATTN") or "1") == "1",
-            liger_kernel=(_read_env("VIBEVOICE_LIGER") or "1") == "1",
             hotwords_context=hotwords_context,
-            system_prompt=_read_env("VIBEVOICE_SYSTEM_PROMPT") or "",
             max_new_tokens=int(_read_env("VIBEVOICE_MAX_NEW_TOKENS") or "32768"),
             do_sample=(_read_env("VIBEVOICE_DO_SAMPLE") or "0") == "1",
             temperature=float(_read_env("VIBEVOICE_TEMPERATURE") or "0"),
             top_p=float(_read_env("VIBEVOICE_TOP_P") or "1"),
             repetition_penalty=float(_read_env("VIBEVOICE_REPETITION_PENALTY") or "1"),
             num_beams=int(_read_env("VIBEVOICE_NUM_BEAMS") or "1"),
-            attn_implementation=_read_env("VIBEVOICE_ATTN_IMPLEMENTATION")
-            or "flash_attention_2",
-            subprocess_timeout_s=int(_read_env("VIBEVOICE_SUBPROCESS_TIMEOUT_S") or "7200"),
         ),
         vllm_vibevoice=vllm_settings,
         vertex=VertexSettings(

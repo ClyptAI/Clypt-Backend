@@ -8,7 +8,6 @@ from .config import (
     load_provider_settings,
 )
 from .forced_aligner import ForcedAlignmentProvider
-from .vibevoice import VibeVoiceASRProvider
 from .vibevoice_vllm import VibeVoiceVLLMProvider
 from .vertex import VertexEmbeddingClient, VertexGeminiClient
 
@@ -20,7 +19,6 @@ __all__ = [
     "VertexEmbeddingClient",
     "VertexGeminiClient",
     "VertexSettings",
-    "VibeVoiceASRProvider",
     "VibeVoiceSettings",
     "VibeVoiceVLLMProvider",
     "VibeVoiceVLLMSettings",

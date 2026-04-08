@@ -8,6 +8,7 @@ Requires=docker.service
 Type=simple
 ExecStartPre=-/usr/bin/docker stop clypt-vllm-vibevoice
 ExecStartPre=-/usr/bin/docker rm   clypt-vllm-vibevoice
+ExecStartPre=/usr/bin/test -f /opt/clypt-phase1/vibevoice-repo/vllm_plugin/scripts/start_server.py
 ExecStart=/usr/bin/docker run \
     --name clypt-vllm-vibevoice \
     --gpus all \

@@ -34,7 +34,6 @@ Audio artifacts ready ~230s before RF-DETR finishes on a 13-min clip. The audio 
 - **Visual:** RF-DETR Small + ByteTrack (`pytorch_cuda_fp16` default)
 - **vLLM version:** `v0.14.1` (pinned — tested compatible with the VibeVoice plugin)
 - **Served model name:** `vibevoice` (not `microsoft/VibeVoice-ASR`)
-- **No second venv** — the vLLM path does not require a native VibeVoice subprocess venv
 
 ### Phase 2–4 — Vertex AI performance
 
@@ -85,7 +84,7 @@ Full config in [.env.example](/Users/rithvik/Clypt-V3/.env.example).
 ## Setup
 
 ```bash
-# Primary venv (all backends including vLLM)
+# Primary venv (vLLM pipeline)
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -93,8 +92,6 @@ pip install -r requirements.txt
 # For Phase 1 GPU deployment
 pip install -r requirements-do-phase1.txt
 ```
-
-A second venv is only needed for `VIBEVOICE_BACKEND=native` (legacy). The vLLM path needs only the primary venv.
 
 ## Tests
 
@@ -151,7 +148,7 @@ See [docs/deployment/v3.1_phase1_digitalocean.md](/Users/rithvik/Clypt-V3/docs/d
 
 ### Phase 1 sidecar orchestration
 
-- [backend/phase1_runtime/extract.py](/Users/rithvik/Clypt-V3/backend/phase1_runtime/extract.py) — concurrent or serial depending on backend
+- [backend/phase1_runtime/extract.py](/Users/rithvik/Clypt-V3/backend/phase1_runtime/extract.py) — vLLM concurrent orchestration
 
 ### Phase 1 CLI
 
@@ -185,9 +182,9 @@ Phase 3 sends N concurrent batches of local edge proposals to Gemini Pro. With 2
 
 ```
 backend/pipeline/          — Phase 1-4 contracts, transforms, orchestrator
-backend/providers/         — VibeVoice (native/hf/vllm), Vertex AI, GCS, emotion2vec+, YAMNet
+backend/providers/         — VibeVoice vLLM, Vertex AI, GCS, emotion2vec+, YAMNet
 backend/phase1_runtime/    — Phase 1 sidecar orchestration, visual pipeline, job store
-backend/runtime/           — Live Phase 1-4 runner, CLI entrypoints, native VibeVoice worker
+backend/runtime/           — Live Phase 1-4 runner, CLI entrypoints
 docker/vibevoice-vllm/     — Dockerfile for the vLLM sidecar (based on vllm/vllm-openai:v0.14.1)
 scripts/do_phase1/         — Deployment scripts and systemd units
 docs/                      — Deployment reference, runtime guide, specs
