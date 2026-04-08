@@ -20,7 +20,7 @@
 #   13. Restart the Phase 1 API + worker so they pick up new code
 #
 # What it does NOT do (intentional):
-#   - install the native VibeVoice venv
+#   - install any legacy/native/non-vLLM ASR environment
 #   - build flash-attn from source
 #   - touch cuda-toolkit (GPU base image CUDA driver is sufficient)
 #
@@ -60,7 +60,7 @@ VIBEVOICE_REPO_URL="${VIBEVOICE_REPO_URL:-https://github.com/microsoft/VibeVoice
 VIBEVOICE_REPO_REF="${VIBEVOICE_REPO_REF:-main}"
 PIP_FALLBACK_LEGACY_RESOLVER="${PIP_FALLBACK_LEGACY_RESOLVER:-1}"
 PREWARM_PHASE1_MODELS="${PREWARM_PHASE1_MODELS:-1}"
-PHASE1_CACHE_HOME="${PHASE1_CACHE_HOME:-/opt/clypt-phase1/.cache}"
+PHASE1_CACHE_HOME="${PHASE1_CACHE_HOME:-}"
 PREWARM_RETRIES="${PREWARM_RETRIES:-3}"
 PREWARM_RETRY_BACKOFF_S="${PREWARM_RETRY_BACKOFF_S:-20}"
 PREWARM_TIMEOUT_S="${PREWARM_TIMEOUT_S:-1800}"
@@ -176,6 +176,34 @@ if ! /usr/bin/env -i bash -c "set -a; source '$ENV_FILE'; set +a; [[ \${VIBEVOIC
   echo "[deploy-vllm] ERROR: VIBEVOICE_BACKEND must be set to 'vllm' in $ENV_FILE for this deploy path." >&2
   exit 1
 fi
+if ! /usr/bin/env -i bash -c "set -a; source '$ENV_FILE'; set +a; [[ \${VIBEVOICE_VLLM_MODEL:-vibevoice} == vibevoice ]]" >/dev/null 2>&1; then
+  echo "[deploy-vllm] ERROR: VIBEVOICE_VLLM_MODEL must be 'vibevoice' (served-model-name)." >&2
+  exit 1
+fi
+
+set -a
+source "$ENV_FILE"
+set +a
+
+if [[ -z "$PHASE1_CACHE_HOME" ]]; then
+  PHASE1_CACHE_HOME="${CLYPT_PHASE1_CACHE_HOME:-/opt/clypt-phase1/.cache}"
+fi
+
+if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" && ! -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]]; then
+  echo "[deploy-vllm] ERROR: GOOGLE_APPLICATION_CREDENTIALS points to a missing file: ${GOOGLE_APPLICATION_CREDENTIALS}" >&2
+  exit 1
+fi
+
+for legacy_var in \
+  VIBEVOICE_OUTPUT_MODE \
+  VIBEVOICE_WORD_TURN_GAP_MS \
+  VIBEVOICE_WORD_TIME_TOKEN_MODE \
+  VIBEVOICE_WORD_CHUNK_SECONDS \
+  VIBEVOICE_WORD_STREAMING_SEGMENT_DURATION_S; do
+  if [[ -n "${!legacy_var:-}" ]]; then
+    echo "[deploy-vllm] WARN: $legacy_var is set but unused by the main vLLM pipeline."
+  fi
+done
 
 # --- 5. Main worker venv — pip install (no native venv, no flash-attn) ----
 echo "[deploy-vllm] installing main worker requirements ($REQUIREMENTS_FILE) ..."
@@ -221,6 +249,7 @@ if [[ "$PREWARM_PHASE1_MODELS" == "1" ]]; then
   export XDG_CACHE_HOME="$PHASE1_CACHE_HOME"
   export TORCH_HOME="$PHASE1_CACHE_HOME/torch"
   export HF_HOME="$PHASE1_CACHE_HOME/huggingface"
+  export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-${CLYPT_PHASE1_CACHE_HOME:+$CLYPT_PHASE1_CACHE_HOME/modelscope}}"
   export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$PHASE1_CACHE_HOME/modelscope}"
   prewarm_attempt=1
   while true; do
@@ -337,10 +366,20 @@ while true; do
   sleep 5
 done
 
+echo "[deploy-vllm] verifying served model id ..."
+models_json="$(curl -fsS "http://127.0.0.1:${VLLM_HOST_PORT}/v1/models" || true)"
+if ! grep -Eq '"id"[[:space:]]*:[[:space:]]*"vibevoice"' <<<"$models_json"; then
+  echo "[deploy-vllm] ERROR: /v1/models did not report model id 'vibevoice'." >&2
+  printf '%s\n' "$models_json" >&2
+  exit 1
+fi
+
 # --- 13. Restart Phase 1 API + worker with new code ------------------------
 echo "[deploy-vllm] restarting Phase 1 API and worker ..."
 systemctl restart clypt-v31-phase1-api.service
 systemctl restart clypt-v31-phase1-worker.service
+systemctl is-active --quiet clypt-v31-phase1-api.service
+systemctl is-active --quiet clypt-v31-phase1-worker.service
 
 systemctl --no-pager --full status clypt-vllm-vibevoice.service || true
 systemctl --no-pager --full status clypt-v31-phase1-worker.service || true

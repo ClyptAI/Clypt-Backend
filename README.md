@@ -2,8 +2,6 @@
 
 This branch contains the V3.1 backend implementation for Phases 1–4 of the Clypt pipeline, with the vLLM VibeVoice ASR sidecar.
 
-**Branch:** `v3.1-refactor-vLLM`
-
 Phases implemented:
 
 1. `Phase 1: Timeline Foundation` — visual extraction, ASR, forced alignment, emotion, audio events
@@ -35,6 +33,13 @@ Audio artifacts ready ~230s before RF-DETR finishes on a 13-min clip. The audio 
 - **vLLM version:** `v0.14.1` (pinned — tested compatible with the VibeVoice plugin)
 - **Served model name:** `vibevoice` (not `microsoft/VibeVoice-ASR`)
 
+### Phase 1 transcript assembly (current default)
+
+- VibeVoice returns turn-level output first: `{Start, End, Speaker, Content}`.
+- NFA then aligns the transcript to audio and produces word-level timings.
+- `merge_vibevoice_outputs()` assigns aligned `word_ids` back onto each VibeVoice turn.
+- Downstream Gemini phases consume turn/node payloads (not raw canonical `words[]` objects).
+
 ### Phase 2–4 — Vertex AI performance
 
 All Gemini calls (Phases 2–4) use the following optimizations:
@@ -48,14 +53,14 @@ All Gemini calls (Phases 2–4) use the following optimizations:
 | **Parallel embeddings** (ThreadPoolExecutor) | `embed_texts` and `embed_media_uris` each spawn one `embed_content` call per item in parallel (API limit: 1 text doc or 1 video part per call). |
 | **Dynamic meta-prompts** (Phase 4) | Gemini Flash reads Phase 2 node summaries and generates video-specific retrieval queries. Count scales with duration: 2/4/6/8/10 prompts. No static fallback — fails fast if Gemini returns nothing. |
 
-### Validated runs (H100 80GB, 2026-04-07/08)
+### Validated runs (2026-04-07/08)
 
 | Clip | Duration | Turns | Phase 1 | Phases 2–4 | Total | Mode |
 |------|----------|-------|---------|-----------|-------|------|
 | mrbeastflagrant.mp4 | 392.9s (6.5 min) | 104 | 153s | 98s | **251s (4m11s)** | Full Phase 1–4 ✓ |
 | joeroganflagrant.mp4 | 788.7s (13.1 min) | 201 | 285s | — | — | Phase 1 only (Phase 3 hit 429) |
 
-ASR RTF ~0.07x on H100 for both clips. Full Phase 1–4 pipeline is **0.64× real-time** on a 6.5-min clip.
+ASR RTF ~0.07x on the validated GPU droplets. Full Phase 1–4 pipeline is **0.64× real-time** on a 6.5-min clip.
 
 **429 note:** Longer videos (200+ turns) can hit `RESOURCE_EXHAUSTED` on Phase 3 local-edge batches. No automatic retry is implemented yet — rerun with a new job ID. See [Known Issues](#known-issues).
 
@@ -65,6 +70,9 @@ Core env vars:
 
 ```bash
 CLYPT_V31_OUTPUT_ROOT=backend/outputs/v3_1
+CLYPT_PHASE1_WORK_ROOT=backend/outputs/v3_1_phase1_work
+CLYPT_PHASE1_KEEP_WORKDIR=0
+CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1   # fail hard on 0-word alignment for non-empty turns
 VIBEVOICE_BACKEND=vllm
 VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
 VIBEVOICE_VLLM_MODEL=vibevoice             # NOT "microsoft/VibeVoice-ASR" — returns 404
@@ -76,7 +84,12 @@ VERTEX_EMBEDDING_LOCATION=us-central1     # embedding endpoint (cannot use globa
 VERTEX_GEMINI_MODEL=gemini-3.1-pro-preview
 VERTEX_FLASH_MODEL=gemini-3-flash-preview # used for dynamic meta-prompt generation (Phase 4)
 VERTEX_EMBEDDING_MODEL=gemini-embedding-2-preview
-CLYPT_PHASE1_YAMNET_DEVICE=cpu            # TF GPU fails on H100 — always cpu
+CLYPT_PHASE1_YAMNET_DEVICE=cpu            # TF GPU path is unstable on current droplets — keep cpu
+CLYPT_PHASE1_CACHE_HOME=/opt/clypt-phase1/.cache
+XDG_CACHE_HOME=/opt/clypt-phase1/.cache
+TORCH_HOME=/opt/clypt-phase1/.cache/torch
+HF_HOME=/opt/clypt-phase1/.cache/huggingface
+MODELSCOPE_CACHE=/opt/clypt-phase1/.cache/modelscope
 ```
 
 Full config in [.env.example](/Users/rithvik/Clypt-V3/.env.example).
@@ -119,7 +132,7 @@ Accepts MP4, WAV, MP3, etc. MP4 files are automatically extracted to MP3 before 
 
 ## Production Deployment
 
-Target: DigitalOcean GPU droplet (`gpu-h100x1-base`, Ubuntu 22.04 + CUDA 12).
+Target: DigitalOcean GPU droplet (currently validated on `atl1` H200 / Ubuntu 22.04 + CUDA 12 base image).
 
 ```bash
 # Sync repo to droplet

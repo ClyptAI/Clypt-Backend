@@ -178,7 +178,7 @@ CLYPT_PHASE1_VISUAL_BACKEND=pytorch_cuda_fp16  # or tensorrt_fp16
 
 ## Production Deployment
 
-Target: DigitalOcean GPU droplet (`gpu-h100x1-base`, Ubuntu 22.04 + CUDA 12, region `ams3` or `nyc2`).
+Target: DigitalOcean GPU droplet (currently validated on `atl1` H200, Ubuntu 22.04 + CUDA 12 GPU base image).
 Deploy via `rsync` (not git). See `docs/deployment/v3.1_phase1_digitalocean.md`.
 Deployment scripts live in `scripts/do_phase1/` (bootstrap, deploy, systemd units).
 
@@ -188,6 +188,6 @@ The vLLM service is managed by `scripts/do_phase1/deploy_vllm_service.sh`, which
 3. Clones the VibeVoice plugin repo to `/opt/clypt-phase1/vibevoice-repo`
 4. Builds the Docker image from `docker/vibevoice-vllm/Dockerfile` (based on `vllm/vllm-openai:v0.14.1`)
 5. Installs and starts `clypt-vllm-vibevoice.service`
-6. Polls `/health` until ready (first start downloads the ~17GB model)
+6. Polls `/health` until ready, verifies `/v1/models` includes `vibevoice`, then restarts API/worker
 
-Expected Phase 1 throughput on H100 80GB: RF-DETR ~109–114 fps; VibeVoice vLLM RTF ~0.07x.
+Expected Phase 1 throughput on validated GPU droplets: RF-DETR ~109–114 fps; VibeVoice vLLM RTF ~0.07x.
