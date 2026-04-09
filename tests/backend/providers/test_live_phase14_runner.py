@@ -1,12 +1,74 @@
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 
 def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Path):
     from backend.phase1_runtime.models import Phase1SidecarOutputs
     from backend.pipeline.config import V31Config
+    from backend.repository.models import (
+        ClipCandidateRecord,
+        Phase24JobRecord,
+        PhaseMetricRecord,
+        RunRecord,
+        SemanticEdgeRecord,
+        SemanticNodeRecord,
+        TimelineTurnRecord,
+    )
     from backend.runtime.phase14_live import V31LivePhase14Runner
+
+    class _FakeRepository:
+        def __init__(self) -> None:
+            self.timeline_turns: list[TimelineTurnRecord] = []
+            self.nodes: list[SemanticNodeRecord] = []
+            self.edges: list[SemanticEdgeRecord] = []
+            self.candidates: list[ClipCandidateRecord] = []
+            self.phase_metrics: list[PhaseMetricRecord] = []
+
+        def upsert_run(self, record: RunRecord) -> RunRecord:
+            return record
+
+        def get_run(self, run_id: str) -> RunRecord | None:
+            return None
+
+        def write_timeline_turns(self, *, run_id: str, turns: list[TimelineTurnRecord]) -> None:
+            self.timeline_turns = list(turns)
+
+        def list_timeline_turns(self, *, run_id: str) -> list[TimelineTurnRecord]:
+            return list(self.timeline_turns)
+
+        def write_nodes(self, *, run_id: str, nodes: list[SemanticNodeRecord]) -> None:
+            self.nodes = list(nodes)
+
+        def list_nodes(self, *, run_id: str) -> list[SemanticNodeRecord]:
+            return list(self.nodes)
+
+        def write_edges(self, *, run_id: str, edges: list[SemanticEdgeRecord]) -> None:
+            self.edges = list(edges)
+
+        def list_edges(self, *, run_id: str) -> list[SemanticEdgeRecord]:
+            return list(self.edges)
+
+        def write_candidates(self, *, run_id: str, candidates: list[ClipCandidateRecord]) -> None:
+            self.candidates = list(candidates)
+
+        def list_candidates(self, *, run_id: str) -> list[ClipCandidateRecord]:
+            return list(self.candidates)
+
+        def write_phase_metric(self, record: PhaseMetricRecord) -> PhaseMetricRecord:
+            self.phase_metrics.append(record)
+            return record
+
+        def list_phase_metrics(self, *, run_id: str) -> list[PhaseMetricRecord]:
+            return list(self.phase_metrics)
+
+        def upsert_phase24_job(self, record: Phase24JobRecord) -> Phase24JobRecord:
+            return record
+
+        def get_phase24_job(self, run_id: str) -> Phase24JobRecord | None:
+            return None
 
     class _FakeEmbeddingClient:
         def embed_texts(self, texts, *, task_type=None, model=None):
@@ -19,59 +81,135 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
         def __init__(self):
             self.calls = []
 
-        def generate_json(self, *, prompt, model=None, temperature=0.0):
+        def generate_json(self, *, prompt, model=None, temperature=0.0, **kwargs):
             self.calls.append(prompt)
-            if "Merge contiguous target turns" in prompt:
+            prompt_lc = prompt.lower()
+            def _extract_json_payload(marker: str) -> dict:
+                if marker not in prompt:
+                    return {}
+                raw = prompt.split(marker, 1)[1].strip()
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    return {}
+            if "merge contiguous target turns" in prompt_lc:
+                payload = _extract_json_payload("Neighborhood payload:\n")
+                target_turn_ids = list(payload.get("target_turn_ids") or [])
+                if not target_turn_ids:
+                    target_turn_ids = ["t_000001"]
                 return {
                     "merged_nodes": [
                         {
-                            "source_turn_ids": ["t_000001", "t_000002"],
+                            "source_turn_ids": target_turn_ids,
                             "node_type": "claim",
                             "node_flags": ["high_resonance_candidate"],
-                            "summary": "One merged unit.",
+                            "summary": "Merged target unit.",
                         }
                     ]
                 }
-            if "Draw only local semantic graph edges" in prompt:
-                return {"edges": []}
-            if "Adjudicate only callback_to and topic_recurrence" in prompt:
-                return {"edges": []}
-            if "Review this local semantic subgraph" in prompt:
+            if "boundary between two semantic batches" in prompt_lc:
+                payload = _extract_json_payload("Boundary payload:\n")
+                left = ((payload.get("left_batch_nodes") or [{}])[0]) if payload else {}
+                right = ((payload.get("right_batch_nodes") or [{}])[0]) if payload else {}
+
+                def _boundary_node(item: dict, fallback_id: str) -> dict:
+                    return {
+                        "existing_node_id": item.get("node_id") or item.get("existing_node_id") or fallback_id,
+                        "source_turn_ids": list(item.get("source_turn_ids") or []),
+                        "node_type": item.get("node_type") or "claim",
+                        "node_flags": list(item.get("node_flags") or []),
+                        "summary": item.get("summary") or "Boundary node.",
+                    }
+
                 return {
-                    "subgraph_id": "sg_0001",
-                    "seed_node_id": "node_t_000001__t_000002",
+                    "resolution": "keep_both",
+                    "nodes": [
+                        _boundary_node(left, "left_node"),
+                        _boundary_node(right, "right_node"),
+                    ],
+                }
+            if (
+                "draw only local semantic graph edges" in prompt_lc
+                or "identify meaningful semantic edges only between target nodes" in prompt_lc
+            ):
+                return {"edges": []}
+            if (
+                "adjudicate only callback_to and topic_recurrence" in prompt_lc
+                or "adjudicating potential long-range semantic edges" in prompt_lc
+            ):
+                return {"edges": []}
+            if "designing retrieval queries to find the best short-form clip candidates" in prompt_lc:
+                target_count_match = re.search(r"task:\s*generate exactly\s+(\d+)\s+targeted retrieval prompts", prompt_lc)
+                target_count = int(target_count_match.group(1)) if target_count_match else 1
+                return {
+                    "prompts": [
+                        f"Find the strongest standalone moment #{idx}."
+                        for idx in range(1, target_count + 1)
+                    ]
+                }
+            if (
+                "selecting clip candidates from a local semantic subgraph" in prompt_lc
+                or "review this local semantic subgraph" in prompt_lc
+            ):
+                payload = _extract_json_payload("Subgraph payload:\n")
+                subgraph_id = payload.get("subgraph_id") or "sg_0001"
+                seed_node_id = payload.get("seed_node_id") or "node_seed_001"
+                nodes = list(payload.get("nodes") or [])
+                first_node = nodes[0] if nodes else {}
+                return {
+                    "subgraph_id": subgraph_id,
+                    "seed_node_id": seed_node_id,
                     "reject_all": False,
                     "reject_reason": "",
                     "candidates": [
                         {
-                            "node_ids": ["node_t_000001__t_000002"],
-                            "start_ms": 0,
-                            "end_ms": 1600,
+                            "node_ids": [first_node.get("node_id") or seed_node_id],
+                            "start_ms": int(first_node.get("start_ms") or 0),
+                            "end_ms": int(first_node.get("end_ms") or 1600),
                             "score": 8.2,
                             "rationale": "Strong standalone thought.",
                         }
                     ],
                 }
-            if "Review this candidate pool" in prompt:
+            if (
+                "final quality review of a pool of clip candidates" in prompt_lc
+                or "review this candidate pool" in prompt_lc
+            ):
+                payload = _extract_json_payload("Candidate pool:\n")
+                candidates = list(payload.get("candidates") or [])
+                ranked = []
+                dropped = []
+                for idx, candidate in enumerate(candidates, start=1):
+                    clip_id = candidate.get("clip_id") or f"cand_tmp_{idx:03d}"
+                    if idx == 1:
+                        ranked.append(
+                            {
+                                "candidate_temp_id": clip_id,
+                                "keep": True,
+                                "pool_rank": 1,
+                                "score": 8.9,
+                                "score_breakdown": {"virality": 8.9, "coherence": 8.9, "engagement": 8.9},
+                                "rationale": "Best clip.",
+                            }
+                        )
+                    else:
+                        dropped.append(clip_id)
                 return {
-                    "ranked_candidates": [
-                        {
-                            "candidate_temp_id": "sg_0001_cand_01",
-                            "keep": True,
-                            "pool_rank": 1,
-                            "score": 8.9,
-                            "score_breakdown": {"overall_clip_quality": 8.9},
-                            "rationale": "Best clip.",
-                        }
-                    ],
-                    "dropped_candidate_temp_ids": [],
+                    "ranked_candidates": ranked,
+                    "dropped_candidate_temp_ids": dropped,
                 }
             raise AssertionError(f"unexpected prompt: {prompt[:120]}")
+
+    repository = _FakeRepository()
+    log_events: list[dict[str, object]] = []
 
     runner = V31LivePhase14Runner(
         config=V31Config(output_root=tmp_path),
         llm_client=_FakeLLMClient(),
         embedding_client=_FakeEmbeddingClient(),
+        repository=repository,
+        query_version="graph-v2",
+        log_event=lambda **payload: log_events.append(payload),
         node_media_preparer=lambda **kwargs: [
             {
                 "node_id": node.node_id,
@@ -126,12 +264,15 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
             },
             yamnet_payload={"events": []},
         ),
-        phase2_target_turn_count=2,
-        phase2_halo_turn_count=0,
-        phase3_local_target_node_count=4,
-        phase3_local_halo_node_count=0,
     )
 
-    assert Path(summary.artifact_paths["clip_candidates"]).exists()
-    payload = Path(summary.artifact_paths["clip_candidates"]).read_text(encoding="utf-8")
-    assert "Best clip." in payload
+    assert summary.run_id == "run_live"
+    assert summary.artifact_paths == {}
+    assert len(repository.timeline_turns) == 2
+    assert len(repository.nodes) >= 1
+    assert len(repository.edges) >= 1
+    assert len(repository.candidates) == 1
+    assert repository.candidates[0].rationale == "Best clip."
+    assert [metric.phase_name for metric in repository.phase_metrics] == ["phase2", "phase3", "phase4", "phase24"]
+    assert all(metric.query_version == "graph-v2" for metric in repository.phase_metrics)
+    assert any(event["event"] == "candidate_summary" for event in log_events)

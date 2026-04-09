@@ -66,6 +66,7 @@ Operational updates (2026-04-08):
 - Fresh `ai/ml` base-image redeploy run (`run_20260408_095543_mrbeastflagrant`) completed in ~4m34s wall time with **Phases 2-4 = 271.8s**.
 - Live logs now include explicit timing gates: `Phase 2 done`, `Phase 3 done`, `Phase 4 done`, and `Phases 2-4 done`.
 - emotion2vec progress logging now reports the true top class via score argmax (older logs could show misleading entries like `top: angry 0.00`).
+- Baseline run metrics and final clip candidate snapshots are consolidated in [docs/runtime/v3.1_baseline_reference.md](/Users/rithvik/Clypt-V3/docs/runtime/v3.1_baseline_reference.md).
 
 **429 note:** Longer videos (200+ turns) can hit `RESOURCE_EXHAUSTED` on Phase 3 local-edge batches. No automatic retry is implemented yet — rerun with a new job ID. See [Known Issues](#known-issues).
 
@@ -194,6 +195,7 @@ Phase 3 sends N concurrent batches of local edge proposals to Gemini Pro. With 2
 
 - [docs/deployment/v3.1_phase1_digitalocean.md](/Users/rithvik/Clypt-V3/docs/deployment/v3.1_phase1_digitalocean.md) — deployment, env setup, all gotchas
 - [docs/runtime/v3.1_runtime_guide.md](/Users/rithvik/Clypt-V3/docs/runtime/v3.1_runtime_guide.md) — provider surface, execution model
+- [docs/runtime/v3.1_baseline_reference.md](/Users/rithvik/Clypt-V3/docs/runtime/v3.1_baseline_reference.md) — canonical baseline runs/candidates for migration and cutover validation
 - [docs/superpowers/specs/2026-04-06-vllm-vibevoice-phase1-design.md](/Users/rithvik/Clypt-V3/docs/superpowers/specs/2026-04-06-vllm-vibevoice-phase1-design.md) — vLLM migration design spec
 
 ## Repository Structure

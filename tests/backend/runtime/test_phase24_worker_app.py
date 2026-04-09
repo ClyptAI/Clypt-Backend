@@ -1,0 +1,275 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from fastapi.testclient import TestClient
+import pytest
+
+
+UTC = timezone.utc
+
+
+class _FakeRepository:
+    def __init__(self) -> None:
+        self.run_record = None
+        self.job_record = None
+
+    def upsert_run(self, record):
+        self.run_record = record
+        return record
+
+    def get_run(self, run_id: str):
+        return self.run_record if self.run_record and self.run_record.run_id == run_id else None
+
+    def upsert_phase24_job(self, record):
+        self.job_record = record
+        return record
+
+    def get_phase24_job(self, run_id: str):
+        return self.job_record if self.job_record and self.job_record.run_id == run_id else None
+
+    def acquire_phase24_job_lease(
+        self,
+        *,
+        run_id: str,
+        job_id: str,
+        worker_name: str,
+        attempt: int,
+        query_version: str,
+        running_timeout_s: int = 1800,
+    ):
+        current = self.get_phase24_job(run_id)
+        if current is not None and current.status == "succeeded":
+            return {"acquired": False, "status": "succeeded"}
+        if current is not None and current.status == "running":
+            return {"acquired": False, "status": "running"}
+        from backend.repository.models import Phase24JobRecord
+
+        now = datetime(2026, 4, 8, 12, 0, tzinfo=UTC)
+        self.job_record = Phase24JobRecord(
+            run_id=run_id,
+            status="running",
+            attempt_count=attempt,
+            last_error=None,
+            worker_name=worker_name,
+            task_name=job_id,
+            locked_at=now,
+            updated_at=now,
+            completed_at=None,
+            metadata={"query_version": query_version},
+        )
+        return {"acquired": True, "status": "running"}
+
+
+class _FakeRunner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, **kwargs):
+        self.calls.append(kwargs)
+        return type(
+            "Summary",
+            (),
+            {
+                "model_dump": lambda self, mode="json": {
+                    "run_id": kwargs["run_id"],
+                    "artifact_paths": {},
+                    "metadata": {"candidate_count": 1},
+                }
+            },
+        )()
+
+
+def _build_payload() -> dict[str, object]:
+    return {
+        "run_id": "run_001",
+        "source_url": "https://example.com/video",
+        "query_version": "graph-v2",
+        "phase1_outputs": {
+            "phase1_audio": {
+                "source_audio": "https://example.com/video",
+                "video_gcs_uri": "gs://bucket/video.mp4",
+                "local_video_path": "/tmp/source_video.mp4",
+            },
+            "diarization_payload": {"words": [], "turns": []},
+            "phase1_visual": {"video_metadata": {"fps": 30.0}, "shot_changes": [], "tracks": []},
+            "emotion2vec_payload": {"segments": []},
+            "yamnet_payload": {"events": []},
+        },
+        "phase4_extra_prompt_texts": ["find the strongest moment"],
+    }
+
+
+def test_phase24_worker_app_processes_task_and_updates_repository():
+    from backend.runtime.phase24_worker_app import Phase24WorkerService, create_app
+
+    repository = _FakeRepository()
+    runner = _FakeRunner()
+    app = create_app(
+        service=Phase24WorkerService(
+            repository=repository,
+            runner=runner,
+            service_name="clypt-phase24-worker",
+            environment="staging",
+            default_query_version="graph-v1",
+            max_attempts=3,
+        )
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/tasks/phase24",
+        json=_build_payload(),
+        headers={
+            "X-CloudTasks-TaskName": "projects/test/locations/us-central1/queues/phase24/tasks/task-001",
+            "X-CloudTasks-TaskExecutionCount": "2",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    assert response.json()["summary"]["metadata"]["candidate_count"] == 1
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["run_id"] == "run_001"
+    assert runner.calls[0]["job_id"] == "projects/test/locations/us-central1/queues/phase24/tasks/task-001"
+    assert runner.calls[0]["attempt"] == 3
+    assert repository.run_record is not None
+    assert repository.run_record.status == "PHASE24_DONE"
+    assert repository.job_record is not None
+    assert repository.job_record.status == "succeeded"
+    assert repository.job_record.attempt_count == 3
+    assert repository.job_record.task_name == "projects/test/locations/us-central1/queues/phase24/tasks/task-001"
+
+
+def test_phase24_worker_app_short_circuits_completed_jobs():
+    from backend.repository.models import Phase24JobRecord
+    from backend.runtime.phase24_worker_app import Phase24WorkerService, create_app
+
+    repository = _FakeRepository()
+    repository.job_record = Phase24JobRecord(
+        run_id="run_001",
+        status="succeeded",
+        attempt_count=1,
+        last_error=None,
+        worker_name="clypt-phase24-worker",
+        task_name="projects/test/locations/us-central1/queues/phase24/tasks/task-001",
+        locked_at=None,
+        updated_at=datetime(2026, 4, 8, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 4, 8, 12, 1, tzinfo=UTC),
+        metadata={"query_version": "graph-v2"},
+    )
+    runner = _FakeRunner()
+    client = TestClient(
+        create_app(
+            service=Phase24WorkerService(
+                repository=repository,
+                runner=runner,
+                service_name="clypt-phase24-worker",
+                environment="staging",
+                default_query_version="graph-v1",
+                max_attempts=3,
+            )
+        )
+    )
+
+    response = client.post("/tasks/phase24", json=_build_payload())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "already_succeeded"
+    assert runner.calls == []
+
+
+def test_phase24_worker_app_short_circuits_running_jobs():
+    from backend.repository.models import Phase24JobRecord
+    from backend.runtime.phase24_worker_app import Phase24WorkerService, create_app
+
+    repository = _FakeRepository()
+    repository.job_record = Phase24JobRecord(
+        run_id="run_001",
+        status="running",
+        attempt_count=1,
+        last_error=None,
+        worker_name="clypt-phase24-worker",
+        task_name="projects/test/locations/us-central1/queues/phase24/tasks/task-001",
+        locked_at=None,
+        updated_at=datetime(2026, 4, 8, 12, 0, tzinfo=UTC),
+        completed_at=None,
+        metadata={"query_version": "graph-v2"},
+    )
+    runner = _FakeRunner()
+    client = TestClient(
+        create_app(
+            service=Phase24WorkerService(
+                repository=repository,
+                runner=runner,
+                service_name="clypt-phase24-worker",
+                environment="staging",
+                default_query_version="graph-v1",
+                max_attempts=3,
+            )
+        )
+    )
+
+    response = client.post("/tasks/phase24", json=_build_payload())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "already_running"
+    assert runner.calls == []
+
+
+def test_phase24_worker_app_marks_non_terminal_failures_as_queued():
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
+
+    class _FailingRunner(_FakeRunner):
+        def run(self, **kwargs):
+            raise RuntimeError("boom")
+
+    repository = _FakeRepository()
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=_FailingRunner(),
+        service_name="clypt-phase24-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=3,
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        service.handle_task(
+            payload=Phase24TaskPayload(**_build_payload()),
+            job_id="task-001",
+            attempt=2,
+        )
+
+    assert repository.job_record is not None
+    assert repository.job_record.status == "queued"
+    assert repository.run_record is not None
+    assert repository.run_record.status == "PHASE24_QUEUED"
+
+
+def test_phase24_worker_app_stops_when_attempt_exceeds_max_attempts():
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
+
+    repository = _FakeRepository()
+    runner = _FakeRunner()
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=runner,
+        service_name="clypt-phase24-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=2,
+    )
+
+    result = service.handle_task(
+        payload=Phase24TaskPayload(**_build_payload()),
+        job_id="task-001",
+        attempt=3,
+    )
+
+    assert result["status"] == "max_attempts_exceeded"
+    assert runner.calls == []
+    assert repository.job_record is not None
+    assert repository.job_record.status == "failed"
+    assert repository.run_record is not None
+    assert repository.run_record.status == "FAILED"

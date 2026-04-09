@@ -96,6 +96,33 @@ class StorageSettings:
 
 
 @dataclass(slots=True)
+class CloudTasksSettings:
+    project: str = ""
+    location: str = "us-central1"
+    queue: str = "clypt-phase24"
+    worker_url: str | None = None
+    service_account_email: str | None = None
+
+
+@dataclass(slots=True)
+class SpannerSettings:
+    project: str = ""
+    instance: str = "clypt-phase14"
+    database: str = "clypt_phase14"
+    ddl_operation_timeout_s: float = 600.0
+
+
+@dataclass(slots=True)
+class Phase24WorkerSettings:
+    service_name: str = "clypt-phase24-worker"
+    environment: str = "dev"
+    query_version: str = "v1"
+    concurrency: int = 1
+    debug_snapshots: bool = False
+    max_attempts: int = 3
+
+
+@dataclass(slots=True)
 class Phase1RuntimeSettings:
     working_root: Path = field(
         default_factory=lambda: Path(
@@ -112,6 +139,9 @@ class ProviderSettings:
     vllm_vibevoice: VibeVoiceVLLMSettings
     vertex: VertexSettings
     storage: StorageSettings
+    cloud_tasks: CloudTasksSettings = field(default_factory=CloudTasksSettings)
+    spanner: SpannerSettings = field(default_factory=SpannerSettings)
+    phase24_worker: Phase24WorkerSettings = field(default_factory=Phase24WorkerSettings)
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
 
 
@@ -169,6 +199,30 @@ def load_provider_settings() -> ProviderSettings:
             flash_model=_read_env("VERTEX_FLASH_MODEL") or "gemini-3-flash-preview",
         ),
         storage=StorageSettings(gcs_bucket=gcs_bucket),
+        cloud_tasks=CloudTasksSettings(
+            project=_read_env("CLYPT_PHASE24_PROJECT") or vertex_project,
+            location=_read_env("CLYPT_PHASE24_TASKS_LOCATION") or "us-central1",
+            queue=_read_env("CLYPT_PHASE24_TASKS_QUEUE") or "clypt-phase24",
+            worker_url=_read_env("CLYPT_PHASE24_WORKER_URL"),
+            service_account_email=_read_env("CLYPT_PHASE24_WORKER_SERVICE_ACCOUNT_EMAIL"),
+        ),
+        spanner=SpannerSettings(
+            project=_read_env("CLYPT_SPANNER_PROJECT") or vertex_project,
+            instance=_read_env("CLYPT_SPANNER_INSTANCE") or "clypt-phase14",
+            database=_read_env("CLYPT_SPANNER_DATABASE") or "clypt_phase14",
+            ddl_operation_timeout_s=float(
+                _read_env("CLYPT_SPANNER_DDL_OPERATION_TIMEOUT_S") or "600"
+            ),
+        ),
+        phase24_worker=Phase24WorkerSettings(
+            service_name=_read_env("CLYPT_PHASE24_WORKER_SERVICE_NAME")
+            or "clypt-phase24-worker",
+            environment=_read_env("CLYPT_PHASE24_ENVIRONMENT") or "dev",
+            query_version=_read_env("CLYPT_PHASE24_QUERY_VERSION") or "v1",
+            concurrency=int(_read_env("CLYPT_PHASE24_CONCURRENCY") or "1"),
+            debug_snapshots=(_read_env("CLYPT_DEBUG_SNAPSHOTS") or "0") == "1",
+            max_attempts=int(_read_env("CLYPT_PHASE24_MAX_ATTEMPTS") or "3"),
+        ),
         phase1_runtime=Phase1RuntimeSettings(
             working_root=Path(
                 _read_env("CLYPT_PHASE1_WORK_ROOT") or "backend/outputs/v3_1_phase1_work"
@@ -184,6 +238,9 @@ __all__ = [
     "Phase1RuntimeSettings",
     "ProviderSettings",
     "StorageSettings",
+    "CloudTasksSettings",
+    "SpannerSettings",
+    "Phase24WorkerSettings",
     "VertexSettings",
     "VibeVoiceSettings",
     "VibeVoiceVLLMSettings",

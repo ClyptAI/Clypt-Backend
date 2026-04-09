@@ -5,15 +5,18 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from backend.phase1_runtime.extract import run_phase1_sidecars
 from backend.phase1_runtime.media import prepare_workspace_media
 from backend.phase1_runtime.models import Phase1SidecarOutputs, Phase1Workspace
+from backend.repository import Phase24JobRecord, RunRecord
 from backend.providers.youtube import YouTubeDownloader
 
 logger = logging.getLogger(__name__)
+UTC = timezone.utc
 
 
 def _jsonable(value):
@@ -42,6 +45,10 @@ class Phase1JobRunner:
         emotion_provider: Any,
         yamnet_provider: Any,
         phase14_runner: Any | None = None,
+        phase24_task_queue_client: Any | None = None,
+        phase14_repository: Any | None = None,
+        phase24_worker_url: str | None = None,
+        phase24_query_version: str | None = None,
     ) -> None:
         self.working_root = Path(working_root)
         self.downloader = downloader or YouTubeDownloader()
@@ -53,6 +60,121 @@ class Phase1JobRunner:
         self.emotion_provider = emotion_provider
         self.yamnet_provider = yamnet_provider
         self.phase14_runner = phase14_runner
+        self.phase24_task_queue_client = phase24_task_queue_client
+        self.phase14_repository = phase14_repository
+        self.phase24_worker_url = phase24_worker_url
+        self.phase24_query_version = phase24_query_version
+
+    def _upsert_run_record(
+        self,
+        *,
+        run_id: str,
+        source_url: str | None,
+        source_video_gcs_uri: str | None,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.phase14_repository is None:
+            return
+        get_run = getattr(self.phase14_repository, "get_run", None)
+        existing = get_run(run_id) if callable(get_run) else None
+        now = datetime.now(UTC)
+        merged_metadata = dict(existing.metadata if existing is not None else {})
+        if metadata:
+            merged_metadata.update(metadata)
+        self.phase14_repository.upsert_run(
+            RunRecord(
+                run_id=run_id,
+                source_url=source_url,
+                source_video_gcs_uri=source_video_gcs_uri,
+                status=status,
+                created_at=existing.created_at if existing is not None else now,
+                updated_at=now,
+                metadata=merged_metadata,
+            )
+        )
+
+    def _upsert_phase24_job_record(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        task_name: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.phase14_repository is None:
+            return
+        get_phase24_job = getattr(self.phase14_repository, "get_phase24_job", None)
+        existing = get_phase24_job(run_id) if callable(get_phase24_job) else None
+        now = datetime.now(UTC)
+        merged_metadata = dict(existing.metadata if existing is not None else {})
+        if metadata:
+            merged_metadata.update(metadata)
+        self.phase14_repository.upsert_phase24_job(
+            Phase24JobRecord(
+                run_id=run_id,
+                status=status,
+                attempt_count=existing.attempt_count if existing is not None else 0,
+                last_error=None,
+                worker_name=existing.worker_name if existing is not None else None,
+                task_name=task_name or (existing.task_name if existing is not None else None),
+                locked_at=existing.locked_at if existing is not None else None,
+                updated_at=now,
+                completed_at=existing.completed_at if existing is not None else None,
+                metadata=merged_metadata,
+            )
+        )
+
+    def _enqueue_phase24(
+        self,
+        *,
+        job_id: str,
+        source_ref: str,
+        video_gcs_uri: str,
+        phase1_outputs: Phase1SidecarOutputs,
+        runtime_controls: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.phase24_task_queue_client is None:
+            raise ValueError("phase24_task_queue_client is required when queue mode is enabled")
+
+        payload = {
+            "run_id": job_id,
+            "source_url": source_ref,
+            "source_video_gcs_uri": video_gcs_uri,
+            "phase1_outputs": _jsonable(phase1_outputs),
+            "phase3_long_range_top_k": int(runtime_controls.get("phase3_long_range_top_k") or 3),
+            "phase4_extra_prompt_texts": list(runtime_controls.get("phase4_extra_prompt_texts") or []),
+            "query_version": self.phase24_query_version,
+        }
+        task_name = self.phase24_task_queue_client.enqueue_phase24(
+            run_id=job_id,
+            payload=payload,
+            worker_url=self.phase24_worker_url,
+        )
+        metadata = {
+            "query_version": self.phase24_query_version,
+            "task_name": task_name,
+        }
+        self._upsert_run_record(
+            run_id=job_id,
+            source_url=source_ref,
+            source_video_gcs_uri=video_gcs_uri,
+            status="PHASE24_QUEUED",
+            metadata=metadata,
+        )
+        self._upsert_phase24_job_record(
+            run_id=job_id,
+            status="queued",
+            task_name=task_name,
+            metadata=metadata,
+        )
+        logger.info("[phase24] enqueued Cloud Task %s", task_name)
+        return {
+            "run_id": job_id,
+            "status": "queued",
+            "task_name": task_name,
+            "artifact_paths": {},
+        }
 
     def run_job(
         self,
@@ -86,8 +208,29 @@ class Phase1JobRunner:
 
         source_ref = source_url or str(source_path)
         result: dict[str, Any] = {}
+        run_phase14 = bool(runtime_controls.get("run_phase14"))
+        queue_enabled = runtime_controls.get("phase24_queue_enabled", True)
 
-        if runtime_controls.get("run_phase14") and self.phase14_runner is not None:
+        if run_phase14 and queue_enabled and self.phase24_task_queue_client is not None:
+            phase1_outputs = run_phase1_sidecars(
+                source_url=source_ref,
+                video_gcs_uri=video_gcs_uri,
+                workspace=workspace,
+                vibevoice_provider=self.vibevoice_provider,
+                forced_aligner=self.forced_aligner,
+                visual_extractor=self.visual_extractor,
+                emotion_provider=self.emotion_provider,
+                yamnet_provider=self.yamnet_provider,
+            )
+            result["phase1"] = _jsonable(phase1_outputs)
+            result["summary"] = self._enqueue_phase24(
+                job_id=job_id,
+                source_ref=source_ref,
+                video_gcs_uri=video_gcs_uri,
+                phase1_outputs=phase1_outputs,
+                runtime_controls=runtime_controls,
+            )
+        elif run_phase14 and self.phase14_runner is not None:
             # Phase 1 sidecars and Phases 2-4 run concurrently:
             # - Thread A: runs all sidecars (visual + audio chain in parallel internally)
             # - Thread B: waits for audio chain callback, then immediately starts Phases 2-4
@@ -143,6 +286,13 @@ class Phase1JobRunner:
 
             result["phase1"] = _jsonable(phase1_outputs)
             result["summary"] = _jsonable(summary)
+            self._upsert_run_record(
+                run_id=job_id,
+                source_url=source_ref,
+                source_video_gcs_uri=video_gcs_uri,
+                status="PHASE24_DONE",
+                metadata={"query_version": self.phase24_query_version},
+            )
             logger.info(
                 "[phase14] Phase 2-4 branch joined in %.1f s (includes overlap with Phase 1 sidecars)",
                 time.perf_counter() - t_p14,
@@ -160,6 +310,13 @@ class Phase1JobRunner:
                 yamnet_provider=self.yamnet_provider,
             )
             result["phase1"] = _jsonable(phase1_outputs)
+            self._upsert_run_record(
+                run_id=job_id,
+                source_url=source_ref,
+                source_video_gcs_uri=video_gcs_uri,
+                status="PHASE1_DONE",
+                metadata={"query_version": self.phase24_query_version},
+            )
 
         return result
 
