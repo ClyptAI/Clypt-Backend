@@ -14,10 +14,6 @@ try:
 except ImportError:
     types = None
 
-_PRIORITY_PAYGO_HEADERS = {
-    "X-Vertex-AI-LLM-Shared-Request-Type": "priority",
-    "X-Vertex-AI-LLM-Request-Type": "shared",
-}
 _TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 _TRANSIENT_ERROR_TOKENS = (
     "resource_exhausted",
@@ -165,22 +161,20 @@ def _build_default_sdk_client(*, settings: VertexSettings, location: str, header
 class VertexGeminiClient:
     def __init__(self, *, settings: VertexSettings, sdk_client: Any | None = None) -> None:
         self.settings = settings
-        self._api_max_retries = max(0, int(settings.api_max_retries))
-        self._api_initial_backoff_s = max(0.0, float(settings.api_initial_backoff_s))
-        self._api_max_backoff_s = max(0.0, float(settings.api_max_backoff_s))
-        self._api_backoff_multiplier = max(1.0, float(settings.api_backoff_multiplier))
-        self._api_jitter_ratio = max(0.0, float(settings.api_jitter_ratio))
-        backend = (settings.generation_backend or "developer").strip().lower()
-        if backend == "developer" and not settings.gemini_api_key:
-            logger.warning(
-                "[vertex] GENAI_GENERATION_BACKEND=developer but GEMINI_API_KEY is missing; falling back to Vertex backend."
+        self._api_max_retries = max(0, int(settings.generation_api_max_retries))
+        self._api_initial_backoff_s = max(0.0, float(settings.generation_api_initial_backoff_s))
+        self._api_max_backoff_s = max(0.0, float(settings.generation_api_max_backoff_s))
+        self._api_backoff_multiplier = max(1.0, float(settings.generation_api_backoff_multiplier))
+        self._api_jitter_ratio = max(0.0, float(settings.generation_api_jitter_ratio))
+        if not settings.gemini_api_key:
+            raise ValueError(
+                "GEMINI_API_KEY (or GOOGLE_API_KEY) is required for Gemini Developer API generation."
             )
-            backend = "vertex"
-        self._backend = backend
+        self._backend = "developer"
         self._sdk = sdk_client or _build_default_sdk_client(
             settings=settings,
-            location="__developer__" if self._backend == "developer" else settings.generation_location,
-            headers=_PRIORITY_PAYGO_HEADERS if self._backend == "vertex" else None,
+            location="__developer__",
+            headers=None,
         )
 
     def _call_with_retry(self, *, operation: str, model: str, fn):
@@ -247,15 +241,6 @@ class VertexGeminiClient:
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     thinking_level=resolved_level
                 )
-            elif "pro" in resolved_model.lower():
-                # Keep a conservative default budget for Pro when the caller
-                # does not set an explicit thinking level.
-                try:
-                    config_kwargs["thinking_config"] = types.ThinkingConfig(
-                        thinking_budget=int(self.settings.thinking_budget)
-                    )
-                except Exception:
-                    pass
             if response_schema is not None:
                 config_kwargs["response_schema"] = response_schema
             if max_output_tokens is not None:
@@ -263,6 +248,8 @@ class VertexGeminiClient:
             _config = types.GenerateContentConfig(**config_kwargs)
         else:
             _config = {"temperature": temperature, "response_mime_type": "application/json"}
+            if thinking_level:
+                _config["thinking_config"] = {"thinking_level": str(thinking_level).strip().upper()}
         response = self._call_with_retry(
             operation="generate_content",
             model=resolved_model,
@@ -294,15 +281,15 @@ class VertexGeminiClient:
 class VertexEmbeddingClient:
     def __init__(self, *, settings: VertexSettings, sdk_client: Any | None = None) -> None:
         self.settings = settings
-        self._api_max_retries = max(0, int(settings.api_max_retries))
-        self._api_initial_backoff_s = max(0.0, float(settings.api_initial_backoff_s))
-        self._api_max_backoff_s = max(0.0, float(settings.api_max_backoff_s))
-        self._api_backoff_multiplier = max(1.0, float(settings.api_backoff_multiplier))
-        self._api_jitter_ratio = max(0.0, float(settings.api_jitter_ratio))
+        self._api_max_retries = max(0, int(settings.embedding_api_max_retries))
+        self._api_initial_backoff_s = max(0.0, float(settings.embedding_api_initial_backoff_s))
+        self._api_max_backoff_s = max(0.0, float(settings.embedding_api_max_backoff_s))
+        self._api_backoff_multiplier = max(1.0, float(settings.embedding_api_backoff_multiplier))
+        self._api_jitter_ratio = max(0.0, float(settings.embedding_api_jitter_ratio))
         backend = (settings.embedding_backend or "vertex").strip().lower()
         if backend == "developer" and not settings.gemini_api_key:
             logger.warning(
-                "[vertex] GENAI_EMBEDDING_BACKEND=developer but GEMINI_API_KEY is missing; falling back to Vertex backend."
+                "[vertex] VERTEX_EMBEDDING_BACKEND=developer but GEMINI_API_KEY is missing; falling back to Vertex backend."
             )
             backend = "vertex"
         self._backend = backend
@@ -391,7 +378,7 @@ class VertexEmbeddingClient:
             return []
         if self._backend != "vertex":
             raise RuntimeError(
-                "Multimodal URI embeddings require Vertex backend. Set GENAI_EMBEDDING_BACKEND=vertex."
+                "Multimodal URI embeddings require Vertex backend. Set VERTEX_EMBEDDING_BACKEND=vertex."
             )
         try:
             from google.genai import types as _types

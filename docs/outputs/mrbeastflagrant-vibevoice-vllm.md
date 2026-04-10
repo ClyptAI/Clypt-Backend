@@ -1,5 +1,7 @@
 # mrbeastflagrant.mp4 — VibeVoice vLLM Transcript
 
+**Historical artifact:** legacy transcript snapshot preserved for reference.
+
 **Run date:** 2026-04-07
 **Backend:** vLLM (vibevoice, RTF 0.07x, 30.8s for 392.9s audio)
 **Speakers:** 7 (IDs 0–6)

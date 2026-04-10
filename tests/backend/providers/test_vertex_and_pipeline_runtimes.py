@@ -99,6 +99,7 @@ def test_vertex_clients_generate_json_and_embed_texts():
         project="clypt-v3",
         generation_location="global",
         embedding_location="us-central1",
+        gemini_api_key="test-key",
     )
 
     gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
@@ -139,7 +140,7 @@ def test_vertex_gemini_client_prefers_sdk_parsed_json():
         text="not valid json",
         parsed={"ok": True, "from": "parsed"},
     )
-    settings = VertexSettings(project="clypt-v3")
+    settings = VertexSettings(project="clypt-v3", gemini_api_key="test-key")
     gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
 
     response = gemini_client.generate_json(prompt="use parsed")
@@ -147,26 +148,25 @@ def test_vertex_gemini_client_prefers_sdk_parsed_json():
     assert response == {"ok": True, "from": "parsed"}
 
 
-def test_vertex_gemini_client_uses_low_thinking_budget_for_pro_only():
+def test_vertex_gemini_client_uses_no_default_thinking_config():
     from backend.providers.config import VertexSettings
     from backend.providers.vertex import VertexGeminiClient
 
     sdk_client = _FakeGenAIClient()
     settings = VertexSettings(
         project="clypt-v3",
-        thinking_budget=128,
+        gemini_api_key="test-key",
     )
     gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
 
-    gemini_client.generate_json(prompt="pro call", model="gemini-3.1-pro-preview")
-    pro_config = sdk_client.models.generate_calls[-1]["config"]
-    thinking_cfg = getattr(pro_config, "thinking_config", None)
-    assert thinking_cfg is not None
-    assert getattr(thinking_cfg, "thinking_budget", None) == 128
-
     gemini_client.generate_json(prompt="flash call", model="gemini-3-flash-preview")
     flash_config = sdk_client.models.generate_calls[-1]["config"]
-    assert getattr(flash_config, "thinking_config", None) is None
+    flash_thinking_cfg = (
+        getattr(flash_config, "thinking_config", None)
+        if not isinstance(flash_config, dict)
+        else flash_config.get("thinking_config")
+    )
+    assert flash_thinking_cfg is None
 
 
 def test_vertex_clients_retry_transient_generate_and_embed_errors(monkeypatch: pytest.MonkeyPatch):
@@ -181,11 +181,17 @@ def test_vertex_clients_retry_transient_generate_and_embed_errors(monkeypatch: p
         project="clypt-v3",
         generation_location="global",
         embedding_location="us-central1",
-        api_max_retries=4,
-        api_initial_backoff_s=0.01,
-        api_max_backoff_s=0.02,
-        api_backoff_multiplier=2.0,
-        api_jitter_ratio=0.0,
+        generation_api_max_retries=4,
+        generation_api_initial_backoff_s=0.01,
+        generation_api_max_backoff_s=0.02,
+        generation_api_backoff_multiplier=2.0,
+        generation_api_jitter_ratio=0.0,
+        embedding_api_max_retries=4,
+        embedding_api_initial_backoff_s=0.01,
+        embedding_api_max_backoff_s=0.02,
+        embedding_api_backoff_multiplier=2.0,
+        embedding_api_jitter_ratio=0.0,
+        gemini_api_key="test-key",
     )
 
     sleeps: list[float] = []
@@ -209,7 +215,7 @@ def test_vertex_gemini_client_fails_hard_when_parsed_payload_missing():
 
     sdk_client = _FakeGenAIClient()
     sdk_client.models.generate_next_response = _FakeResponse('{"broken": "unterminated}')
-    settings = VertexSettings(project="clypt-v3")
+    settings = VertexSettings(project="clypt-v3", gemini_api_key="test-key")
     gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
 
     with pytest.raises(ValueError, match="did not return SDK-parsed JSON object"):

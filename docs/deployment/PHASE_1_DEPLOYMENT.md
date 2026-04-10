@@ -7,37 +7,45 @@
 This document is the authoritative operational reference for deploying and running Phase 1 with the vLLM VibeVoice sidecar.
 
 For copy/paste end-to-end repro commands (Phase 1 + queue-mode Phase 2-4 + verification), use:
-- [Canonical Repro Checklist](/Users/rithvik/Clypt-V3/docs/runtime/v3.1_runtime_guide.md#canonical-repro-checklist) in `docs/runtime/v3.1_runtime_guide.md`
+
+- [Canonical Repro Checklist](../runtime/RUNTIME_GUIDE.md#4-canonical-repro-checklist) in `docs/runtime/RUNTIME_GUIDE.md`
 
 ## Current Working Setup
 
 - **ASR:** VibeVoice via persistent Docker-managed vLLM service (`clypt-vllm-vibevoice.service`)
 - **Visual:** RF-DETR Small + ByteTrack (`pytorch_cuda_fp16` default)
 - **Execution:** visual extraction + ASR run **concurrently**; NFA / emotion2vec+ / YAMNet start immediately after ASR (not waiting for RF-DETR), running concurrent with visual — serial with each other
+- **Phase 2-4 queue worker default profile:** `us-east4` L4 GPU-accelerated (CPU encoder path is fallback/degraded)
 - **Model served as:** `vibevoice` (NOT `microsoft/VibeVoice-ASR` — see model ID gotcha below)
 - **vLLM version:** `v0.14.1` (pinned — this is the tested/compatible version for the VibeVoice plugin)
 
-### Validated runs (vLLM backend)
+### Run snapshots (vLLM backend, includes historical baselines)
 
-| Clip | Duration | Turns | Wall time | ASR RTF | Mode |
-|------|----------|-------|-----------|---------|------|
-| mrbeastflagrant.mp4 | 392.9s | 102 | 30.8s | 0.07x | ASR-only |
-| joeroganflagrant.mp4 | 788.7s | 200 | 64.3s | 0.07x | ASR-only |
-| mrbeastflagrant.mp4 | 392.9s | 104 | 179.2s (3.0 min) | 0.07x | Full Phase 1 (audio chain sequential) |
-| joeroganflagrant.mp4 | 788.7s | 201 | 342.4s (5.7 min) | 0.07x | Full Phase 1 (audio chain sequential) |
-| joeroganflagrant.mp4 | 788.7s | 201 | 299.6s (5.0 min) | 0.07x | **Full Phase 1 (audio chain parallel ✓)** |
-| mrbeastflagrant.mp4 | 392.9s | 104 | **251s (4m11s)** | 0.07x | **Full Phase 1–4 end-to-end ✓** (Phase 1: 153s, Phases 2–4: 98s) |
-| mrbeastflagrant.mp4 | 392.9s | 104 | **273.5s (4.6 min)** | 0.07x | **Full Phase 1–4 end-to-end ✓** (fresh `ai/ml` redeploy; Phases 2–4: 271.8s) |
-| mrbeastflagrant.mp4 | 392.9s | 104 | **820.8s (13m41s)** | — | **Phase 2–4 queue worker ✓** (Cloud Run CPU ffmpeg fallback baseline) |
-| mrbeastflagrant.mp4 | 392.9s | 104 | **143.8s (2m24s)** | — | **Phase 2–4 queue worker ✓** (verified Phase 1 handoff replay; us-east4 L4 + tuned Flash thinking profile) |
+
+| Video                | Duration | Turns | Wall time            | ASR RTF | Mode                                                                                                       |
+| -------------------- | -------- | ----- | -------------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| mrbeastflagrant.mp4  | 392.9s   | 102   | 30.8s                | 0.07x   | ASR-only                                                                                                   |
+| joeroganflagrant.mp4 | 788.7s   | 200   | 64.3s                | 0.07x   | ASR-only                                                                                                   |
+| mrbeastflagrant.mp4  | 392.9s   | 104   | 179.2s (3.0 min)     | 0.07x   | Full Phase 1 (audio chain sequential)                                                                      |
+| joeroganflagrant.mp4 | 788.7s   | 201   | 342.4s (5.7 min)     | 0.07x   | Full Phase 1 (audio chain sequential)                                                                      |
+| joeroganflagrant.mp4 | 788.7s   | 201   | 299.6s (5.0 min)     | 0.07x   | **Full Phase 1 (audio chain parallel ✓)**                                                                  |
+| mrbeastflagrant.mp4  | 392.9s   | 104   | **251s (4m11s)**     | 0.07x   | **Full Phase 1–4 end-to-end ✓** (Phase 1: 153s, Phases 2–4: 98s)                                           |
+| mrbeastflagrant.mp4  | 392.9s   | 104   | **273.5s (4.6 min)** | 0.07x   | **Full Phase 1–4 end-to-end ✓** (fresh `ai/ml` redeploy; Phases 2–4: 271.8s)                               |
+| mrbeastflagrant.mp4  | 392.9s   | 104   | **820.8s (13m41s)**  | —       | **Phase 2–4 queue worker ✓** (Cloud Run CPU-encoder fallback baseline)                                     |
+| mrbeastflagrant.mp4  | 392.9s   | 104   | **143.8s (2m24s)**   | —       | **Phase 2–4 queue worker ✓** (verified Phase 1 handoff replay; us-east4 L4 + tuned Flash thinking profile) |
+
 
 Audio chain parallel = NFA → emotion2vec+ → YAMNet start immediately after ASR, concurrent with RF-DETR. Audio artifacts ready ~234s earlier on the 13-min clip. Current production mode.
 
-Inline Phase 1–4 on the GPU droplet is **0.64× real-time** on a 6.5-min clip. Queue-mode Phase 2–4 on Cloud Run is currently slower when ffmpeg GPU is unavailable.
+Historical-run labeling:
+- Rows marked `audio chain sequential` and `CPU-encoder fallback baseline` are historical baselines, not current default production behavior.
+
+Immediately after a successful Phase 1 run, validate queue handoff and worker execution (Cloud Task enqueue + Cloud Run logs) before treating the run as complete.
 
 ## Droplet Shape
 
 **Current live droplet:**
+
 - region: `atl1`
 - GPU: `NVIDIA H200` (`143771 MiB` from `nvidia-smi`)
 - image family: Ubuntu 22.04 + CUDA 12 GPU base image
@@ -45,15 +53,17 @@ Inline Phase 1–4 on the GPU droplet is **0.64× real-time** on a 6.5-min clip.
 - SSH key: `~/.ssh/clypt_do_ed25519`
 
 **Acceptable alternatives (in order of preference):**
+
 1. `atl1` — `gpu-h200x1-141gb` (currently validated)
 2. `nyc2` — H100/H200 equivalent if available
 3. `ams3` — H100 equivalent if available
 
-Do **not** silently fall back to a non-GPU or CPU-only shape. If no H100/H200 slot is available, stop and check.
+Do **not** silently fall back to a non-GPU droplet shape. If no H100/H200 slot is available, stop and check.
 
 **Note:** GPU snapshots are GPU-family-specific. A snapshot taken from an H200 droplet will NOT work on an H100 droplet and vice versa. Always use the matching base image when creating a new droplet.
 
 **Performance observed on validated GPU droplets:**
+
 - RF-DETR Small (PyTorch CUDA FP16, `torch.compile`): ~109–114 fps
 - VibeVoice vLLM: RTF ~0.07x (392.9s clip in 30.8s; 788.7s clip in 64.3s)
 
@@ -93,6 +103,7 @@ bash scripts/do_phase1/deploy_vllm_service.sh
 ```
 
 What `deploy_vllm_service.sh` does:
+
 1. Installs host prerequisites (`ffmpeg`, `git`, `python3-venv`, `curl`, `unzip`, etc.)
 2. Installs Docker CE if absent
 3. Installs `nvidia-container-toolkit` and configures the nvidia Docker runtime (`nvidia-ctk runtime configure --runtime=docker && systemctl restart docker`) — **required** for `--gpus all` to work
@@ -168,6 +179,7 @@ PY
 ```
 
 Expected:
+
 - all three services are `active`
 - `/health` returns HTTP 200
 - `/v1/models` includes `"id": "vibevoice"`
@@ -229,25 +241,38 @@ VIBEVOICE_HOTWORDS_CONTEXT="I, you, he, she, it, we, they, me, him, her, us, the
 
 ```bash
 GOOGLE_CLOUD_PROJECT=clypt-v3
-GOOGLE_CLOUD_LOCATION=global              # used when generation backend is Vertex
-VERTEX_GEMINI_LOCATION=global
+GOOGLE_CLOUD_LOCATION=global              # retained for compatibility; generation is Developer API-only
+GENAI_GENERATION_LOCATION=global
 VERTEX_EMBEDDING_LOCATION=us-central1    # Embedding endpoint — cannot use global
-GENAI_GENERATION_BACKEND=developer       # default generation path (AI Studio/Developer API)
-GENAI_EMBEDDING_BACKEND=vertex           # keep embeddings on Vertex
+GENAI_GENERATION_BACKEND=developer       # required generation path (AI Studio/Developer API only)
+VERTEX_EMBEDDING_BACKEND=vertex          # keep embeddings on Vertex
 GEMINI_API_KEY=<from secret manager/env>
-VERTEX_GEMINI_MODEL=gemini-3.1-pro-preview
-VERTEX_FLASH_MODEL=gemini-3-flash-preview # Current default model for all Phase 2-4 generation calls
+GENAI_GENERATION_MODEL=gemini-3-flash-preview
+GENAI_FLASH_MODEL=gemini-3-flash-preview # Current default model for all Phase 2-4 generation calls
 VERTEX_EMBEDDING_MODEL=gemini-embedding-2-preview
-VERTEX_THINKING_BUDGET=128               # compatibility knob if Pro generation path is re-enabled
 GCS_BUCKET=clypt-storage-v3
 ```
 
-Set `VERTEX_FLASH_MODEL` explicitly for reproducibility. Current generation profile uses Flash for all Phase 2-4 calls with per-stage thinking levels.
+Set `GENAI_FLASH_MODEL` explicitly for reproducibility. Current generation profile uses Flash for all Phase 2-4 calls with per-stage thinking levels.
 
-### Phase 2-4 worker perf env (Cloud Run)
+### Phase 1 -> Phase 2-4 handoff contract (required immediately after Phase 1)
 
-Authoritative copy/paste values are maintained in:
-- [Canonical Repro Checklist](/Users/rithvik/Clypt-V3/docs/runtime/v3.1_runtime_guide.md#canonical-repro-checklist) in `docs/runtime/v3.1_runtime_guide.md`
+This deployment guide keeps only the interface contract needed after Phase 1 completes:
+
+1. Run Phase 1 with `--run-phase14` so the queue handoff is enabled.
+2. Verify handoff log marker:
+   - `[phase24] queue-mode handoff complete — Cloud Task enqueued while RF-DETR finishes`
+3. Confirm Cloud Run worker receives the task:
+   - `gcloud run services logs read clypt-phase24-worker --region=us-east4 --project=clypt-v3 --follow`
+4. Confirm run status in Spanner transitions to `PHASE24_DONE` (or terminal failure requiring rerun).
+
+Phase 2-4 worker defaults, comments/trends signal defaults, and Phase 2-4 caveats are documented in the runtime guide.
+
+Authoritative runtime reference:
+
+- [RUNTIME_GUIDE.md - Phase 2-4 worker defaults](../runtime/RUNTIME_GUIDE.md#51-phase-2-4-worker-defaults-future-runs)
+- [RUNTIME_GUIDE.md - Comments/Trends signal defaults](../runtime/RUNTIME_GUIDE.md#52-commentstrends-signal-defaults-future-runs)
+- [RUNTIME_GUIDE.md - Detailed Phase 2-4 worker caveats](../runtime/RUNTIME_GUIDE.md#71-detailed-phase-2-4-worker-caveats)
 
 ### Cache env (must be consistent across prewarm + runtime)
 
@@ -261,9 +286,9 @@ FUNASR_MODEL_SOURCE=hf
 
 `deploy_vllm_service.sh` now sources the env file before prewarm so these paths are honored consistently.
 
-### Live env snapshot (captured 2026-04-08 UTC)
+### Reference env template (current defaults)
 
-Current droplet `/etc/clypt-phase1/v3_1_phase1.env`:
+Use these as the current baseline for `/etc/clypt-phase1/v3_1_phase1.env`:
 
 ```bash
 CLYPT_V31_OUTPUT_ROOT=backend/outputs/v3_1
@@ -280,9 +305,6 @@ CLYPT_PHASE1_VISUAL_TRACKER_BUFFER=30
 CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH=0.7
 CLYPT_PHASE1_VISUAL_DECODE=cpu
 
-CLYPT_YOUTUBE_COOKIES_FILE=/opt/clypt-phase1/yt_cookies.txt
-CLYPT_YOUTUBE_JS_RUNTIMES=bun:/root/.bun/bin/bun
-
 VIBEVOICE_BACKEND=vllm
 VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
 VIBEVOICE_VLLM_MODEL=vibevoice
@@ -296,10 +318,12 @@ VIBEVOICE_HOTWORDS_CONTEXT=I,you,he,she,it,we,they,me,him,her,us,them,my,your,hi
 
 GOOGLE_CLOUD_PROJECT=clypt-v3
 GOOGLE_CLOUD_LOCATION=global
-VERTEX_GEMINI_LOCATION=global
+GENAI_GENERATION_LOCATION=global
 VERTEX_EMBEDDING_LOCATION=us-central1
-VERTEX_GEMINI_MODEL=gemini-3.1-pro-preview
-VERTEX_FLASH_MODEL=gemini-3-flash-preview
+GENAI_GENERATION_BACKEND=developer
+VERTEX_EMBEDDING_BACKEND=vertex
+GENAI_GENERATION_MODEL=gemini-3-flash-preview
+GENAI_FLASH_MODEL=gemini-3-flash-preview
 VERTEX_EMBEDDING_MODEL=gemini-embedding-2-preview
 GCS_BUCKET=clypt-storage-v3
 GOOGLE_APPLICATION_CREDENTIALS=/opt/clypt-phase1/sa-key.json
@@ -311,8 +335,8 @@ HF_HOME=/opt/clypt-phase1/.cache/huggingface
 FUNASR_MODEL_SOURCE=hf
 ```
 
-The live env currently omits `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT`; runtime default is `1` (strict mode).
-The live env currently also contains legacy experiment keys (`VIBEVOICE_OUTPUT_MODE`, `VIBEVOICE_WORD_*`). They are ignored by the main pipeline; deploy script now warns if they are present.
+If `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT` is omitted, runtime default is `1` (strict mode).
+Legacy experiment keys (`VIBEVOICE_OUTPUT_MODE`, `VIBEVOICE_WORD_*`) are ignored by the main pipeline; deploy script warns if they are present.
 
 ### GCS service account key (required for video upload + Vertex)
 
@@ -343,23 +367,6 @@ Add to `/etc/clypt-phase1/v3_1_phase1.env`:
 ```bash
 GOOGLE_APPLICATION_CREDENTIALS=/opt/clypt-phase1/sa-key.json
 ```
-
-### YouTube downloading
-
-```bash
-CLYPT_YOUTUBE_COOKIES_FILE=/opt/clypt-phase1/yt_cookies.txt
-CLYPT_YOUTUBE_JS_RUNTIMES=bun:/root/.bun/bin/bun
-```
-
-Export cookies from your browser for `youtube.com` (Netscape format) and upload:
-
-```bash
-scp -i ~/.ssh/clypt_do_ed25519 \
-  ~/Downloads/www.youtube.com_cookies.txt \
-  root@<DROPLET_IP>:/opt/clypt-phase1/yt_cookies.txt
-```
-
-Both `CLYPT_YOUTUBE_COOKIES_FILE` and `CLYPT_YOUTUBE_JS_RUNTIMES` are required. Without the JS runtime, yt-dlp cannot solve the EJS n-challenge even when cookies are present, resulting in "Requested format is not available." Use `bun` not `node` — yt-dlp only bundles solver scripts for bun and deno.
 
 ### Local video upload procedure
 
@@ -437,7 +444,7 @@ nohup python -m backend.runtime.run_phase1 \
   --job-id "$JOB_ID" \
   > "$LOG" 2>&1 &
 
-# Local file (use --source-path, NOT file:// — yt-dlp blocks file:// by default):
+# Local file:
 nohup python -m backend.runtime.run_phase1 \
   --source-path /opt/clypt-phase1/videos/myvideo.mp4 \
   --job-id "$JOB_ID" \
@@ -465,8 +472,8 @@ From `requirements-do-phase1.txt` (main venv — no second venv needed for vLLM)
 - `httpx>=0.27.0` — HTTP client
 
 System packages (on the droplet, not the container):
+
 - `ffmpeg` — audio extraction, scene detection
-- `bun` — yt-dlp JS n-challenge solver
 
 For the vLLM container, `ffmpeg` and audio libraries are installed automatically by `start_server.py` inside the container on each start.
 
@@ -477,6 +484,7 @@ For the vLLM container, `ffmpeg` and audio libraries are installed automatically
 The vLLM service registers the model under the name `vibevoice` via `--served-model-name vibevoice`. Using the HuggingFace repo ID as the model name returns `HTTP 404 NotFoundError`. Always set `VIBEVOICE_VLLM_MODEL=vibevoice`.
 
 Confirm the served model name at any time:
+
 ```bash
 curl -s http://127.0.0.1:8000/v1/models | python3 -c "import sys,json; [print(m['id']) for m in json.load(sys.stdin)['data']]"
 ```
@@ -505,6 +513,7 @@ systemctl restart docker
 ```
 
 Verify before starting the service:
+
 ```bash
 docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu22.04 nvidia-smi
 ```
@@ -516,6 +525,7 @@ This is expected and normal — the VibeVoice plugin's one-click setup. It takes
 ### First full run may be slow if Phase 1 caches are cold
 
 Phase 1 loads large model families outside the vLLM container:
+
 - emotion2vec+ model (`emotion2vec/emotion2vec_plus_large` on HuggingFace; mapped from `iic/emotion2vec_plus_large`, ~1.81GB)
 - NeMo forced aligner model (~1GB), when forced alignment is available in the current env
 
@@ -524,13 +534,15 @@ Phase 1 loads large model families outside the vLLM container:
 ### Phase 2-4 timing gates in logs
 
 Current live runner logs explicit timing boundaries:
+
 - `[phase14] Phase 2 done in ...`
 - `[phase14] Phase 3 done in ...`
 - `[phase14] Phase 4 done in ...`
 - `[phase14] Phases 2-4 done in ...`
 
 The wrapper runtime also logs a join time for the concurrent branch:
-- `[phase14] Phase 2-4 branch joined in ... (includes overlap with Phase 1 sidecars)`
+
+- `[phase24] queue-mode handoff complete — Cloud Task enqueued while RF-DETR finishes`
 
 ### emotion2vec top-label log artifact (fixed)
 
@@ -581,10 +593,6 @@ Along with a system message: `"You are a helpful assistant that transcribes audi
 
 The duration in the prompt must be the actual audio duration (probed via `ffprobe`). An incorrect duration (e.g. `0.4 s` from a failed torchaudio probe on an MP4) causes the model to produce incomplete output.
 
-### YouTube format selection
-
-yt-dlp's CLI auto-discovers Node.js, but the Python API does **not**. Without `CLYPT_YOUTUBE_JS_RUNTIMES`, yt-dlp fails with "Requested format is not available" even when cookies are valid. The EJS n-challenge solver requires a JS runtime.
-
 ### GCS bucket ACL vs uniform access
 
 The bucket `clypt-storage-v3` has uniform bucket-level access. `blob.make_public()` fails with `400 BadRequest`. V4 signed URLs via a service account key are the only working path.
@@ -615,6 +623,7 @@ RuntimeError: tensorflow and tensorflow-hub are required for live YAMNet executi
 ```
 
 Fix is already in `requirements-do-phase1.txt`:
+
 ```
 setuptools==69.5.1
 ```
@@ -638,16 +647,6 @@ CLYPT_PHASE1_YAMNET_DEVICE=cpu
 
 This is included in the reference `.env` below.
 
-### Use --source-path for local files, not file:// URLs
-
-yt-dlp (used for `--source-url`) disables `file://` URLs by default for security reasons. Passing `--source-url file:///path/to/video.mp4` fails with:
-
-```
-yt_dlp.networking.exceptions.RequestError: file:// URLs are disabled by default in yt-dlp
-```
-
-Use `--source-path /absolute/path/to/video.mp4` instead. The two flags are mutually exclusive in the CLI.
-
 ### `youtokentome` requires Cython at build time
 
 This is now handled directly by `deploy_vllm_service.sh` (it preinstalls Cython and installs `youtokentome` without build isolation before the full requirements install).
@@ -669,59 +668,26 @@ On some runs, the standard pip resolver backtracks into old `datasets` constrain
 
 This fallback path is expected and was validated on 2026-04-08; deployment still completed successfully end-to-end.
 
-### `embed_content` API treats a list of texts as one document (not N embeddings)
+### Phase 2-4 worker caveats (moved)
 
-`gemini-embedding-2-preview`'s `embed_content` endpoint:
-- Treats a list of text strings as a single multimodal document and returns **1 embedding**, not N.
-- Accepts **at most 1 video/media part** per call — passing multiple video URIs raises `400 INVALID_ARGUMENT: model supports at most 1 video parts per input instance`.
+Phase 2-4 worker caveats now live in:
 
-Both `embed_texts` and `embed_media_uris` in `backend/providers/vertex.py` work around this by looping per item with a `ThreadPoolExecutor`. Never pass a batch to `embed_content`.
-
-### Pro generation rejects `thinking_budget=0` on Developer API
-
-When generation runs through Gemini Developer API with `gemini-3.1-pro-preview`, `thinking_budget=0` can fail with:
-
-`400 INVALID_ARGUMENT: Budget 0 is invalid. This model only works in thinking mode.`
-
-Current default fix is `VERTEX_THINKING_BUDGET=128` (low positive budget). Keep this set unless model behavior changes.
-
-### Priority PayGo headers only apply on Vertex generation path
-
-Current default generation path is Developer API (`GENAI_GENERATION_BACKEND=developer`), which does not use Vertex Priority PayGo headers.
-
-If you switch generation back to Vertex (`GENAI_GENERATION_BACKEND=vertex`), Priority PayGo (`X-Vertex-AI-LLM-Shared-Request-Type: priority`, `X-Vertex-AI-LLM-Request-Type: shared`) is only honored when the generation client uses the `global` location (`GOOGLE_CLOUD_LOCATION=global`, `VERTEX_GEMINI_LOCATION=global`).
-
-The embedding endpoint (`VERTEX_EMBEDDING_LOCATION=us-central1`) does **not** support Priority PayGo and must remain on `us-central1` — passing the headers there has no effect and may cause errors.
-
-Priority PayGo costs ~1.8× Standard price but eliminates Dynamic Shared Quota (DSQ) tail latency — without it, calls 4–5 in a concurrent burst can queue for 4–6 minutes behind calls 1–3. Both headers must be set together.
-
-### 429 RESOURCE_EXHAUSTED — longer videos
-
-Longer videos (200+ speaker turns) generate more concurrent Gemini Flash calls in Phase 3 (local edge batches). These can still exhaust RPM/TPM limits within the rate window.
-
-**Current behavior:** transient API retries/backoff are enabled; queue-mode task retries can also occur via Cloud Tasks. Sustained quota exhaustion can still fail the run.
-
-**Workaround:** rerun with a new job ID after quota recovers, and/or reduce `phase3_target_batch_count` in `V31Config` to lower concurrency pressure.
-
-### Strict long-range edge validation can fail Phase 3
-
-Some runs can fail with:
-
-`ValueError: Gemini returned an edge for a non-shortlisted candidate long-range pair`
-
-This is a strict validation guard in the long-range edge adjudication path. Queue retries may recover, but repeated failures require rerun.
+- [RUNTIME_GUIDE.md - Detailed Phase 2-4 worker caveats](../runtime/RUNTIME_GUIDE.md#71-detailed-phase-2-4-worker-caveats)
 
 ### `as_completed` loop blocked the audio-chain callback (fixed)
 
 A prior version of `backend/phase1_runtime/extract.py` used:
+
 ```python
 for completed_fut in as_completed([visual_future, asr_future]):
     if completed_fut is asr_future:
         audio_chain_future = pool.submit(_run_audio_chain, ...)
 ```
+
 This is wrong — `as_completed` exits the `for` loop iteration per completion but the callback submission was inside the loop, then continued to wait for the next future. The callback fired at the same time RF-DETR finished (~33s late), not when ASR finished.
 
 **Fix (current):** Replace with `asr_future.result()` directly, then submit the audio chain and fire the callback while RF-DETR still runs:
+
 ```python
 vibevoice_turns = asr_future.result()   # blocks until ASR only
 audio_chain_future = pool.submit(_run_audio_chain, ...)
@@ -731,18 +697,22 @@ if on_audio_chain_complete is not None:
 phase1_visual = visual_future.result()  # THEN wait for RF-DETR
 ```
 
-### Phase 1 artifacts are local-only — not uploaded to GCS
+### Phase 1 artifacts are local-first; queue handoff payload is uploaded to GCS
 
-Only the **source video** is uploaded to GCS (`phase1/{job_id}/source_video.mp4`). All Phase 1 sidecar outputs (`canonical_timeline.json`, `tracklet_geometry.json`, `speech_emotion_timeline.json`, `audio_event_timeline.json`, etc.) are written to the local workspace at `backend/outputs/v3_1/{job_id}/` and passed in-memory to Phases 2–4.
+Only the **source video** (`phase1/{job_id}/source_video.mp4`) and the **Phase 2-4 handoff payload**
+(`phase1/{job_id}/phase24_inputs/phase1_outputs.json`) are uploaded to GCS for queue-mode execution.
+Phase 1 sidecar artifacts (`canonical_timeline.json`, `tracklet_geometry.json`, `speech_emotion_timeline.json`,
+`audio_event_timeline.json`, etc.) are still written locally under `backend/outputs/v3_1/{job_id}/`.
 
 Implications:
-- If the droplet is destroyed after Phase 1 completes, the artifacts are lost (source video survives in GCS)
-- Phases 2–4 must run on the same machine as Phase 1 (or receive the in-memory payload via the live runner)
-- If you need cross-machine pipeline splits in the future, a GCS artifact upload step must be added to `runner.py` after `run_phase1_sidecars()` returns
 
-### The cookies file is not synced by rsync
+- If the droplet is destroyed after Phase 1 completes, local sidecar artifacts are lost unless separately exported.
+- Queue-mode Phase 2-4 executes on Cloud Run and reads the handoff payload from GCS; it does not require the Phase 1 host.
+- Keep queue handoff healthy and verify Cloud Task dispatch logs immediately after Phase 1 audio-chain completion.
 
-The systemd env file and the YouTube cookies file live outside the repo directory. They must be uploaded manually after each new droplet provisioning.
+### The systemd env file is not synced by rsync
+
+The systemd env file lives outside the repo directory and must be managed manually after each new droplet provisioning.
 
 ## Benchmarking (Pending)
 
@@ -755,4 +725,4 @@ Success condition: TensorRT preserves or improves detection/tracking quality vs 
 
 ---
 
-*For the runtime provider surface and execution model, see `docs/runtime/v3.1_runtime_guide.md`.*
+*For the runtime provider surface and execution model, see `docs/runtime/RUNTIME_GUIDE.md`.*

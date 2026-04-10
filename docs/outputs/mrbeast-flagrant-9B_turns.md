@@ -1,5 +1,7 @@
 # MrBeast x Flagrant — VibeVoice ASR Turns
 
+**Historical artifact:** legacy non-production transcript snapshot preserved for comparison.
+
 **Job ID:** `mrbeast-flagrant-1`
 **Model:** `microsoft/VibeVoice-ASR-HF` (9B, HF Transformers)
 **Backend:** `hf-transformers`

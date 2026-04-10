@@ -1,5 +1,7 @@
 # MrBeast x Flagrant — VibeVoice ASR Turns (Native Flash)
 
+**Historical artifact:** legacy non-production transcript snapshot preserved for comparison.
+
 **Job ID:** `mrbeastflagrant-flash-test`
 **Model:** `microsoft/VibeVoice-ASR` (7B, native subprocess)
 **Backend:** `native-subprocess`

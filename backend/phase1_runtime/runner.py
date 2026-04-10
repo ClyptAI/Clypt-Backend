@@ -4,7 +4,6 @@ import json
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,7 +36,6 @@ class Phase1JobRunner:
         self,
         *,
         working_root: Path,
-        downloader=None,
         audio_extractor=None,
         storage_client: Any,
         vibevoice_provider: Any,
@@ -45,7 +43,6 @@ class Phase1JobRunner:
         visual_extractor: Any,
         emotion_provider: Any,
         yamnet_provider: Any,
-        phase14_runner: Any | None = None,
         phase24_task_queue_client: Any | None = None,
         phase14_repository: Any | None = None,
         phase24_worker_url: str | None = None,
@@ -54,7 +51,6 @@ class Phase1JobRunner:
         input_resolver_strict: bool = True,
     ) -> None:
         self.working_root = Path(working_root)
-        # downloader is intentionally unused; Phase 1 URL-download mode was removed.
         self.audio_extractor = audio_extractor
         self.storage_client = storage_client
         self.vibevoice_provider = vibevoice_provider
@@ -62,7 +58,6 @@ class Phase1JobRunner:
         self.visual_extractor = visual_extractor
         self.emotion_provider = emotion_provider
         self.yamnet_provider = yamnet_provider
-        self.phase14_runner = phase14_runner
         self.phase24_task_queue_client = phase24_task_queue_client
         self.phase14_repository = phase14_repository
         self.phase24_worker_url = phase24_worker_url
@@ -261,9 +256,8 @@ class Phase1JobRunner:
         source_ref = source_url or str(source_path)
         result: dict[str, Any] = {}
         run_phase14 = bool(runtime_controls.get("run_phase14"))
-        queue_enabled = bool(runtime_controls.get("phase24_queue_enabled", True))
 
-        if run_phase14 and queue_enabled:
+        if run_phase14:
             if self.phase24_task_queue_client is None:
                 raise RuntimeError(
                     "run_phase14 requested with queue mode, but Cloud Tasks client is unavailable. "
@@ -317,77 +311,6 @@ class Phase1JobRunner:
             if not enqueue_summary:
                 raise RuntimeError("phase24 enqueue callback completed without a summary.")
             result["summary"] = enqueue_summary[0]
-        elif run_phase14:
-            if self.phase14_runner is None:
-                raise RuntimeError(
-                    "run_phase14 requested with inline mode, but phase14_runner is unavailable."
-                )
-            # Phase 1 sidecars and Phases 2-4 run concurrently:
-            # - Thread A: runs all sidecars (visual + audio chain in parallel internally)
-            # - Thread B: waits for audio chain callback, then immediately starts Phases 2-4
-            # - Thread A finishes last (RF-DETR); after both done, overwrite tracklets with real visual
-
-            _audio_done = threading.Event()
-            _partial_outputs: list[Phase1SidecarOutputs] = []  # one-element holder
-
-            def _on_audio_done(partial: Phase1SidecarOutputs) -> None:
-                _partial_outputs.append(partial)
-                _audio_done.set()
-
-            def _run_phases_24() -> Any:
-                _audio_done.wait()
-                return self.phase14_runner.run(
-                    run_id=job_id,
-                    source_url=source_ref,
-                    phase1_outputs=_partial_outputs[0],
-                )
-
-            t_p14 = time.perf_counter()
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                sidecars_future = pool.submit(
-                    run_phase1_sidecars,
-                    source_url=source_ref,
-                    video_gcs_uri=video_gcs_uri,
-                    workspace=workspace,
-                    vibevoice_provider=self.vibevoice_provider,
-                    forced_aligner=self.forced_aligner,
-                    visual_extractor=self.visual_extractor,
-                    emotion_provider=self.emotion_provider,
-                    yamnet_provider=self.yamnet_provider,
-                    on_audio_chain_complete=_on_audio_done,
-                )
-                phases24_future = pool.submit(_run_phases_24)
-
-                phase1_outputs = sidecars_future.result()   # blocks until RF-DETR done
-                summary = phases24_future.result()           # blocks until Phase 4 done
-
-            # Overwrite the placeholder (empty) tracklet artifacts with real visual data
-            from backend.pipeline.artifacts import build_run_paths, save_json
-            from backend.pipeline.timeline.tracklets import build_tracklet_artifacts
-            paths = build_run_paths(
-                output_root=self.phase14_runner.config.output_root,
-                run_id=job_id,
-            )
-            shot_tracklet_index, tracklet_geometry = build_tracklet_artifacts(
-                phase1_visual=phase1_outputs.phase1_visual
-            )
-            save_json(paths.shot_tracklet_index, shot_tracklet_index.model_dump(mode="json"))
-            save_json(paths.tracklet_geometry, tracklet_geometry.model_dump(mode="json"))
-            logger.info("[phase14] tracklet artifacts updated with real RF-DETR data")
-
-            result["phase1"] = _jsonable(phase1_outputs)
-            result["summary"] = _jsonable(summary)
-            self._upsert_run_record(
-                run_id=job_id,
-                source_url=source_ref,
-                source_video_gcs_uri=video_gcs_uri,
-                status="PHASE24_DONE",
-                metadata={"query_version": self.phase24_query_version},
-            )
-            logger.info(
-                "[phase14] Phase 2-4 branch joined in %.1f s (includes overlap with Phase 1 sidecars)",
-                time.perf_counter() - t_p14,
-            )
         else:
             # Original path: run sidecars, no phases 2-4
             phase1_outputs = run_phase1_sidecars(

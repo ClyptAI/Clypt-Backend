@@ -31,4 +31,4 @@ videos/
 *.log
 
 .worktrees/
-docs/planning/lovable_prompts/
+docs/specs/lovable_prompts/

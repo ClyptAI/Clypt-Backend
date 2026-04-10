@@ -1,8 +1,8 @@
 # Clypt V3.1 Spec: GCP Decoupling Of Phases 2-4 With Spanner-Backed Graph
 
-**Status:** Draft v1  
+**Status:** Inactive (historical reference)  
 **Date:** 2026-04-08  
-**Scope:** Production migration of Phases 2-4 from in-process/on-GPU-host execution to GCP CPU workers with Spanner persistence and graph traversal  
+**Scope:** Production migration of Phases 2-4 to GCP queue workers with Spanner persistence and graph traversal  
 **Decision Constraints (locked):**
 - Keep Phase 1 on the GPU droplet.
 - Move Phase 2-4 orchestration/ranking off the GPU host.
@@ -16,9 +16,9 @@
 
 ## 1. Why This Migration
 
-Current Phase 1-4 runs are tightly coupled at runtime:
+Pre-migration, Phase 1-4 runs were tightly coupled at runtime:
 - Phase 1 executes on the GPU host.
-- Phase 2-4 can be started from the Phase 1 callback path in the same process/host.
+- Phase 2-4 could be started from the Phase 1 callback path on the same host.
 - Phase outputs are persisted as JSON files under `backend/outputs/v3_1/{run_id}/...`.
 
 This is fast for local iteration, but it blocks production goals:
@@ -27,24 +27,24 @@ This is fast for local iteration, but it blocks production goals:
 - hard to scale Phase 2-4 independently,
 - no database-native traversal/search.
 
-Target state: Phase 1 remains GPU-specialized; Phase 2-4 becomes a GCP-native, CPU-scaled, Spanner-backed pipeline.
+Target state: Phase 1 remains GPU-specialized; Phase 2-4 becomes a GCP-native, queue-worker, Spanner-backed pipeline.
 
 ---
 
 ## 2. Current Code Surfaces (Migration Anchors)
 
 ### 2.1 Phase 1 -> Phase 2-4 coupling
-- `/Users/rithvik/Clypt-V3/backend/phase1_runtime/runner.py`
-  - `Phase1JobRunner.run_job(...)` currently invokes `phase14_runner.run(...)` after audio-chain callback.
+- `backend/phase1_runtime/runner.py`
+  - `Phase1JobRunner.run_job(...)` enqueues Cloud Tasks handoff immediately after audio-chain callback.
 
 ### 2.2 Phase 2-4 orchestration
-- `/Users/rithvik/Clypt-V3/backend/runtime/phase14_live.py`
+- `backend/runtime/phase14_live.py`
   - `V31LivePhase14Runner.run()` and `run_phase_2/3/4()`.
 
 ### 2.3 JSON artifact persistence (to remove as durable store)
-- `/Users/rithvik/Clypt-V3/backend/pipeline/artifacts.py`
+- `backend/pipeline/artifacts.py`
   - `V31RunPaths`, `save_json(...)`, `load_json(...)`.
-- `/Users/rithvik/Clypt-V3/backend/runtime/phase14_live.py`
+- `backend/runtime/phase14_live.py`
   - multiple `save_json(...)` calls for timeline, graph, and candidate outputs.
 
 ---
@@ -58,10 +58,11 @@ Target state: Phase 1 remains GPU-specialized; Phase 2-4 becomes a GCP-native, C
 - Publishes Phase 1 outputs to GCS/Spanner.
 - Enqueues a `phase24` job to GCP.
 
-2. **CPU tier (new, GCP Cloud Run service)**
+2. **Phase 2-4 worker tier (new, GCP Cloud Run service)**
 - Pulls `phase24` work via authenticated HTTP task dispatch (Cloud Tasks -> Cloud Run).
 - Runs Phase 2-4 orchestration.
 - Calls Vertex Gemini + Vertex Embeddings.
+- Supports CPU execution and GPU-accelerated profiles (for example, `us-east4` L4 with GPU ffmpeg).
 - Writes nodes/edges/candidates/metrics to Spanner.
 
 3. **Persistence tier (GCP Spanner)**
@@ -203,14 +204,14 @@ JSON artifact files stop being a required persistence mechanism.
 2. Implement Spanner repository:
 - `SpannerPhase14Repository` for all durable writes and reads.
 
-3. Refactor `/Users/rithvik/Clypt-V3/backend/runtime/phase14_live.py`:
+3. Refactor `backend/runtime/phase14_live.py`:
 - remove direct filesystem dependency on `save_json(...)` and `V31RunPaths` for core outputs,
 - persist through repository methods.
 
 4. Keep optional debug snapshots only behind explicit flag:
 - `CLYPT_DEBUG_SNAPSHOTS=1` -> write non-authoritative payload dumps to GCS (not local JSON dependency).
 
-5. Deprecate/remove `/Users/rithvik/Clypt-V3/backend/pipeline/artifacts.py` from production path.
+5. Deprecate/remove `backend/pipeline/artifacts.py` from production path.
 
 Result: all production reads/writes come from Spanner (+ GCS for media blobs), not local JSON files.
 
@@ -265,9 +266,10 @@ Traversal logic should be database-backed for persistent graph operations.
 - Phase 1 heavy inference only.
 - Do not execute Phase 2-4 there in production mode.
 
-## 9.2 Move to GCP CPU worker
+## 9.2 Move to GCP Phase 2-4 worker
 
 - `phase24` Cloud Run service (`concurrency=1` recommended at start).
+- Worker profile can be CPU baseline or L4 GPU-accelerated depending on run/perf goals.
 - Tune max instances + concurrency based on Vertex call pressure and per-job memory profile.
 
 ## 9.3 IAM
@@ -314,7 +316,7 @@ No historical run backfill is required.
 This migration does not require a read-only dual-path comparator.
 
 Validation before production cutover should use:
-- documented baseline run data in [v3.1_baseline_reference.md](/Users/rithvik/Clypt-V3/docs/runtime/v3.1_baseline_reference.md),
+- documented baseline run data in [RUN_REFERENCE.md](../runtime/RUN_REFERENCE.md),
 - canary rollout percentages,
 - run-level guardrails (node/edge/candidate count thresholds, empty-output guards, latency/error SLOs),
 - query versioning with fast rollback to prior query set.
@@ -326,23 +328,23 @@ Spanner remains the only authoritative read path in production.
 ## 12. File-Level Implementation Plan (First Pass)
 
 ### Modify
-- `/Users/rithvik/Clypt-V3/backend/phase1_runtime/runner.py`
-  - replace in-process Phase 2-4 launch with enqueue call.
-- `/Users/rithvik/Clypt-V3/backend/runtime/phase14_live.py`
+- `backend/phase1_runtime/runner.py`
+  - ensure queue enqueue from Phase 1 callback remains the only production handoff path.
+- `backend/runtime/phase14_live.py`
   - remove JSON persistence coupling; write via repository.
-- `/Users/rithvik/Clypt-V3/backend/providers/config.py`
+- `backend/providers/config.py`
   - add GCP queue/Spanner/worker config knobs.
 
 ### Add
-- `/Users/rithvik/Clypt-V3/backend/repository/phase14_repository.py`
-- `/Users/rithvik/Clypt-V3/backend/repository/spanner_phase14_repository.py`
-- `/Users/rithvik/Clypt-V3/backend/repository/models.py`
-- `/Users/rithvik/Clypt-V3/backend/runtime/run_phase24_worker.py`
-- `/Users/rithvik/Clypt-V3/backend/runtime/phase24_worker_app.py`
-- `/Users/rithvik/Clypt-V3/backend/providers/task_queue.py` (Cloud Tasks client)
+- `backend/repository/phase14_repository.py`
+- `backend/repository/spanner_phase14_repository.py`
+- `backend/repository/models.py`
+- `backend/runtime/run_phase24_worker.py`
+- `backend/runtime/phase24_worker_app.py`
+- `backend/providers/task_queue.py` (Cloud Tasks client)
 
 ### Decommission from production path
-- `/Users/rithvik/Clypt-V3/backend/pipeline/artifacts.py` (or keep only test helper role)
+- `backend/pipeline/artifacts.py` (or keep only test helper role)
 
 ---
 

@@ -1,5 +1,7 @@
 # Joe Rogan x Flagrant — VibeVoice ASR Turns
 
+**Historical artifact:** legacy non-production transcript snapshot preserved for comparison.
+
 **Job ID:** `joeroganxflagrant-flash`
 **Model:** `microsoft/VibeVoice-ASR` (7B, native subprocess)
 **Backend:** `native-subprocess`

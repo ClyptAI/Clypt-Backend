@@ -23,11 +23,6 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--source-path", help="Local source video path")
     parser.add_argument("--job-id", required=True, help="Stable run/job id")
     parser.add_argument("--run-phase14", action="store_true", help="Continue into live Phases 2-4 after Phase 1")
-    parser.add_argument(
-        "--inline-phase24",
-        action="store_true",
-        help="Run Phases 2-4 inline on this machine (debug only; default uses Cloud Tasks queue mode).",
-    )
     parser.add_argument("--working-root", default=None, help="Optional workspace root override")
     return parser
 
@@ -41,8 +36,7 @@ def main() -> int:
     logger.info("Clypt V3.1 Phase 1 — job_id=%s", args.job_id)
     logger.info("Source: %s", source_ref)
     if args.run_phase14:
-        mode = "inline" if args.inline_phase24 else "queue"
-        logger.info("Phases 2-4 will run after Phase 1 (mode=%s).", mode)
+        logger.info("Phases 2-4 will run after Phase 1 (mode=queue).")
     logger.info("=" * 60)
 
     t0 = time.perf_counter()
@@ -53,7 +47,6 @@ def main() -> int:
         source_path=args.source_path,
         runtime_controls={
             "run_phase14": bool(args.run_phase14),
-            "phase24_queue_enabled": not bool(args.inline_phase24),
         },
     )
     elapsed = time.perf_counter() - t0

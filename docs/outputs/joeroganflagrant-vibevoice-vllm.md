@@ -1,5 +1,7 @@
 # joeroganflagrant.mp4 — VibeVoice vLLM Transcript
 
+**Historical artifact:** legacy transcript snapshot preserved for reference.
+
 ## Metadata
 
 | Field | Value |

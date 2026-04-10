@@ -76,10 +76,6 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
             self.job_record = record
             return record
 
-    class _FakePhase14Runner:
-        def run(self, *, run_id: str, source_url: str, phase1_outputs, **kwargs):
-            raise AssertionError("inline phase14 runner should not be called when queue mode is enabled")
-
     repository = _FakeRepository()
 
     runner = Phase1JobRunner(
@@ -91,7 +87,6 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
         visual_extractor=_FakeVisual(),
         emotion_provider=_FakeEmotion(),
         yamnet_provider=_FakeYamnet(),
-        phase14_runner=_FakePhase14Runner(),
         phase24_task_queue_client=_FakeQueueClient(),
         phase14_repository=repository,
         phase24_worker_url="https://phase24-worker.example.com/tasks/phase24",
@@ -207,7 +202,6 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
         visual_extractor=_FakeVisual(),
         emotion_provider=_FakeEmotion(),
         yamnet_provider=_FakeYamnet(),
-        phase14_runner=object(),
         phase24_task_queue_client=_FakeQueueClient(),
         phase24_worker_url="https://phase24-worker.example.com/tasks/phase24",
         phase24_query_version="graph-v2",
@@ -226,7 +220,7 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
     assert calls.index("enqueue:job_002") < calls.index("visual:done")
 
 
-def test_phase1_job_runner_uses_inline_phase14_when_queue_mode_disabled(tmp_path: Path):
+def test_phase1_job_runner_enforces_queue_mode_for_run_phase14(tmp_path: Path):
     from backend.phase1_runtime.runner import Phase1JobRunner
 
     calls: list[str] = []
@@ -275,23 +269,8 @@ def test_phase1_job_runner_uses_inline_phase14_when_queue_mode_disabled(tmp_path
 
     class _FakeQueueClient:
         def enqueue_phase24(self, *, run_id: str, payload: dict, worker_url: str | None = None) -> str:
-            raise AssertionError("queue client should not be used when queue mode is disabled")
-
-    class _FakePhase14Runner:
-        config = type("Config", (), {"output_root": tmp_path})()
-
-        def run(self, *, run_id: str, source_url: str, phase1_outputs, **kwargs):
-            calls.append(f"phase14:{run_id}")
-            return type(
-                "Summary",
-                (),
-                {
-                    "model_dump": lambda self, mode="json": {
-                        "run_id": run_id,
-                        "artifact_paths": {"clip_candidates": "x.json"},
-                    }
-                },
-            )()
+            calls.append(f"enqueue:{run_id}")
+            return "projects/test/locations/us-central1/queues/phase24/tasks/run-queue-only"
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
@@ -302,7 +281,6 @@ def test_phase1_job_runner_uses_inline_phase14_when_queue_mode_disabled(tmp_path
         visual_extractor=_FakeVisual(),
         emotion_provider=_FakeEmotion(),
         yamnet_provider=_FakeYamnet(),
-        phase14_runner=_FakePhase14Runner(),
         phase24_task_queue_client=_FakeQueueClient(),
     )
 
@@ -310,20 +288,10 @@ def test_phase1_job_runner_uses_inline_phase14_when_queue_mode_disabled(tmp_path
         job_id="job_001",
         source_url=None,
         source_path=str(source_video),
-        runtime_controls={"run_phase14": True, "phase24_queue_enabled": False},
+        runtime_controls={"run_phase14": True},
     )
-
-    assert result["summary"]["artifact_paths"]["clip_candidates"] == "x.json"
-    assert calls == [
-        "audio:source_video.mp4",
-        "upload:phase1/job_001/source_video.mp4",
-        "visual:source_video.mp4",
-        "vibevoice:source_audio.wav",
-        "forced_aligner:1",
-        "emotion:1",
-        "yamnet",
-        "phase14:job_001",
-    ]
+    assert result["summary"]["status"] == "queued"
+    assert "enqueue:job_001" in calls
 
 
 def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(tmp_path: Path):
@@ -339,10 +307,6 @@ def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(t
         def upload_file(self, *, local_path: Path, object_name: str) -> str:
             return f"gs://bucket/{object_name}"
 
-    class _FakePhase14Runner:
-        def run(self, *, run_id: str, source_url: str, phase1_outputs, **kwargs):
-            raise AssertionError("inline phase14 runner should not be used in queue mode")
-
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
@@ -352,7 +316,6 @@ def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(t
         visual_extractor=object(),
         emotion_provider=object(),
         yamnet_provider=object(),
-        phase14_runner=_FakePhase14Runner(),
         phase24_task_queue_client=None,
     )
 
@@ -361,43 +324,8 @@ def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(t
             job_id="job_001",
             source_url=None,
             source_path=str(source_video),
-            runtime_controls={"run_phase14": True, "phase24_queue_enabled": True},
+            runtime_controls={"run_phase14": True},
         )
-
-
-def test_phase1_job_runner_fails_inline_mode_when_phase14_runner_missing(tmp_path: Path):
-    from backend.phase1_runtime.runner import Phase1JobRunner
-
-    source_video = tmp_path / "source.mp4"
-    source_video.write_text("video", encoding="utf-8")
-
-    def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
-        audio_path.write_text("audio", encoding="utf-8")
-
-    class _FakeStorage:
-        def upload_file(self, *, local_path: Path, object_name: str) -> str:
-            return f"gs://bucket/{object_name}"
-
-    runner = Phase1JobRunner(
-        working_root=tmp_path,
-        audio_extractor=fake_audio_extractor,
-        storage_client=_FakeStorage(),
-        vibevoice_provider=object(),
-        forced_aligner=object(),
-        visual_extractor=object(),
-        emotion_provider=object(),
-        yamnet_provider=object(),
-        phase14_runner=None,
-        phase24_task_queue_client=None,
-    )
-
-    with pytest.raises(RuntimeError, match="phase14_runner is unavailable"):
-        runner.run_job(
-            job_id="job_001",
-            source_url=None,
-            source_path=str(source_video),
-        runtime_controls={"run_phase14": True, "phase24_queue_enabled": False},
-    )
 
 
 def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(tmp_path: Path):
@@ -458,22 +386,6 @@ def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(
         def run(self, *, audio_path: Path):
             return {"events": []}
 
-    class _FakePhase14Runner:
-        config = type("Config", (), {"output_root": tmp_path})()
-
-        def run(self, *, run_id: str, source_url: str, phase1_outputs, **kwargs):
-            captured["phase14_source_url"] = source_url
-            return type(
-                "Summary",
-                (),
-                {
-                    "model_dump": lambda self, mode="json": {
-                        "run_id": run_id,
-                        "artifact_paths": {},
-                    }
-                },
-            )()
-
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
@@ -483,7 +395,6 @@ def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(
         visual_extractor=_FakeVisual(),
         emotion_provider=_FakeEmotion(),
         yamnet_provider=_FakeYamnet(),
-        phase14_runner=None,
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
     )
@@ -549,22 +460,6 @@ def test_phase1_job_runner_does_not_apply_input_resolver_to_source_path_inputs(t
         def run(self, *, audio_path: Path):
             return {"events": []}
 
-    class _FakePhase14Runner:
-        config = type("Config", (), {"output_root": tmp_path})()
-
-        def run(self, *, run_id: str, source_url: str, phase1_outputs, **kwargs):
-            captured["phase14_source_url"] = source_url
-            return type(
-                "Summary",
-                (),
-                {
-                    "model_dump": lambda self, mode="json": {
-                        "run_id": run_id,
-                        "artifact_paths": {},
-                    }
-                },
-            )()
-
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
@@ -574,7 +469,6 @@ def test_phase1_job_runner_does_not_apply_input_resolver_to_source_path_inputs(t
         visual_extractor=_FakeVisual(),
         emotion_provider=_FakeEmotion(),
         yamnet_provider=_FakeYamnet(),
-        phase14_runner=_FakePhase14Runner(),
         phase24_task_queue_client=None,
         input_resolver=_RecordingResolver(),
     )
@@ -583,13 +477,12 @@ def test_phase1_job_runner_does_not_apply_input_resolver_to_source_path_inputs(t
         job_id="job_004",
         source_url=None,
         source_path=str(source_path),
-        runtime_controls={"run_phase14": True, "phase24_queue_enabled": False},
+        runtime_controls={},
     )
 
     assert calls == ["upload:source-video"]
     assert "resolve:" not in "".join(calls)
     assert captured["visual_video_contents"] == "source-video"
-    assert captured["phase14_source_url"] == str(source_path)
     assert result["phase1"]["phase1_audio"]["source_audio"] == str(source_path)
 
 
@@ -621,7 +514,6 @@ def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_strict(tmp_
         visual_extractor=object(),
         emotion_provider=object(),
         yamnet_provider=object(),
-        phase14_runner=None,
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
         input_resolver_strict=True,
@@ -664,7 +556,6 @@ def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_non_strict(
         visual_extractor=object(),
         emotion_provider=object(),
         yamnet_provider=object(),
-        phase14_runner=None,
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
         input_resolver_strict=False,

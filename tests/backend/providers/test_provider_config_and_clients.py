@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import subprocess
 from pathlib import Path
 
@@ -16,7 +17,7 @@ def test_load_provider_settings_uses_env_and_gcloud_fallback(
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
     monkeypatch.delenv("GCS_BUCKET", raising=False)
-    monkeypatch.delenv("VERTEX_GEMINI_LOCATION", raising=False)
+    monkeypatch.delenv("GENAI_GENERATION_LOCATION", raising=False)
     monkeypatch.delenv("VERTEX_EMBEDDING_LOCATION", raising=False)
     monkeypatch.setenv("CLYPT_GCS_BUCKET", "bucket-a")
     monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
@@ -80,6 +81,9 @@ def test_load_provider_settings_reads_untracked_env_local(
 ) -> None:
     from backend.providers.config import load_provider_settings
 
+    if importlib.util.find_spec("dotenv") is None:
+        pytest.skip("python-dotenv is not installed in this test environment")
+
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
@@ -94,7 +98,7 @@ def test_load_provider_settings_reads_untracked_env_local(
                 "VIBEVOICE_VLLM_MODEL=vibevoice",
                 "VIBEVOICE_DO_SAMPLE=1",
                 "GOOGLE_CLOUD_PROJECT=clypt-v3",
-                "VERTEX_GEMINI_LOCATION=global",
+                "GENAI_GENERATION_LOCATION=global",
                 "VERTEX_EMBEDDING_LOCATION=us-central1",
                 "GCS_BUCKET=clypt-storage-v3",
             ]
@@ -145,6 +149,21 @@ def test_load_provider_settings_rejects_non_vllm_backend(
         load_provider_settings()
 
 
+def test_load_provider_settings_rejects_non_developer_generation_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("GENAI_GENERATION_BACKEND", "vertex")
+
+    with pytest.raises(ValueError, match="only 'developer' is supported"):
+        load_provider_settings()
+
+
 def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -187,7 +206,7 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     assert settings.phase24_worker.max_attempts == 5
 
 
-def test_load_provider_settings_exposes_vertex_retry_settings(
+def test_load_provider_settings_exposes_split_generation_and_embedding_retry_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from backend.providers.config import load_provider_settings
@@ -196,21 +215,29 @@ def test_load_provider_settings_exposes_vertex_retry_settings(
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
     monkeypatch.setenv("GCS_BUCKET", "bucket-a")
     monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("VERTEX_API_MAX_RETRIES", "9")
-    monkeypatch.setenv("VERTEX_API_INITIAL_BACKOFF_S", "0.5")
-    monkeypatch.setenv("VERTEX_API_MAX_BACKOFF_S", "12.0")
-    monkeypatch.setenv("VERTEX_API_BACKOFF_MULTIPLIER", "1.7")
-    monkeypatch.setenv("VERTEX_API_JITTER_RATIO", "0.05")
-    monkeypatch.setenv("VERTEX_THINKING_BUDGET", "96")
+    monkeypatch.setenv("GENAI_GENERATION_API_MAX_RETRIES", "9")
+    monkeypatch.setenv("GENAI_GENERATION_API_INITIAL_BACKOFF_S", "0.5")
+    monkeypatch.setenv("GENAI_GENERATION_API_MAX_BACKOFF_S", "12.0")
+    monkeypatch.setenv("GENAI_GENERATION_API_BACKOFF_MULTIPLIER", "1.7")
+    monkeypatch.setenv("GENAI_GENERATION_API_JITTER_RATIO", "0.05")
+    monkeypatch.setenv("VERTEX_EMBEDDING_API_MAX_RETRIES", "3")
+    monkeypatch.setenv("VERTEX_EMBEDDING_API_INITIAL_BACKOFF_S", "0.2")
+    monkeypatch.setenv("VERTEX_EMBEDDING_API_MAX_BACKOFF_S", "6.0")
+    monkeypatch.setenv("VERTEX_EMBEDDING_API_BACKOFF_MULTIPLIER", "1.4")
+    monkeypatch.setenv("VERTEX_EMBEDDING_API_JITTER_RATIO", "0.01")
 
     settings = load_provider_settings()
 
-    assert settings.vertex.api_max_retries == 9
-    assert settings.vertex.api_initial_backoff_s == 0.5
-    assert settings.vertex.api_max_backoff_s == 12.0
-    assert settings.vertex.api_backoff_multiplier == 1.7
-    assert settings.vertex.api_jitter_ratio == 0.05
-    assert settings.vertex.thinking_budget == 96
+    assert settings.vertex.generation_api_max_retries == 9
+    assert settings.vertex.generation_api_initial_backoff_s == 0.5
+    assert settings.vertex.generation_api_max_backoff_s == 12.0
+    assert settings.vertex.generation_api_backoff_multiplier == 1.7
+    assert settings.vertex.generation_api_jitter_ratio == 0.05
+    assert settings.vertex.embedding_api_max_retries == 3
+    assert settings.vertex.embedding_api_initial_backoff_s == 0.2
+    assert settings.vertex.embedding_api_max_backoff_s == 6.0
+    assert settings.vertex.embedding_api_backoff_multiplier == 1.4
+    assert settings.vertex.embedding_api_jitter_ratio == 0.01
 
 
 def test_phase24_task_queue_client_uses_run_id_for_idempotent_task_name() -> None:
