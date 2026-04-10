@@ -232,4 +232,6 @@ def test_run_phase1_sidecars_can_bypass_forced_alignment_zero_words_with_env_ove
         emotion_provider=_FakeEmotionProvider(),
         yamnet_provider=_FakeYamnetProvider(),
     )
-    assert outputs.diarization_payload["words"] == []
+    # When forced alignment is bypassed, we still synthesize fallback words from ASR turns.
+    assert outputs.diarization_payload["words"]
+    assert outputs.diarization_payload["words"][0]["text"] == "hello"

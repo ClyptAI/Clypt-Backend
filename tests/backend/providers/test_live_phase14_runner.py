@@ -26,6 +26,12 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
             self.edges: list[SemanticEdgeRecord] = []
             self.candidates: list[ClipCandidateRecord] = []
             self.phase_metrics: list[PhaseMetricRecord] = []
+            self.subgraph_provenance = []
+            self.external_signals = []
+            self.external_signal_clusters = []
+            self.prompt_source_links = []
+            self.node_signal_links = []
+            self.candidate_signal_links = []
 
         def upsert_run(self, record: RunRecord) -> RunRecord:
             return record
@@ -69,6 +75,24 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
 
         def get_phase24_job(self, run_id: str) -> Phase24JobRecord | None:
             return None
+
+        def write_subgraph_provenance(self, *, run_id: str, provenance) -> None:
+            self.subgraph_provenance = list(provenance)
+
+        def write_external_signals(self, *, run_id: str, signals) -> None:
+            self.external_signals = list(signals)
+
+        def write_external_signal_clusters(self, *, run_id: str, clusters) -> None:
+            self.external_signal_clusters = list(clusters)
+
+        def write_prompt_source_links(self, *, run_id: str, links) -> None:
+            self.prompt_source_links = list(links)
+
+        def write_node_signal_links(self, *, run_id: str, links) -> None:
+            self.node_signal_links = list(links)
+
+        def write_candidate_signal_links(self, *, run_id: str, links) -> None:
+            self.candidate_signal_links = list(links)
 
     class _FakeEmbeddingClient:
         def embed_texts(self, texts, *, task_type=None, model=None):
