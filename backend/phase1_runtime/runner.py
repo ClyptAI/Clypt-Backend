@@ -15,7 +15,6 @@ from backend.phase1_runtime.input_resolver import Phase1InputResolutionError, Ph
 from backend.phase1_runtime.media import prepare_workspace_media
 from backend.phase1_runtime.models import Phase1SidecarOutputs, Phase1Workspace
 from backend.repository import Phase24JobRecord, RunRecord
-from backend.providers.youtube import YouTubeDownloader
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -55,7 +54,7 @@ class Phase1JobRunner:
         input_resolver_strict: bool = True,
     ) -> None:
         self.working_root = Path(working_root)
-        self.downloader = downloader or YouTubeDownloader()
+        # downloader is intentionally unused; Phase 1 URL-download mode was removed.
         self.audio_extractor = audio_extractor
         self.storage_client = storage_client
         self.vibevoice_provider = vibevoice_provider
@@ -213,31 +212,43 @@ class Phase1JobRunner:
         runtime_controls: dict | None,
     ) -> dict[str, Any]:
         runtime_controls = dict(runtime_controls or {})
+        if bool(source_url) == bool(source_path):
+            raise ValueError("Provide exactly one of source_url or source_path")
+
         resolved_source_path = source_path
-        media_source_url = source_url
-        if source_url is not None and self.input_resolver is not None:
+        if source_url is not None:
+            if self.input_resolver is None:
+                raise Phase1InputResolutionError(
+                    "source_url requires test-bank mapping, but no Phase1InputResolver is configured. "
+                    "Provide source_path or configure CLYPT_PHASE1_TEST_BANK_PATH."
+                )
             try:
                 resolved_source_path = str(self.input_resolver.resolve_source_path(source_url=source_url))
-                media_source_url = None
                 logger.info("[media]  test-bank source_url resolved to %s", resolved_source_path)
-            except Phase1InputResolutionError:
-                if self.input_resolver_strict:
-                    raise
-                logger.warning(
-                    "[media]  test-bank source_url missing mapping; falling back to direct source_url fetch"
+            except Phase1InputResolutionError as exc:
+                raise Phase1InputResolutionError(
+                    f"{exc} URL download mode has been removed; add test-bank mapping or use source_path."
+                ) from exc
+
+        if resolved_source_path is None:
+            raise ValueError(
+                "Unable to resolve local source_path for Phase 1 media. "
+                "Provide source_path directly or configure a test-bank mapping for source_url."
+            )
+        if self.input_resolver is not None and source_url is not None and not self.input_resolver_strict:
+            logger.info(
+                "[media]  input_resolver_strict=0 is ignored now that URL download is removed."
                 )
         workspace = Phase1Workspace.create(root=self.working_root, run_id=job_id)
         logger.info("[media]  workspace: %s", workspace.root)
 
         t_media = time.perf_counter()
         prepare_workspace_media(
-            source_url=media_source_url,
             source_path=resolved_source_path,
             workspace=workspace,
-            downloader=self.downloader,
             audio_extractor=self.audio_extractor,
         )
-        logger.info("[media]  download + audio prep done in %.1f s", time.perf_counter() - t_media)
+        logger.info("[media]  local media + audio prep done in %.1f s", time.perf_counter() - t_media)
 
         t_upload = time.perf_counter()
         logger.info("[gcs]    uploading video to GCS ...")

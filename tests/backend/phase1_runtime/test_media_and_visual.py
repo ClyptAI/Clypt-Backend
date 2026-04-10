@@ -5,17 +5,13 @@ from pathlib import Path
 import pytest
 
 
-def test_prepare_workspace_media_downloads_video_and_extracts_audio(tmp_path: Path):
+def test_prepare_workspace_media_copies_local_video_and_extracts_audio(tmp_path: Path):
     from backend.phase1_runtime.media import prepare_workspace_media
     from backend.phase1_runtime.models import Phase1Workspace
 
     calls: list[str] = []
-
-    class _FakeDownloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            calls.append(f"download:{source_url}")
-            output_path.write_text("video", encoding="utf-8")
-            return output_path
+    source_video = tmp_path / "input.mp4"
+    source_video.write_text("video", encoding="utf-8")
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         calls.append(f"audio:{video_path.name}")
@@ -23,10 +19,8 @@ def test_prepare_workspace_media_downloads_video_and_extracts_audio(tmp_path: Pa
 
     workspace = Phase1Workspace.create(root=tmp_path, run_id="run_001")
     prepared = prepare_workspace_media(
-        source_url="https://youtube.com/watch?v=test",
-        source_path=None,
+        source_path=str(source_video),
         workspace=workspace,
-        downloader=_FakeDownloader(),
         audio_extractor=fake_audio_extractor,
     )
 
@@ -34,10 +28,7 @@ def test_prepare_workspace_media_downloads_video_and_extracts_audio(tmp_path: Pa
     assert prepared.audio_path == workspace.audio_path
     assert workspace.video_path.read_text(encoding="utf-8") == "video"
     assert workspace.audio_path.read_text(encoding="utf-8") == "audio"
-    assert calls == [
-        "download:https://youtube.com/watch?v=test",
-        "audio:source_video.mp4",
-    ]
+    assert calls == ["audio:source_video.mp4"]
 
 
 def test_simple_visual_extractor_emits_single_shot_payload(tmp_path: Path):

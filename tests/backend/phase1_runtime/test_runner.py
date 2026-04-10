@@ -13,12 +13,8 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
 
     calls: list[str] = []
     captured: dict[str, object] = {}
-
-    class _FakeDownloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            calls.append(f"download:{source_url}")
-            output_path.write_text("video", encoding="utf-8")
-            return output_path
+    source_video = tmp_path / "source.mp4"
+    source_video.write_text("video", encoding="utf-8")
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         calls.append(f"audio:{video_path.name}")
@@ -88,7 +84,6 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
-        downloader=_FakeDownloader(),
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
         vibevoice_provider=_FakeVibeVoice(),
@@ -105,8 +100,8 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
 
     result = runner.run_job(
         job_id="job_001",
-        source_url="https://youtube.com/watch?v=test",
-        source_path=None,
+        source_url=None,
+        source_path=str(source_video),
         runtime_controls={"run_phase14": True},
     )
 
@@ -135,7 +130,6 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
     assert repository.job_record.task_name == "projects/test/locations/us-central1/queues/phase24/tasks/run-001"
     assert repository.job_record.metadata["query_version"] == "graph-v2"
     assert calls == [
-        "download:https://youtube.com/watch?v=test",
         "audio:source_video.mp4",
         "upload:phase1/job_001/source_video.mp4",
         "visual:source_video.mp4",
@@ -152,12 +146,8 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
 
     calls: list[str] = []
     queue_called = threading.Event()
-
-    class _FakeDownloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            calls.append(f"download:{source_url}")
-            output_path.write_text("video", encoding="utf-8")
-            return output_path
+    source_video = tmp_path / "source.mp4"
+    source_video.write_text("video", encoding="utf-8")
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         calls.append(f"audio:{video_path.name}")
@@ -210,7 +200,6 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
-        downloader=_FakeDownloader(),
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
         vibevoice_provider=_FakeVibeVoice(),
@@ -226,8 +215,8 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
 
     result = runner.run_job(
         job_id="job_002",
-        source_url="https://youtube.com/watch?v=test",
-        source_path=None,
+        source_url=None,
+        source_path=str(source_video),
         runtime_controls={"run_phase14": True},
     )
 
@@ -241,12 +230,8 @@ def test_phase1_job_runner_uses_inline_phase14_when_queue_mode_disabled(tmp_path
     from backend.phase1_runtime.runner import Phase1JobRunner
 
     calls: list[str] = []
-
-    class _FakeDownloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            calls.append(f"download:{source_url}")
-            output_path.write_text("video", encoding="utf-8")
-            return output_path
+    source_video = tmp_path / "source.mp4"
+    source_video.write_text("video", encoding="utf-8")
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         calls.append(f"audio:{video_path.name}")
@@ -310,7 +295,6 @@ def test_phase1_job_runner_uses_inline_phase14_when_queue_mode_disabled(tmp_path
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
-        downloader=_FakeDownloader(),
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
         vibevoice_provider=_FakeVibeVoice(),
@@ -324,14 +308,13 @@ def test_phase1_job_runner_uses_inline_phase14_when_queue_mode_disabled(tmp_path
 
     result = runner.run_job(
         job_id="job_001",
-        source_url="https://youtube.com/watch?v=test",
-        source_path=None,
+        source_url=None,
+        source_path=str(source_video),
         runtime_controls={"run_phase14": True, "phase24_queue_enabled": False},
     )
 
     assert result["summary"]["artifact_paths"]["clip_candidates"] == "x.json"
     assert calls == [
-        "download:https://youtube.com/watch?v=test",
         "audio:source_video.mp4",
         "upload:phase1/job_001/source_video.mp4",
         "visual:source_video.mp4",
@@ -346,10 +329,8 @@ def test_phase1_job_runner_uses_inline_phase14_when_queue_mode_disabled(tmp_path
 def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(tmp_path: Path):
     from backend.phase1_runtime.runner import Phase1JobRunner
 
-    class _FakeDownloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            output_path.write_text("video", encoding="utf-8")
-            return output_path
+    source_video = tmp_path / "source.mp4"
+    source_video.write_text("video", encoding="utf-8")
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         audio_path.write_text("audio", encoding="utf-8")
@@ -364,7 +345,6 @@ def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(t
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
-        downloader=_FakeDownloader(),
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
         vibevoice_provider=object(),
@@ -379,8 +359,8 @@ def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(t
     with pytest.raises(RuntimeError, match="Cloud Tasks client is unavailable"):
         runner.run_job(
             job_id="job_001",
-            source_url="https://youtube.com/watch?v=test",
-            source_path=None,
+            source_url=None,
+            source_path=str(source_video),
             runtime_controls={"run_phase14": True, "phase24_queue_enabled": True},
         )
 
@@ -388,10 +368,8 @@ def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(t
 def test_phase1_job_runner_fails_inline_mode_when_phase14_runner_missing(tmp_path: Path):
     from backend.phase1_runtime.runner import Phase1JobRunner
 
-    class _FakeDownloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            output_path.write_text("video", encoding="utf-8")
-            return output_path
+    source_video = tmp_path / "source.mp4"
+    source_video.write_text("video", encoding="utf-8")
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         audio_path.write_text("audio", encoding="utf-8")
@@ -402,7 +380,6 @@ def test_phase1_job_runner_fails_inline_mode_when_phase14_runner_missing(tmp_pat
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
-        downloader=_FakeDownloader(),
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
         vibevoice_provider=object(),
@@ -417,8 +394,8 @@ def test_phase1_job_runner_fails_inline_mode_when_phase14_runner_missing(tmp_pat
     with pytest.raises(RuntimeError, match="phase14_runner is unavailable"):
         runner.run_job(
             job_id="job_001",
-            source_url="https://youtube.com/watch?v=test",
-            source_path=None,
+            source_url=None,
+            source_path=str(source_video),
         runtime_controls={"run_phase14": True, "phase24_queue_enabled": False},
     )
 
@@ -444,10 +421,6 @@ def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(
 """.strip(),
         encoding="utf-8",
     )
-
-    class _FailingDownloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            raise AssertionError("downloader should not be called when test-bank mapping is enabled")
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         calls.append(f"audio:{video_path.read_text(encoding='utf-8')}")
@@ -503,7 +476,6 @@ def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
-        downloader=_FailingDownloader(),
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
         vibevoice_provider=_FakeVibeVoice(),
@@ -541,10 +513,6 @@ def test_phase1_job_runner_does_not_apply_input_resolver_to_source_path_inputs(t
         def resolve_source_path(self, *, source_url: str) -> Path:
             calls.append(f"resolve:{source_url}")
             raise AssertionError("source_path inputs should bypass the input resolver")
-
-    class _FakeDownloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            raise AssertionError("downloader should not be called for source_path inputs")
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         audio_path.write_text(video_path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -599,7 +567,6 @@ def test_phase1_job_runner_does_not_apply_input_resolver_to_source_path_inputs(t
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
-        downloader=_FakeDownloader(),
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
         vibevoice_provider=_FakeVibeVoice(),
@@ -645,13 +612,8 @@ def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_strict(tmp_
         encoding="utf-8",
     )
 
-    class _FailingDownloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            raise AssertionError("downloader should not be reached when strict unmapped resolution fails")
-
     runner = Phase1JobRunner(
         working_root=tmp_path,
-        downloader=_FailingDownloader(),
         audio_extractor=object(),
         storage_client=object(),
         vibevoice_provider=object(),
@@ -674,11 +636,10 @@ def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_strict(tmp_
         )
 
 
-def test_phase1_job_runner_falls_back_to_direct_source_when_unmapped_and_not_strict(tmp_path: Path):
-    from backend.phase1_runtime.input_resolver import Phase1InputResolver
+def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_non_strict(tmp_path: Path):
+    from backend.phase1_runtime.input_resolver import Phase1InputResolutionError, Phase1InputResolver
     from backend.phase1_runtime.runner import Phase1JobRunner
 
-    calls: list[str] = []
     mapped_video = tmp_path / "fixtures" / "mapped-video.mp4"
     mapped_video.parent.mkdir(parents=True)
     mapped_video.write_text("mapped-video", encoding="utf-8")
@@ -694,67 +655,25 @@ def test_phase1_job_runner_falls_back_to_direct_source_when_unmapped_and_not_str
         encoding="utf-8",
     )
 
-    class _Downloader:
-        def download(self, *, source_url: str, output_path: Path) -> Path:
-            calls.append(f"download:{source_url}")
-            output_path.write_text("downloaded-video", encoding="utf-8")
-            return output_path
-
-    def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
-        audio_path.write_text("audio", encoding="utf-8")
-
-    class _FakeStorage:
-        def upload_file(self, *, local_path: Path, object_name: str) -> str:
-            return f"gs://bucket/{object_name}"
-
-    class _FakeVibeVoice:
-        supports_concurrent_visual = True
-
-        def run(self, *, audio_path: Path, context_info=None):
-            return [{"Start": 0.0, "End": 0.2, "Speaker": 0, "Content": "hello"}]
-
-    class _FakeForcedAligner:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            return [{"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"}]
-
-    class _FakeVisual:
-        def extract(self, *, video_path: Path, workspace):
-            return {
-                "video_metadata": {"fps": 30.0, "duration_ms": 1000},
-                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
-                "tracks": [],
-            }
-
-    class _FakeEmotion:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            return {"segments": []}
-
-    class _FakeYamnet:
-        def run(self, *, audio_path: Path):
-            return {"events": []}
-
     runner = Phase1JobRunner(
         working_root=tmp_path,
-        downloader=_Downloader(),
-        audio_extractor=fake_audio_extractor,
-        storage_client=_FakeStorage(),
-        vibevoice_provider=_FakeVibeVoice(),
-        forced_aligner=_FakeForcedAligner(),
-        visual_extractor=_FakeVisual(),
-        emotion_provider=_FakeEmotion(),
-        yamnet_provider=_FakeYamnet(),
+        audio_extractor=object(),
+        storage_client=object(),
+        vibevoice_provider=object(),
+        forced_aligner=object(),
+        visual_extractor=object(),
+        emotion_provider=object(),
+        yamnet_provider=object(),
         phase14_runner=None,
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
         input_resolver_strict=False,
     )
 
-    result = runner.run_job(
-        job_id="job_unmapped_nonstrict",
-        source_url="https://youtube.com/watch?v=unknown",
-        source_path=None,
-        runtime_controls={},
-    )
-
-    assert calls == ["download:https://youtube.com/watch?v=unknown"]
-    assert result["phase1"]["phase1_audio"]["source_audio"] == "https://youtube.com/watch?v=unknown"
+    with pytest.raises(Phase1InputResolutionError, match="URL download mode has been removed"):
+        runner.run_job(
+            job_id="job_unmapped_nonstrict",
+            source_url="https://youtube.com/watch?v=unknown",
+            source_path=None,
+            runtime_controls={},
+        )
