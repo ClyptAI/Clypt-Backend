@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from ..signals.contracts import SignalPromptSpec
 from .prompts import (
     META_PROMPT_GENERATION_SCHEMA,
     POOL_REVIEW_SCHEMA,
@@ -11,7 +12,6 @@ from .prompts import (
     build_pooled_candidate_review_prompt,
     build_subgraph_review_prompt,
 )
-from .query_embeddings import embed_prompt_texts
 from .review_candidate_pool import review_candidate_pool
 from .review_subgraphs import review_local_subgraph
 from ..contracts import ClipCandidate, LocalSubgraph, PooledCandidateReviewResponse, SemanticGraphNode, SubgraphReviewResponse
@@ -77,18 +77,28 @@ def generate_meta_prompts_live(
     return [str(p) for p in prompts if p]
 
 
-def embed_prompt_texts_live(*, prompts: list[str], embedding_client: Any) -> list[dict]:
-    embedded = embed_prompt_texts(prompts=prompts)
+def embed_prompt_texts_live(*, prompts: list[str | dict[str, Any] | SignalPromptSpec], embedding_client: Any) -> list[dict]:
+    normalized_prompts: list[dict[str, Any]] = []
+    prompt_texts: list[str] = []
+    for index, prompt in enumerate(prompts, start=1):
+        if isinstance(prompt, SignalPromptSpec):
+            item = prompt.model_dump(mode="json")
+        elif isinstance(prompt, dict):
+            item = dict(prompt)
+        else:
+            item = {"prompt_id": f"prompt_{index:03d}", "text": str(prompt)}
+        item.setdefault("prompt_id", f"prompt_{index:03d}")
+        item.setdefault("text", "")
+        normalized_prompts.append(item)
+        prompt_texts.append(str(item["text"]))
+
     vectors = embedding_client.embed_texts(
-        [item["text"] for item in embedded],
+        prompt_texts,
         task_type="RETRIEVAL_QUERY",
     )
     return [
-        {
-            **item,
-            "embedding": vector,
-        }
-        for item, vector in zip(embedded, vectors, strict=True)
+        {**item, "embedding": vector}
+        for item, vector in zip(normalized_prompts, vectors, strict=True)
     ]
 
 
@@ -99,10 +109,14 @@ def run_subgraph_reviews(
     model: str | None = None,
     max_concurrent: int = 5,
     thinking_level: str | None = None,
+    subgraph_provenance_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[SubgraphReviewResponse], list[dict[str, Any]]]:
     def _call_review(subgraph):
         payload = subgraph.model_dump(mode="json")
-        prompt = build_subgraph_review_prompt(subgraph_payload=payload)
+        provenance_payload = None
+        if subgraph_provenance_by_id is not None:
+            provenance_payload = subgraph_provenance_by_id.get(subgraph.subgraph_id)
+        prompt = build_subgraph_review_prompt(subgraph_payload=payload, provenance_payload=provenance_payload)
         response = llm_client.generate_json(
             prompt=prompt,
             model=model,

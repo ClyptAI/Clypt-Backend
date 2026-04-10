@@ -246,6 +246,9 @@ class ClipCandidate(StrictModel):
     query_aligned: bool | None = None
     pool_rank: int | None = None
     score_breakdown: dict[str, float] | None = None
+    external_signal_score: float | None = None
+    agreement_bonus: float | None = None
+    external_attribution_json: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _check_time_order(self):

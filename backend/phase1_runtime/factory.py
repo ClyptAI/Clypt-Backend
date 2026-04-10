@@ -17,6 +17,7 @@ from backend.providers.yamnet import YAMNetProvider
 from backend.repository import SpannerPhase14Repository
 from backend.runtime.phase14_live import V31LivePhase14Runner
 
+from .input_resolver import Phase1InputResolver
 from .runner import Phase1JobRunner
 from .visual import SimpleVisualExtractor
 from .visual_config import VisualPipelineConfig
@@ -86,6 +87,23 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
     )
     phase24_task_queue_client = _build_phase24_task_queue_client(settings=settings)
     visual_config = VisualPipelineConfig.from_env()
+    input_resolver = None
+    input_mode = (settings.phase1_runtime.input_mode or "test_bank").strip().lower()
+    if input_mode not in {"direct", "test_bank"}:
+        raise ValueError(
+            f"Unsupported CLYPT_PHASE1_INPUT_MODE={settings.phase1_runtime.input_mode!r}; expected 'direct' or 'test_bank'."
+        )
+    if input_mode == "test_bank":
+        if settings.phase1_runtime.test_bank_path:
+            input_resolver = Phase1InputResolver.from_mapping_file(settings.phase1_runtime.test_bank_path)
+        elif settings.phase1_runtime.test_bank_strict:
+            raise ValueError(
+                "CLYPT_PHASE1_INPUT_MODE=test_bank requires CLYPT_PHASE1_TEST_BANK_PATH when strict mode is enabled."
+            )
+        else:
+            logger.warning(
+                "CLYPT_PHASE1_INPUT_MODE=test_bank with strict=0 and no mapping path; Phase 1 will fall back to direct source URLs."
+            )
     return Phase1JobRunner(
         working_root=Path(working_root or settings.phase1_runtime.working_root),
         storage_client=storage_client,
@@ -101,6 +119,8 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
         phase14_repository=phase14_repository,
         phase24_worker_url=settings.cloud_tasks.worker_url,
         phase24_query_version=settings.phase24_worker.query_version,
+        input_resolver=input_resolver,
+        input_resolver_strict=settings.phase1_runtime.test_bank_strict,
     )
 
 

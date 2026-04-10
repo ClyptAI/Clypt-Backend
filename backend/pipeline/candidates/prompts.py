@@ -71,7 +71,10 @@ POOL_REVIEW_SCHEMA = {
 }
 
 
-def build_subgraph_review_prompt(*, subgraph_payload: dict) -> str:
+def build_subgraph_review_prompt(*, subgraph_payload: dict, provenance_payload: dict | None = None) -> str:
+    provenance_block = ""
+    if provenance_payload is not None:
+        provenance_block = f"\n\nSubgraph provenance:\n{_compact_json(provenance_payload)}"
     return (
         "You are selecting clip candidates from a local semantic subgraph of a long-form video or podcast.\n\n"
         "TASK: review the subgraph and propose up to 3 contiguous clip candidates that would make "
@@ -107,7 +110,8 @@ def build_subgraph_review_prompt(*, subgraph_payload: dict) -> str:
         '  "reject_all": true,\n'
         '  "reject_reason": "<why no good clip was found>",\n'
         '  "candidates": []\n'
-        "}\n\n"
+        "}\n"
+        f"{provenance_block}\n\n"
         f"Subgraph payload:\n{_compact_json(subgraph_payload)}"
     )
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.phase1_runtime.extract import run_phase1_sidecars
+from backend.phase1_runtime.input_resolver import Phase1InputResolutionError, Phase1InputResolver
 from backend.phase1_runtime.media import prepare_workspace_media
 from backend.phase1_runtime.models import Phase1SidecarOutputs, Phase1Workspace
 from backend.repository import Phase24JobRecord, RunRecord
@@ -50,6 +51,8 @@ class Phase1JobRunner:
         phase14_repository: Any | None = None,
         phase24_worker_url: str | None = None,
         phase24_query_version: str | None = None,
+        input_resolver: Phase1InputResolver | None = None,
+        input_resolver_strict: bool = True,
     ) -> None:
         self.working_root = Path(working_root)
         self.downloader = downloader or YouTubeDownloader()
@@ -65,6 +68,8 @@ class Phase1JobRunner:
         self.phase14_repository = phase14_repository
         self.phase24_worker_url = phase24_worker_url
         self.phase24_query_version = phase24_query_version
+        self.input_resolver = input_resolver
+        self.input_resolver_strict = input_resolver_strict
 
     def _upsert_run_record(
         self,
@@ -208,13 +213,26 @@ class Phase1JobRunner:
         runtime_controls: dict | None,
     ) -> dict[str, Any]:
         runtime_controls = dict(runtime_controls or {})
+        resolved_source_path = source_path
+        media_source_url = source_url
+        if source_url is not None and self.input_resolver is not None:
+            try:
+                resolved_source_path = str(self.input_resolver.resolve_source_path(source_url=source_url))
+                media_source_url = None
+                logger.info("[media]  test-bank source_url resolved to %s", resolved_source_path)
+            except Phase1InputResolutionError:
+                if self.input_resolver_strict:
+                    raise
+                logger.warning(
+                    "[media]  test-bank source_url missing mapping; falling back to direct source_url fetch"
+                )
         workspace = Phase1Workspace.create(root=self.working_root, run_id=job_id)
         logger.info("[media]  workspace: %s", workspace.root)
 
         t_media = time.perf_counter()
         prepare_workspace_media(
-            source_url=source_url,
-            source_path=source_path,
+            source_url=media_source_url,
+            source_path=resolved_source_path,
             workspace=workspace,
             downloader=self.downloader,
             audio_extractor=self.audio_extractor,

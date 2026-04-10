@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from ..config import Phase4SubgraphConfig
 from ..contracts import LocalSubgraph, LocalSubgraphNode, LocalSubgraphNodeEdge, SemanticGraphEdge, SemanticGraphNode
 
-from ..contracts import LocalSubgraph, SemanticGraphEdge, SemanticGraphNode
-
 
 EDGE_WEIGHTS: dict[str, float] = {
     "setup_for": 4.0,
@@ -203,7 +201,20 @@ def build_local_subgraphs(*, seeds: list[dict], nodes: list[SemanticGraphNode], 
             overlap_ratio = len(node_ids & existing_node_ids) / max(1, len(node_ids | existing_node_ids))
             if overlap_ratio > cfg.subgraph_overlap_dedupe_threshold:
                 if score > existing_score:
-                    deduped[idx] = candidate
+                    merged_prompt_ids = list(
+                        dict.fromkeys([*existing_subgraph.source_prompt_ids, *subgraph.source_prompt_ids])
+                    )
+                    merged_subgraph = subgraph.model_copy(update={"source_prompt_ids": merged_prompt_ids})
+                    deduped[idx] = (merged_subgraph, score, node_ids)
+                else:
+                    merged_prompt_ids = list(
+                        dict.fromkeys([*existing_subgraph.source_prompt_ids, *subgraph.source_prompt_ids])
+                    )
+                    deduped[idx] = (
+                        existing_subgraph.model_copy(update={"source_prompt_ids": merged_prompt_ids}),
+                        existing_score,
+                        existing_node_ids,
+                    )
                 replaced = True
                 break
         if not replaced:

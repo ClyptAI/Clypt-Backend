@@ -8,6 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, model_validat
 RunStatus = Literal["PHASE1_DONE", "PHASE24_QUEUED", "PHASE24_RUNNING", "PHASE24_DONE", "FAILED"]
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
 Phase14RunStatus = RunStatus
+ExternalSignalType = Literal["comment_top", "comment_reply", "trend_topic", "trend_query"]
+SourcePlatform = Literal["youtube", "google_trends"]
+ExternalClusterType = Literal["comment", "trend"]
+SignalLinkType = Literal["direct", "inferred"]
+PromptSourceType = Literal["general", "comment", "trend"]
 
 
 class StrictModel(BaseModel):
@@ -88,6 +93,9 @@ class ClipCandidateRecord(StrictModel):
     query_aligned: bool | None = None
     pool_rank: int | None = None
     score_breakdown: dict[str, float] | None = None
+    external_signal_score: float | None = None
+    agreement_bonus: float | None = None
+    external_attribution_json: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _check_time_order(self):
@@ -121,16 +129,117 @@ class Phase24JobRecord(StrictModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ExternalSignalRecord(StrictModel):
+    run_id: str
+    signal_id: str
+    signal_type: ExternalSignalType
+    source_platform: SourcePlatform
+    source_id: str
+    author_id: str | None = None
+    text: str
+    engagement_score: float
+    published_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalSignalClusterRecord(StrictModel):
+    run_id: str
+    cluster_id: str
+    cluster_type: ExternalClusterType
+    summary_text: str
+    member_signal_ids: list[str] = Field(default_factory=list)
+    cluster_weight: float
+    embedding: list[float] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class NodeSignalLinkRecord(StrictModel):
+    run_id: str
+    node_id: str
+    cluster_id: str
+    link_type: SignalLinkType
+    hop_distance: int
+    time_offset_ms: int
+    similarity: float
+    link_score: float
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidateSignalLinkRecord(StrictModel):
+    run_id: str
+    clip_id: str
+    cluster_id: str
+    cluster_type: ExternalClusterType
+    aggregated_link_score: float
+    coverage_ms: int
+    direct_node_count: int
+    inferred_node_count: int
+    agreement_flags: list[str] = Field(default_factory=list)
+    bonus_applied: float
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromptSourceLinkRecord(StrictModel):
+    run_id: str
+    prompt_id: str
+    prompt_source_type: PromptSourceType
+    source_cluster_id: str | None = None
+    source_cluster_type: ExternalClusterType | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_prompt_source_consistency(self):
+        if self.prompt_source_type == "general":
+            if self.source_cluster_id is not None or self.source_cluster_type is not None:
+                raise ValueError("general prompt sources must not reference a source cluster")
+        else:
+            if self.source_cluster_id is None or self.source_cluster_type is None:
+                raise ValueError("comment and trend prompt sources must reference a source cluster")
+            if self.prompt_source_type != self.source_cluster_type:
+                raise ValueError("prompt_source_type must match source_cluster_type")
+        return self
+
+
+class SubgraphProvenanceRecord(StrictModel):
+    run_id: str
+    subgraph_id: str
+    seed_source_set: list[PromptSourceType] = Field(default_factory=list)
+    seed_prompt_ids: list[str] = Field(default_factory=list)
+    source_cluster_ids: list[str] = Field(default_factory=list)
+    support_summary: dict[str, Any] = Field(default_factory=dict)
+    canonical_selected: bool
+    dedupe_overlap_ratio: float | None = None
+    selection_reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_seed_sources(self):
+        if not self.seed_source_set:
+            raise ValueError("seed_source_set must be non-empty")
+        return self
+
+
 __all__ = [
+    "CandidateSignalLinkRecord",
     "ClipCandidateRecord",
+    "ExternalClusterType",
+    "ExternalSignalClusterRecord",
+    "ExternalSignalRecord",
+    "ExternalSignalType",
     "JobStatus",
     "Phase14RunStatus",
     "Phase24JobRecord",
     "PhaseMetricRecord",
+    "PromptSourceLinkRecord",
+    "PromptSourceType",
     "RunRecord",
     "RunStatus",
     "SemanticEdgeRecord",
     "SemanticNodeRecord",
+    "SignalLinkType",
+    "SourcePlatform",
+    "NodeSignalLinkRecord",
+    "SubgraphProvenanceRecord",
     "StrictModel",
     "TimelineTurnRecord",
 ]

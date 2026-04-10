@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from backend.pipeline.candidates.runtime import embed_prompt_texts_live
 from backend.pipeline.candidates.build_local_subgraphs import build_local_subgraphs
 from backend.pipeline.candidates.seed_retrieval import retrieve_seed_nodes
 from backend.pipeline.config import Phase4SubgraphConfig
@@ -149,3 +150,35 @@ def test_build_local_subgraphs_prefers_local_high_weight_neighbors_and_dedupes_o
     assert [node.node_id for node in subgraph.nodes] == ["node_1", "node_2", "node_3"]
     assert subgraph.start_ms == 0
     assert subgraph.end_ms == 14000
+
+
+def test_embed_prompt_texts_live_preserves_prompt_metadata(monkeypatch):
+    def fake_embed_texts(*, texts, task_type):
+        return [[0.1, 0.2] for _ in texts]
+
+    class _FakeEmbeddingClient:
+        def embed_texts(self, texts, task_type):
+            return fake_embed_texts(texts=texts, task_type=task_type)
+
+    prompts = [
+        {
+            "prompt_id": "comment_prompt_001",
+            "text": "Find the callback joke.",
+            "prompt_source_type": "comment",
+            "source_cluster_id": "cluster_comment_1",
+            "source_cluster_type": "comment",
+        }
+    ]
+
+    embedded = embed_prompt_texts_live(prompts=prompts, embedding_client=_FakeEmbeddingClient())
+
+    assert embedded == [
+        {
+            "prompt_id": "comment_prompt_001",
+            "text": "Find the callback joke.",
+            "prompt_source_type": "comment",
+            "source_cluster_id": "cluster_comment_1",
+            "source_cluster_type": "comment",
+            "embedding": [0.1, 0.2],
+        }
+    ]

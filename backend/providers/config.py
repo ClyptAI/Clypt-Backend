@@ -140,6 +140,9 @@ class Phase1RuntimeSettings:
     )
     run_yamnet_on_gpu: bool = True
     keep_workdir: bool = False
+    input_mode: str = "test_bank"
+    test_bank_path: str | None = None
+    test_bank_strict: bool = True
 
 
 @dataclass(slots=True)
@@ -271,6 +274,9 @@ def load_provider_settings() -> ProviderSettings:
             run_yamnet_on_gpu=(_read_env("CLYPT_PHASE1_YAMNET_DEVICE") or "gpu").lower()
             == "gpu",
             keep_workdir=(_read_env("CLYPT_PHASE1_KEEP_WORKDIR") or "0") == "1",
+            input_mode=(_read_env("CLYPT_PHASE1_INPUT_MODE") or "test_bank").strip().lower(),
+            test_bank_path=_read_env("CLYPT_PHASE1_TEST_BANK_PATH"),
+            test_bank_strict=(_read_env("CLYPT_PHASE1_TEST_BANK_STRICT") or "1") == "1",
         ),
     )
 

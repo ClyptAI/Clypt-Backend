@@ -5,12 +5,18 @@ from datetime import datetime, timezone
 import pytest
 
 from backend.repository.models import (
+    CandidateSignalLinkRecord,
     ClipCandidateRecord,
+    ExternalSignalClusterRecord,
+    ExternalSignalRecord,
     Phase24JobRecord,
     PhaseMetricRecord,
+    PromptSourceLinkRecord,
     RunRecord,
     SemanticEdgeRecord,
     SemanticNodeRecord,
+    NodeSignalLinkRecord,
+    SubgraphProvenanceRecord,
     TimelineTurnRecord,
 )
 import backend.repository.spanner_phase14_repository as spanner_repo
@@ -95,6 +101,12 @@ class _FakeDatabase:
         "semantic_nodes": ("run_id", "node_id"),
         "semantic_edges": ("run_id", "source_node_id", "target_node_id", "edge_type"),
         "clip_candidates": ("run_id", "clip_id"),
+        "external_signals": ("run_id", "signal_id"),
+        "external_signal_clusters": ("run_id", "cluster_id"),
+        "node_signal_links": ("run_id", "node_id", "cluster_id"),
+        "candidate_signal_links": ("run_id", "clip_id", "cluster_id"),
+        "prompt_source_links": ("run_id", "prompt_id"),
+        "subgraph_provenance": ("run_id", "subgraph_id"),
         "phase_metrics": ("run_id", "phase_name"),
         "phase24_jobs": ("run_id",),
     }
@@ -145,6 +157,15 @@ def test_build_phase14_bootstrap_ddl_includes_core_tables_and_graph() -> None:
     assert any("CREATE TABLE timeline_turns" in statement for statement in ddl)
     assert any("CREATE TABLE semantic_nodes" in statement for statement in ddl)
     assert any("CREATE TABLE clip_candidates" in statement for statement in ddl)
+    assert any("CREATE TABLE external_signals" in statement for statement in ddl)
+    assert any("CREATE TABLE external_signal_clusters" in statement for statement in ddl)
+    assert any("CREATE TABLE node_signal_links" in statement for statement in ddl)
+    assert any("CREATE TABLE candidate_signal_links" in statement for statement in ddl)
+    assert any("CREATE TABLE prompt_source_links" in statement for statement in ddl)
+    assert any("CREATE TABLE subgraph_provenance" in statement for statement in ddl)
+    assert any("external_signal_score" in statement for statement in ddl)
+    assert any("agreement_bonus" in statement for statement in ddl)
+    assert any("external_attribution_json" in statement for statement in ddl)
     assert any("CREATE OR REPLACE PROPERTY GRAPH" in statement for statement in ddl)
 
 
@@ -336,9 +357,176 @@ def test_spanner_phase14_repository_round_trips_core_records() -> None:
             query_aligned=True,
             pool_rank=1,
             score_breakdown={"overall_clip_quality": 8.4},
+            external_signal_score=1.25,
+            agreement_bonus=0.5,
+            external_attribution_json={"signals": ["cluster_comment_1"]},
         )
     ]
     repository.write_candidates(run_id="run_001", candidates=candidates)
+    stored_clip_id = repository.list_candidates(run_id="run_001")[0].clip_id
+    assert stored_clip_id is not None
+
+    external_signals = [
+        ExternalSignalRecord(
+            run_id="run_001",
+            signal_id="signal_comment_2",
+            signal_type="comment_top",
+            source_platform="youtube",
+            source_id="youtube_comment_2",
+            author_id="author_b",
+            text="this was the best part",
+            engagement_score=4.5,
+            published_at=datetime(2026, 4, 8, 17, 59, tzinfo=UTC),
+            metadata={"likes": 12},
+        ),
+        ExternalSignalRecord(
+            run_id="run_001",
+            signal_id="signal_comment_1",
+            signal_type="comment_reply",
+            source_platform="youtube",
+            source_id="youtube_comment_1",
+            author_id="author_a",
+            text="totally agree",
+            engagement_score=1.0,
+            published_at=datetime(2026, 4, 8, 17, 58, tzinfo=UTC),
+            metadata={},
+        ),
+    ]
+    repository.write_external_signals(run_id="run_001", signals=external_signals)
+
+    external_signal_clusters = [
+        ExternalSignalClusterRecord(
+            run_id="run_001",
+            cluster_id="cluster_comment_2",
+            cluster_type="comment",
+            summary_text="Audience loved the reveal",
+            member_signal_ids=["signal_comment_2", "signal_comment_1"],
+            cluster_weight=2.5,
+            embedding=[0.2, 0.3],
+            metadata={"source": "comments"},
+        ),
+        ExternalSignalClusterRecord(
+            run_id="run_001",
+            cluster_id="cluster_trend_1",
+            cluster_type="trend",
+            summary_text="Trend around shocking reveal",
+            member_signal_ids=["signal_trend_1"],
+            cluster_weight=1.8,
+            embedding=[0.4, 0.5],
+            metadata={"source": "trends"},
+        ),
+    ]
+    repository.write_external_signal_clusters(run_id="run_001", clusters=external_signal_clusters)
+
+    node_signal_links = [
+        NodeSignalLinkRecord(
+            run_id="run_001",
+            node_id="node_2",
+            cluster_id="cluster_trend_1",
+            link_type="inferred",
+            hop_distance=2,
+            time_offset_ms=1500,
+            similarity=0.67,
+            link_score=0.88,
+            evidence={"why": "temporal expansion"},
+        ),
+        NodeSignalLinkRecord(
+            run_id="run_001",
+            node_id="node_1",
+            cluster_id="cluster_comment_2",
+            link_type="direct",
+            hop_distance=1,
+            time_offset_ms=0,
+            similarity=0.92,
+            link_score=0.97,
+            evidence={"why": "exact topic match"},
+        ),
+    ]
+    repository.write_node_signal_links(run_id="run_001", links=node_signal_links)
+
+    candidate_signal_links = [
+        CandidateSignalLinkRecord(
+            run_id="run_001",
+            clip_id=stored_clip_id,
+            cluster_id="cluster_comment_2",
+            cluster_type="comment",
+            aggregated_link_score=2.8,
+            coverage_ms=2500,
+            direct_node_count=2,
+            inferred_node_count=1,
+            agreement_flags=["general", "comment"],
+            bonus_applied=0.5,
+            evidence={"support": "top comment cluster"},
+        ),
+        CandidateSignalLinkRecord(
+            run_id="run_001",
+            clip_id=stored_clip_id,
+            cluster_id="cluster_trend_1",
+            cluster_type="trend",
+            aggregated_link_score=1.4,
+            coverage_ms=1200,
+            direct_node_count=1,
+            inferred_node_count=2,
+            agreement_flags=["trend"],
+            bonus_applied=0.25,
+            evidence={"support": "trend cluster"},
+        ),
+    ]
+    repository.write_candidate_signal_links(run_id="run_001", links=candidate_signal_links)
+
+    prompt_source_links = [
+        PromptSourceLinkRecord(
+            run_id="run_001",
+            prompt_id="prompt_general_2",
+            prompt_source_type="general",
+            metadata={"priority": 2},
+        ),
+        PromptSourceLinkRecord(
+            run_id="run_001",
+            prompt_id="prompt_comment_1",
+            prompt_source_type="comment",
+            source_cluster_id="cluster_comment_2",
+            source_cluster_type="comment",
+            metadata={"priority": 1},
+        ),
+        PromptSourceLinkRecord(
+            run_id="run_001",
+            prompt_id="prompt_trend_1",
+            prompt_source_type="trend",
+            source_cluster_id="cluster_trend_1",
+            source_cluster_type="trend",
+            metadata={"priority": 3},
+        ),
+    ]
+    repository.write_prompt_source_links(run_id="run_001", links=prompt_source_links)
+
+    subgraph_provenance = [
+        SubgraphProvenanceRecord(
+            run_id="run_001",
+            subgraph_id="sg_2",
+            seed_source_set=["trend", "comment", "general"],
+            seed_prompt_ids=["prompt_trend_1", "prompt_comment_1", "prompt_general_2"],
+            source_cluster_ids=["cluster_trend_1", "cluster_comment_2"],
+            support_summary={"comment": 2.5, "trend": 1.8},
+            canonical_selected=True,
+            dedupe_overlap_ratio=0.12,
+            selection_reason="highest combined support",
+            metadata={"note": "round-trip"},
+        ),
+        SubgraphProvenanceRecord(
+            run_id="run_001",
+            subgraph_id="sg_1",
+            seed_source_set=["general"],
+            seed_prompt_ids=["prompt_general_2"],
+            source_cluster_ids=[],
+            support_summary={"general": 1.0},
+            canonical_selected=False,
+            dedupe_overlap_ratio=None,
+            selection_reason=None,
+            metadata={},
+        ),
+    ]
+    repository.write_subgraph_provenance(run_id="run_001", provenance=subgraph_provenance)
 
     metric = PhaseMetricRecord(
         run_id="run_001",
@@ -375,6 +563,28 @@ def test_spanner_phase14_repository_round_trips_core_records() -> None:
     assert len(listed_candidates) == 1
     assert listed_candidates[0].clip_id is not None and listed_candidates[0].clip_id.startswith("clip_")
     assert listed_candidates[0].score_breakdown == {"overall_clip_quality": 8.4}
+    assert listed_candidates[0].external_signal_score == 1.25
+    assert listed_candidates[0].agreement_bonus == 0.5
+    assert listed_candidates[0].external_attribution_json == {"signals": ["cluster_comment_1"]}
+    assert repository.list_external_signals(run_id="run_001") == [
+        external_signals[1],
+        external_signals[0],
+    ]
+    assert repository.list_external_signal_clusters(run_id="run_001") == external_signal_clusters
+    assert repository.list_node_signal_links(run_id="run_001") == [
+        node_signal_links[1],
+        node_signal_links[0],
+    ]
+    assert repository.list_candidate_signal_links(run_id="run_001") == candidate_signal_links
+    assert repository.list_prompt_source_links(run_id="run_001") == [
+        prompt_source_links[1],
+        prompt_source_links[0],
+        prompt_source_links[2],
+    ]
+    assert repository.list_subgraph_provenance(run_id="run_001") == [
+        subgraph_provenance[1],
+        subgraph_provenance[0],
+    ]
     assert repository.list_phase_metrics(run_id="run_001") == [metric]
     assert repository.get_phase24_job("run_001") == job
 
@@ -435,6 +645,80 @@ def test_spanner_phase14_repository_rejects_mismatched_run_ids() -> None:
         repository.write_edges(run_id="run_001", edges=[edge])
     with pytest.raises(ValueError, match="clip_candidates"):
         repository.write_candidates(run_id="run_001", candidates=[candidate])
+
+
+def test_spanner_phase14_repository_rejects_inconsistent_signal_links() -> None:
+    base_candidate = ClipCandidateRecord(
+        run_id="run_002",
+        clip_id=None,
+        node_ids=["node_1"],
+        start_ms=0,
+        end_ms=1000,
+        score=1.0,
+        rationale="rationale",
+    )
+    signal = ExternalSignalRecord(
+        run_id="run_002",
+        signal_id="signal_1",
+        signal_type="comment_top",
+        source_platform="youtube",
+        source_id="youtube_comment_1",
+        text="hello",
+        engagement_score=1.0,
+    )
+    cluster = ExternalSignalClusterRecord(
+        run_id="run_002",
+        cluster_id="cluster_1",
+        cluster_type="comment",
+        summary_text="summary",
+        cluster_weight=1.0,
+    )
+    node_link = NodeSignalLinkRecord(
+        run_id="run_002",
+        node_id="node_1",
+        cluster_id="cluster_1",
+        link_type="direct",
+        hop_distance=1,
+        time_offset_ms=0,
+        similarity=0.9,
+        link_score=1.0,
+    )
+    candidate_link = CandidateSignalLinkRecord(
+        run_id="run_002",
+        clip_id="clip_1",
+        cluster_id="cluster_1",
+        cluster_type="trend",
+        aggregated_link_score=1.0,
+        coverage_ms=100,
+        direct_node_count=1,
+        inferred_node_count=0,
+        agreement_flags=[],
+        bonus_applied=0.0,
+    )
+    with pytest.raises(ValueError, match="general prompt sources must not reference a source cluster"):
+        PromptSourceLinkRecord(
+            run_id="run_002",
+            prompt_id="prompt_1",
+            prompt_source_type="general",
+            source_cluster_id="cluster_1",
+        )
+
+    repository = SpannerPhase14Repository(database=_FakeDatabase())
+    repository.write_candidates(run_id="run_002", candidates=[base_candidate])
+    stored_clip_id = repository.list_candidates(run_id="run_002")[0].clip_id
+    assert stored_clip_id is not None
+    repository.write_external_signals(run_id="run_002", signals=[signal])
+    repository.write_external_signal_clusters(run_id="run_002", clusters=[cluster])
+    with pytest.raises(ValueError, match="node_signal_links"):
+        repository.write_node_signal_links(
+            run_id="run_002",
+            links=[node_link.model_copy(update={"run_id": "run_002"})],
+        )
+    with pytest.raises(ValueError, match="cluster_type"):
+        repository.write_candidate_signal_links(
+            run_id="run_002",
+            links=[candidate_link.model_copy(update={"clip_id": stored_clip_id})],
+        )
 
 
 def test_spanner_phase14_repository_decodes_tuple_like_rows_by_column_order() -> None:

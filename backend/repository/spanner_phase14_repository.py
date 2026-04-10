@@ -8,12 +8,18 @@ from hashlib import sha1
 from typing import Any
 
 from .models import (
+    CandidateSignalLinkRecord,
     ClipCandidateRecord,
+    ExternalSignalClusterRecord,
+    ExternalSignalRecord,
     Phase24JobRecord,
     PhaseMetricRecord,
+    PromptSourceLinkRecord,
     RunRecord,
     SemanticEdgeRecord,
     SemanticNodeRecord,
+    NodeSignalLinkRecord,
+    SubgraphProvenanceRecord,
     TimelineTurnRecord,
 )
 from .phase14_repository import Phase14Repository
@@ -187,8 +193,99 @@ def build_phase14_bootstrap_ddl() -> list[str]:
             subgraph_id STRING(128),
             query_aligned BOOL,
             pool_rank INT64,
-            score_breakdown_json STRING(MAX)
+            score_breakdown_json STRING(MAX),
+            external_signal_score FLOAT64,
+            agreement_bonus FLOAT64,
+            external_attribution_json STRING(MAX)
         ) PRIMARY KEY (run_id, clip_id)
+        """,
+        """
+        CREATE TABLE external_signals (
+            run_id STRING(128) NOT NULL,
+            signal_id STRING(128) NOT NULL,
+            signal_type STRING(32) NOT NULL,
+            source_platform STRING(32) NOT NULL,
+            source_id STRING(MAX) NOT NULL,
+            author_id STRING(MAX),
+            text STRING(MAX) NOT NULL,
+            engagement_score FLOAT64 NOT NULL,
+            published_at TIMESTAMP,
+            metadata_json STRING(MAX)
+        ) PRIMARY KEY (run_id, signal_id)
+        """,
+        """
+        CREATE TABLE external_signal_clusters (
+            run_id STRING(128) NOT NULL,
+            cluster_id STRING(128) NOT NULL,
+            cluster_type STRING(32) NOT NULL,
+            summary_text STRING(MAX) NOT NULL,
+            member_signal_ids ARRAY<STRING(128)>,
+            cluster_weight FLOAT64 NOT NULL,
+            embedding ARRAY<FLOAT32>,
+            metadata_json STRING(MAX)
+        ) PRIMARY KEY (run_id, cluster_id)
+        """,
+        """
+        CREATE TABLE node_signal_links (
+            run_id STRING(128) NOT NULL,
+            node_id STRING(128) NOT NULL,
+            cluster_id STRING(128) NOT NULL,
+            link_type STRING(16) NOT NULL,
+            hop_distance INT64 NOT NULL,
+            time_offset_ms INT64 NOT NULL,
+            similarity FLOAT64 NOT NULL,
+            link_score FLOAT64 NOT NULL,
+            evidence_json STRING(MAX),
+            CONSTRAINT fk_node_signal_links_node FOREIGN KEY (run_id, node_id)
+              REFERENCES semantic_nodes (run_id, node_id),
+            CONSTRAINT fk_node_signal_links_cluster FOREIGN KEY (run_id, cluster_id)
+              REFERENCES external_signal_clusters (run_id, cluster_id)
+        ) PRIMARY KEY (run_id, node_id, cluster_id)
+        """,
+        """
+        CREATE TABLE candidate_signal_links (
+            run_id STRING(128) NOT NULL,
+            clip_id STRING(128) NOT NULL,
+            cluster_id STRING(128) NOT NULL,
+            cluster_type STRING(32) NOT NULL,
+            aggregated_link_score FLOAT64 NOT NULL,
+            coverage_ms INT64 NOT NULL,
+            direct_node_count INT64 NOT NULL,
+            inferred_node_count INT64 NOT NULL,
+            agreement_flags ARRAY<STRING(32)>,
+            bonus_applied FLOAT64 NOT NULL,
+            evidence_json STRING(MAX),
+            CONSTRAINT fk_candidate_signal_links_clip FOREIGN KEY (run_id, clip_id)
+              REFERENCES clip_candidates (run_id, clip_id),
+            CONSTRAINT fk_candidate_signal_links_cluster FOREIGN KEY (run_id, cluster_id)
+              REFERENCES external_signal_clusters (run_id, cluster_id)
+        ) PRIMARY KEY (run_id, clip_id, cluster_id)
+        """,
+        """
+        CREATE TABLE prompt_source_links (
+            run_id STRING(128) NOT NULL,
+            prompt_id STRING(128) NOT NULL,
+            prompt_source_type STRING(16) NOT NULL,
+            source_cluster_id STRING(128),
+            source_cluster_type STRING(32),
+            metadata_json STRING(MAX),
+            CONSTRAINT fk_prompt_source_links_cluster FOREIGN KEY (run_id, source_cluster_id)
+              REFERENCES external_signal_clusters (run_id, cluster_id)
+        ) PRIMARY KEY (run_id, prompt_id)
+        """,
+        """
+        CREATE TABLE subgraph_provenance (
+            run_id STRING(128) NOT NULL,
+            subgraph_id STRING(128) NOT NULL,
+            seed_source_set ARRAY<STRING(16)>,
+            seed_prompt_ids ARRAY<STRING(128)>,
+            source_cluster_ids ARRAY<STRING(128)>,
+            support_summary_json STRING(MAX),
+            canonical_selected BOOL NOT NULL,
+            dedupe_overlap_ratio FLOAT64,
+            selection_reason STRING(128),
+            metadata_json STRING(MAX)
+        ) PRIMARY KEY (run_id, subgraph_id)
         """,
         """
         CREATE TABLE phase_metrics (
@@ -580,6 +677,14 @@ class SpannerPhase14Repository(Phase14Repository):
             candidate if candidate.clip_id else candidate.model_copy(update={"clip_id": _stable_clip_id(candidate)})
             for candidate in candidates
         ]
+        normalized_candidates = sorted(
+            normalized_candidates,
+            key=lambda candidate: (
+                candidate.pool_rank if candidate.pool_rank is not None else 2**31 - 1,
+                -float(candidate.score),
+                candidate.clip_id or "",
+            ),
+        )
         rows = [
             [
                 run_id,
@@ -595,6 +700,9 @@ class SpannerPhase14Repository(Phase14Repository):
                 candidate.query_aligned,
                 candidate.pool_rank,
                 _json_dumps(candidate.score_breakdown),
+                candidate.external_signal_score,
+                candidate.agreement_bonus,
+                _json_dumps(candidate.external_attribution_json),
             ]
             for candidate in normalized_candidates
         ]
@@ -614,6 +722,9 @@ class SpannerPhase14Repository(Phase14Repository):
                 "query_aligned",
                 "pool_rank",
                 "score_breakdown_json",
+                "external_signal_score",
+                "agreement_bonus",
+                "external_attribution_json",
             ],
             rows,
         )
@@ -622,7 +733,8 @@ class SpannerPhase14Repository(Phase14Repository):
         rows = self._query(
             """
             SELECT run_id, clip_id, node_ids, start_ms, end_ms, score, rationale, source_prompt_ids,
-                   seed_node_id, subgraph_id, query_aligned, pool_rank, score_breakdown_json
+                   seed_node_id, subgraph_id, query_aligned, pool_rank, score_breakdown_json,
+                   external_signal_score, agreement_bonus, external_attribution_json
             FROM clip_candidates
             WHERE run_id = @run_id
             ORDER BY COALESCE(pool_rank, 2147483647) ASC, score DESC, clip_id ASC
@@ -643,6 +755,9 @@ class SpannerPhase14Repository(Phase14Repository):
                 "query_aligned",
                 "pool_rank",
                 "score_breakdown_json",
+                "external_signal_score",
+                "agreement_bonus",
+                "external_attribution_json",
             ),
         )
         return [
@@ -660,9 +775,493 @@ class SpannerPhase14Repository(Phase14Repository):
                 query_aligned=row["query_aligned"],
                 pool_rank=int(row["pool_rank"]) if row["pool_rank"] is not None else None,
                 score_breakdown=_json_loads(row["score_breakdown_json"]),
+                external_signal_score=float(row["external_signal_score"])
+                if row["external_signal_score"] is not None
+                else None,
+                agreement_bonus=float(row["agreement_bonus"]) if row["agreement_bonus"] is not None else None,
+                external_attribution_json=_json_loads(row["external_attribution_json"]),
             )
             for row in rows
         ]
+
+    def write_external_signals(self, *, run_id: str, signals: Sequence[ExternalSignalRecord]) -> None:
+        for signal in signals:
+            _ensure_run_id_match("external_signals", run_id, signal.run_id)
+        normalized_signals = sorted(signals, key=lambda signal: signal.signal_id)
+        rows = [
+            [
+                run_id,
+                signal.signal_id,
+                signal.signal_type,
+                signal.source_platform,
+                signal.source_id,
+                signal.author_id,
+                signal.text,
+                float(signal.engagement_score),
+                signal.published_at,
+                _json_dumps(signal.metadata),
+            ]
+            for signal in normalized_signals
+        ]
+        self._batch_upsert(
+            "external_signals",
+            [
+                "run_id",
+                "signal_id",
+                "signal_type",
+                "source_platform",
+                "source_id",
+                "author_id",
+                "text",
+                "engagement_score",
+                "published_at",
+                "metadata_json",
+            ],
+            rows,
+        )
+
+    def list_external_signals(self, *, run_id: str) -> list[ExternalSignalRecord]:
+        rows = self._query(
+            """
+            SELECT run_id, signal_id, signal_type, source_platform, source_id, author_id, text,
+                   engagement_score, published_at, metadata_json
+            FROM external_signals
+            WHERE run_id = @run_id
+            ORDER BY signal_id ASC
+            """,
+            {"run_id": run_id},
+            param_types={"run_id": _STRING_PARAM_TYPE},
+            columns=(
+                "run_id",
+                "signal_id",
+                "signal_type",
+                "source_platform",
+                "source_id",
+                "author_id",
+                "text",
+                "engagement_score",
+                "published_at",
+                "metadata_json",
+            ),
+        )
+        return [
+            ExternalSignalRecord(
+                run_id=row["run_id"],
+                signal_id=row["signal_id"],
+                signal_type=row["signal_type"],
+                source_platform=row["source_platform"],
+                source_id=row["source_id"],
+                author_id=row["author_id"],
+                text=row["text"],
+                engagement_score=float(row["engagement_score"]),
+                published_at=_coerce_datetime(row["published_at"]),
+                metadata=_json_loads(row["metadata_json"]) or {},
+            )
+            for row in rows
+        ]
+
+    def write_external_signal_clusters(
+        self, *, run_id: str, clusters: Sequence[ExternalSignalClusterRecord]
+    ) -> None:
+        for cluster in clusters:
+            _ensure_run_id_match("external_signal_clusters", run_id, cluster.run_id)
+        normalized_clusters = sorted(clusters, key=lambda cluster: cluster.cluster_id)
+        rows = [
+            [
+                run_id,
+                cluster.cluster_id,
+                cluster.cluster_type,
+                cluster.summary_text,
+                list(cluster.member_signal_ids),
+                float(cluster.cluster_weight),
+                list(cluster.embedding),
+                _json_dumps(cluster.metadata),
+            ]
+            for cluster in normalized_clusters
+        ]
+        self._batch_upsert(
+            "external_signal_clusters",
+            [
+                "run_id",
+                "cluster_id",
+                "cluster_type",
+                "summary_text",
+                "member_signal_ids",
+                "cluster_weight",
+                "embedding",
+                "metadata_json",
+            ],
+            rows,
+        )
+
+    def list_external_signal_clusters(self, *, run_id: str) -> list[ExternalSignalClusterRecord]:
+        rows = self._query(
+            """
+            SELECT run_id, cluster_id, cluster_type, summary_text, member_signal_ids, cluster_weight, embedding,
+                   metadata_json
+            FROM external_signal_clusters
+            WHERE run_id = @run_id
+            ORDER BY cluster_id ASC
+            """,
+            {"run_id": run_id},
+            param_types={"run_id": _STRING_PARAM_TYPE},
+            columns=(
+                "run_id",
+                "cluster_id",
+                "cluster_type",
+                "summary_text",
+                "member_signal_ids",
+                "cluster_weight",
+                "embedding",
+                "metadata_json",
+            ),
+        )
+        return [
+            ExternalSignalClusterRecord(
+                run_id=row["run_id"],
+                cluster_id=row["cluster_id"],
+                cluster_type=row["cluster_type"],
+                summary_text=row["summary_text"],
+                member_signal_ids=list(row["member_signal_ids"] or []),
+                cluster_weight=float(row["cluster_weight"]),
+                embedding=list(row["embedding"] or []),
+                metadata=_json_loads(row["metadata_json"]) or {},
+            )
+            for row in rows
+        ]
+
+    def write_node_signal_links(self, *, run_id: str, links: Sequence[NodeSignalLinkRecord]) -> None:
+        for link in links:
+            _ensure_run_id_match("node_signal_links", run_id, link.run_id)
+        cluster_types = self._load_external_signal_cluster_types(run_id=run_id)
+        existing_node_ids = {node.node_id for node in self.list_nodes(run_id=run_id)}
+        for link in links:
+            if link.node_id not in existing_node_ids:
+                raise ValueError(f"node_signal_links references missing node_id {link.node_id!r}")
+            if link.cluster_id not in cluster_types:
+                raise ValueError(f"node_signal_links references missing cluster_id {link.cluster_id!r}")
+        normalized_links = sorted(links, key=lambda link: (link.node_id, link.cluster_id))
+        rows = [
+            [
+                run_id,
+                link.node_id,
+                link.cluster_id,
+                link.link_type,
+                int(link.hop_distance),
+                int(link.time_offset_ms),
+                float(link.similarity),
+                float(link.link_score),
+                _json_dumps(link.evidence),
+            ]
+            for link in normalized_links
+        ]
+        self._batch_upsert(
+            "node_signal_links",
+            [
+                "run_id",
+                "node_id",
+                "cluster_id",
+                "link_type",
+                "hop_distance",
+                "time_offset_ms",
+                "similarity",
+                "link_score",
+                "evidence_json",
+            ],
+            rows,
+        )
+
+    def list_node_signal_links(self, *, run_id: str) -> list[NodeSignalLinkRecord]:
+        rows = self._query(
+            """
+            SELECT run_id, node_id, cluster_id, link_type, hop_distance, time_offset_ms, similarity, link_score,
+                   evidence_json
+            FROM node_signal_links
+            WHERE run_id = @run_id
+            ORDER BY node_id ASC, cluster_id ASC
+            """,
+            {"run_id": run_id},
+            param_types={"run_id": _STRING_PARAM_TYPE},
+            columns=(
+                "run_id",
+                "node_id",
+                "cluster_id",
+                "link_type",
+                "hop_distance",
+                "time_offset_ms",
+                "similarity",
+                "link_score",
+                "evidence_json",
+            ),
+        )
+        return [
+            NodeSignalLinkRecord(
+                run_id=row["run_id"],
+                node_id=row["node_id"],
+                cluster_id=row["cluster_id"],
+                link_type=row["link_type"],
+                hop_distance=int(row["hop_distance"]),
+                time_offset_ms=int(row["time_offset_ms"]),
+                similarity=float(row["similarity"]),
+                link_score=float(row["link_score"]),
+                evidence=_json_loads(row["evidence_json"]) or {},
+            )
+            for row in rows
+        ]
+
+    def write_candidate_signal_links(
+        self, *, run_id: str, links: Sequence[CandidateSignalLinkRecord]
+    ) -> None:
+        for link in links:
+            _ensure_run_id_match("candidate_signal_links", run_id, link.run_id)
+        cluster_types = self._load_external_signal_cluster_types(run_id=run_id)
+        existing_clip_ids = {candidate.clip_id for candidate in self.list_candidates(run_id=run_id)}
+        for link in links:
+            if link.clip_id not in existing_clip_ids:
+                raise ValueError(f"candidate_signal_links references missing clip_id {link.clip_id!r}")
+            cluster_type = cluster_types.get(link.cluster_id)
+            if cluster_type is None:
+                raise ValueError(f"candidate_signal_links references missing cluster_id {link.cluster_id!r}")
+            if cluster_type != link.cluster_type:
+                raise ValueError(
+                    "candidate_signal_links.cluster_type must match linked cluster type "
+                    f"for cluster_id {link.cluster_id!r}"
+                )
+        normalized_links = sorted(links, key=lambda link: (link.clip_id, link.cluster_id))
+        rows = [
+            [
+                run_id,
+                link.clip_id,
+                link.cluster_id,
+                link.cluster_type,
+                float(link.aggregated_link_score),
+                int(link.coverage_ms),
+                int(link.direct_node_count),
+                int(link.inferred_node_count),
+                list(link.agreement_flags),
+                float(link.bonus_applied),
+                _json_dumps(link.evidence),
+            ]
+            for link in normalized_links
+        ]
+        self._batch_upsert(
+            "candidate_signal_links",
+            [
+                "run_id",
+                "clip_id",
+                "cluster_id",
+                "cluster_type",
+                "aggregated_link_score",
+                "coverage_ms",
+                "direct_node_count",
+                "inferred_node_count",
+                "agreement_flags",
+                "bonus_applied",
+                "evidence_json",
+            ],
+            rows,
+        )
+
+    def list_candidate_signal_links(self, *, run_id: str) -> list[CandidateSignalLinkRecord]:
+        rows = self._query(
+            """
+            SELECT run_id, clip_id, cluster_id, cluster_type, aggregated_link_score, coverage_ms,
+                   direct_node_count, inferred_node_count, agreement_flags, bonus_applied, evidence_json
+            FROM candidate_signal_links
+            WHERE run_id = @run_id
+            ORDER BY clip_id ASC, cluster_id ASC
+            """,
+            {"run_id": run_id},
+            param_types={"run_id": _STRING_PARAM_TYPE},
+            columns=(
+                "run_id",
+                "clip_id",
+                "cluster_id",
+                "cluster_type",
+                "aggregated_link_score",
+                "coverage_ms",
+                "direct_node_count",
+                "inferred_node_count",
+                "agreement_flags",
+                "bonus_applied",
+                "evidence_json",
+            ),
+        )
+        return [
+            CandidateSignalLinkRecord(
+                run_id=row["run_id"],
+                clip_id=row["clip_id"],
+                cluster_id=row["cluster_id"],
+                cluster_type=row["cluster_type"],
+                aggregated_link_score=float(row["aggregated_link_score"]),
+                coverage_ms=int(row["coverage_ms"]),
+                direct_node_count=int(row["direct_node_count"]),
+                inferred_node_count=int(row["inferred_node_count"]),
+                agreement_flags=list(row["agreement_flags"] or []),
+                bonus_applied=float(row["bonus_applied"]),
+                evidence=_json_loads(row["evidence_json"]) or {},
+            )
+            for row in rows
+        ]
+
+    def write_prompt_source_links(self, *, run_id: str, links: Sequence[PromptSourceLinkRecord]) -> None:
+        for link in links:
+            _ensure_run_id_match("prompt_source_links", run_id, link.run_id)
+        cluster_types = self._load_external_signal_cluster_types(run_id=run_id)
+        for link in links:
+            if link.source_cluster_id is None:
+                continue
+            cluster_type = cluster_types.get(link.source_cluster_id)
+            if cluster_type is None:
+                raise ValueError(
+                    f"prompt_source_links references missing source_cluster_id {link.source_cluster_id!r}"
+                )
+            if link.source_cluster_type != cluster_type:
+                raise ValueError(
+                    "prompt_source_links.source_cluster_type must match linked cluster type "
+                    f"for source_cluster_id {link.source_cluster_id!r}"
+                )
+        normalized_links = sorted(links, key=lambda link: link.prompt_id)
+        rows = [
+            [
+                run_id,
+                link.prompt_id,
+                link.prompt_source_type,
+                link.source_cluster_id,
+                link.source_cluster_type,
+                _json_dumps(link.metadata),
+            ]
+            for link in normalized_links
+        ]
+        self._batch_upsert(
+            "prompt_source_links",
+            [
+                "run_id",
+                "prompt_id",
+                "prompt_source_type",
+                "source_cluster_id",
+                "source_cluster_type",
+                "metadata_json",
+            ],
+            rows,
+        )
+
+    def list_prompt_source_links(self, *, run_id: str) -> list[PromptSourceLinkRecord]:
+        rows = self._query(
+            """
+            SELECT run_id, prompt_id, prompt_source_type, source_cluster_id, source_cluster_type, metadata_json
+            FROM prompt_source_links
+            WHERE run_id = @run_id
+            ORDER BY prompt_id ASC
+            """,
+            {"run_id": run_id},
+            param_types={"run_id": _STRING_PARAM_TYPE},
+            columns=(
+                "run_id",
+                "prompt_id",
+                "prompt_source_type",
+                "source_cluster_id",
+                "source_cluster_type",
+                "metadata_json",
+            ),
+        )
+        return [
+            PromptSourceLinkRecord(
+                run_id=row["run_id"],
+                prompt_id=row["prompt_id"],
+                prompt_source_type=row["prompt_source_type"],
+                source_cluster_id=row["source_cluster_id"],
+                source_cluster_type=row["source_cluster_type"],
+                metadata=_json_loads(row["metadata_json"]) or {},
+            )
+            for row in rows
+        ]
+
+    def write_subgraph_provenance(
+        self, *, run_id: str, provenance: Sequence[SubgraphProvenanceRecord]
+    ) -> None:
+        for record in provenance:
+            _ensure_run_id_match("subgraph_provenance", run_id, record.run_id)
+        normalized_provenance = sorted(provenance, key=lambda record: record.subgraph_id)
+        rows = [
+            [
+                run_id,
+                record.subgraph_id,
+                list(record.seed_source_set),
+                list(record.seed_prompt_ids),
+                list(record.source_cluster_ids),
+                _json_dumps(record.support_summary),
+                bool(record.canonical_selected),
+                record.dedupe_overlap_ratio,
+                record.selection_reason,
+                _json_dumps(record.metadata),
+            ]
+            for record in normalized_provenance
+        ]
+        self._batch_upsert(
+            "subgraph_provenance",
+            [
+                "run_id",
+                "subgraph_id",
+                "seed_source_set",
+                "seed_prompt_ids",
+                "source_cluster_ids",
+                "support_summary_json",
+                "canonical_selected",
+                "dedupe_overlap_ratio",
+                "selection_reason",
+                "metadata_json",
+            ],
+            rows,
+        )
+
+    def list_subgraph_provenance(self, *, run_id: str) -> list[SubgraphProvenanceRecord]:
+        rows = self._query(
+            """
+            SELECT run_id, subgraph_id, seed_source_set, seed_prompt_ids, source_cluster_ids,
+                   support_summary_json, canonical_selected, dedupe_overlap_ratio, selection_reason, metadata_json
+            FROM subgraph_provenance
+            WHERE run_id = @run_id
+            ORDER BY subgraph_id ASC
+            """,
+            {"run_id": run_id},
+            param_types={"run_id": _STRING_PARAM_TYPE},
+            columns=(
+                "run_id",
+                "subgraph_id",
+                "seed_source_set",
+                "seed_prompt_ids",
+                "source_cluster_ids",
+                "support_summary_json",
+                "canonical_selected",
+                "dedupe_overlap_ratio",
+                "selection_reason",
+                "metadata_json",
+            ),
+        )
+        return [
+            SubgraphProvenanceRecord(
+                run_id=row["run_id"],
+                subgraph_id=row["subgraph_id"],
+                seed_source_set=list(row["seed_source_set"] or []),
+                seed_prompt_ids=list(row["seed_prompt_ids"] or []),
+                source_cluster_ids=list(row["source_cluster_ids"] or []),
+                support_summary=_json_loads(row["support_summary_json"]) or {},
+                canonical_selected=bool(row["canonical_selected"]),
+                dedupe_overlap_ratio=float(row["dedupe_overlap_ratio"])
+                if row["dedupe_overlap_ratio"] is not None
+                else None,
+                selection_reason=row["selection_reason"],
+                metadata=_json_loads(row["metadata_json"]) or {},
+            )
+            for row in rows
+        ]
+
+    def _load_external_signal_cluster_types(self, *, run_id: str) -> dict[str, str]:
+        return {
+            cluster.cluster_id: cluster.cluster_type
+            for cluster in self.list_external_signal_clusters(run_id=run_id)
+        }
 
     def write_phase_metric(self, record: PhaseMetricRecord) -> PhaseMetricRecord:
         self._batch_upsert(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import logging
 from pathlib import Path
 import time
@@ -31,16 +32,28 @@ from backend.pipeline.semantics.runtime import (
     prepare_node_media_embeddings,
     run_merge_classify_and_reconcile,
 )
+from backend.pipeline.signals.contracts import SignalPipelineOutput, SignalPromptSpec
+from backend.pipeline.signals.comments_client import resolve_youtube_video_id
+from backend.pipeline.signals.linking import build_node_signal_links
+from backend.pipeline.signals.llm_runtime import explain_candidate_attribution_with_llm
+from backend.pipeline.signals.runtime import merge_signal_outputs, start_comments_future, start_trends_future
+from backend.pipeline.signals.scoring import apply_signal_scoring
 from backend.pipeline.timeline.audio_events import build_audio_event_timeline
 from backend.pipeline.timeline.emotion_events import build_speech_emotion_timeline
 from backend.pipeline.timeline.timeline_builder import build_canonical_timeline
 from backend.pipeline.timeline.tracklets import build_tracklet_artifacts
 from backend.repository import (
+    CandidateSignalLinkRecord,
     ClipCandidateRecord,
+    ExternalSignalClusterRecord,
+    ExternalSignalRecord,
     Phase14Repository,
     PhaseMetricRecord,
+    NodeSignalLinkRecord,
+    PromptSourceLinkRecord,
     SemanticEdgeRecord,
     SemanticNodeRecord,
+    SubgraphProvenanceRecord,
     TimelineTurnRecord,
 )
 
@@ -127,8 +140,6 @@ class V31LivePhase14Runner:
                 resumed_phases=("phase2", "phase3", "phase4"),
             )
 
-        phase1 = self.run_phase_1(paths=paths, phase1_outputs=phase1_outputs)
-
         run_started_at = datetime.now(UTC)
         run_started = time.perf_counter()
         self._emit_log(
@@ -139,7 +150,34 @@ class V31LivePhase14Runner:
             attempt=attempt,
             status="start",
         )
+        signal_executor = ThreadPoolExecutor(max_workers=2)
+        comments_future: Any | None = None
+        trends_future: Any | None = None
+        comments_future_started_at: float | None = None
+        trends_future_started_at: float | None = None
         try:
+            if self._comments_enabled_effective() and not resolve_youtube_video_id(source_url):
+                raise ValueError(
+                    "comments signals are enabled but source URL does not resolve a youtube_video_id"
+                )
+
+            comments_future, comments_future_started_at = self._start_signal_future(
+                executor=signal_executor,
+                run_id=run_id,
+                job_id=job_id,
+                attempt=attempt,
+                signal_name="comments",
+                starter=lambda: start_comments_future(
+                    executor=signal_executor,
+                    cfg=self.config.signals,
+                    llm_client=self.llm_client,
+                    embedding_client=self.embedding_client,
+                    source_url=source_url,
+                ),
+            )
+
+            phase1 = self.run_phase_1(paths=paths, phase1_outputs=phase1_outputs)
+
             phase2_nodes: list[SemanticGraphNode]
             phase3_edges: list[SemanticGraphEdge]
             if resume_phase in {"phase2", "phase3"}:
@@ -168,6 +206,34 @@ class V31LivePhase14Runner:
                 )
                 phase2_nodes = phase2["nodes"]
 
+            if comments_future is not None and hasattr(comments_future, "done") and comments_future.done():
+                comments_future.result()
+
+            if self._trends_enabled_effective():
+                self._emit_log(
+                    run_id=run_id,
+                    job_id=job_id,
+                    phase="signals",
+                    event="trend_fetch_start_after_phase2",
+                    attempt=attempt,
+                    status="start",
+                )
+            trends_future, trends_future_started_at = self._start_signal_future(
+                executor=signal_executor,
+                run_id=run_id,
+                job_id=job_id,
+                attempt=attempt,
+                signal_name="trends",
+                starter=lambda: start_trends_future(
+                    executor=signal_executor,
+                    cfg=self.config.signals,
+                    llm_client=self.llm_client,
+                    embedding_client=self.embedding_client,
+                    nodes=phase2_nodes,
+                    source_url=source_url,
+                ),
+            )
+
             if resume_phase == "phase3":
                 phase3_edges = self._load_resume_edges(run_id=run_id)
                 self._emit_phase_skipped_resume(
@@ -192,6 +258,23 @@ class V31LivePhase14Runner:
                 )
                 phase3_edges = phase3["edges"]
 
+            comments_output, trends_output = self._join_signal_outputs(
+                run_id=run_id,
+                job_id=job_id,
+                attempt=attempt,
+                comments_future=comments_future,
+                comments_future_started_at=comments_future_started_at,
+                trends_future=trends_future,
+                trends_future_started_at=trends_future_started_at,
+            )
+            signal_output = self._merge_signal_outputs(
+                run_id=run_id,
+                job_id=job_id,
+                attempt=attempt,
+                comments_output=comments_output,
+                trends_output=trends_output,
+            )
+
             phase4 = self._execute_phase(
                 run_id=run_id,
                 job_id=job_id,
@@ -207,6 +290,7 @@ class V31LivePhase14Runner:
                     nodes=phase2_nodes,
                     edges=phase3_edges,
                     extra_prompt_texts=phase4_extra_prompt_texts or [],
+                    signal_output=signal_output,
                 ),
                 metric_metadata_builder=lambda payload: {
                     "seed_count": payload["seed_count"],
@@ -238,7 +322,19 @@ class V31LivePhase14Runner:
                 final_status="FAILED",
                 total_duration_ms=total_duration_ms,
             )
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event="signals_failure",
+                attempt=attempt,
+                status="error",
+                error_code=exc.__class__.__name__,
+                error_message=str(exc),
+            )
             raise
+        finally:
+            signal_executor.shutdown(wait=False, cancel_futures=True)
 
         return self._finish_phase24_success(
             run_id=run_id,
@@ -445,6 +541,7 @@ class V31LivePhase14Runner:
         nodes: list[SemanticGraphNode],
         edges: list[SemanticGraphEdge],
         extra_prompt_texts: list[str],
+        signal_output: SignalPipelineOutput | None = None,
     ) -> dict[str, Any]:
         duration_s = 0.0
         if canonical_timeline.turns:
@@ -458,9 +555,22 @@ class V31LivePhase14Runner:
             thinking_level=self.config.phase4_meta_thinking_level,
         )
         logger.info("[phase4] meta prompt generation done in %.1f s", time.perf_counter() - meta_started)
-        prompt_texts = [*dynamic_prompts, *extra_prompt_texts]
+        signal_output = signal_output or SignalPipelineOutput()
+        general_prompt_specs = [
+            SignalPromptSpec(
+                prompt_id=f"general_prompt_{idx:03d}",
+                text=text,
+                prompt_source_type="general",
+            )
+            for idx, text in enumerate([*dynamic_prompts, *extra_prompt_texts], start=1)
+        ]
+        augmentation_prompt_specs = list(signal_output.prompt_specs)
+        all_prompt_specs = [*general_prompt_specs, *augmentation_prompt_specs]
+
+        prompt_source_links = self._build_prompt_source_links(run_id=paths.run_id, prompt_specs=all_prompt_specs)
+
         embedded_prompts = embed_prompt_texts_live(
-            prompts=prompt_texts,
+            prompts=all_prompt_specs,
             embedding_client=self.embedding_client,
         )
         seeds = retrieve_seed_nodes(
@@ -474,6 +584,18 @@ class V31LivePhase14Runner:
             edges=edges,
             config=self.config.phase4_subgraphs,
         )
+        subgraph_provenance = self._build_subgraph_provenance(
+            run_id=paths.run_id,
+            subgraphs=subgraphs,
+            prompt_specs=all_prompt_specs,
+        )
+        subgraph_provenance_by_id = {
+            record.subgraph_id: record.model_dump(mode="json")
+            for record in subgraph_provenance
+        }
+        if self.repository is not None and subgraph_provenance:
+            self.repository.write_subgraph_provenance(run_id=paths.run_id, provenance=subgraph_provenance)
+
         subgraph_review_started = time.perf_counter()
         reviews, subgraph_debug = run_subgraph_reviews(
             subgraphs=subgraphs,
@@ -481,6 +603,7 @@ class V31LivePhase14Runner:
             model=self.flash_model,
             max_concurrent=self.config.gemini_max_concurrent,
             thinking_level=self.config.phase4_subgraph_thinking_level,
+            subgraph_provenance_by_id=subgraph_provenance_by_id,
         )
         logger.info("[phase4] subgraph reviews done in %.1f s", time.perf_counter() - subgraph_review_started)
         raw_candidates: list[ClipCandidate] = []
@@ -516,7 +639,159 @@ class V31LivePhase14Runner:
                     )
                 )
 
+        prompt_embeddings = {item["prompt_id"]: item["embedding"] for item in embedded_prompts}
+        node_signal_links = build_node_signal_links(
+            clusters=list(signal_output.clusters),
+            prompt_specs=all_prompt_specs,
+            prompt_embeddings=prompt_embeddings,
+            nodes=nodes,
+            edges=edges,
+            llm_client=self.llm_client,
+            model=self.config.signals.llm.model_5,
+            thinking_level=self.config.signals.llm.thinking_5,
+            max_hops=self.config.signals.max_hops,
+            time_window_ms=self.config.signals.time_window_ms,
+        )
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signals_node_linking_done",
+            attempt=attempt,
+            status="success",
+            link_count=len(node_signal_links),
+        )
+        signal_scoring = apply_signal_scoring(
+            candidates=final_candidates,
+            nodes=nodes,
+            clusters=list(signal_output.clusters),
+            node_links=node_signal_links,
+            prompt_specs=all_prompt_specs,
+            cfg=self.config.signals,
+        )
+        final_candidates = signal_scoring.candidates
+        candidate_signal_links = signal_scoring.candidate_signal_links
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signals_candidate_attribution_done",
+            attempt=attempt,
+            status="success",
+            candidate_link_count=len(candidate_signal_links),
+        )
+
+        for idx, candidate in enumerate(final_candidates):
+            if not candidate.external_attribution_json:
+                continue
+            started = time.perf_counter()
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event="signals_llm_call_start",
+                attempt=attempt,
+                status="start",
+                callpoint_id="11",
+                model=self.config.signals.llm.model_11,
+                thinking_level=self.config.signals.llm.thinking_11,
+            )
+            try:
+                explanation = explain_candidate_attribution_with_llm(
+                    llm_client=self.llm_client,
+                    model=self.config.signals.llm.model_11,
+                    thinking_level=self.config.signals.llm.thinking_11,
+                    evidence_payload=candidate.external_attribution_json,
+                )
+            except Exception as exc:
+                self._emit_log(
+                    run_id=run_id,
+                    job_id=job_id,
+                    phase="signals",
+                    event="signals_failure",
+                    attempt=attempt,
+                    status="error",
+                    error_code=exc.__class__.__name__,
+                    error_message=str(exc),
+                    failed_callpoint_id="11",
+                )
+                raise
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event="signals_llm_call_done",
+                attempt=attempt,
+                status="success",
+                callpoint_id="11",
+                model=self.config.signals.llm.model_11,
+                thinking_level=self.config.signals.llm.thinking_11,
+                latency_ms=duration_ms,
+            )
+            enriched = dict(candidate.external_attribution_json)
+            enriched["explanation"] = explanation
+            final_candidates[idx] = candidate.model_copy(
+                update={"external_attribution_json": enriched}
+            )
+
         if self.repository is not None:
+            self.repository.write_external_signals(
+                run_id=paths.run_id,
+                signals=[
+                    ExternalSignalRecord(
+                        run_id=paths.run_id,
+                        signal_id=signal.signal_id,
+                        signal_type=signal.signal_type,
+                        source_platform=signal.source_platform,
+                        source_id=signal.source_id,
+                        author_id=signal.author_id,
+                        text=signal.text,
+                        engagement_score=signal.engagement_score,
+                        published_at=signal.published_at,
+                        metadata=signal.metadata,
+                    )
+                    for signal in signal_output.external_signals
+                ],
+            )
+            self.repository.write_external_signal_clusters(
+                run_id=paths.run_id,
+                clusters=[
+                    ExternalSignalClusterRecord(
+                        run_id=paths.run_id,
+                        cluster_id=cluster.cluster_id,
+                        cluster_type=cluster.cluster_type,
+                        summary_text=cluster.summary_text,
+                        member_signal_ids=list(cluster.member_signal_ids),
+                        cluster_weight=cluster.cluster_weight,
+                        embedding=list(cluster.embedding),
+                        metadata=cluster.metadata,
+                    )
+                    for cluster in signal_output.clusters
+                ],
+            )
+            if prompt_source_links:
+                self.repository.write_prompt_source_links(
+                    run_id=paths.run_id,
+                    links=prompt_source_links,
+                )
+            self.repository.write_node_signal_links(
+                run_id=paths.run_id,
+                links=[
+                    NodeSignalLinkRecord(
+                        run_id=paths.run_id,
+                        node_id=link.node_id,
+                        cluster_id=link.cluster_id,
+                        link_type=link.link_type,
+                        hop_distance=link.hop_distance,
+                        time_offset_ms=link.time_offset_ms,
+                        similarity=link.similarity,
+                        link_score=link.link_score,
+                        evidence=link.evidence,
+                    )
+                    for link in node_signal_links
+                ],
+            )
             self.repository.write_candidates(
                 run_id=paths.run_id,
                 candidates=[
@@ -534,8 +809,30 @@ class V31LivePhase14Runner:
                         query_aligned=candidate.query_aligned,
                         pool_rank=candidate.pool_rank,
                         score_breakdown=candidate.score_breakdown,
+                        external_signal_score=candidate.external_signal_score,
+                        agreement_bonus=candidate.agreement_bonus,
+                        external_attribution_json=candidate.external_attribution_json,
                     )
                     for candidate in final_candidates
+                ],
+            )
+            self.repository.write_candidate_signal_links(
+                run_id=paths.run_id,
+                links=[
+                    CandidateSignalLinkRecord(
+                        run_id=paths.run_id,
+                        clip_id=link.clip_id,
+                        cluster_id=link.cluster_id,
+                        cluster_type=link.cluster_type,
+                        aggregated_link_score=link.aggregated_link_score,
+                        coverage_ms=link.coverage_ms,
+                        direct_node_count=link.direct_node_count,
+                        inferred_node_count=link.inferred_node_count,
+                        agreement_flags=list(link.agreement_flags),
+                        bonus_applied=link.bonus_applied,
+                        evidence=link.evidence,
+                    )
+                    for link in candidate_signal_links
                 ],
             )
 
@@ -549,6 +846,15 @@ class V31LivePhase14Runner:
         self._save_debug_json(paths.candidate_dedup_debug, [candidate.model_dump(mode="json") for candidate in deduped_candidates])
         self._save_debug_json(paths.clip_candidates, [candidate.model_dump(mode="json") for candidate in final_candidates])
         self._save_debug_json(paths.candidates_dir / "subgraph_review_debug.json", subgraph_debug)
+        self._save_debug_json(paths.candidates_dir / "prompt_source_links_debug.json", [link.model_dump(mode="json") for link in prompt_source_links])
+        self._save_debug_json(
+            paths.candidates_dir / "subgraph_provenance_debug.json",
+            [record.model_dump(mode="json") for record in subgraph_provenance],
+        )
+        self._save_debug_json(
+            paths.candidates_dir / "signal_output_debug.json",
+            signal_output.model_dump(mode="json"),
+        )
         self._save_debug_json(
             paths.phase_4_summary,
             {
@@ -559,6 +865,9 @@ class V31LivePhase14Runner:
                 "raw_candidate_count": len(raw_candidates),
                 "deduped_candidate_count": len(deduped_candidates),
                 "final_candidate_count": len(final_candidates),
+                "comment_cluster_count": len(signal_output.clusters) if signal_output else 0,
+                "comment_prompt_count": len([spec for spec in augmentation_prompt_specs if spec.prompt_source_type == "comment"]),
+                "trend_prompt_count": len([spec for spec in augmentation_prompt_specs if spec.prompt_source_type == "trend"]),
             },
         )
         self._emit_log(
@@ -580,6 +889,348 @@ class V31LivePhase14Runner:
             "deduped_candidate_count": len(deduped_candidates),
             "final_candidate_count": len(final_candidates),
         }
+
+    def _start_signal_future(
+        self,
+        *,
+        executor: ThreadPoolExecutor,
+        run_id: str,
+        job_id: str | None,
+        attempt: int,
+        signal_name: str,
+        starter: Callable[[], Any | None],
+    ) -> tuple[Any | None, float | None]:
+        if signal_name == "comments" and not self._comments_enabled_effective():
+            return None, None
+        if signal_name == "trends" and not self._trends_enabled_effective():
+            return None, None
+        started_at = time.perf_counter()
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signal_future_start",
+            attempt=attempt,
+            status="start",
+            signal_name=signal_name,
+        )
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signals_fetch_start",
+            attempt=attempt,
+            status="start",
+            signal_name=signal_name,
+        )
+        future = starter()
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signal_future_submitted",
+            attempt=attempt,
+            status="submitted",
+            signal_name=signal_name,
+        )
+        return future, started_at
+
+    def _comments_enabled_effective(self) -> bool:
+        return bool(self.config.signals.enable_comment_signals) and int(self.config.signals.comment_top_threads_max) > 0
+
+    def _trends_enabled_effective(self) -> bool:
+        return bool(self.config.signals.enable_trend_signals) and int(self.config.signals.trend_max_items) > 0
+
+    def _join_signal_future(
+        self,
+        *,
+        run_id: str,
+        job_id: str | None,
+        attempt: int,
+        signal_name: str,
+        future: Any | None,
+        started_at: float | None,
+    ) -> SignalPipelineOutput:
+        if future is None:
+            return SignalPipelineOutput()
+        join_started = time.perf_counter()
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signal_future_join_start",
+            attempt=attempt,
+            status="start",
+            signal_name=signal_name,
+        )
+        try:
+            output = future.result()
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - (started_at or join_started)) * 1000.0
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event="signal_future_join_error",
+                attempt=attempt,
+                status="error",
+                signal_name=signal_name,
+                duration_ms=duration_ms,
+                error_code=exc.__class__.__name__,
+                error_message=str(exc),
+            )
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event="signals_failure",
+                attempt=attempt,
+                status="error",
+                error_code=exc.__class__.__name__,
+                error_message=str(exc),
+                signal_name=signal_name,
+            )
+            raise
+        duration_ms = (time.perf_counter() - (started_at or join_started)) * 1000.0
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signal_future_join_success",
+            attempt=attempt,
+            status="success",
+            signal_name=signal_name,
+            duration_ms=duration_ms,
+            prompt_count=len(output.prompt_specs),
+            cluster_count=len(output.clusters),
+            signal_count=len(output.external_signals),
+        )
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signals_fetch_done",
+            attempt=attempt,
+            status="success",
+            signal_name=signal_name,
+            duration_ms=duration_ms,
+            prompt_count=len(output.prompt_specs),
+            cluster_count=len(output.clusters),
+            signal_count=len(output.external_signals),
+        )
+        return output
+
+    def _join_signal_outputs(
+        self,
+        *,
+        run_id: str,
+        job_id: str | None,
+        attempt: int,
+        comments_future: Any | None,
+        comments_future_started_at: float | None,
+        trends_future: Any | None,
+        trends_future_started_at: float | None,
+    ) -> tuple[SignalPipelineOutput, SignalPipelineOutput]:
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signals_hard_join_wait_start",
+            attempt=attempt,
+            status="start",
+            comment_enabled=comments_future is not None,
+            trend_enabled=trends_future is not None,
+        )
+        try:
+            comments_output = self._join_signal_future(
+                run_id=run_id,
+                job_id=job_id,
+                attempt=attempt,
+                signal_name="comments",
+                future=comments_future,
+                started_at=comments_future_started_at,
+            )
+        except Exception:
+            if trends_future is not None and hasattr(trends_future, "cancel"):
+                trends_future.cancel()
+            raise
+        trends_output = self._join_signal_future(
+            run_id=run_id,
+            job_id=job_id,
+            attempt=attempt,
+            signal_name="trends",
+            future=trends_future,
+            started_at=trends_future_started_at,
+        )
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signals_hard_join_wait_done",
+            attempt=attempt,
+            status="success",
+            comment_prompt_count=len(comments_output.prompt_specs),
+            trend_prompt_count=len(trends_output.prompt_specs),
+            comment_cluster_count=len(comments_output.clusters),
+            trend_cluster_count=len(trends_output.clusters),
+        )
+        return comments_output, trends_output
+
+    def _merge_signal_outputs(
+        self,
+        *,
+        run_id: str,
+        job_id: str | None,
+        attempt: int,
+        comments_output: SignalPipelineOutput,
+        trends_output: SignalPipelineOutput,
+    ) -> SignalPipelineOutput:
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signal_augmentation_merge_start",
+            attempt=attempt,
+            status="start",
+            comment_prompt_count=len(comments_output.prompt_specs),
+            trend_prompt_count=len(trends_output.prompt_specs),
+        )
+        merged = merge_signal_outputs(comments=comments_output, trends=trends_output)
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signal_augmentation_merge_success",
+            attempt=attempt,
+            status="success",
+            prompt_count=len(merged.prompt_specs),
+            cluster_count=len(merged.clusters),
+            signal_count=len(merged.external_signals),
+        )
+        if comments_output.metadata:
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event="comments_threads_count",
+                attempt=attempt,
+                status="success",
+                threads_total=int(comments_output.metadata.get("threads_total") or 0),
+                threads_selected=int(comments_output.metadata.get("threads_selected") or 0),
+            )
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event="comments_replies_count",
+                attempt=attempt,
+                status="success",
+                replies_total=int(comments_output.metadata.get("replies_total") or 0),
+            )
+        if trends_output.metadata:
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event="trend_items_count",
+                attempt=attempt,
+                status="success",
+                trend_items_count=int(trends_output.metadata.get("trend_items_count") or 0),
+            )
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event="trend_retained_count",
+                attempt=attempt,
+                status="success",
+                trend_retained_count=int(trends_output.metadata.get("trend_retained_count") or 0),
+            )
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signal_clusters_built",
+            attempt=attempt,
+            status="success",
+            cluster_count=len(merged.clusters),
+            prompt_count=len(merged.prompt_specs),
+            signal_count=len(merged.external_signals),
+        )
+        return merged
+
+    def _build_prompt_source_links(
+        self,
+        *,
+        run_id: str,
+        prompt_specs: list[SignalPromptSpec],
+    ) -> list[PromptSourceLinkRecord]:
+        links: list[PromptSourceLinkRecord] = []
+        for idx, prompt in enumerate(prompt_specs, start=1):
+            metadata = {
+                "prompt_text": prompt.text,
+                "prompt_index": idx,
+            }
+            links.append(
+                PromptSourceLinkRecord(
+                    run_id=run_id,
+                    prompt_id=prompt.prompt_id,
+                    prompt_source_type=prompt.prompt_source_type,
+                    source_cluster_id=prompt.source_cluster_id,
+                    source_cluster_type=prompt.source_cluster_type,
+                    metadata=metadata,
+                )
+            )
+        return links
+
+    def _build_subgraph_provenance(
+        self,
+        *,
+        run_id: str,
+        subgraphs: list[Any],
+        prompt_specs: list[SignalPromptSpec],
+    ) -> list[SubgraphProvenanceRecord]:
+        prompt_by_id = {prompt.prompt_id: prompt for prompt in prompt_specs}
+        provenance_records: list[SubgraphProvenanceRecord] = []
+        for subgraph in subgraphs:
+            seed_prompt_ids = list(getattr(subgraph, "source_prompt_ids", []) or [])
+            source_types: list[str] = []
+            source_cluster_ids: list[str] = []
+            source_type_counts: dict[str, int] = {}
+            for prompt_id in seed_prompt_ids:
+                prompt = prompt_by_id.get(prompt_id)
+                if prompt is None:
+                    continue
+                if prompt.prompt_source_type not in source_types:
+                    source_types.append(prompt.prompt_source_type)
+                source_type_counts[prompt.prompt_source_type] = source_type_counts.get(prompt.prompt_source_type, 0) + 1
+                if prompt.source_cluster_id and prompt.source_cluster_id not in source_cluster_ids:
+                    source_cluster_ids.append(prompt.source_cluster_id)
+            if not source_types:
+                source_types = ["general"]
+                source_type_counts = {"general": len(seed_prompt_ids)}
+            provenance_records.append(
+                SubgraphProvenanceRecord(
+                    run_id=run_id,
+                    subgraph_id=str(getattr(subgraph, "subgraph_id")),
+                    seed_source_set=source_types,
+                    seed_prompt_ids=seed_prompt_ids,
+                    source_cluster_ids=source_cluster_ids,
+                    support_summary={
+                        "seed_prompt_count": len(seed_prompt_ids),
+                        "source_type_counts": source_type_counts,
+                        "node_count": len(getattr(subgraph, "nodes", []) or []),
+                    },
+                    canonical_selected=True,
+                    dedupe_overlap_ratio=None,
+                    selection_reason="retained_after_dedupe",
+                    metadata={
+                        "seed_node_id": getattr(subgraph, "seed_node_id", None),
+                        "node_count": len(getattr(subgraph, "nodes", []) or []),
+                    },
+                )
+            )
+        return provenance_records
 
     def _execute_phase(
         self,
