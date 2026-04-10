@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 import math
-from typing import Any
+from typing import Any, Callable
 
 from backend.pipeline._embedding_utils import cosine_similarity
 from backend.pipeline.candidates.build_local_subgraphs import build_local_subgraphs
@@ -27,6 +27,7 @@ def build_node_signal_links(
     max_hops: int,
     time_window_ms: int,
     fail_fast: bool = True,
+    signal_event_logger: Callable[..., None] | None = None,
 ) -> list[NodeSignalLink]:
     if not clusters:
         return []
@@ -85,6 +86,7 @@ def build_node_signal_links(
             cluster=cluster,
             neighborhood_payload=neighborhood_payload,
             fail_fast=fail_fast,
+            event_logger=signal_event_logger,
         )
         direct_ids = [node_id for node_id in selected_ids if node_id in node_by_id]
         if not direct_ids:

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from backend.pipeline.signals.contracts import SignalPipelineOutput, SignalPromptSpec
 
 
@@ -16,6 +18,10 @@ class _FakeFuture:
     def result(self):
         self.events.append(f"{self.label}_result")
         return self.result_value
+
+    def cancel(self):
+        self.events.append(f"{self.label}_cancel")
+        return True
 
 
 class _FakeRepository:
@@ -66,7 +72,7 @@ def test_phase14_runner_starts_comments_before_phase1_and_trends_after_phase2(tm
     )
     events: list[str] = []
 
-    def fake_start_comments_future(*, executor, cfg, llm_client, embedding_client, source_url):
+    def fake_start_comments_future(*, executor, cfg, llm_client, embedding_client, source_url, signal_event_logger=None):
         events.append("comments_submit")
         return _FakeFuture(
             SignalPipelineOutput(
@@ -84,7 +90,7 @@ def test_phase14_runner_starts_comments_before_phase1_and_trends_after_phase2(tm
             "comments",
         )
 
-    def fake_start_trends_future(*, executor, cfg, llm_client, embedding_client, nodes, source_url):
+    def fake_start_trends_future(*, executor, cfg, llm_client, embedding_client, nodes, source_url, signal_event_logger=None):
         events.append("trends_submit")
         return _FakeFuture(
             SignalPipelineOutput(
@@ -159,10 +165,10 @@ def test_phase14_runner_uses_general_prompts_only_when_augmentation_is_empty(tmp
     )
     captured: dict[str, object] = {}
 
-    def fake_start_comments_future(*, executor, cfg, llm_client, embedding_client, source_url):
+    def fake_start_comments_future(*, executor, cfg, llm_client, embedding_client, source_url, signal_event_logger=None):
         return _FakeFuture(SignalPipelineOutput(), [], "comments")
 
-    def fake_start_trends_future(*, executor, cfg, llm_client, embedding_client, nodes, source_url):
+    def fake_start_trends_future(*, executor, cfg, llm_client, embedding_client, nodes, source_url, signal_event_logger=None):
         return _FakeFuture(SignalPipelineOutput(), [], "trends")
 
     def fake_run_phase_1(self, **kwargs):
@@ -262,3 +268,98 @@ def test_phase14_runner_builds_prompt_source_links_and_subgraph_provenance(tmp_p
     ]
     assert provenance[0].source_cluster_ids == ["cluster_comment_1", "cluster_trend_1"]
     assert provenance[0].support_summary["source_type_counts"] == {"general": 1, "comment": 1, "trend": 1}
+
+
+def test_phase14_runner_cancels_comments_future_when_phase2_fails(tmp_path: Path, monkeypatch):
+    from backend.runtime import phase14_live
+
+    runner = _build_runner(
+        tmp_path,
+        _FakeRepository(),
+        enable_comment_signals=True,
+        enable_trend_signals=True,
+    )
+    events: list[str] = []
+
+    def fake_start_comments_future(*, executor, cfg, llm_client, embedding_client, source_url, signal_event_logger=None):
+        events.append("comments_submit")
+        return _FakeFuture(SignalPipelineOutput(), events, "comments")
+
+    def fake_start_trends_future(*, executor, cfg, llm_client, embedding_client, nodes, source_url, signal_event_logger=None):
+        events.append("trends_submit")
+        return _FakeFuture(SignalPipelineOutput(), events, "trends")
+
+    def fake_run_phase_1(self, **kwargs):
+        return {
+            "canonical_timeline": SimpleNamespace(turns=[SimpleNamespace(end_ms=1000)]),
+            "speech_emotion_timeline": SimpleNamespace(),
+            "audio_event_timeline": SimpleNamespace(),
+        }
+
+    def fake_run_phase_2(self, **kwargs):
+        raise RuntimeError("phase2 boom")
+
+    monkeypatch.setattr(phase14_live, "start_comments_future", fake_start_comments_future)
+    monkeypatch.setattr(phase14_live, "start_trends_future", fake_start_trends_future)
+    monkeypatch.setattr(type(runner), "run_phase_1", fake_run_phase_1)
+    monkeypatch.setattr(type(runner), "run_phase_2", fake_run_phase_2)
+
+    with pytest.raises(RuntimeError, match="phase2 boom"):
+        runner.run(
+            run_id="run_cancel_001",
+            source_url="https://www.youtube.com/watch?v=abc123",
+            phase1_outputs=_phase1_outputs(),
+        )
+
+    assert "comments_cancel" in events
+    assert "trends_submit" not in events
+
+
+def test_phase14_runner_cancels_comments_and_trends_when_phase3_fails(tmp_path: Path, monkeypatch):
+    from backend.runtime import phase14_live
+
+    runner = _build_runner(
+        tmp_path,
+        _FakeRepository(),
+        enable_comment_signals=True,
+        enable_trend_signals=True,
+    )
+    events: list[str] = []
+
+    def fake_start_comments_future(*, executor, cfg, llm_client, embedding_client, source_url, signal_event_logger=None):
+        events.append("comments_submit")
+        return _FakeFuture(SignalPipelineOutput(), events, "comments")
+
+    def fake_start_trends_future(*, executor, cfg, llm_client, embedding_client, nodes, source_url, signal_event_logger=None):
+        events.append("trends_submit")
+        return _FakeFuture(SignalPipelineOutput(), events, "trends")
+
+    def fake_run_phase_1(self, **kwargs):
+        return {
+            "canonical_timeline": SimpleNamespace(turns=[SimpleNamespace(end_ms=1000)]),
+            "speech_emotion_timeline": SimpleNamespace(),
+            "audio_event_timeline": SimpleNamespace(),
+        }
+
+    def fake_run_phase_2(self, **kwargs):
+        return {"nodes": [SimpleNamespace(node_id="node_1")]}
+
+    def fake_run_phase_3(self, **kwargs):
+        raise RuntimeError("phase3 boom")
+
+    monkeypatch.setattr(phase14_live, "start_comments_future", fake_start_comments_future)
+    monkeypatch.setattr(phase14_live, "start_trends_future", fake_start_trends_future)
+    monkeypatch.setattr(type(runner), "run_phase_1", fake_run_phase_1)
+    monkeypatch.setattr(type(runner), "run_phase_2", fake_run_phase_2)
+    monkeypatch.setattr(type(runner), "run_phase_3", fake_run_phase_3)
+
+    with pytest.raises(RuntimeError, match="phase3 boom"):
+        runner.run(
+            run_id="run_cancel_002",
+            source_url="https://www.youtube.com/watch?v=abc123",
+            phase1_outputs=_phase1_outputs(),
+        )
+
+    assert "trends_submit" in events
+    assert "comments_cancel" in events
+    assert "trends_cancel" in events

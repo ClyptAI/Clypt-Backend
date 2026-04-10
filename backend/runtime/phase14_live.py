@@ -156,6 +156,7 @@ class V31LivePhase14Runner:
         trends_future: Any | None = None
         comments_future_started_at: float | None = None
         trends_future_started_at: float | None = None
+        signal_event_logger = self._build_signal_event_logger(run_id=run_id, job_id=job_id, attempt=attempt)
         try:
             if self._comments_enabled_effective() and not resolve_youtube_video_id(source_url):
                 raise ValueError(
@@ -174,6 +175,7 @@ class V31LivePhase14Runner:
                     llm_client=self.llm_client,
                     embedding_client=self.embedding_client,
                     source_url=source_url,
+                    signal_event_logger=signal_event_logger,
                 ),
             )
 
@@ -191,20 +193,30 @@ class V31LivePhase14Runner:
                     reason="phase2_already_succeeded",
                 )
             else:
-                phase2 = self._execute_phase(
-                    run_id=run_id,
-                    job_id=job_id,
-                    attempt=attempt,
-                    phase_name="phase2",
-                    operation=lambda: self.run_phase_2(
-                        paths=paths,
-                        phase1_outputs=phase1_outputs,
-                        canonical_timeline=phase1["canonical_timeline"],
-                        speech_emotion_timeline=phase1["speech_emotion_timeline"],
-                        audio_event_timeline=phase1["audio_event_timeline"],
-                    ),
-                    metric_metadata_builder=lambda payload: {"node_count": len(payload["nodes"])},
-                )
+                try:
+                    phase2 = self._execute_phase(
+                        run_id=run_id,
+                        job_id=job_id,
+                        attempt=attempt,
+                        phase_name="phase2",
+                        operation=lambda: self.run_phase_2(
+                            paths=paths,
+                            phase1_outputs=phase1_outputs,
+                            canonical_timeline=phase1["canonical_timeline"],
+                            speech_emotion_timeline=phase1["speech_emotion_timeline"],
+                            audio_event_timeline=phase1["audio_event_timeline"],
+                        ),
+                        metric_metadata_builder=lambda payload: {"node_count": len(payload["nodes"])},
+                    )
+                except Exception:
+                    self._cancel_signal_future(
+                        run_id=run_id,
+                        job_id=job_id,
+                        attempt=attempt,
+                        signal_name="comments",
+                        future=comments_future,
+                    )
+                    raise
                 phase2_nodes = phase2["nodes"]
 
             if comments_future is not None and hasattr(comments_future, "done") and comments_future.done():
@@ -232,6 +244,7 @@ class V31LivePhase14Runner:
                     embedding_client=self.embedding_client,
                     nodes=phase2_nodes,
                     source_url=source_url,
+                    signal_event_logger=signal_event_logger,
                 ),
             )
 
@@ -245,18 +258,35 @@ class V31LivePhase14Runner:
                     reason="phase3_already_succeeded",
                 )
             else:
-                phase3 = self._execute_phase(
-                    run_id=run_id,
-                    job_id=job_id,
-                    attempt=attempt,
-                    phase_name="phase3",
-                    operation=lambda: self.run_phase_3(
-                        paths=paths,
-                        nodes=phase2_nodes,
-                        long_range_top_k=phase3_long_range_top_k,
-                    ),
-                    metric_metadata_builder=lambda payload: {"edge_count": len(payload["edges"])},
-                )
+                try:
+                    phase3 = self._execute_phase(
+                        run_id=run_id,
+                        job_id=job_id,
+                        attempt=attempt,
+                        phase_name="phase3",
+                        operation=lambda: self.run_phase_3(
+                            paths=paths,
+                            nodes=phase2_nodes,
+                            long_range_top_k=phase3_long_range_top_k,
+                        ),
+                        metric_metadata_builder=lambda payload: {"edge_count": len(payload["edges"])},
+                    )
+                except Exception:
+                    self._cancel_signal_future(
+                        run_id=run_id,
+                        job_id=job_id,
+                        attempt=attempt,
+                        signal_name="comments",
+                        future=comments_future,
+                    )
+                    self._cancel_signal_future(
+                        run_id=run_id,
+                        job_id=job_id,
+                        attempt=attempt,
+                        signal_name="trends",
+                        future=trends_future,
+                    )
+                    raise
                 phase3_edges = phase3["edges"]
 
             comments_output, trends_output = self._join_signal_outputs(
@@ -654,6 +684,7 @@ class V31LivePhase14Runner:
             max_hops=self.config.signals.max_hops,
             time_window_ms=self.config.signals.time_window_ms,
             fail_fast=self.config.signals.llm_fail_fast,
+            signal_event_logger=self._build_signal_event_logger(run_id=run_id, job_id=job_id, attempt=attempt),
         )
         self._emit_log(
             run_id=run_id,
@@ -1057,8 +1088,13 @@ class V31LivePhase14Runner:
                 started_at=comments_future_started_at,
             )
         except Exception:
-            if trends_future is not None and hasattr(trends_future, "cancel"):
-                trends_future.cancel()
+            self._cancel_signal_future(
+                run_id=run_id,
+                job_id=job_id,
+                attempt=attempt,
+                signal_name="trends",
+                future=trends_future,
+            )
             raise
         trends_output = self._join_signal_future(
             run_id=run_id,
@@ -1164,6 +1200,58 @@ class V31LivePhase14Runner:
             signal_count=len(merged.external_signals),
         )
         return merged
+
+    def _build_signal_event_logger(
+        self,
+        *,
+        run_id: str,
+        job_id: str | None,
+        attempt: int,
+    ) -> Callable[..., None]:
+        def _logger(**payload: Any) -> None:
+            event = str(payload.pop("event", "signal_event"))
+            status = str(payload.pop("status", "info"))
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="signals",
+                event=event,
+                attempt=attempt,
+                status=status,
+                **payload,
+            )
+
+        return _logger
+
+    def _cancel_signal_future(
+        self,
+        *,
+        run_id: str,
+        job_id: str | None,
+        attempt: int,
+        signal_name: str,
+        future: Any | None,
+    ) -> None:
+        if future is None:
+            return
+        cancelled = False
+        cancel_error: Exception | None = None
+        if hasattr(future, "cancel"):
+            try:
+                cancelled = bool(future.cancel())
+            except Exception as exc:  # pragma: no cover - defensive
+                cancel_error = exc
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="signals",
+            event="signal_future_cancel_requested",
+            attempt=attempt,
+            status="cancel_requested",
+            signal_name=signal_name,
+            cancelled=cancelled,
+            cancel_error=str(cancel_error) if cancel_error is not None else None,
+        )
 
     def _extract_failed_callpoint_id(self, exc: BaseException) -> str | None:
         pattern = re.compile(r"callpoint(?:_id)?[=:\s]+(?P<id>[0-9]+)")

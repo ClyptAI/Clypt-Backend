@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .contracts import ExternalSignal, ExternalSignalCluster
 
@@ -91,10 +91,19 @@ def _call_json(
     thinking_level: str,
     response_schema: dict[str, Any],
     fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     if not fail_fast:
         raise ValueError("non-fail-fast signal LLM mode is not supported")
     started = time.perf_counter()
+    if event_logger is not None:
+        event_logger(
+            event="signals_llm_call_start",
+            status="start",
+            callpoint_id=callpoint_id,
+            model=model,
+            thinking_level=thinking_level,
+        )
     logger.info(
         "[signals_llm_call_start] callpoint=%s model=%s thinking=%s",
         callpoint_id,
@@ -111,6 +120,14 @@ def _call_json(
             thinking_level=thinking_level,
         )
     except Exception as exc:
+        if event_logger is not None:
+            event_logger(
+                event="signals_failure",
+                status="error",
+                error_code=exc.__class__.__name__,
+                error_message=str(exc),
+                failed_callpoint_id=callpoint_id,
+            )
         logger.exception(
             "[signals_llm_call_error] callpoint=%s model=%s thinking=%s",
             callpoint_id,
@@ -128,6 +145,15 @@ def _call_json(
         thinking_level,
         (time.perf_counter() - started) * 1000.0,
     )
+    if event_logger is not None:
+        event_logger(
+            event="signals_llm_call_done",
+            status="success",
+            callpoint_id=callpoint_id,
+            model=model,
+            thinking_level=thinking_level,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+        )
     return response
 
 
@@ -138,9 +164,11 @@ def consolidate_thread_with_llm(
     thinking_level: str,
     thread_payload: dict[str, Any],
     fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     prompt = (
         "You are consolidating a YouTube comment thread (top comment + replies) into compact intent guidance.\n"
+        "The thread_summary must explicitly include the top-level comment text.\n"
         "Return strict JSON.\n"
         f"Thread payload:\n{_compact(thread_payload)}"
     )
@@ -152,6 +180,7 @@ def consolidate_thread_with_llm(
         thinking_level=thinking_level,
         response_schema=THREAD_CONSOLIDATION_SCHEMA,
         fail_fast=fail_fast,
+        event_logger=event_logger,
     )
 
 
@@ -162,6 +191,7 @@ def classify_comment_with_llm(
     thinking_level: str,
     signal: ExternalSignal,
     fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     prompt = (
         "Classify this audience signal quality for clip-seeding usefulness.\n"
@@ -176,6 +206,7 @@ def classify_comment_with_llm(
         thinking_level=thinking_level,
         response_schema=COMMENT_CLASSIFICATION_SCHEMA,
         fail_fast=fail_fast,
+        event_logger=event_logger,
     )
 
 
@@ -186,6 +217,7 @@ def generate_cluster_prompt_with_llm(
     thinking_level: str,
     cluster: ExternalSignalCluster,
     fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
 ) -> str:
     prompt = (
         "You are writing one retrieval prompt to find the referenced video moment.\n"
@@ -200,6 +232,7 @@ def generate_cluster_prompt_with_llm(
         thinking_level=thinking_level,
         response_schema=CLUSTER_PROMPT_SCHEMA,
         fail_fast=fail_fast,
+        event_logger=event_logger,
     )
     value = str(response.get("prompt") or "").strip()
     if not value:
@@ -214,6 +247,7 @@ def synthesize_trend_queries_with_llm(
     thinking_level: str,
     video_context: dict[str, Any],
     fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
 ) -> list[str]:
     prompt = (
         "Generate concise search/trend queries for this video context.\n"
@@ -227,6 +261,7 @@ def synthesize_trend_queries_with_llm(
         thinking_level=thinking_level,
         response_schema=TREND_QUERY_SCHEMA,
         fail_fast=fail_fast,
+        event_logger=event_logger,
     )
     queries = [str(item).strip() for item in list(response.get("queries") or [])]
     return [query for query in queries if query]
@@ -240,6 +275,7 @@ def adjudicate_trend_relevance_with_llm(
     trend_item: dict[str, Any],
     video_context: dict[str, Any],
     fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     prompt = (
         "Decide if this trend signal is relevant to the target video context.\n"
@@ -255,6 +291,7 @@ def adjudicate_trend_relevance_with_llm(
         thinking_level=thinking_level,
         response_schema=TREND_RELEVANCE_SCHEMA,
         fail_fast=fail_fast,
+        event_logger=event_logger,
     )
 
 
@@ -266,6 +303,7 @@ def resolve_cluster_span_with_llm(
     cluster: ExternalSignalCluster,
     neighborhood_payload: dict[str, Any],
     fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
 ) -> list[str]:
     prompt = (
         "Select the node_ids that best capture the core moment for this external signal cluster.\n"
@@ -281,6 +319,7 @@ def resolve_cluster_span_with_llm(
         thinking_level=thinking_level,
         response_schema=CLUSTER_SPAN_SCHEMA,
         fail_fast=fail_fast,
+        event_logger=event_logger,
     )
     node_ids = [str(item) for item in list(response.get("node_ids") or []) if str(item)]
     return node_ids
@@ -293,6 +332,7 @@ def explain_candidate_attribution_with_llm(
     thinking_level: str,
     evidence_payload: dict[str, Any],
     fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
 ) -> str:
     prompt = (
         "Write a concise explanation for why this clip candidate was externally boosted.\n"
@@ -307,6 +347,7 @@ def explain_candidate_attribution_with_llm(
         thinking_level=thinking_level,
         response_schema=ATTRIBUTION_EXPLANATION_SCHEMA,
         fail_fast=fail_fast,
+        event_logger=event_logger,
     )
     explanation = str(response.get("explanation") or "").strip()
     return explanation

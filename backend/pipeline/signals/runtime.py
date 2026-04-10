@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any
+from typing import Any, Callable
 
 from backend.pipeline.contracts import SemanticGraphNode
 
@@ -31,6 +31,7 @@ def start_comments_future(
     llm_client: Any,
     embedding_client: Any,
     source_url: str,
+    signal_event_logger: Callable[..., None] | None = None,
 ) -> Future[SignalPipelineOutput] | None:
     if not bool(cfg.enable_comment_signals):
         return None
@@ -40,6 +41,7 @@ def start_comments_future(
         llm_client=llm_client,
         embedding_client=embedding_client,
         source_url=source_url,
+        signal_event_logger=signal_event_logger,
     )
 
 
@@ -51,6 +53,7 @@ def start_trends_future(
     embedding_client: Any,
     nodes: list[SemanticGraphNode],
     source_url: str,
+    signal_event_logger: Callable[..., None] | None = None,
 ) -> Future[SignalPipelineOutput] | None:
     if not bool(cfg.enable_trend_signals):
         return None
@@ -61,6 +64,7 @@ def start_trends_future(
         embedding_client=embedding_client,
         nodes=nodes,
         source_url=source_url,
+        signal_event_logger=signal_event_logger,
     )
 
 
@@ -110,6 +114,7 @@ def _build_comments_output(
     llm_client: Any,
     embedding_client: Any,
     source_url: str,
+    signal_event_logger: Callable[..., None] | None = None,
 ) -> SignalPipelineOutput:
     if not bool(cfg.llm_fail_fast):
         raise ValueError("CLYPT_SIGNAL_LLM_FAIL_FAST must be enabled for signal pipelines")
@@ -158,10 +163,24 @@ def _build_comments_output(
             thinking_level=cfg.llm.thinking_10,
             thread_payload=thread,
             fail_fast=cfg.llm_fail_fast,
+            event_logger=signal_event_logger,
         )
         thread_intents.append(consolidated)
 
     signals = to_external_signals_from_threads(thread_items=selected_threads, include_replies=True)
+    thread_signal_text_by_id = {
+        str(thread.get("id") or ""): _build_thread_signal_text(thread=thread, consolidated=consolidated)
+        for thread, consolidated in zip(selected_threads, thread_intents, strict=False)
+        if str(thread.get("id") or "")
+    }
+    for signal in signals:
+        thread_id = str((signal.metadata or {}).get("thread_id") or "")
+        merged_text = thread_signal_text_by_id.get(thread_id)
+        if not merged_text:
+            continue
+        signal.metadata["raw_text"] = signal.text
+        signal.metadata["thread_signal_text"] = merged_text
+        signal.text = merged_text
 
     # Callpoint #3: quality filter.
     filtered_signals: list[ExternalSignal] = []
@@ -172,6 +191,7 @@ def _build_comments_output(
             thinking_level=cfg.llm.thinking_3,
             signal=signal,
             fail_fast=cfg.llm_fail_fast,
+            event_logger=signal_event_logger,
         )
         quality = str(classified.get("quality") or "").strip().lower()
         signal.metadata["quality"] = quality
@@ -201,6 +221,7 @@ def _build_comments_output(
             thinking_level=cfg.llm.thinking_1,
             cluster=cluster,
             fail_fast=cfg.llm_fail_fast,
+            event_logger=signal_event_logger,
         )
         prompt_specs.append(
             SignalPromptSpec(
@@ -233,6 +254,7 @@ def _build_trends_output(
     embedding_client: Any,
     nodes: list[SemanticGraphNode],
     source_url: str,
+    signal_event_logger: Callable[..., None] | None = None,
 ) -> SignalPipelineOutput:
     if not bool(cfg.llm_fail_fast):
         raise ValueError("CLYPT_SIGNAL_LLM_FAIL_FAST must be enabled for signal pipelines")
@@ -258,6 +280,7 @@ def _build_trends_output(
         thinking_level=cfg.llm.thinking_9,
         video_context=video_context,
         fail_fast=cfg.llm_fail_fast,
+        event_logger=signal_event_logger,
     )
     if not queries:
         return SignalPipelineOutput(metadata={"trend_queries": []})
@@ -276,6 +299,7 @@ def _build_trends_output(
                 trend_item=item,
                 video_context=video_context,
                 fail_fast=cfg.llm_fail_fast,
+                event_logger=signal_event_logger,
             )
             keep = bool(adjudication.get("keep"))
             relevance = float(adjudication.get("relevance") or 0.0)
@@ -306,6 +330,7 @@ def _build_trends_output(
             thinking_level=cfg.llm.thinking_1,
             cluster=cluster,
             fail_fast=cfg.llm_fail_fast,
+            event_logger=signal_event_logger,
         )
         prompt_specs.append(
             SignalPromptSpec(
@@ -327,6 +352,31 @@ def _build_trends_output(
             "trend_retained_count": len(retained_signals),
         },
     )
+
+
+def _build_thread_signal_text(*, thread: dict[str, Any], consolidated: dict[str, Any]) -> str:
+    top_comment = _top_comment_text(thread)
+    summary = str(consolidated.get("thread_summary") or "").strip()
+    hints = [
+        str(item).strip()
+        for item in list(consolidated.get("moment_hints") or [])
+        if str(item).strip()
+    ]
+    lines: list[str] = []
+    if top_comment:
+        lines.append(f"Top comment: {top_comment}")
+    if summary:
+        lines.append(f"Thread summary: {summary}")
+    if hints:
+        lines.append(f"Moment hints: {' | '.join(hints[:8])}")
+    return "\n".join(lines).strip() or top_comment or summary
+
+
+def _top_comment_text(thread: dict[str, Any]) -> str:
+    top_comment = ((thread.get("snippet") or {}).get("topLevelComment") or {})
+    top_snippet = top_comment.get("snippet") or {}
+    text = top_snippet.get("textDisplay") or top_snippet.get("textOriginal") or ""
+    return str(text).strip()
 
 
 __all__ = [
