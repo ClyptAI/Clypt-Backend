@@ -904,3 +904,227 @@ def test_spanner_phase14_repository_acquire_phase24_job_lease_sets_running_state
     assert row.task_name == "task-2"
     assert row.worker_name == "worker-2"
     assert row.metadata["query_version"] == "graph-v2"
+
+
+def test_spanner_phase14_repository_delete_run_cascades_all_run_scoped_tables() -> None:
+    database = _FakeDatabase()
+    repository = SpannerPhase14Repository(database=database)
+    now = datetime.now(UTC)
+
+    repository.upsert_run(
+        RunRecord(
+            run_id="run_del_001",
+            source_url="https://youtube.com/watch?v=abc",
+            source_video_gcs_uri=None,
+            status="PHASE24_DONE",
+            created_at=now,
+            updated_at=now,
+            metadata={},
+        )
+    )
+    repository.write_timeline_turns(
+        run_id="run_del_001",
+        turns=[
+            TimelineTurnRecord(
+                run_id="run_del_001",
+                turn_id="turn-1",
+                speaker_id="spk-1",
+                start_ms=0,
+                end_ms=1000,
+                word_ids=[],
+                transcript_text="hello",
+            )
+        ],
+    )
+    repository.write_nodes(
+        run_id="run_del_001",
+        nodes=[
+            SemanticNodeRecord(
+                run_id="run_del_001",
+                node_id="node-1",
+                node_type="claim",
+                start_ms=0,
+                end_ms=1000,
+                source_turn_ids=["turn-1"],
+                word_ids=[],
+                transcript_text="hello",
+                node_flags=[],
+                summary="sum",
+                evidence={},
+                semantic_embedding=[0.1, 0.2],
+                multimodal_embedding=[0.3, 0.4],
+            )
+        ],
+    )
+    repository.write_edges(
+        run_id="run_del_001",
+        edges=[
+            SemanticEdgeRecord(
+                run_id="run_del_001",
+                source_node_id="node-1",
+                target_node_id="node-1",
+                edge_type="next_turn",
+                rationale="self",
+                confidence=1.0,
+                support_count=1,
+                batch_ids=[],
+            )
+        ],
+    )
+    repository.write_candidates(
+        run_id="run_del_001",
+        candidates=[
+            ClipCandidateRecord(
+                run_id="run_del_001",
+                clip_id="clip-1",
+                node_ids=["node-1"],
+                start_ms=0,
+                end_ms=1000,
+                score=1.0,
+                rationale="r",
+                source_prompt_ids=["general_prompt_001"],
+                seed_node_id="node-1",
+                subgraph_id="sg-1",
+                query_aligned=True,
+                pool_rank=1,
+                score_breakdown={"base_score": 1.0},
+            )
+        ],
+    )
+    repository.write_external_signals(
+        run_id="run_del_001",
+        signals=[
+            ExternalSignalRecord(
+                run_id="run_del_001",
+                signal_id="comment_top:1",
+                signal_type="comment_top",
+                source_platform="youtube",
+                source_id="1",
+                author_id="a",
+                text="t",
+                engagement_score=1.0,
+                published_at=now,
+                metadata={"quality": "high_signal"},
+            )
+        ],
+    )
+    repository.write_external_signal_clusters(
+        run_id="run_del_001",
+        clusters=[
+            ExternalSignalClusterRecord(
+                run_id="run_del_001",
+                cluster_id="comment_cluster_001",
+                cluster_type="comment",
+                summary_text="s",
+                member_signal_ids=["comment_top:1"],
+                cluster_weight=1.0,
+                embedding=[0.1, 0.2],
+                metadata={},
+            )
+        ],
+    )
+    repository.write_prompt_source_links(
+        run_id="run_del_001",
+        links=[
+            PromptSourceLinkRecord(
+                run_id="run_del_001",
+                prompt_id="comment_prompt_001",
+                prompt_source_type="comment",
+                source_cluster_id="comment_cluster_001",
+                source_cluster_type="comment",
+                metadata={},
+            )
+        ],
+    )
+    repository.write_node_signal_links(
+        run_id="run_del_001",
+        links=[
+            NodeSignalLinkRecord(
+                run_id="run_del_001",
+                node_id="node-1",
+                cluster_id="comment_cluster_001",
+                link_type="direct",
+                hop_distance=0,
+                time_offset_ms=0,
+                similarity=1.0,
+                link_score=1.0,
+                evidence={},
+            )
+        ],
+    )
+    repository.write_candidate_signal_links(
+        run_id="run_del_001",
+        links=[
+            CandidateSignalLinkRecord(
+                run_id="run_del_001",
+                clip_id="clip-1",
+                cluster_id="comment_cluster_001",
+                cluster_type="comment",
+                aggregated_link_score=1.0,
+                coverage_ms=1000,
+                direct_node_count=1,
+                inferred_node_count=0,
+                agreement_flags=["general", "comment"],
+                bonus_applied=0.04,
+                evidence={},
+            )
+        ],
+    )
+    repository.write_subgraph_provenance(
+        run_id="run_del_001",
+        provenance=[
+            SubgraphProvenanceRecord(
+                run_id="run_del_001",
+                subgraph_id="sg-1",
+                seed_source_set=["general", "comment"],
+                seed_prompt_ids=["general_prompt_001", "comment_prompt_001"],
+                source_cluster_ids=["comment_cluster_001"],
+                support_summary={},
+                canonical_selected=True,
+                dedupe_overlap_ratio=0.9,
+                selection_reason="retained",
+                metadata={},
+            )
+        ],
+    )
+    repository.write_phase_metric(
+        PhaseMetricRecord(
+            run_id="run_del_001",
+            phase_name="phase24",
+            status="succeeded",
+            started_at=now,
+            ended_at=now,
+            duration_ms=1.0,
+            metadata={},
+        )
+    )
+    repository.upsert_phase24_job(
+        Phase24JobRecord(
+            run_id="run_del_001",
+            status="succeeded",
+            attempt_count=1,
+            last_error=None,
+            worker_name="w",
+            task_name="t",
+            locked_at=now,
+            updated_at=now,
+            completed_at=now,
+            metadata={},
+        )
+    )
+
+    repository.delete_run(run_id="run_del_001")
+
+    assert repository.get_run("run_del_001") is None
+    assert repository.list_timeline_turns(run_id="run_del_001") == []
+    assert repository.list_nodes(run_id="run_del_001") == []
+    assert repository.list_edges(run_id="run_del_001") == []
+    assert repository.list_candidates(run_id="run_del_001") == []
+    assert repository.list_external_signals(run_id="run_del_001") == []
+    assert repository.list_external_signal_clusters(run_id="run_del_001") == []
+    assert repository.list_prompt_source_links(run_id="run_del_001") == []
+    assert repository.list_node_signal_links(run_id="run_del_001") == []
+    assert repository.list_candidate_signal_links(run_id="run_del_001") == []
+    assert repository.list_subgraph_provenance(run_id="run_del_001") == []
+    assert repository.list_phase_metrics(run_id="run_del_001") == []
+    assert repository.get_phase24_job("run_del_001") is None

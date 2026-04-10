@@ -79,15 +79,18 @@ class YouTubeCommentsClient:
                 break
         return threads, max(0, total_results)
 
-    def fetch_replies(self, *, parent_id: str, max_replies: int) -> list[dict[str, Any]]:
+    def fetch_replies(self, *, parent_id: str, max_replies: int | None = None) -> list[dict[str, Any]]:
         replies: list[dict[str, Any]] = []
         page_token: str | None = None
-        while len(replies) < max(0, max_replies):
+        unlimited = max_replies is None or int(max_replies) <= 0
+        target_limit = 0 if unlimited else max(0, int(max_replies))
+        while unlimited or len(replies) < target_limit:
+            remaining = 100 if unlimited else max(1, target_limit - len(replies))
             params: dict[str, Any] = {
                 "part": "snippet",
                 "parentId": parent_id,
                 "textFormat": "plainText",
-                "maxResults": min(100, max(1, max_replies - len(replies))),
+                "maxResults": min(100, remaining),
             }
             if page_token:
                 params["pageToken"] = page_token
@@ -98,7 +101,7 @@ class YouTubeCommentsClient:
             page_token = payload.get("nextPageToken")
             if not page_token:
                 break
-        return replies[: max(0, max_replies)]
+        return replies if unlimited else replies[:target_limit]
 
 
 def _author_id(item: dict[str, Any]) -> str | None:

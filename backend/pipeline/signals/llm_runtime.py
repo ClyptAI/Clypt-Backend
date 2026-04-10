@@ -14,6 +14,12 @@ def _compact(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
+class SignalLLMCallError(RuntimeError):
+    def __init__(self, *, callpoint_id: str, message: str) -> None:
+        super().__init__(message)
+        self.callpoint_id = str(callpoint_id)
+
+
 THREAD_CONSOLIDATION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -84,7 +90,10 @@ def _call_json(
     model: str,
     thinking_level: str,
     response_schema: dict[str, Any],
+    fail_fast: bool = True,
 ) -> dict[str, Any]:
+    if not fail_fast:
+        raise ValueError("non-fail-fast signal LLM mode is not supported")
     started = time.perf_counter()
     logger.info(
         "[signals_llm_call_start] callpoint=%s model=%s thinking=%s",
@@ -101,14 +110,17 @@ def _call_json(
             max_output_tokens=32768,
             thinking_level=thinking_level,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "[signals_llm_call_error] callpoint=%s model=%s thinking=%s",
             callpoint_id,
             model,
             thinking_level,
         )
-        raise
+        raise SignalLLMCallError(
+            callpoint_id=callpoint_id,
+            message=f"signal_llm_call_failed callpoint={callpoint_id}: {exc}",
+        ) from exc
     logger.info(
         "[signals_llm_call_done] callpoint=%s model=%s thinking=%s latency_ms=%.1f",
         callpoint_id,
@@ -125,6 +137,7 @@ def consolidate_thread_with_llm(
     model: str,
     thinking_level: str,
     thread_payload: dict[str, Any],
+    fail_fast: bool = True,
 ) -> dict[str, Any]:
     prompt = (
         "You are consolidating a YouTube comment thread (top comment + replies) into compact intent guidance.\n"
@@ -138,6 +151,7 @@ def consolidate_thread_with_llm(
         model=model,
         thinking_level=thinking_level,
         response_schema=THREAD_CONSOLIDATION_SCHEMA,
+        fail_fast=fail_fast,
     )
 
 
@@ -147,6 +161,7 @@ def classify_comment_with_llm(
     model: str,
     thinking_level: str,
     signal: ExternalSignal,
+    fail_fast: bool = True,
 ) -> dict[str, Any]:
     prompt = (
         "Classify this audience signal quality for clip-seeding usefulness.\n"
@@ -160,6 +175,7 @@ def classify_comment_with_llm(
         model=model,
         thinking_level=thinking_level,
         response_schema=COMMENT_CLASSIFICATION_SCHEMA,
+        fail_fast=fail_fast,
     )
 
 
@@ -169,6 +185,7 @@ def generate_cluster_prompt_with_llm(
     model: str,
     thinking_level: str,
     cluster: ExternalSignalCluster,
+    fail_fast: bool = True,
 ) -> str:
     prompt = (
         "You are writing one retrieval prompt to find the referenced video moment.\n"
@@ -182,6 +199,7 @@ def generate_cluster_prompt_with_llm(
         model=model,
         thinking_level=thinking_level,
         response_schema=CLUSTER_PROMPT_SCHEMA,
+        fail_fast=fail_fast,
     )
     value = str(response.get("prompt") or "").strip()
     if not value:
@@ -195,6 +213,7 @@ def synthesize_trend_queries_with_llm(
     model: str,
     thinking_level: str,
     video_context: dict[str, Any],
+    fail_fast: bool = True,
 ) -> list[str]:
     prompt = (
         "Generate concise search/trend queries for this video context.\n"
@@ -207,6 +226,7 @@ def synthesize_trend_queries_with_llm(
         model=model,
         thinking_level=thinking_level,
         response_schema=TREND_QUERY_SCHEMA,
+        fail_fast=fail_fast,
     )
     queries = [str(item).strip() for item in list(response.get("queries") or [])]
     return [query for query in queries if query]
@@ -219,6 +239,7 @@ def adjudicate_trend_relevance_with_llm(
     thinking_level: str,
     trend_item: dict[str, Any],
     video_context: dict[str, Any],
+    fail_fast: bool = True,
 ) -> dict[str, Any]:
     prompt = (
         "Decide if this trend signal is relevant to the target video context.\n"
@@ -233,6 +254,7 @@ def adjudicate_trend_relevance_with_llm(
         model=model,
         thinking_level=thinking_level,
         response_schema=TREND_RELEVANCE_SCHEMA,
+        fail_fast=fail_fast,
     )
 
 
@@ -243,6 +265,7 @@ def resolve_cluster_span_with_llm(
     thinking_level: str,
     cluster: ExternalSignalCluster,
     neighborhood_payload: dict[str, Any],
+    fail_fast: bool = True,
 ) -> list[str]:
     prompt = (
         "Select the node_ids that best capture the core moment for this external signal cluster.\n"
@@ -257,6 +280,7 @@ def resolve_cluster_span_with_llm(
         model=model,
         thinking_level=thinking_level,
         response_schema=CLUSTER_SPAN_SCHEMA,
+        fail_fast=fail_fast,
     )
     node_ids = [str(item) for item in list(response.get("node_ids") or []) if str(item)]
     return node_ids
@@ -268,6 +292,7 @@ def explain_candidate_attribution_with_llm(
     model: str,
     thinking_level: str,
     evidence_payload: dict[str, Any],
+    fail_fast: bool = True,
 ) -> str:
     prompt = (
         "Write a concise explanation for why this clip candidate was externally boosted.\n"
@@ -281,6 +306,7 @@ def explain_candidate_attribution_with_llm(
         model=model,
         thinking_level=thinking_level,
         response_schema=ATTRIBUTION_EXPLANATION_SCHEMA,
+        fail_fast=fail_fast,
     )
     explanation = str(response.get("explanation") or "").strip()
     return explanation
@@ -290,6 +316,7 @@ __all__ = [
     "adjudicate_trend_relevance_with_llm",
     "classify_comment_with_llm",
     "consolidate_thread_with_llm",
+    "SignalLLMCallError",
     "explain_candidate_attribution_with_llm",
     "generate_cluster_prompt_with_llm",
     "resolve_cluster_span_with_llm",

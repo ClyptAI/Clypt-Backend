@@ -6,7 +6,14 @@ from typing import Any
 
 from backend.pipeline.contracts import ClipCandidate, SemanticGraphNode
 
-from .contracts import CandidateSignalLink, ExternalSignalCluster, NodeSignalLink, PromptSourceType, SignalPromptSpec
+from .contracts import (
+    CandidateSignalLink,
+    ExternalSignal,
+    ExternalSignalCluster,
+    NodeSignalLink,
+    PromptSourceType,
+    SignalPromptSpec,
+)
 
 
 @dataclass(slots=True)
@@ -19,6 +26,7 @@ def apply_signal_scoring(
     *,
     candidates: list[ClipCandidate],
     nodes: list[SemanticGraphNode],
+    signals: list[ExternalSignal],
     clusters: list[ExternalSignalCluster],
     node_links: list[NodeSignalLink],
     prompt_specs: list[SignalPromptSpec],
@@ -30,15 +38,17 @@ def apply_signal_scoring(
     node_by_id = {node.node_id: node for node in nodes}
     cluster_by_id = {cluster.cluster_id: cluster for cluster in clusters}
 
-    links_by_cluster: dict[str, list[NodeSignalLink]] = defaultdict(list)
-    for link in node_links:
-        links_by_cluster[link.cluster_id].append(link)
+    signal_by_id: dict[str, ExternalSignal] = {signal.signal_id: signal for signal in signals}
+    signal_score_by_id = _compute_signal_scores(signals=signals, cfg=cfg)
 
-    # 8.3.2 cluster weight
+    # 8.3.2 cluster weight (engagement + frequency)
     cluster_weight_by_id: dict[str, float] = {}
     for cluster in clusters:
-        links = links_by_cluster.get(cluster.cluster_id) or []
-        signal_scores = [max(0.0, min(1.0, float(link.similarity))) for link in links]
+        signal_scores = [
+            float(signal_score_by_id[signal_id])
+            for signal_id in cluster.member_signal_ids
+            if signal_id in signal_score_by_id
+        ]
         if signal_scores:
             mean_eng = sum(signal_scores) / len(signal_scores)
             max_eng = max(signal_scores)
@@ -145,6 +155,16 @@ def apply_signal_scoring(
                     evidence={
                         "coverage": coverage_ck,
                         "direct_ratio": direct_ratio_ck,
+                        "cluster_weight": float(cluster_weight_by_id.get(cluster.cluster_id, 0.0)),
+                        "signal_scores": {
+                            signal_id: float(signal_score_by_id.get(signal_id, 0.0))
+                            for signal_id in cluster.member_signal_ids
+                        },
+                        "signal_types": {
+                            signal_id: signal_by_id[signal_id].signal_type
+                            for signal_id in cluster.member_signal_ids
+                            if signal_id in signal_by_id
+                        },
                     },
                 )
             )
@@ -235,6 +255,76 @@ def _safe_log1p(value: float) -> float:
     import math
 
     return math.log1p(max(0.0, float(value)))
+
+
+def _compute_signal_scores(*, signals: list[ExternalSignal], cfg: Any) -> dict[str, float]:
+    raw_by_id: dict[str, float] = {}
+    raw_nonspam: list[float] = []
+    for signal in signals:
+        quality = str((signal.metadata or {}).get("quality") or "").strip().lower()
+        quality_mult = _quality_multiplier(quality)
+        raw = _raw_signal_engagement(signal=signal, cfg=cfg, quality_mult=quality_mult)
+        raw_by_id[signal.signal_id] = raw
+        if quality != "spam" and raw > 0.0:
+            raw_nonspam.append(raw)
+    denom = max(_percentile(raw_nonspam, 95.0), float(cfg.epsilon))
+    if denom <= float(cfg.epsilon):
+        return {signal.signal_id: 0.0 for signal in signals}
+    return {
+        signal.signal_id: _clip(raw_by_id.get(signal.signal_id, 0.0) / denom, 0.0, 1.0)
+        for signal in signals
+    }
+
+
+def _quality_multiplier(quality: str) -> float:
+    quality_key = (quality or "").strip().lower()
+    if quality_key == "high_signal":
+        return 1.0
+    if quality_key == "contextual":
+        return 0.75
+    if quality_key == "low_signal":
+        return 0.30
+    if quality_key == "spam":
+        return 0.0
+    return 1.0
+
+
+def _raw_signal_engagement(*, signal: ExternalSignal, cfg: Any, quality_mult: float) -> float:
+    metadata = signal.metadata or {}
+    like_count = max(0.0, float(metadata.get("like_count") or 0.0))
+    likes_term = _safe_log1p(like_count)
+    if signal.signal_type == "comment_top":
+        reply_count = max(0.0, float(metadata.get("reply_count") or 0.0))
+        reply_term = _safe_log1p(reply_count)
+        return quality_mult * (
+            float(cfg.engagement_top_like_weight) * likes_term
+            + float(cfg.engagement_top_reply_weight) * reply_term
+        )
+    if signal.signal_type == "comment_reply":
+        parent_reply_count = max(0.0, float(metadata.get("parent_reply_count") or 0.0))
+        parent_term = _safe_log1p(parent_reply_count)
+        return quality_mult * (
+            float(cfg.engagement_reply_like_weight) * likes_term
+            + float(cfg.engagement_reply_parent_weight) * parent_term
+        )
+    # Trend signals do not have the same engagement fields; use normalized payload score fallback.
+    return quality_mult * max(0.0, float(signal.engagement_score or 0.0))
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(v) for v in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pct = _clip(percentile, 0.0, 100.0) / 100.0
+    rank = pct * (len(ordered) - 1)
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    if lower == upper:
+        return ordered[lower]
+    weight = rank - lower
+    return ((1.0 - weight) * ordered[lower]) + (weight * ordered[upper])
 
 
 def _source_coverage(*, intervals: list[tuple[int, int]], candidate_duration_ms: int, eps: float) -> float:

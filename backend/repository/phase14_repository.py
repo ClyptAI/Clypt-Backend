@@ -144,6 +144,10 @@ class Phase14Repository(ABC):
     ) -> dict[str, object]:
         raise NotImplementedError
 
+    @abstractmethod
+    def delete_run(self, *, run_id: str) -> None:
+        raise NotImplementedError
+
 
 __all__ = [
     "Phase14Repository",

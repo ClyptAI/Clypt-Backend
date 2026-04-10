@@ -55,10 +55,10 @@ class SignalConfig:
     youtube_api_key: str | None = field(default_factory=lambda: (os.getenv("CLYPT_YOUTUBE_DATA_API_KEY") or os.getenv("YOUTUBE_API_KEY")))
     youtube_base_url: str = field(default_factory=lambda: os.getenv("CLYPT_YOUTUBE_DATA_API_BASE_URL") or "https://www.googleapis.com/youtube/v3")
     max_comment_pages: int = field(default_factory=lambda: int(os.getenv("CLYPT_COMMENT_MAX_PAGES") or "5"))
-    comment_order: str = "relevance"
+    comment_order: str = field(default_factory=lambda: (os.getenv("CLYPT_COMMENT_ORDER") or "relevance").strip().lower())
     comment_top_threads_min: int = field(default_factory=lambda: int(os.getenv("CLYPT_COMMENT_TOP_THREADS_MIN") or "15"))
     comment_top_threads_max: int = field(default_factory=lambda: int(os.getenv("CLYPT_COMMENT_TOP_THREADS_MAX") or "40"))
-    comment_max_replies_per_thread: int = field(default_factory=lambda: int(os.getenv("CLYPT_COMMENT_MAX_REPLIES_PER_THREAD") or "200"))
+    comment_max_replies_per_thread: int = field(default_factory=lambda: int(os.getenv("CLYPT_COMMENT_MAX_REPLIES_PER_THREAD") or "0"))
     comment_cluster_sim_threshold: float = field(default_factory=lambda: float(os.getenv("CLYPT_COMMENT_CLUSTER_SIM_THRESHOLD") or "0.82"))
     trend_max_items: int = field(default_factory=lambda: int(os.getenv("CLYPT_TREND_MAX_ITEMS") or "40"))
     trend_relevance_threshold: float = field(default_factory=lambda: float(os.getenv("CLYPT_TREND_RELEVANCE_THRESHOLD") or "0.6"))
@@ -85,6 +85,10 @@ class SignalConfig:
     coverage_weight: float = field(default_factory=lambda: float(os.getenv("CLYPT_SIGNAL_COVERAGE_WEIGHT") or "0.30"))
     direct_ratio_weight: float = field(default_factory=lambda: float(os.getenv("CLYPT_SIGNAL_DIRECT_RATIO_WEIGHT") or "0.15"))
     llm: SignalLLMCallConfig = field(default_factory=SignalLLMCallConfig)
+
+    def __post_init__(self) -> None:
+        if self.comment_order != "relevance":
+            raise ValueError("CLYPT_COMMENT_ORDER currently supports only 'relevance'")
 
 
 @dataclass(slots=True)

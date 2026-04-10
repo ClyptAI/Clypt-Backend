@@ -11,7 +11,7 @@ from backend.pipeline.config import Phase4SubgraphConfig
 from backend.pipeline.contracts import SemanticGraphEdge, SemanticGraphNode
 
 from .contracts import ExternalSignalCluster, NodeSignalLink, SignalPromptSpec
-from .llm_runtime import resolve_cluster_span_with_llm
+from .llm_runtime import SignalLLMCallError, resolve_cluster_span_with_llm
 
 
 def build_node_signal_links(
@@ -26,6 +26,7 @@ def build_node_signal_links(
     thinking_level: str,
     max_hops: int,
     time_window_ms: int,
+    fail_fast: bool = True,
 ) -> list[NodeSignalLink]:
     if not clusters:
         return []
@@ -83,10 +84,16 @@ def build_node_signal_links(
             thinking_level=thinking_level,
             cluster=cluster,
             neighborhood_payload=neighborhood_payload,
+            fail_fast=fail_fast,
         )
         direct_ids = [node_id for node_id in selected_ids if node_id in node_by_id]
         if not direct_ids:
-            direct_ids = [node_id for node_id in seed_ids if node_id in node_by_id]
+            raise SignalLLMCallError(
+                callpoint_id="5",
+                message=(
+                    f"callpoint_5_resolve_cluster_span returned no valid node_ids for cluster={cluster_id}"
+                ),
+            )
 
         for node_id in direct_ids:
             node = node_by_id[node_id]

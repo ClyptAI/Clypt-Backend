@@ -111,6 +111,8 @@ def _build_comments_output(
     embedding_client: Any,
     source_url: str,
 ) -> SignalPipelineOutput:
+    if not bool(cfg.llm_fail_fast):
+        raise ValueError("CLYPT_SIGNAL_LLM_FAIL_FAST must be enabled for signal pipelines")
     video_id = resolve_youtube_video_id(source_url)
     if not video_id:
         raise ValueError("unable to resolve youtube_video_id from source URL for comments signal pipeline")
@@ -155,6 +157,7 @@ def _build_comments_output(
             model=cfg.llm.model_10,
             thinking_level=cfg.llm.thinking_10,
             thread_payload=thread,
+            fail_fast=cfg.llm_fail_fast,
         )
         thread_intents.append(consolidated)
 
@@ -168,11 +171,12 @@ def _build_comments_output(
             model=cfg.llm.model_3,
             thinking_level=cfg.llm.thinking_3,
             signal=signal,
+            fail_fast=cfg.llm_fail_fast,
         )
         quality = str(classified.get("quality") or "").strip().lower()
         signal.metadata["quality"] = quality
         signal.metadata["quality_reason"] = str(classified.get("reason") or "")
-        if quality == "spam":
+        if quality in {"spam", "low_signal"}:
             continue
         filtered_signals.append(signal)
 
@@ -196,6 +200,7 @@ def _build_comments_output(
             model=cfg.llm.model_1,
             thinking_level=cfg.llm.thinking_1,
             cluster=cluster,
+            fail_fast=cfg.llm_fail_fast,
         )
         prompt_specs.append(
             SignalPromptSpec(
@@ -229,6 +234,8 @@ def _build_trends_output(
     nodes: list[SemanticGraphNode],
     source_url: str,
 ) -> SignalPipelineOutput:
+    if not bool(cfg.llm_fail_fast):
+        raise ValueError("CLYPT_SIGNAL_LLM_FAIL_FAST must be enabled for signal pipelines")
     if not nodes:
         return SignalPipelineOutput()
 
@@ -250,6 +257,7 @@ def _build_trends_output(
         model=cfg.llm.model_9,
         thinking_level=cfg.llm.thinking_9,
         video_context=video_context,
+        fail_fast=cfg.llm_fail_fast,
     )
     if not queries:
         return SignalPipelineOutput(metadata={"trend_queries": []})
@@ -267,6 +275,7 @@ def _build_trends_output(
                 thinking_level=cfg.llm.thinking_2,
                 trend_item=item,
                 video_context=video_context,
+                fail_fast=cfg.llm_fail_fast,
             )
             keep = bool(adjudication.get("keep"))
             relevance = float(adjudication.get("relevance") or 0.0)
@@ -296,6 +305,7 @@ def _build_trends_output(
             model=cfg.llm.model_1,
             thinking_level=cfg.llm.thinking_1,
             cluster=cluster,
+            fail_fast=cfg.llm_fail_fast,
         )
         prompt_specs.append(
             SignalPromptSpec(

@@ -6,6 +6,7 @@ from backend.pipeline.contracts import SemanticGraphEdge, SemanticGraphNode, Sem
 from backend.pipeline.signals.cluster import cluster_signals
 from backend.pipeline.signals.contracts import ExternalSignal, ExternalSignalCluster, SignalPromptSpec
 from backend.pipeline.signals.linking import build_node_signal_links
+from backend.pipeline.signals.llm_runtime import SignalLLMCallError
 
 
 def _signal(signal_id: str, text: str, embedding: list[float], engagement_score: float) -> ExternalSignal:
@@ -132,3 +133,57 @@ def test_build_node_signal_links_returns_direct_and_inferred_links(monkeypatch: 
     assert links[1].node_id == "node-2"
     assert links[1].hop_distance == 1
     assert links[1].evidence["edge_type"] == "payoff_of"
+
+
+def test_build_node_signal_links_fails_hard_when_callpoint5_selects_no_valid_nodes() -> None:
+    nodes = [
+        SemanticGraphNode(
+            node_id="node-1",
+            node_type="claim",
+            start_ms=0,
+            end_ms=2000,
+            transcript_text="node 1",
+            summary="node 1",
+            evidence=SemanticNodeEvidence(),
+            semantic_embedding=[1.0, 0.0],
+            multimodal_embedding=[1.0, 0.0],
+        )
+    ]
+    clusters = [
+        ExternalSignalCluster(
+            cluster_id="comment_cluster_001",
+            cluster_type="comment",
+            summary_text="audience noticed the payoff",
+            member_signal_ids=["signal-1"],
+            cluster_weight=0.0,
+            embedding=[1.0, 0.0],
+            metadata={},
+        )
+    ]
+    prompt_specs = [
+        SignalPromptSpec(
+            prompt_id="comment_prompt_001",
+            text="Find the payoff moment",
+            prompt_source_type="comment",
+            source_cluster_id="comment_cluster_001",
+            source_cluster_type="comment",
+        )
+    ]
+
+    class _FakeLLM:
+        def generate_json(self, **kwargs):
+            return {"node_ids": ["missing-node"], "reason": "bad span"}
+
+    with pytest.raises(SignalLLMCallError, match="callpoint_5_resolve_cluster_span"):
+        build_node_signal_links(
+            clusters=clusters,
+            prompt_specs=prompt_specs,
+            prompt_embeddings={"comment_prompt_001": [1.0, 0.0]},
+            nodes=nodes,
+            edges=[],
+            llm_client=_FakeLLM(),
+            model="gemini-3-flash",
+            thinking_level="minimal",
+            max_hops=2,
+            time_window_ms=10_000,
+        )

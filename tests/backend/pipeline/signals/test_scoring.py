@@ -7,6 +7,7 @@ import pytest
 from backend.pipeline.contracts import ClipCandidate, SemanticGraphNode, SemanticNodeEvidence
 from backend.pipeline.signals.contracts import (
     CandidateSignalLink,
+    ExternalSignal,
     ExternalSignalCluster,
     NodeSignalLink,
     SignalPromptSpec,
@@ -72,6 +73,26 @@ def test_apply_signal_scoring_uses_union_source_coverage_and_keeps_general_only_
             evidence={},
         ),
     ]
+    signals = [
+        ExternalSignal(
+            signal_id="signal-1",
+            signal_type="comment_top",
+            source_platform="youtube",
+            source_id="signal-1",
+            text="same beat",
+            engagement_score=0.0,
+            metadata={"quality": "high_signal", "like_count": 10, "reply_count": 2},
+        ),
+        ExternalSignal(
+            signal_id="signal-2",
+            signal_type="comment_top",
+            source_platform="youtube",
+            source_id="signal-2",
+            text="same beat 2",
+            engagement_score=0.0,
+            metadata={"quality": "high_signal", "like_count": 10, "reply_count": 2},
+        ),
+    ]
     prompt_specs = [
         SignalPromptSpec(
             prompt_id="general_prompt_001",
@@ -118,11 +139,16 @@ def test_apply_signal_scoring_uses_union_source_coverage_and_keeps_general_only_
         agreement_bonus_tier1=0.25,
         agreement_bonus_tier2=0.50,
         agreement_cap=1.0,
+        engagement_top_like_weight=0.65,
+        engagement_top_reply_weight=0.35,
+        engagement_reply_like_weight=0.85,
+        engagement_reply_parent_weight=0.15,
     )
 
     result = apply_signal_scoring(
         candidates=candidates,
         nodes=nodes,
+        signals=signals,
         clusters=clusters,
         node_links=node_links,
         prompt_specs=prompt_specs,

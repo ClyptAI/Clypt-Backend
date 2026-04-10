@@ -1593,6 +1593,53 @@ class SpannerPhase14Repository(Phase14Repository):
             metadata=_json_loads(row["metadata_json"]) or {},
         )
 
+    def delete_run(self, *, run_id: str) -> None:
+        delete_order = [
+            "candidate_signal_links",
+            "node_signal_links",
+            "prompt_source_links",
+            "subgraph_provenance",
+            "clip_candidates",
+            "external_signal_clusters",
+            "external_signals",
+            "semantic_edges",
+            "semantic_nodes",
+            "timeline_turns",
+            "phase_metrics",
+            "phase24_jobs",
+            "runs",
+        ]
+
+        def _delete_txn(txn: Any) -> None:
+            execute_update = getattr(txn, "execute_update", None)
+            if callable(execute_update):
+                for table in delete_order:
+                    execute_update(
+                        f"DELETE FROM {table} WHERE run_id = @run_id",
+                        params={"run_id": run_id},
+                        param_types={"run_id": _STRING_PARAM_TYPE},
+                    )
+                return
+
+            # Fallback for in-memory fakes used by unit tests.
+            storage = getattr(self.database, "storage", None)
+            if isinstance(storage, dict):
+                for table in delete_order:
+                    rows = list(storage.get(table, []))
+                    storage[table] = [row for row in rows if row.get("run_id") != run_id]
+
+        run_in_transaction = getattr(self.database, "run_in_transaction", None)
+        if callable(run_in_transaction):
+            run_in_transaction(_delete_txn)
+            return
+
+        # Last-resort fallback for simple database doubles without transactions.
+        storage = getattr(self.database, "storage", None)
+        if isinstance(storage, dict):
+            for table in delete_order:
+                rows = list(storage.get(table, []))
+                storage[table] = [row for row in rows if row.get("run_id") != run_id]
+
     def _batch_upsert(self, table: str, columns: Sequence[str], rows: Sequence[Sequence[Any]]) -> None:
         if not rows:
             return

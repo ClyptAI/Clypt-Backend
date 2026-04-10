@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from pathlib import Path
+import re
 import time
 from typing import Any, Callable
 
@@ -331,6 +332,7 @@ class V31LivePhase14Runner:
                 status="error",
                 error_code=exc.__class__.__name__,
                 error_message=str(exc),
+                failed_callpoint_id=self._extract_failed_callpoint_id(exc),
             )
             raise
         finally:
@@ -651,6 +653,7 @@ class V31LivePhase14Runner:
             thinking_level=self.config.signals.llm.thinking_5,
             max_hops=self.config.signals.max_hops,
             time_window_ms=self.config.signals.time_window_ms,
+            fail_fast=self.config.signals.llm_fail_fast,
         )
         self._emit_log(
             run_id=run_id,
@@ -664,6 +667,7 @@ class V31LivePhase14Runner:
         signal_scoring = apply_signal_scoring(
             candidates=final_candidates,
             nodes=nodes,
+            signals=list(signal_output.external_signals),
             clusters=list(signal_output.clusters),
             node_links=node_signal_links,
             prompt_specs=all_prompt_specs,
@@ -702,6 +706,7 @@ class V31LivePhase14Runner:
                     model=self.config.signals.llm.model_11,
                     thinking_level=self.config.signals.llm.thinking_11,
                     evidence_payload=candidate.external_attribution_json,
+                    fail_fast=self.config.signals.llm_fail_fast,
                 )
             except Exception as exc:
                 self._emit_log(
@@ -989,6 +994,7 @@ class V31LivePhase14Runner:
                 error_code=exc.__class__.__name__,
                 error_message=str(exc),
                 signal_name=signal_name,
+                failed_callpoint_id=self._extract_failed_callpoint_id(exc),
             )
             raise
         duration_ms = (time.perf_counter() - (started_at or join_started)) * 1000.0
@@ -1158,6 +1164,19 @@ class V31LivePhase14Runner:
             signal_count=len(merged.external_signals),
         )
         return merged
+
+    def _extract_failed_callpoint_id(self, exc: BaseException) -> str | None:
+        pattern = re.compile(r"callpoint(?:_id)?[=:\s]+(?P<id>[0-9]+)")
+        current: BaseException | None = exc
+        while current is not None:
+            callpoint = getattr(current, "callpoint_id", None)
+            if callpoint is not None:
+                return str(callpoint)
+            match = pattern.search(str(current))
+            if match:
+                return match.group("id")
+            current = current.__cause__
+        return None
 
     def _build_prompt_source_links(
         self,
