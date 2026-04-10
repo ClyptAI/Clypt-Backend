@@ -39,18 +39,16 @@ def _ensure_cache_env() -> None:
     os.environ.setdefault("XDG_CACHE_HOME", cache_home)
     os.environ.setdefault("TORCH_HOME", os.path.join(cache_home, "torch"))
     os.environ.setdefault("HF_HOME", os.path.join(cache_home, "huggingface"))
-    os.environ.setdefault("MODELSCOPE_CACHE", os.path.join(cache_home, "modelscope"))
 
     for path in (
         os.environ["XDG_CACHE_HOME"],
         os.environ["TORCH_HOME"],
         os.environ["HF_HOME"],
-        os.environ["MODELSCOPE_CACHE"],
     ):
         try:
             os.makedirs(path, exist_ok=True)
         except Exception:
-            # Best-effort only: if dir creation fails, NeMo/modelscope will still
+            # Best-effort only: if dir creation fails, NeMo/HF paths will still
             # raise explicit errors later that include the actual root cause.
             pass
 

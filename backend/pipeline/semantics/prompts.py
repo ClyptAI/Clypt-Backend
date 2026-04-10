@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 
 
+def _compact_json(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
 MERGE_AND_CLASSIFY_SCHEMA = {
     "type": "object",
     "properties": {
@@ -108,7 +112,7 @@ def build_merge_and_classify_prompt(*, neighborhood_payload: dict) -> str:
         "}\n\n"
         f"VALID node_type values (pick exactly one):\n{_NODE_TYPES}\n\n"
         f"VALID node_flags (include any that apply, or empty list []):\n{_NODE_FLAGS}\n\n"
-        f"Neighborhood payload:\n{json.dumps(neighborhood_payload, ensure_ascii=True, indent=2)}"
+        f"Neighborhood payload:\n{_compact_json(neighborhood_payload)}"
     )
 
 
@@ -150,7 +154,7 @@ def build_boundary_reconciliation_prompt(*, overlap_payload: dict) -> str:
         "}\n\n"
         f"Valid node_type values: claim, explanation, example, anecdote, reaction_beat, qa_exchange, challenge_exchange, setup_payoff, reveal, transition\n"
         f"Valid node_flags: topic_pivot, callback_candidate, high_resonance_candidate, backchannel_dense, interruption_heavy, overlap_heavy, resumed_topic\n\n"
-        f"Boundary payload:\n{json.dumps(overlap_payload, ensure_ascii=True, indent=2)}"
+        f"Boundary payload:\n{_compact_json(overlap_payload)}"
     )
 
 

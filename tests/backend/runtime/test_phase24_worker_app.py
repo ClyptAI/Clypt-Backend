@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 
 from fastapi.testclient import TestClient
 import pytest
@@ -273,3 +274,52 @@ def test_phase24_worker_app_stops_when_attempt_exceeds_max_attempts():
     assert repository.job_record.status == "failed"
     assert repository.run_record is not None
     assert repository.run_record.status == "FAILED"
+
+
+def test_phase24_worker_app_loads_phase1_outputs_from_gcs_pointer(tmp_path):
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
+
+    class _FakeStorage:
+        def __init__(self) -> None:
+            self.download_calls: list[str] = []
+
+        def download_file(self, *, gcs_uri: str, local_path):
+            self.download_calls.append(gcs_uri)
+            payload = _build_payload()["phase1_outputs"]
+            local_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    class _RunnerWithStorage(_FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.storage_client = _FakeStorage()
+            self.node_media_preparer = object()
+
+    repository = _FakeRepository()
+    runner = _RunnerWithStorage()
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=runner,
+        service_name="clypt-phase24-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=3,
+    )
+
+    result = service.handle_task(
+        payload=Phase24TaskPayload(
+            run_id="run_001",
+            source_url="https://example.com/video",
+            source_video_gcs_uri="gs://bucket/video.mp4",
+            phase1_outputs_gcs_uri="gs://bucket/phase24_inputs/run_001.json",
+            query_version="graph-v2",
+        ),
+        job_id="task-001",
+        attempt=1,
+    )
+
+    assert result["status"] == "succeeded"
+    assert len(runner.calls) == 1
+    assert (
+        runner.calls[0]["phase1_outputs"].phase1_audio["video_gcs_uri"] == "gs://bucket/video.mp4"
+    )
+    assert runner.storage_client.download_calls == ["gs://bucket/phase24_inputs/run_001.json"]

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-import json
+import logging
+import random
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterable
 
@@ -15,6 +18,63 @@ _PRIORITY_PAYGO_HEADERS = {
     "X-Vertex-AI-LLM-Shared-Request-Type": "priority",
     "X-Vertex-AI-LLM-Request-Type": "shared",
 }
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+_TRANSIENT_ERROR_TOKENS = (
+    "resource_exhausted",
+    "too many requests",
+    "rate limit",
+    "temporarily unavailable",
+    "service unavailable",
+    "deadline exceeded",
+    "connection reset",
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _coerce_parsed_json(response: Any) -> dict[str, Any] | None:
+    parsed = getattr(response, "parsed", None)
+    if parsed is None:
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    if hasattr(parsed, "model_dump"):
+        dumped = parsed.model_dump(mode="json")
+        if isinstance(dumped, dict):
+            return dumped
+    raise ValueError(f"Vertex Gemini parsed payload must be an object, got {type(parsed).__name__}")
+
+
+def _extract_finish_reason(response: Any) -> str | None:
+    candidates = getattr(response, "candidates", None)
+    if not candidates:
+        return None
+    first = candidates[0]
+    finish = getattr(first, "finish_reason", None)
+    if finish is None and isinstance(first, dict):
+        finish = first.get("finish_reason")
+    if finish is None:
+        return None
+    if hasattr(finish, "name"):
+        return str(finish.name)
+    return str(finish)
+
+
+def _extract_usage_summary(response: Any) -> str:
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        return "unknown"
+    try:
+        prompt_tokens = getattr(usage, "prompt_token_count", None)
+        candidates_tokens = getattr(usage, "candidates_token_count", None)
+        total_tokens = getattr(usage, "total_token_count", None)
+        return (
+            f"prompt_token_count={prompt_tokens}, "
+            f"candidates_token_count={candidates_tokens}, "
+            f"total_token_count={total_tokens}"
+        )
+    except Exception:
+        return "unavailable"
 
 
 def _extract_embedding_values(item: Any) -> list[float]:
@@ -24,6 +84,56 @@ def _extract_embedding_values(item: Any) -> list[float]:
     if values is None:
         raise ValueError("embedding response item is missing values")
     return [float(value) for value in values]
+
+
+def _status_code_from_exception(exc: Exception) -> int | None:
+    for attr in ("status_code", "code", "http_status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        for attr in ("status_code", "code"):
+            value = getattr(response, attr, None)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+
+    match = re.search(r"\b([1-5][0-9]{2})\b", str(exc))
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None) if response is not None else None
+    if not headers:
+        return None
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_transient_vertex_exception(exc: Exception) -> bool:
+    status = _status_code_from_exception(exc)
+    if status in _TRANSIENT_STATUS_CODES:
+        return True
+    message = str(exc).lower()
+    return any(token in message for token in _TRANSIENT_ERROR_TOKENS)
 
 
 def _build_default_sdk_client(*, settings: VertexSettings, location: str, headers: dict | None = None):
@@ -38,7 +148,15 @@ def _build_default_sdk_client(*, settings: VertexSettings, location: str, header
         http_options = HttpOptions(headers=headers or {})
     except Exception:
         http_options = None
-    kwargs = dict(vertexai=True, project=settings.project, location=location)
+    kwargs: dict[str, Any]
+    if location == "__developer__":
+        if not settings.gemini_api_key:
+            raise ValueError(
+                "GEMINI_API_KEY (or GOOGLE_API_KEY) is required when using Gemini Developer API."
+            )
+        kwargs = dict(api_key=settings.gemini_api_key)
+    else:
+        kwargs = dict(vertexai=True, project=settings.project, location=location)
     if http_options is not None:
         kwargs["http_options"] = http_options
     return genai.Client(**kwargs)
@@ -47,11 +165,58 @@ def _build_default_sdk_client(*, settings: VertexSettings, location: str, header
 class VertexGeminiClient:
     def __init__(self, *, settings: VertexSettings, sdk_client: Any | None = None) -> None:
         self.settings = settings
+        self._api_max_retries = max(0, int(settings.api_max_retries))
+        self._api_initial_backoff_s = max(0.0, float(settings.api_initial_backoff_s))
+        self._api_max_backoff_s = max(0.0, float(settings.api_max_backoff_s))
+        self._api_backoff_multiplier = max(1.0, float(settings.api_backoff_multiplier))
+        self._api_jitter_ratio = max(0.0, float(settings.api_jitter_ratio))
+        backend = (settings.generation_backend or "developer").strip().lower()
+        if backend == "developer" and not settings.gemini_api_key:
+            logger.warning(
+                "[vertex] GENAI_GENERATION_BACKEND=developer but GEMINI_API_KEY is missing; falling back to Vertex backend."
+            )
+            backend = "vertex"
+        self._backend = backend
         self._sdk = sdk_client or _build_default_sdk_client(
             settings=settings,
-            location=settings.generation_location,
-            headers=_PRIORITY_PAYGO_HEADERS,
+            location="__developer__" if self._backend == "developer" else settings.generation_location,
+            headers=_PRIORITY_PAYGO_HEADERS if self._backend == "vertex" else None,
         )
+
+    def _call_with_retry(self, *, operation: str, model: str, fn):
+        for retry_index in range(self._api_max_retries + 1):
+            attempt = retry_index + 1
+            try:
+                return fn()
+            except Exception as exc:
+                if retry_index >= self._api_max_retries or not _is_transient_vertex_exception(exc):
+                    raise
+                base_delay = min(
+                    self._api_max_backoff_s,
+                    self._api_initial_backoff_s
+                    * (self._api_backoff_multiplier ** retry_index),
+                )
+                retry_after_s = _retry_after_seconds(exc)
+                if retry_after_s is not None:
+                    base_delay = max(base_delay, retry_after_s)
+                jitter = (
+                    base_delay * self._api_jitter_ratio * random.random()
+                    if base_delay > 0.0 and self._api_jitter_ratio > 0.0
+                    else 0.0
+                )
+                sleep_s = base_delay + jitter
+                logger.warning(
+                    "[vertex] transient %s error for model=%s attempt=%d/%d status=%s; retrying in %.2fs: %s",
+                    operation,
+                    model,
+                    attempt,
+                    self._api_max_retries + 1,
+                    _status_code_from_exception(exc),
+                    sleep_s,
+                    exc,
+                )
+                if sleep_s > 0.0:
+                    time.sleep(sleep_s)
 
     def generate_json(
         self,
@@ -61,17 +226,36 @@ class VertexGeminiClient:
         temperature: float = 0.0,
         response_schema: dict | None = None,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> dict[str, Any]:
+        resolved_model = model or self.settings.generation_model
         if types is not None:
             config_kwargs: dict[str, Any] = dict(
                 temperature=temperature,
                 response_mime_type="application/json",
             )
-            # Explicitly disable thinking for Flash and Pro — use model defaults
-            try:
-                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-            except Exception:
-                pass
+            if thinking_level:
+                requested_level = str(thinking_level).strip().upper()
+                try:
+                    resolved_level = types.ThinkingLevel(requested_level)
+                except Exception as exc:
+                    raise ValueError(
+                        "Unsupported thinking_level="
+                        f"{thinking_level!r}; expected one of "
+                        "MINIMAL|LOW|MEDIUM|HIGH."
+                    ) from exc
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_level=resolved_level
+                )
+            elif "pro" in resolved_model.lower():
+                # Keep a conservative default budget for Pro when the caller
+                # does not set an explicit thinking level.
+                try:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(
+                        thinking_budget=int(self.settings.thinking_budget)
+                    )
+                except Exception:
+                    pass
             if response_schema is not None:
                 config_kwargs["response_schema"] = response_schema
             if max_output_tokens is not None:
@@ -79,24 +263,88 @@ class VertexGeminiClient:
             _config = types.GenerateContentConfig(**config_kwargs)
         else:
             _config = {"temperature": temperature, "response_mime_type": "application/json"}
-        response = self._sdk.models.generate_content(
-            model=model or self.settings.generation_model,
-            contents=prompt,
-            config=_config,
+        response = self._call_with_retry(
+            operation="generate_content",
+            model=resolved_model,
+            fn=lambda: self._sdk.models.generate_content(
+                model=resolved_model,
+                contents=prompt,
+                config=_config,
+            ),
         )
-        text = (getattr(response, "text", None) or "").strip()
-        if not text:
-            raise ValueError("Vertex Gemini returned no text payload.")
-        return json.loads(text)
+        parsed_payload = _coerce_parsed_json(response)
+        if parsed_payload is None:
+            text = (getattr(response, "text", None) or "").strip()
+            snippet = text[:300].replace("\n", "\\n") if text else ""
+            finish_reason = _extract_finish_reason(response)
+            usage_summary = _extract_usage_summary(response)
+            raise ValueError(
+                "Vertex Gemini did not return SDK-parsed JSON object; failing fast "
+                f"(model={resolved_model}, finish_reason={finish_reason}, usage={usage_summary}, "
+                f"has_text={bool(text)}, text_snippet={snippet!r})."
+            )
+        if not isinstance(parsed_payload, dict):
+            raise ValueError(
+                f"Vertex Gemini parsed payload must be an object, got {type(parsed_payload).__name__} "
+                f"(model={resolved_model})."
+            )
+        return parsed_payload
 
 
 class VertexEmbeddingClient:
     def __init__(self, *, settings: VertexSettings, sdk_client: Any | None = None) -> None:
         self.settings = settings
+        self._api_max_retries = max(0, int(settings.api_max_retries))
+        self._api_initial_backoff_s = max(0.0, float(settings.api_initial_backoff_s))
+        self._api_max_backoff_s = max(0.0, float(settings.api_max_backoff_s))
+        self._api_backoff_multiplier = max(1.0, float(settings.api_backoff_multiplier))
+        self._api_jitter_ratio = max(0.0, float(settings.api_jitter_ratio))
+        backend = (settings.embedding_backend or "vertex").strip().lower()
+        if backend == "developer" and not settings.gemini_api_key:
+            logger.warning(
+                "[vertex] GENAI_EMBEDDING_BACKEND=developer but GEMINI_API_KEY is missing; falling back to Vertex backend."
+            )
+            backend = "vertex"
+        self._backend = backend
         self._sdk = sdk_client or _build_default_sdk_client(
             settings=settings,
-            location=settings.embedding_location,
+            location="__developer__" if self._backend == "developer" else settings.embedding_location,
         )
+
+    def _call_with_retry(self, *, operation: str, model: str, fn):
+        for retry_index in range(self._api_max_retries + 1):
+            attempt = retry_index + 1
+            try:
+                return fn()
+            except Exception as exc:
+                if retry_index >= self._api_max_retries or not _is_transient_vertex_exception(exc):
+                    raise
+                base_delay = min(
+                    self._api_max_backoff_s,
+                    self._api_initial_backoff_s
+                    * (self._api_backoff_multiplier ** retry_index),
+                )
+                retry_after_s = _retry_after_seconds(exc)
+                if retry_after_s is not None:
+                    base_delay = max(base_delay, retry_after_s)
+                jitter = (
+                    base_delay * self._api_jitter_ratio * random.random()
+                    if base_delay > 0.0 and self._api_jitter_ratio > 0.0
+                    else 0.0
+                )
+                sleep_s = base_delay + jitter
+                logger.warning(
+                    "[vertex] transient %s error for model=%s attempt=%d/%d status=%s; retrying in %.2fs: %s",
+                    operation,
+                    model,
+                    attempt,
+                    self._api_max_retries + 1,
+                    _status_code_from_exception(exc),
+                    sleep_s,
+                    exc,
+                )
+                if sleep_s > 0.0:
+                    time.sleep(sleep_s)
 
     def embed_texts(
         self,
@@ -114,10 +362,14 @@ class VertexEmbeddingClient:
         config = {"task_type": task_type} if task_type else None
 
         def _embed_one(text):
-            response = self._sdk.models.embed_content(
+            response = self._call_with_retry(
+                operation="embed_content_text",
                 model=_model,
-                contents=text,
-                config=config,
+                fn=lambda: self._sdk.models.embed_content(
+                    model=_model,
+                    contents=text,
+                    config=config,
+                ),
             )
             raw = getattr(response, "embeddings", None)
             if raw is None:
@@ -137,6 +389,10 @@ class VertexEmbeddingClient:
         items = [dict(item) for item in media_items]
         if not items:
             return []
+        if self._backend != "vertex":
+            raise RuntimeError(
+                "Multimodal URI embeddings require Vertex backend. Set GENAI_EMBEDDING_BACKEND=vertex."
+            )
         try:
             from google.genai import types as _types
         except ImportError:
@@ -162,10 +418,14 @@ class VertexEmbeddingClient:
                 content = str(item["descriptor"])
             else:
                 raise ValueError("each media embedding item must include file_uri or descriptor")
-            response = self._sdk.models.embed_content(
+            response = self._call_with_retry(
+                operation="embed_content_media",
                 model=_model,
-                contents=content,
-                config=None,
+                fn=lambda: self._sdk.models.embed_content(
+                    model=_model,
+                    contents=content,
+                    config=None,
+                ),
             )
             raw = getattr(response, "embeddings", None)
             if raw is None:

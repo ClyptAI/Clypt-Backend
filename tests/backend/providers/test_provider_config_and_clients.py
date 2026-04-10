@@ -187,6 +187,32 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     assert settings.phase24_worker.max_attempts == 5
 
 
+def test_load_provider_settings_exposes_vertex_retry_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("VERTEX_API_MAX_RETRIES", "9")
+    monkeypatch.setenv("VERTEX_API_INITIAL_BACKOFF_S", "0.5")
+    monkeypatch.setenv("VERTEX_API_MAX_BACKOFF_S", "12.0")
+    monkeypatch.setenv("VERTEX_API_BACKOFF_MULTIPLIER", "1.7")
+    monkeypatch.setenv("VERTEX_API_JITTER_RATIO", "0.05")
+    monkeypatch.setenv("VERTEX_THINKING_BUDGET", "96")
+
+    settings = load_provider_settings()
+
+    assert settings.vertex.api_max_retries == 9
+    assert settings.vertex.api_initial_backoff_s == 0.5
+    assert settings.vertex.api_max_backoff_s == 12.0
+    assert settings.vertex.api_backoff_multiplier == 1.7
+    assert settings.vertex.api_jitter_ratio == 0.05
+    assert settings.vertex.thinking_budget == 96
+
+
 def test_phase24_task_queue_client_uses_run_id_for_idempotent_task_name() -> None:
     from backend.providers.config import CloudTasksSettings
     from backend.providers.task_queue import AlreadyExists, Phase24TaskQueueClient, _task_id_for_run_id

@@ -11,16 +11,29 @@ from backend.pipeline.contracts import (
 
 
 class _FakeResponse:
-    def __init__(self, text: str):
+    def __init__(self, text: str, parsed=None):
         self.text = text
+        self.parsed = parsed
+
+
+class _FakeTransientError(Exception):
+    def __init__(self, status_code: int, message: str):
+        super().__init__(f"{status_code} {message}")
+        self.status_code = status_code
 
 
 class _FakeModelAPI:
     def __init__(self):
         self.generate_calls = []
         self.embed_calls = []
+        self.generate_failures_remaining = 0
+        self.embed_failures_remaining = 0
+        self.generate_next_response = None
 
     def generate_content(self, *, model, contents, config):
+        if self.generate_failures_remaining > 0:
+            self.generate_failures_remaining -= 1
+            raise _FakeTransientError(429, "RESOURCE_EXHAUSTED")
         self.generate_calls.append(
             {
                 "model": model,
@@ -28,9 +41,20 @@ class _FakeModelAPI:
                 "config": config,
             }
         )
-        return _FakeResponse('{"ok": true, "contents_seen": 1}')
+        if self.generate_next_response is not None:
+            response = self.generate_next_response
+            self.generate_next_response = None
+            return response
+        return _FakeResponse(
+            '{"ok": true, "contents_seen": 1}',
+            parsed={"ok": True, "contents_seen": 1},
+        )
 
     def embed_content(self, *, model, contents, config=None):
+        if self.embed_failures_remaining > 0:
+            self.embed_failures_remaining -= 1
+            raise _FakeTransientError(503, "UNAVAILABLE")
+        call_index = len(self.embed_calls)
         self.embed_calls.append(
             {
                 "model": model,
@@ -38,19 +62,24 @@ class _FakeModelAPI:
                 "config": config,
             }
         )
-        embedding_count = len(contents) if isinstance(contents, list) else 1
         base_vectors = [
             [0.1, 0.2, 0.3],
             [0.4, 0.5, 0.6],
             [0.7, 0.8, 0.9],
         ]
+        if isinstance(contents, list):
+            embedding_values = [
+                base_vectors[idx % len(base_vectors)] for idx in range(len(contents))
+            ]
+        else:
+            embedding_values = [base_vectors[call_index % len(base_vectors)]]
         return type(
             "EmbedResult",
             (),
             {
                 "embeddings": [
-                    type("Embed", (), {"values": base_vectors[idx]})()
-                    for idx in range(embedding_count)
+                    type("Embed", (), {"values": values})()
+                    for values in embedding_values
                 ]
             },
         )()
@@ -84,7 +113,10 @@ def test_vertex_clients_generate_json_and_embed_texts():
 
     assert embeddings == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
     assert sdk_client.models.embed_calls[0]["model"] == settings.embedding_model
-    assert sdk_client.models.embed_calls[0]["contents"] == ["alpha", "beta"]
+    assert sorted(call["contents"] for call in sdk_client.models.embed_calls[:2]) == [
+        "alpha",
+        "beta",
+    ]
 
     media_embeddings = embedding_client.embed_media_uris(
         [
@@ -93,8 +125,95 @@ def test_vertex_clients_generate_json_and_embed_texts():
         ]
     )
 
-    assert media_embeddings == [[0.1, 0.2, 0.3], [0.1, 0.2, 0.3]]
-    assert sdk_client.models.embed_calls[1]["model"] == settings.embedding_model
+    assert len(media_embeddings) == 2
+    assert all(len(vector) == 3 for vector in media_embeddings)
+    assert all(call["model"] == settings.embedding_model for call in sdk_client.models.embed_calls)
+
+
+def test_vertex_gemini_client_prefers_sdk_parsed_json():
+    from backend.providers.config import VertexSettings
+    from backend.providers.vertex import VertexGeminiClient
+
+    sdk_client = _FakeGenAIClient()
+    sdk_client.models.generate_next_response = _FakeResponse(
+        text="not valid json",
+        parsed={"ok": True, "from": "parsed"},
+    )
+    settings = VertexSettings(project="clypt-v3")
+    gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
+
+    response = gemini_client.generate_json(prompt="use parsed")
+
+    assert response == {"ok": True, "from": "parsed"}
+
+
+def test_vertex_gemini_client_uses_low_thinking_budget_for_pro_only():
+    from backend.providers.config import VertexSettings
+    from backend.providers.vertex import VertexGeminiClient
+
+    sdk_client = _FakeGenAIClient()
+    settings = VertexSettings(
+        project="clypt-v3",
+        thinking_budget=128,
+    )
+    gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
+
+    gemini_client.generate_json(prompt="pro call", model="gemini-3.1-pro-preview")
+    pro_config = sdk_client.models.generate_calls[-1]["config"]
+    thinking_cfg = getattr(pro_config, "thinking_config", None)
+    assert thinking_cfg is not None
+    assert getattr(thinking_cfg, "thinking_budget", None) == 128
+
+    gemini_client.generate_json(prompt="flash call", model="gemini-3-flash-preview")
+    flash_config = sdk_client.models.generate_calls[-1]["config"]
+    assert getattr(flash_config, "thinking_config", None) is None
+
+
+def test_vertex_clients_retry_transient_generate_and_embed_errors(monkeypatch: pytest.MonkeyPatch):
+    from backend.providers.config import VertexSettings
+    from backend.providers.vertex import VertexEmbeddingClient, VertexGeminiClient
+
+    sdk_client = _FakeGenAIClient()
+    sdk_client.models.generate_failures_remaining = 2
+    sdk_client.models.embed_failures_remaining = 2
+
+    settings = VertexSettings(
+        project="clypt-v3",
+        generation_location="global",
+        embedding_location="us-central1",
+        api_max_retries=4,
+        api_initial_backoff_s=0.01,
+        api_max_backoff_s=0.02,
+        api_backoff_multiplier=2.0,
+        api_jitter_ratio=0.0,
+    )
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("backend.providers.vertex.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
+    response = gemini_client.generate_json(prompt="retry me")
+    assert response["ok"] is True
+    assert len(sdk_client.models.generate_calls) == 1
+
+    embedding_client = VertexEmbeddingClient(settings=settings, sdk_client=sdk_client)
+    vectors = embedding_client.embed_texts(["alpha"])
+    assert vectors == [[0.1, 0.2, 0.3]]
+    assert len(sdk_client.models.embed_calls) == 1
+    assert len(sleeps) == 4
+
+
+def test_vertex_gemini_client_fails_hard_when_parsed_payload_missing():
+    from backend.providers.config import VertexSettings
+    from backend.providers.vertex import VertexGeminiClient
+
+    sdk_client = _FakeGenAIClient()
+    sdk_client.models.generate_next_response = _FakeResponse('{"broken": "unterminated}')
+    settings = VertexSettings(project="clypt-v3")
+    gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
+
+    with pytest.raises(ValueError, match="did not return SDK-parsed JSON object"):
+        gemini_client.generate_json(prompt="bad json")
 
 
 def test_semantics_runtime_calls_live_client_and_returns_nodes():
@@ -125,7 +244,7 @@ def test_semantics_runtime_calls_live_client_and_returns_nodes():
     calls = []
 
     class _FakeLLM:
-        def generate_json(self, *, prompt, model=None, temperature=0.0):
+        def generate_json(self, *, prompt, model=None, temperature=0.0, **kwargs):
             calls.append(prompt)
             return {
                 "merged_nodes": [

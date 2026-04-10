@@ -40,14 +40,45 @@ class V31Config:
     phase2_max_turns_per_batch: int = field(
         default_factory=lambda: int(os.getenv("CLYPT_PHASE2_MAX_TURNS_PER_BATCH") or "25")
     )
+    phase2_merge_max_output_tokens: int = field(
+        default_factory=lambda: int(
+            os.getenv("CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS") or "32768"
+        )
+    )
+    phase2_boundary_max_output_tokens: int = field(
+        default_factory=lambda: int(
+            os.getenv("CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS") or "32768"
+        )
+    )
     phase3_target_batch_count: int = field(
-        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_TARGET_BATCH_COUNT") or "5")
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_TARGET_BATCH_COUNT") or "3")
     )
     phase3_max_nodes_per_batch: int = field(
-        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_MAX_NODES_PER_BATCH") or "15")
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_MAX_NODES_PER_BATCH") or "24")
     )
     gemini_max_concurrent: int = field(
-        default_factory=lambda: int(os.getenv("CLYPT_GEMINI_MAX_CONCURRENT") or "5")
+        default_factory=lambda: int(os.getenv("CLYPT_GEMINI_MAX_CONCURRENT") or "8")
+    )
+    phase2_merge_thinking_level: str = field(
+        default_factory=lambda: (os.getenv("CLYPT_PHASE2_MERGE_THINKING_LEVEL") or "low").strip().lower()
+    )
+    phase2_boundary_thinking_level: str = field(
+        default_factory=lambda: (os.getenv("CLYPT_PHASE2_BOUNDARY_THINKING_LEVEL") or "minimal").strip().lower()
+    )
+    phase3_local_thinking_level: str = field(
+        default_factory=lambda: (os.getenv("CLYPT_PHASE3_LOCAL_THINKING_LEVEL") or "minimal").strip().lower()
+    )
+    phase3_long_range_thinking_level: str = field(
+        default_factory=lambda: (os.getenv("CLYPT_PHASE3_LONG_RANGE_THINKING_LEVEL") or "low").strip().lower()
+    )
+    phase4_meta_thinking_level: str = field(
+        default_factory=lambda: (os.getenv("CLYPT_PHASE4_META_THINKING_LEVEL") or "low").strip().lower()
+    )
+    phase4_subgraph_thinking_level: str = field(
+        default_factory=lambda: (os.getenv("CLYPT_PHASE4_SUBGRAPH_THINKING_LEVEL") or "medium").strip().lower()
+    )
+    phase4_pool_thinking_level: str = field(
+        default_factory=lambda: (os.getenv("CLYPT_PHASE4_POOL_THINKING_LEVEL") or "medium").strip().lower()
     )
 
 

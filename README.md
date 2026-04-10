@@ -40,24 +40,34 @@ Audio artifacts ready ~230s before RF-DETR finishes on a 13-min clip. The audio 
 - `merge_vibevoice_outputs()` assigns aligned `word_ids` back onto each VibeVoice turn.
 - Downstream Gemini phases consume turn/node payloads (not raw canonical `words[]` objects).
 
-### Phase 2–4 — Vertex AI performance
+### Phase 2–4 — Current backend + performance notes
 
-All Gemini calls (Phases 2–4) use the following optimizations:
+Phases 2–4 now run in queue mode by default (`Cloud Tasks -> Cloud Run worker`) when `--run-phase14` is used. Backend split:
+
+- Generation calls: Gemini **Developer API** (`GENAI_GENERATION_BACKEND=developer`)
+- Embeddings (text + multimodal URI): **Vertex AI** (`GENAI_EMBEDDING_BACKEND=vertex`)
+- Runtime target for queue worker: Cloud Run `us-east4` with L4 GPU and ffmpeg GPU mode (`CLYPT_PHASE24_FFMPEG_DEVICE=gpu`)
+
+Current optimizations:
 
 | Optimization | Effect |
 |---|---|
-| **Priority PayGo headers** (`X-Vertex-AI-LLM-Shared-Request-Type: priority`) | Eliminates Dynamic Shared Quota tail latency — calls 4–5 no longer queue behind earlier bursts. ~1.8× Standard price. |
-| **`thinking_budget=0`** via `ThinkingConfig` | Disables thinking token generation (was `ThinkingLevel.HIGH` — caused 90–390s per batch call). |
+| **Developer API generation path** | Uses AI Studio/Developer API for generate-content calls; avoids prior Vertex DSQ tail-latency pattern for this workload. |
+| **Per-stage Flash thinking levels** | Phase 2A `low`, Phase 2B `minimal`, Phase 3 local `minimal`, Phase 3 long-range `low`, Phase 4 meta `low`, Phase 4 subgraph `medium`, Phase 4 pool `medium`. |
 | **`responseSchema` constrained decoding** | Per-phase JSON Schema passed to `GenerateContentConfig.response_schema` — faster generation, no hallucinated fields, no parse failures. |
-| **`max_output_tokens` caps** | Reduces per-slot token reservation in Vertex AI scheduler, improving throughput. |
+| **`max_output_tokens` caps (`32768`)** | Applied for all Phase 2–4 Gemini JSON calls. |
 | **Parallel embeddings** (ThreadPoolExecutor) | `embed_texts` and `embed_media_uris` each spawn one `embed_content` call per item in parallel (API limit: 1 text doc or 1 video part per call). |
+| **Batch/concurrency tuning** | `CLYPT_GEMINI_MAX_CONCURRENT=8`, `CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY=8`, Phase 3 geometry tuned to fewer/larger batches (`target=3`, `max_nodes=24`). |
 | **Dynamic meta-prompts** (Phase 4) | Gemini Flash reads Phase 2 node summaries and generates video-specific retrieval queries. Count scales with duration: 2/4/6/8/10 prompts. No static fallback — fails fast if Gemini returns nothing. |
+| **Sub-step timers** | Added around merge/boundary, node media extraction+upload, semantic vs multimodal embeddings, local vs long-range vs persistence, and Phase 4 review stages. |
 
-### Validated runs (2026-04-07/08)
+### Validated runs (2026-04-07/08/09)
 
 | Clip | Duration | Turns | Phase 1 | Phases 2–4 | Total | Mode |
 |------|----------|-------|---------|-----------|-------|------|
 | mrbeastflagrant.mp4 | 392.9s (6.5 min) | 104 | 153s | 98s | **251s (4m11s)** | Full Phase 1–4 ✓ |
+| mrbeastflagrant.mp4 | 392.9s (6.5 min) | 104 | — | **820.8s (13m41s)** | — | Phase 2–4 Cloud Run queue worker (slow but successful baseline) |
+| mrbeastflagrant.mp4 (verified Phase 1 handoff replay) | 392.9s (6.5 min) | 104 | — | **143.8s (2m24s)** | — | Phase 2–4 Cloud Run queue worker (us-east4 L4, tuned Flash thinking profile) |
 | joeroganflagrant.mp4 | 788.7s (13.1 min) | 201 | 285s | — | — | Phase 1 only (Phase 3 hit 429) |
 
 ASR RTF ~0.07x on the validated GPU droplets. Full Phase 1–4 pipeline is **0.64× real-time** on a 6.5-min clip.
@@ -68,11 +78,19 @@ Operational updates (2026-04-08):
 - emotion2vec progress logging now reports the true top class via score argmax (older logs could show misleading entries like `top: angry 0.00`).
 - Baseline run metrics and final clip candidate snapshots are consolidated in [docs/runtime/v3.1_baseline_reference.md](/Users/rithvik/Clypt-V3/docs/runtime/v3.1_baseline_reference.md).
 
-**429 note:** Longer videos (200+ turns) can hit `RESOURCE_EXHAUSTED` on Phase 3 local-edge batches. No automatic retry is implemented yet — rerun with a new job ID. See [Known Issues](#known-issues).
+Operational updates (2026-04-09):
+- Generation backend default switched to Developer API; embeddings remain on Vertex.
+- Added `VERTEX_THINKING_BUDGET` (default `128`) as a compatibility knob if a Pro generation path is re-enabled.
+- Current tuned worker profile uses Flash for all Phase 2-4 generation calls with stage-specific thinking levels and GPU ffmpeg on Cloud Run (`us-east4` L4).
+
+**429 note:** Longer videos (200+ turns) can hit `RESOURCE_EXHAUSTED` on Phase 3 local-edge batches. Transient retries/backoff are enabled, but sustained quota pressure may still require rerun. See [Known Issues](#known-issues).
 
 ## Environment
 
-Core env vars:
+Canonical copy/paste repro checklist (authoritative):
+- [Canonical Repro Checklist](/Users/rithvik/Clypt-V3/docs/runtime/v3.1_runtime_guide.md#canonical-repro-checklist) in `docs/runtime/v3.1_runtime_guide.md`
+
+Core env vars (summary):
 
 ```bash
 CLYPT_V31_OUTPUT_ROOT=backend/outputs/v3_1
@@ -84,18 +102,49 @@ VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
 VIBEVOICE_VLLM_MODEL=vibevoice             # NOT "microsoft/VibeVoice-ASR" — returns 404
 GOOGLE_CLOUD_PROJECT=clypt-v3              # required even for VibeVoice-only runs
 GCS_BUCKET=clypt-storage-v3               # required even for VibeVoice-only runs
-GOOGLE_CLOUD_LOCATION=global              # generation endpoint (Priority PayGo requires global)
+GOOGLE_CLOUD_LOCATION=global              # used when generation backend is Vertex
 VERTEX_GEMINI_LOCATION=global
 VERTEX_EMBEDDING_LOCATION=us-central1     # embedding endpoint (cannot use global)
+GENAI_GENERATION_BACKEND=developer        # default generation backend (AI Studio/Developer API)
+GENAI_EMBEDDING_BACKEND=vertex            # keep embeddings on Vertex (required for media URI embeddings)
+GEMINI_API_KEY=<from secret manager/env>
 VERTEX_GEMINI_MODEL=gemini-3.1-pro-preview
-VERTEX_FLASH_MODEL=gemini-3-flash-preview # used for dynamic meta-prompt generation (Phase 4)
+VERTEX_FLASH_MODEL=gemini-3-flash-preview # current default model for all Phase 2-4 generation calls
 VERTEX_EMBEDDING_MODEL=gemini-embedding-2-preview
+VERTEX_THINKING_BUDGET=128               # keep for compatibility if a Pro call path is re-enabled
+VERTEX_API_MAX_RETRIES=6                 # retry transient Vertex 429/5xx without lowering parallelism
+VERTEX_API_INITIAL_BACKOFF_S=1.0
+VERTEX_API_MAX_BACKOFF_S=30.0
+VERTEX_API_BACKOFF_MULTIPLIER=2.0
+VERTEX_API_JITTER_RATIO=0.2
 CLYPT_PHASE1_YAMNET_DEVICE=cpu            # TF GPU path is unstable on current droplets — keep cpu
 CLYPT_PHASE1_CACHE_HOME=/opt/clypt-phase1/.cache
 XDG_CACHE_HOME=/opt/clypt-phase1/.cache
 TORCH_HOME=/opt/clypt-phase1/.cache/torch
 HF_HOME=/opt/clypt-phase1/.cache/huggingface
-MODELSCOPE_CACHE=/opt/clypt-phase1/.cache/modelscope   # optional compatibility cache; HF is the default download hub
+FUNASR_MODEL_SOURCE=hf
+CLYPT_PHASE24_FFMPEG_DEVICE=gpu
+CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY=8
+CLYPT_GEMINI_MAX_CONCURRENT=8
+CLYPT_PHASE3_TARGET_BATCH_COUNT=3
+CLYPT_PHASE3_MAX_NODES_PER_BATCH=24
+CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS=32768
+CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS=32768
+CLYPT_PHASE2_MERGE_THINKING_LEVEL=low
+CLYPT_PHASE2_BOUNDARY_THINKING_LEVEL=minimal
+CLYPT_PHASE3_LOCAL_THINKING_LEVEL=minimal
+CLYPT_PHASE3_LONG_RANGE_THINKING_LEVEL=low
+CLYPT_PHASE4_META_THINKING_LEVEL=low
+CLYPT_PHASE4_SUBGRAPH_THINKING_LEVEL=medium
+CLYPT_PHASE4_POOL_THINKING_LEVEL=medium
+CLYPT_PHASE24_PROJECT=clypt-v3
+CLYPT_PHASE24_TASKS_LOCATION=us-central1
+CLYPT_PHASE24_TASKS_QUEUE=clypt-phase24
+CLYPT_PHASE24_WORKER_URL=https://clypt-phase24-worker-m64xv2dm7a-uk.a.run.app/tasks/phase24
+CLYPT_PHASE24_WORKER_SERVICE_ACCOUNT_EMAIL=clypt-phase24-worker@clypt-v3.iam.gserviceaccount.com
+CLYPT_SPANNER_PROJECT=clypt-v3
+CLYPT_SPANNER_INSTANCE=clypt-spanner-v3
+CLYPT_SPANNER_DATABASE=clypt-graph-db-v3
 ```
 
 Full config in [.env.example](/Users/rithvik/Clypt-V3/.env.example).
@@ -183,13 +232,21 @@ python -m backend.runtime.run_phase1 \
 
 ### 429 RESOURCE_EXHAUSTED (longer videos)
 
-Longer videos (200+ speaker turns) generate more Phase 3 edge batches, which can exhaust the Vertex AI RPM/TPM rate limit. The SDK's tenacity retry exhausts and the process crashes. Priority PayGo helps but doesn't eliminate the limit for very long content.
+Longer videos (200+ speaker turns) generate more Phase 3 edge batches, which can still exhaust model quota/rate windows.
 
-**Workaround:** rerun with a new job ID. Retry-with-backoff is not yet implemented.
+**Current behavior:** transient API retries/backoff are implemented, and queue-mode tasks can be retried by Cloud Tasks; sustained quota exhaustion can still require rerun after quota recovery.
 
 ### Phase 3 local-edge batching vs rate limits
 
-Phase 3 sends N concurrent batches of local edge proposals to Gemini Pro. With 200+ nodes the batch count can exceed the rate limit window. Consider reducing `phase3_target_batch_count` in `V31Config` if you consistently hit 429 on Phase 3.
+Phase 3 sends N concurrent batches of local edge proposals to Gemini Flash. With 200+ nodes the batch count can exceed the rate limit window. Consider reducing `phase3_target_batch_count` in `V31Config` if you consistently hit 429 on Phase 3.
+
+### Cloud Run queue-mode throughput can be CPU-bound
+
+If Phase 2 logs show `GPU ffmpeg unavailable ... falling back to CPU encoder`, node clip extraction runs on CPU in the worker and Phase 2-4 duration will be significantly slower than the inline GPU baseline.
+
+### Strict long-range edge validation can fail a run
+
+Rarely, Phase 3 can fail with `Gemini returned an edge for a non-shortlisted candidate long-range pair`. This is a strict validation guard in the long-range edge path; queue retries may recover, but repeated failures require rerun.
 
 ## Key Docs
 

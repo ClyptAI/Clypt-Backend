@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
 import uvicorn
 
 from backend.runtime.phase24_worker_app import create_app
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    configure_logging()
     args = build_parser().parse_args()
     uvicorn.run(create_app(), host=args.host, port=args.port, reload=False)
     return 0

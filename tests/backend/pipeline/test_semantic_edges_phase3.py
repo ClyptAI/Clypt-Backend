@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from backend.pipeline.contracts import SemanticGraphEdge, SemanticGraphNode, SemanticNodeEvidence
+from backend.pipeline.graph.runtime import _build_node_batches
 from backend.pipeline.graph.local_semantic_edges import build_local_semantic_edges
 from backend.pipeline.graph.long_range_edges import build_long_range_edges, shortlist_long_range_pairs
 from backend.pipeline.graph.reconcile_edges import reconcile_semantic_edges
@@ -169,6 +170,48 @@ def test_shortlist_long_range_pairs_uses_multimodal_enrichment():
     ]
     assert candidate_pairs[0]["semantic_similarity"] < candidate_pairs[1]["semantic_similarity"]
     assert candidate_pairs[0]["multimodal_similarity"] > candidate_pairs[1]["multimodal_similarity"]
+
+
+def test_phase3_batch_payload_uses_slim_nodes_for_llm():
+    nodes = [
+        _node(
+            "node_1",
+            0,
+            5000,
+            node_type="claim",
+            summary="summary one",
+            semantic_embedding=[0.1, 0.2, 0.3],
+            multimodal_embedding=[0.4, 0.5, 0.6],
+        ),
+        _node(
+            "node_2",
+            6000,
+            10000,
+            node_type="reaction_beat",
+            summary="summary two",
+            semantic_embedding=[0.3, 0.2, 0.1],
+            multimodal_embedding=[0.6, 0.5, 0.4],
+        ),
+    ]
+
+    batches = _build_node_batches(nodes=nodes, target_batch_count=1, max_nodes_per_batch=15)
+    assert len(batches) == 1
+    payload_nodes = batches[0]["nodes"]
+    assert len(payload_nodes) == 2
+
+    first = payload_nodes[0]
+    assert set(first.keys()) == {
+        "node_id",
+        "start_ms",
+        "end_ms",
+        "node_type",
+        "node_flags",
+        "summary",
+        "transcript_text",
+    }
+    assert first["transcript_text"] == "node_1"
+    assert "semantic_embedding" not in first
+    assert "multimodal_embedding" not in first
 
 
 def test_build_long_range_edges_validates_pairs_and_preserves_later_to_earlier_direction():

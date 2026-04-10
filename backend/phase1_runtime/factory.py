@@ -26,11 +26,16 @@ logger = logging.getLogger(__name__)
 
 def _build_phase24_task_queue_client(*, settings) -> Phase24TaskQueueClient | None:
     if not settings.cloud_tasks.worker_url:
+        logger.warning(
+            "CLYPT_PHASE24_WORKER_URL is not set; run_phase14 queue mode will fail fast."
+        )
         return None
     try:
         from google.cloud import tasks_v2
     except ImportError:  # pragma: no cover - optional dependency in minimal environments
-        logger.warning("google-cloud-tasks is unavailable; Phase24 queue mode will be disabled")
+        logger.warning(
+            "google-cloud-tasks is unavailable; run_phase14 queue mode will fail fast."
+        )
         return None
     return Phase24TaskQueueClient(
         settings=settings.cloud_tasks,

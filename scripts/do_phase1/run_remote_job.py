@@ -21,12 +21,20 @@ class Phase1RemoteClient:
     def logs_url(self, *, job_id: str, tail_lines: int = 200) -> str:
         return f"{self.job_url(job_id=job_id)}/logs?tail_lines={int(tail_lines)}"
 
-    def submit_job(self, *, source_url: str | None, source_path: str | None = None, run_phase14: bool = False) -> dict:
+    def submit_job(
+        self,
+        *,
+        source_url: str | None,
+        source_path: str | None = None,
+        run_phase14: bool = False,
+        phase24_queue_enabled: bool = True,
+    ) -> dict:
         payload = {
             "source_url": source_url,
             "source_path": source_path,
             "runtime_controls": {
                 "run_phase14": bool(run_phase14),
+                "phase24_queue_enabled": bool(phase24_queue_enabled),
             },
         }
         response = self._client.post(self.jobs_url, json=payload)
@@ -49,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", required=True, help="Phase 1 service base URL, e.g. http://HOST:8080")
     parser.add_argument("--source-url", required=True, help="YouTube or direct source URL")
     parser.add_argument("--run-phase14", action="store_true", help="Continue into live Phases 2-4 after Phase 1")
+    parser.add_argument(
+        "--inline-phase24",
+        action="store_true",
+        help="Run Phases 2-4 inline on the Phase 1 worker (debug only; default is Cloud Tasks queue mode).",
+    )
     parser.add_argument("--poll-interval-s", type=float, default=5.0)
     parser.add_argument("--tail-lines", type=int, default=200)
     return parser
@@ -60,6 +73,7 @@ def main() -> int:
     job = client.submit_job(
         source_url=args.source_url,
         run_phase14=bool(args.run_phase14),
+        phase24_queue_enabled=not bool(args.inline_phase24),
     )
     job_id = job["job_id"]
     last_lines: list[str] = []

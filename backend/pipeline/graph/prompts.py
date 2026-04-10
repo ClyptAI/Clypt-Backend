@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 
 
+def _compact_json(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
 LOCAL_SEMANTIC_EDGE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -87,7 +91,7 @@ def build_local_semantic_edge_prompt(*, batch_payload: dict) -> str:
         '"payoff_of"   — source is the payoff/resolution of a setup in target\n'
         '"reaction_to" — source is an emotional or conversational reaction to target\n'
         '"escalates"   — source raises the stakes, intensity, or severity relative to target\n\n'
-        f"Batch payload:\n{json.dumps(batch_payload, ensure_ascii=True, indent=2)}"
+        f"Batch payload:\n{_compact_json(batch_payload)}"
     )
 
 
@@ -116,7 +120,7 @@ def build_long_range_edge_prompt(*, pair_payload: dict) -> str:
         "  ]\n"
         "}\n\n"
         'If no meaningful long-range edges exist, return: {"edges": []}\n\n'
-        f"Pair payload:\n{json.dumps(pair_payload, ensure_ascii=True, indent=2)}"
+        f"Pair payload:\n{_compact_json(pair_payload)}"
     )
 
 

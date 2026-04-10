@@ -232,8 +232,8 @@ print(f"[deploy-vllm] main venv torchaudio OK: {meta['torchaudio_version']}")
 PY
 
 # --- 7. Prewarm NFA + emotion2vec+ model caches ----------------------------
-# Stop API/worker first so they do not contend on ModelScope locks while prewarm
-# is trying to populate shared caches.
+# Stop API/worker first so they do not contend on cache locks while prewarm
+# is trying to populate shared paths.
 echo "[deploy-vllm] stopping Phase 1 API/worker before prewarm ..."
 systemctl stop clypt-v31-phase1-worker.service clypt-v31-phase1-api.service || true
 
@@ -241,7 +241,6 @@ install -d -m 0755 "$PHASE1_CACHE_HOME"
 install -d -m 0755 "$PHASE1_CACHE_HOME/torch"
 install -d -m 0755 "$PHASE1_CACHE_HOME/torch/kernels"
 install -d -m 0755 "$PHASE1_CACHE_HOME/huggingface"
-install -d -m 0755 "$PHASE1_CACHE_HOME/modelscope"
 if [[ "$PREWARM_PHASE1_MODELS" == "1" ]]; then
   echo "[deploy-vllm] prewarming Phase 1 models (NFA + emotion2vec+) ..."
   export HOME="/opt/clypt-phase1"
@@ -249,8 +248,7 @@ if [[ "$PREWARM_PHASE1_MODELS" == "1" ]]; then
   export XDG_CACHE_HOME="$PHASE1_CACHE_HOME"
   export TORCH_HOME="$PHASE1_CACHE_HOME/torch"
   export HF_HOME="$PHASE1_CACHE_HOME/huggingface"
-  export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-${CLYPT_PHASE1_CACHE_HOME:+$CLYPT_PHASE1_CACHE_HOME/modelscope}}"
-  export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$PHASE1_CACHE_HOME/modelscope}"
+  export FUNASR_MODEL_SOURCE="${FUNASR_MODEL_SOURCE:-hf}"
   prewarm_attempt=1
   while true; do
     echo "[deploy-vllm] prewarm attempt ${prewarm_attempt}/${PREWARM_RETRIES} ..."
@@ -274,7 +272,6 @@ PY
     fi
     if [[ $? -eq 124 ]]; then
       echo "[deploy-vllm] prewarm attempt timed out after ${PREWARM_TIMEOUT_S}s (possible stale lock)." >&2
-      lsof "$PHASE1_CACHE_HOME/modelscope/.lock/iic___emotion2vec_plus_large" >&2 || true
     fi
     if (( prewarm_attempt >= PREWARM_RETRIES )); then
       echo "[deploy-vllm] ERROR: Phase 1 model prewarm failed after ${PREWARM_RETRIES} attempts." >&2

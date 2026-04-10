@@ -83,11 +83,20 @@ class VibeVoiceVLLMSettings:
 @dataclass(slots=True)
 class VertexSettings:
     project: str
+    generation_backend: str = "developer"
+    embedding_backend: str = "vertex"
+    gemini_api_key: str | None = None
     generation_location: str = "global"
     embedding_location: str = "us-central1"
     generation_model: str = "gemini-3.1-pro-preview"
     embedding_model: str = "gemini-embedding-2-preview"
     flash_model: str = "gemini-3-flash-preview"
+    thinking_budget: int = 128
+    api_max_retries: int = 6
+    api_initial_backoff_s: float = 1.0
+    api_max_backoff_s: float = 30.0
+    api_backoff_multiplier: float = 2.0
+    api_jitter_ratio: float = 0.2
 
 
 @dataclass(slots=True)
@@ -177,6 +186,21 @@ def load_provider_settings() -> ProviderSettings:
         audio_mode=_read_env("VIBEVOICE_VLLM_AUDIO_MODE") or "base64",
     )
 
+    generation_backend = (
+        (_read_env("GENAI_GENERATION_BACKEND", "GENAI_BACKEND") or "developer")
+        .strip()
+        .lower()
+    )
+    if generation_backend not in {"developer", "vertex"}:
+        raise ValueError(
+            f"Unsupported GENAI_GENERATION_BACKEND={generation_backend!r}; expected 'developer' or 'vertex'."
+        )
+    embedding_backend = ((_read_env("GENAI_EMBEDDING_BACKEND") or "vertex").strip().lower())
+    if embedding_backend not in {"developer", "vertex"}:
+        raise ValueError(
+            f"Unsupported GENAI_EMBEDDING_BACKEND={embedding_backend!r}; expected 'developer' or 'vertex'."
+        )
+
     return ProviderSettings(
         vibevoice=VibeVoiceSettings(
             hotwords_context=hotwords_context,
@@ -190,6 +214,9 @@ def load_provider_settings() -> ProviderSettings:
         vllm_vibevoice=vllm_settings,
         vertex=VertexSettings(
             project=vertex_project,
+            generation_backend=generation_backend,
+            embedding_backend=embedding_backend,
+            gemini_api_key=_read_env("GEMINI_API_KEY", "GOOGLE_API_KEY"),
             generation_location=_read_env("VERTEX_GEMINI_LOCATION")
             or _read_env("GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION")
             or "global",
@@ -197,6 +224,20 @@ def load_provider_settings() -> ProviderSettings:
             generation_model=_read_env("VERTEX_GEMINI_MODEL") or "gemini-3.1-pro-preview",
             embedding_model=_read_env("VERTEX_EMBEDDING_MODEL") or "gemini-embedding-2-preview",
             flash_model=_read_env("VERTEX_FLASH_MODEL") or "gemini-3-flash-preview",
+            thinking_budget=max(1, int(_read_env("VERTEX_THINKING_BUDGET") or "128")),
+            api_max_retries=max(0, int(_read_env("VERTEX_API_MAX_RETRIES") or "6")),
+            api_initial_backoff_s=max(
+                0.0, float(_read_env("VERTEX_API_INITIAL_BACKOFF_S") or "1.0")
+            ),
+            api_max_backoff_s=max(
+                0.0, float(_read_env("VERTEX_API_MAX_BACKOFF_S") or "30.0")
+            ),
+            api_backoff_multiplier=max(
+                1.0, float(_read_env("VERTEX_API_BACKOFF_MULTIPLIER") or "2.0")
+            ),
+            api_jitter_ratio=max(
+                0.0, float(_read_env("VERTEX_API_JITTER_RATIO") or "0.2")
+            ),
         ),
         storage=StorageSettings(gcs_bucket=gcs_bucket),
         cloud_tasks=CloudTasksSettings(

@@ -29,7 +29,8 @@ class Phase24TaskPayload(BaseModel):
     source_url: str | None = None
     source_uri: str | None = None
     source_video_gcs_uri: str | None = None
-    phase1_outputs: dict[str, Any]
+    phase1_outputs: dict[str, Any] | None = None
+    phase1_outputs_gcs_uri: str | None = None
     phase3_long_range_top_k: int = 3
     phase4_extra_prompt_texts: list[str] = Field(default_factory=list)
     query_version: str | None = None
@@ -38,6 +39,8 @@ class Phase24TaskPayload(BaseModel):
     def _validate_source(self) -> "Phase24TaskPayload":
         if not (self.source_url or self.source_uri):
             raise ValueError("Provide source_url or source_uri")
+        if self.phase1_outputs is None and not self.phase1_outputs_gcs_uri:
+            raise ValueError("Provide phase1_outputs or phase1_outputs_gcs_uri")
         return self
 
     @property
@@ -55,6 +58,14 @@ class Phase24WorkerService:
     max_attempts: int = 3
     running_lease_timeout_s: int = 1800
 
+    @staticmethod
+    def _payload_video_gcs_uri(payload: Phase24TaskPayload) -> str | None:
+        if payload.source_video_gcs_uri:
+            return payload.source_video_gcs_uri
+        if payload.phase1_outputs:
+            return (payload.phase1_outputs.get("phase1_audio") or {}).get("video_gcs_uri")
+        return None
+
     def handle_task(
         self,
         payload: Phase24TaskPayload,
@@ -63,6 +74,7 @@ class Phase24WorkerService:
         attempt: int,
     ) -> dict[str, Any]:
         query_version = payload.query_version or self.default_query_version
+        source_video_gcs_uri = self._payload_video_gcs_uri(payload)
         current_job = self.repository.get_phase24_job(payload.run_id)
         lease_state = self._acquire_phase24_lease(
             run_id=payload.run_id,
@@ -135,8 +147,7 @@ class Phase24WorkerService:
                 RunRecord(
                     run_id=payload.run_id,
                     source_url=payload.source_reference,
-                    source_video_gcs_uri=payload.source_video_gcs_uri
-                    or (payload.phase1_outputs.get("phase1_audio") or {}).get("video_gcs_uri"),
+                    source_video_gcs_uri=source_video_gcs_uri,
                     status="FAILED",
                     created_at=current_run.created_at if current_run is not None else now,
                     updated_at=now,
@@ -172,8 +183,7 @@ class Phase24WorkerService:
             RunRecord(
                 run_id=payload.run_id,
                 source_url=payload.source_reference,
-                source_video_gcs_uri=payload.source_video_gcs_uri
-                or (payload.phase1_outputs.get("phase1_audio") or {}).get("video_gcs_uri"),
+                source_video_gcs_uri=source_video_gcs_uri,
                 status="PHASE24_RUNNING",
                 created_at=current_run.created_at if current_run is not None else now,
                 updated_at=now,
@@ -234,8 +244,7 @@ class Phase24WorkerService:
                 RunRecord(
                     run_id=payload.run_id,
                     source_url=payload.source_reference,
-                    source_video_gcs_uri=payload.source_video_gcs_uri
-                    or (payload.phase1_outputs.get("phase1_audio") or {}).get("video_gcs_uri"),
+                    source_video_gcs_uri=source_video_gcs_uri,
                     status="FAILED" if is_terminal else "PHASE24_QUEUED",
                     created_at=current_run.created_at if current_run is not None else failed_at,
                     updated_at=failed_at,
@@ -286,8 +295,7 @@ class Phase24WorkerService:
             RunRecord(
                 run_id=payload.run_id,
                 source_url=payload.source_reference,
-                source_video_gcs_uri=payload.source_video_gcs_uri
-                or (payload.phase1_outputs.get("phase1_audio") or {}).get("video_gcs_uri"),
+                source_video_gcs_uri=source_video_gcs_uri,
                 status="PHASE24_DONE",
                 created_at=current_run.created_at if current_run is not None else completed_at,
                 updated_at=completed_at,
@@ -329,7 +337,28 @@ class Phase24WorkerService:
         self,
         payload: Phase24TaskPayload,
     ) -> tuple[dict[str, Any], tempfile.TemporaryDirectory[str] | None]:
-        phase1_outputs_payload = dict(payload.phase1_outputs)
+        temp_dir: tempfile.TemporaryDirectory[str] | None = None
+        if payload.phase1_outputs is not None:
+            phase1_outputs_payload = dict(payload.phase1_outputs)
+        else:
+            if not payload.phase1_outputs_gcs_uri:
+                raise ValueError("phase1_outputs_gcs_uri is required when phase1_outputs is omitted")
+            if getattr(self.runner, "storage_client", None) is None:
+                raise ValueError("runner.storage_client is required to load phase1_outputs from GCS")
+            temp_dir = tempfile.TemporaryDirectory(prefix=f"phase24-{payload.run_id}-")
+            handoff_path = Path(temp_dir.name) / "phase1_outputs.json"
+            try:
+                self.runner.storage_client.download_file(
+                    gcs_uri=payload.phase1_outputs_gcs_uri,
+                    local_path=handoff_path,
+                )
+                phase1_outputs_payload = json.loads(
+                    handoff_path.read_text(encoding="utf-8")
+                )
+            except Exception:
+                temp_dir.cleanup()
+                raise
+
         phase1_audio = dict(phase1_outputs_payload.get("phase1_audio") or {})
         local_video_path = phase1_audio.get("local_video_path")
         requires_local_video = (
@@ -342,7 +371,8 @@ class Phase24WorkerService:
                 raise ValueError(
                     "phase1_outputs.phase1_audio.video_gcs_uri or source_video_gcs_uri is required"
                 )
-            temp_dir = tempfile.TemporaryDirectory(prefix=f"phase24-{payload.run_id}-")
+            if temp_dir is None:
+                temp_dir = tempfile.TemporaryDirectory(prefix=f"phase24-{payload.run_id}-")
             local_path = Path(temp_dir.name) / "source_video.mp4"
             try:
                 self.runner.storage_client.download_file(
@@ -454,13 +484,34 @@ def create_app(*, service: Phase24WorkerService | None = None) -> FastAPI:
 
     def _handle(payload: Phase24TaskPayload, request: Request) -> dict[str, Any]:
         task_name = request.headers.get("X-CloudTasks-TaskName") or payload.run_id
+        attempt = _parse_attempt(request)
+        logger.info(
+            "phase24 task dispatch run_id=%s task_name=%s attempt=%s",
+            payload.run_id,
+            task_name,
+            attempt,
+        )
         try:
-            return _service().handle_task(
+            response = _service().handle_task(
                 payload,
                 job_id=task_name,
-                attempt=_parse_attempt(request),
+                attempt=attempt,
             )
+            logger.info(
+                "phase24 task complete run_id=%s task_name=%s attempt=%s status=%s",
+                payload.run_id,
+                task_name,
+                attempt,
+                response.get("status"),
+            )
+            return response
         except Exception as exc:
+            logger.exception(
+                "phase24 task failed run_id=%s task_name=%s attempt=%s",
+                payload.run_id,
+                task_name,
+                attempt,
+            )
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.post("/")

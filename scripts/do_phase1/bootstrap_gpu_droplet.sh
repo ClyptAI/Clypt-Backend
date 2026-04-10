@@ -25,7 +25,6 @@ install -d /opt/clypt-phase1/hf-cache
 install -d /opt/clypt-phase1/videos
 install -d /opt/clypt-phase1/.cache/torch/kernels
 install -d /opt/clypt-phase1/.cache/huggingface
-install -d /opt/clypt-phase1/.cache/modelscope
 install -d /etc/clypt-phase1
 install -d /var/lib/clypt/v3_1_phase1_service
 install -d /var/log/clypt/v3_1_phase1

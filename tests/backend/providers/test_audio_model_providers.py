@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+import types
 
 
 def test_emotion2vec_plus_provider_clips_turns_and_normalizes_segments(tmp_path: Path):
@@ -40,6 +42,46 @@ def test_emotion2vec_plus_provider_clips_turns_and_normalizes_segments(tmp_path:
     assert payload["segments"][0]["turn_id"] == "t_000001"
     assert payload["segments"][0]["labels"] == ["neutral"]
     assert payload["segments"][1]["scores"] == [0.91]
+
+
+def test_emotion2vec_default_model_uses_hf_hub(monkeypatch):
+    import backend.providers.emotion2vec as emotion2vec
+
+    captured_kwargs = {}
+
+    class _FakeAutoModel:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "funasr", types.SimpleNamespace(AutoModel=_FakeAutoModel))
+    monkeypatch.delenv("FUNASR_MODEL_SOURCE", raising=False)
+    monkeypatch.delenv("EMOTION2VEC_MODEL_ID", raising=False)
+
+    model = emotion2vec._build_default_model()
+
+    assert isinstance(model, _FakeAutoModel)
+    assert captured_kwargs["model"] == "iic/emotion2vec_plus_large"
+    assert captured_kwargs["hub"] == "hf"
+    assert captured_kwargs["disable_update"] is True
+
+
+def test_emotion2vec_default_model_ignores_non_hf_source(monkeypatch):
+    import backend.providers.emotion2vec as emotion2vec
+
+    captured_kwargs = {}
+
+    class _FakeAutoModel:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "funasr", types.SimpleNamespace(AutoModel=_FakeAutoModel))
+    monkeypatch.setenv("FUNASR_MODEL_SOURCE", "modelscope")
+    monkeypatch.setenv("EMOTION2VEC_MODEL_ID", "iic/emotion2vec_plus_large")
+
+    model = emotion2vec._build_default_model()
+
+    assert isinstance(model, _FakeAutoModel)
+    assert captured_kwargs["hub"] == "hf"
 
 
 def test_emotion2vec_plus_provider_logs_true_top_label_for_unsorted_scores(tmp_path: Path, caplog):

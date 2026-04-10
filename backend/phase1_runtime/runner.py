@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -131,7 +132,7 @@ class Phase1JobRunner:
         job_id: str,
         source_ref: str,
         video_gcs_uri: str,
-        phase1_outputs: Phase1SidecarOutputs,
+        phase1_outputs_gcs_uri: str,
         runtime_controls: dict[str, Any],
     ) -> dict[str, Any]:
         if self.phase24_task_queue_client is None:
@@ -141,7 +142,7 @@ class Phase1JobRunner:
             "run_id": job_id,
             "source_url": source_ref,
             "source_video_gcs_uri": video_gcs_uri,
-            "phase1_outputs": _jsonable(phase1_outputs),
+            "phase1_outputs_gcs_uri": phase1_outputs_gcs_uri,
             "phase3_long_range_top_k": int(runtime_controls.get("phase3_long_range_top_k") or 3),
             "phase4_extra_prompt_texts": list(runtime_controls.get("phase4_extra_prompt_texts") or []),
             "query_version": self.phase24_query_version,
@@ -154,6 +155,7 @@ class Phase1JobRunner:
         metadata = {
             "query_version": self.phase24_query_version,
             "task_name": task_name,
+            "phase1_outputs_gcs_uri": phase1_outputs_gcs_uri,
         }
         self._upsert_run_record(
             run_id=job_id,
@@ -175,6 +177,27 @@ class Phase1JobRunner:
             "task_name": task_name,
             "artifact_paths": {},
         }
+
+    def _persist_phase24_handoff(
+        self,
+        *,
+        job_id: str,
+        workspace: Phase1Workspace,
+        phase1_outputs: Phase1SidecarOutputs,
+    ) -> str:
+        handoff_payload = _jsonable(phase1_outputs)
+        handoff_path = workspace.metadata_dir / "phase24_handoff.json"
+        handoff_path.write_text(
+            json.dumps(handoff_payload, ensure_ascii=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        handoff_object_name = f"phase1/{job_id}/phase24_inputs/phase1_outputs.json"
+        handoff_gcs_uri = self.storage_client.upload_file(
+            local_path=handoff_path,
+            object_name=handoff_object_name,
+        )
+        logger.info("[gcs]    phase24 handoff uploaded → %s", handoff_gcs_uri)
+        return handoff_gcs_uri
 
     def run_job(
         self,
@@ -209,9 +232,41 @@ class Phase1JobRunner:
         source_ref = source_url or str(source_path)
         result: dict[str, Any] = {}
         run_phase14 = bool(runtime_controls.get("run_phase14"))
-        queue_enabled = runtime_controls.get("phase24_queue_enabled", True)
+        queue_enabled = bool(runtime_controls.get("phase24_queue_enabled", True))
 
-        if run_phase14 and queue_enabled and self.phase24_task_queue_client is not None:
+        if run_phase14 and queue_enabled:
+            if self.phase24_task_queue_client is None:
+                raise RuntimeError(
+                    "run_phase14 requested with queue mode, but Cloud Tasks client is unavailable. "
+                    "Set CLYPT_PHASE24_WORKER_URL and ensure google-cloud-tasks is installed."
+                )
+            enqueue_done = threading.Event()
+            enqueue_error: list[Exception] = []
+            enqueue_summary: list[dict[str, Any]] = []
+
+            def _on_audio_done(partial: Phase1SidecarOutputs) -> None:
+                try:
+                    phase1_outputs_gcs_uri = self._persist_phase24_handoff(
+                        job_id=job_id,
+                        workspace=workspace,
+                        phase1_outputs=partial,
+                    )
+                    summary = self._enqueue_phase24(
+                        job_id=job_id,
+                        source_ref=source_ref,
+                        video_gcs_uri=video_gcs_uri,
+                        phase1_outputs_gcs_uri=phase1_outputs_gcs_uri,
+                        runtime_controls=runtime_controls,
+                    )
+                    enqueue_summary.append(summary)
+                    logger.info(
+                        "[phase24] queue-mode handoff complete — Cloud Task enqueued while RF-DETR finishes"
+                    )
+                except Exception as exc:  # pragma: no cover - defensive passthrough
+                    enqueue_error.append(exc)
+                finally:
+                    enqueue_done.set()
+
             phase1_outputs = run_phase1_sidecars(
                 source_url=source_ref,
                 video_gcs_uri=video_gcs_uri,
@@ -221,16 +276,23 @@ class Phase1JobRunner:
                 visual_extractor=self.visual_extractor,
                 emotion_provider=self.emotion_provider,
                 yamnet_provider=self.yamnet_provider,
+                on_audio_chain_complete=_on_audio_done,
             )
             result["phase1"] = _jsonable(phase1_outputs)
-            result["summary"] = self._enqueue_phase24(
-                job_id=job_id,
-                source_ref=source_ref,
-                video_gcs_uri=video_gcs_uri,
-                phase1_outputs=phase1_outputs,
-                runtime_controls=runtime_controls,
-            )
-        elif run_phase14 and self.phase14_runner is not None:
+            if not enqueue_done.is_set():
+                raise RuntimeError(
+                    "audio-chain callback did not fire; unable to enqueue phase24 work."
+                )
+            if enqueue_error:
+                raise enqueue_error[0]
+            if not enqueue_summary:
+                raise RuntimeError("phase24 enqueue callback completed without a summary.")
+            result["summary"] = enqueue_summary[0]
+        elif run_phase14:
+            if self.phase14_runner is None:
+                raise RuntimeError(
+                    "run_phase14 requested with inline mode, but phase14_runner is unavailable."
+                )
             # Phase 1 sidecars and Phases 2-4 run concurrently:
             # - Thread A: runs all sidecars (visual + audio chain in parallel internally)
             # - Thread B: waits for audio chain callback, then immediately starts Phases 2-4

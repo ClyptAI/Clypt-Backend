@@ -34,6 +34,23 @@ Transcript/timeline contract:
 - Merge step attaches `word_ids` onto turns.
 - Gemini phases consume turn/node payloads (not raw canonical `words[]` objects).
 
+Phase 2-4 backend split (current default):
+
+- Generation: Gemini Developer API (`GENAI_GENERATION_BACKEND=developer`)
+- Embeddings: Vertex (`GENAI_EMBEDDING_BACKEND=vertex`)
+- Queue mode: Cloud Tasks -> Cloud Run worker when `--run-phase14` (default unless `--inline-phase24`)
+- Current worker target: `us-east4` Cloud Run GPU revision (L4), with ffmpeg GPU mode enabled
+
+Phase 2-4 Gemini thinking profile (current default):
+
+- Phase 2A merge/classify: Flash + `low`
+- Phase 2B boundary reconciliation: Flash + `minimal`
+- Phase 3 local semantic edges: Flash + `minimal`
+- Phase 3 long-range adjudication: Flash + `low`
+- Phase 4 meta prompt generation: Flash + `low`
+- Phase 4 subgraph reviews: Flash + `medium`
+- Phase 4 pooled candidate review: Flash + `medium`
+
 ## Start Runs
 
 ### On Droplet: full Phase 1 (and optional 1-4)
@@ -86,6 +103,9 @@ tail -f /var/log/clypt/v3_1_phase1/<job_log>.log
 
 # phase timing gates only
 tail -f /var/log/clypt/v3_1_phase1/<job_log>.log | grep --line-buffered -E "Phase 2 done|Phase 3 done|Phase 4 done|Phases 2-4 done|Phase 1-4 run complete"
+
+# Cloud Run Phase 2-4 worker logs (queue mode, GPU worker)
+gcloud run services logs read clypt-phase24-worker --region=us-east4 --project=clypt-v3 --follow
 ```
 
 ## Key Paths
@@ -96,16 +116,10 @@ tail -f /var/log/clypt/v3_1_phase1/<job_log>.log | grep --line-buffered -E "Phas
 - Phase 1 service logs: `/var/log/clypt/v3_1_phase1`
 - Artifacts: `backend/outputs/v3_1/<run_id>/...`
 
-## Critical Env Facts
+## Canonical Repro Source
 
-- Must be `VIBEVOICE_BACKEND=vllm`
-- Must be `VIBEVOICE_VLLM_MODEL=vibevoice` (not `microsoft/VibeVoice-ASR`)
-- `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required even for VibeVoice-only smoke runs
-- Keep `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1` (strict)
-- Keep `CLYPT_PHASE1_YAMNET_DEVICE=cpu`
-- Keep cache env aligned to `/opt/clypt-phase1/.cache` roots (`TORCH_HOME`, `HF_HOME`; `MODELSCOPE_CACHE` is optional compatibility only)
-- Keep `VIBEVOICE_VLLM_MAX_RETRIES=1` (single-attempt behavior; no automatic retry policy yet)
-- Keep deploy prewarm enabled (`PREWARM_PHASE1_MODELS=1`, default)
+Use this as the single source of truth for copy/paste runtime setup and verification:
+- [Canonical Repro Checklist](/Users/rithvik/Clypt-V3/docs/runtime/v3.1_runtime_guide.md#canonical-repro-checklist) in `docs/runtime/v3.1_runtime_guide.md`
 
 ## Important Gotchas
 
@@ -114,11 +128,6 @@ tail -f /var/log/clypt/v3_1_phase1/<job_log>.log | grep --line-buffered -E "Phas
 - First vLLM start may take 15-30 min due model download; later starts are much faster (cached).
 - If deployment pip resolver backtracks/fails on old `datasets/pyarrow`, deploy script auto-fallbacks to legacy resolver; this is expected.
 - emotion2vec progress logs now report true argmax top labels; old logs with `top: angry 0.00` were a logging artifact, not necessarily inference failure.
-
-## Session Checklist For Any LLM
-
-1. Read the 4 docs above.
-2. Confirm active services + `/health` + `/v1/models` (`vibevoice` present).
-3. Confirm env loaded from `/etc/clypt-phase1/v3_1_phase1.env`.
-4. Run VibeVoice-only smoke test first.
-5. Then run Phase 1/1-4 job and tail logs.
+- Queue-mode Phase 2 can be much slower when Cloud Run worker lacks ffmpeg GPU; logs show `GPU ffmpeg unavailable ... falling back to CPU encoder`.
+- If you see `Budget 0 is invalid. This model only works in thinking mode.`, set `VERTEX_THINKING_BUDGET` to a low positive value (default now `128`).
+- If you see `Gemini returned an edge for a non-shortlisted candidate long-range pair`, it is a strict Phase 3 validation guard; queue retries may recover, otherwise rerun.

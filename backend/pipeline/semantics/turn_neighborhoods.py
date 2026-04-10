@@ -47,7 +47,6 @@ def build_turn_neighborhoods(
                     "speaker_id": turn.speaker_id,
                     "start_ms": turn.start_ms,
                     "end_ms": turn.end_ms,
-                    "word_ids": list(turn.word_ids),
                     "transcript_text": turn.transcript_text,
                     "emotion_labels": emotion_by_turn.get(turn.turn_id, []),
                     "audio_events": audio_labels,
@@ -59,8 +58,6 @@ def build_turn_neighborhoods(
             {
                 "batch_id": f"nb_{batch_number:04d}",
                 "target_turn_ids": [turn.turn_id for turn in target_turns],
-                "left_halo_turn_ids": [turn.turn_id for turn in left_halo_turns],
-                "right_halo_turn_ids": [turn.turn_id for turn in right_halo_turns],
                 "turns": serialized_turns,
             }
         )

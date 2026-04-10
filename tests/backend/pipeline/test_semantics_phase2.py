@@ -98,18 +98,19 @@ def test_build_turn_neighborhoods_creates_overlapping_target_blocks_with_halos()
 
     first = neighborhoods[0]
     assert first["target_turn_ids"] == ["t_000001", "t_000002"]
-    assert first["left_halo_turn_ids"] == []
-    assert first["right_halo_turn_ids"] == ["t_000003"]
+    assert "left_halo_turn_ids" not in first
+    assert "right_halo_turn_ids" not in first
     assert [turn["turn_id"] for turn in first["turns"]] == ["t_000001", "t_000002", "t_000003"]
     assert first["turns"][0]["role"] == "target"
     assert first["turns"][2]["role"] == "halo"
+    assert "word_ids" not in first["turns"][0]
     assert first["turns"][0]["emotion_labels"] == ["fearful"]
     assert first["turns"][1]["audio_events"] == ["Laughter"]
 
     second = neighborhoods[1]
     assert second["target_turn_ids"] == ["t_000003", "t_000004"]
-    assert second["left_halo_turn_ids"] == ["t_000002"]
-    assert second["right_halo_turn_ids"] == []
+    assert "left_halo_turn_ids" not in second
+    assert "right_halo_turn_ids" not in second
     assert [turn["turn_id"] for turn in second["turns"]] == ["t_000002", "t_000003", "t_000004"]
     assert second["turns"][2]["emotion_labels"] == ["surprised"]
 
@@ -156,6 +157,10 @@ def test_merge_and_classify_neighborhood_builds_nodes_from_gemini_partition():
     nodes = merge_and_classify_neighborhood(
         neighborhood_payload=neighborhood,
         gemini_response=gemini_response,
+        turn_word_ids_by_turn_id={
+            turn.turn_id: list(turn.word_ids)
+            for turn in _canonical_timeline().turns
+        },
     )
 
     assert len(nodes) == 1

@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 
 
+def _compact_json(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
 META_PROMPT_GENERATION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -104,7 +108,7 @@ def build_subgraph_review_prompt(*, subgraph_payload: dict) -> str:
         '  "reject_reason": "<why no good clip was found>",\n'
         '  "candidates": []\n'
         "}\n\n"
-        f"Subgraph payload:\n{json.dumps(subgraph_payload, ensure_ascii=True, indent=2)}"
+        f"Subgraph payload:\n{_compact_json(subgraph_payload)}"
     )
 
 
@@ -134,7 +138,7 @@ def build_pooled_candidate_review_prompt(*, candidate_payload: dict) -> str:
         '  "dropped_candidate_temp_ids": ["<clip_id>", "<clip_id>"]\n'
         "}\n\n"
         "Note: dropped_candidate_temp_ids must be an empty list [] if you keep all candidates.\n\n"
-        f"Candidate pool:\n{json.dumps(candidate_payload, ensure_ascii=True, indent=2)}"
+        f"Candidate pool:\n{_compact_json(candidate_payload)}"
     )
 
 
@@ -160,7 +164,7 @@ def build_meta_prompt_generation_prompt(*, node_summaries: list[dict], target_co
         "    ...\n"
         "  ]\n"
         "}\n\n"
-        f"Semantic node summaries:\n{json.dumps(node_summaries, ensure_ascii=True, indent=2)}"
+        f"Semantic node summaries:\n{_compact_json(node_summaries)}"
     )
 
 

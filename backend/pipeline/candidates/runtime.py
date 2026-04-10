@@ -37,6 +37,7 @@ def generate_meta_prompts_live(
     llm_client: Any,
     model: str | None = None,
     duration_s: float = 0.0,
+    thinking_level: str | None = None,
 ) -> list[str]:
     """Generate video-specific retrieval prompts from the semantic node graph using Gemini Flash.
 
@@ -60,7 +61,14 @@ def generate_meta_prompts_live(
         node_summaries=node_summaries,
         target_count=target_count,
     )
-    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=META_PROMPT_GENERATION_SCHEMA, max_output_tokens=1024)
+    response = llm_client.generate_json(
+        prompt=prompt,
+        model=model,
+        temperature=0.0,
+        response_schema=META_PROMPT_GENERATION_SCHEMA,
+        max_output_tokens=32768,
+        thinking_level=thinking_level,
+    )
     prompts = response.get("prompts") or []
     if not prompts or not isinstance(prompts, list):
         raise ValueError(
@@ -90,11 +98,19 @@ def run_subgraph_reviews(
     llm_client: Any,
     model: str | None = None,
     max_concurrent: int = 5,
+    thinking_level: str | None = None,
 ) -> tuple[list[SubgraphReviewResponse], list[dict[str, Any]]]:
     def _call_review(subgraph):
         payload = subgraph.model_dump(mode="json")
         prompt = build_subgraph_review_prompt(subgraph_payload=payload)
-        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=SUBGRAPH_REVIEW_SCHEMA, max_output_tokens=1024)
+        response = llm_client.generate_json(
+            prompt=prompt,
+            model=model,
+            temperature=0.0,
+            response_schema=SUBGRAPH_REVIEW_SCHEMA,
+            max_output_tokens=32768,
+            thinking_level=thinking_level,
+        )
         return review_local_subgraph(subgraph=subgraph, gemini_response=response), {
             "subgraph_id": subgraph.subgraph_id,
             "prompt": prompt,
@@ -115,6 +131,7 @@ def run_candidate_pool_review(
     candidates: list[ClipCandidate],
     llm_client: Any,
     model: str | None = None,
+    thinking_level: str | None = None,
 ) -> PooledCandidateReviewResponse:
     if llm_client is None:
         raise ValueError("llm_client is required for pooled candidate review.")
@@ -122,7 +139,14 @@ def run_candidate_pool_review(
         "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
     }
     prompt = build_pooled_candidate_review_prompt(candidate_payload=payload)
-    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=POOL_REVIEW_SCHEMA, max_output_tokens=4096)
+    response = llm_client.generate_json(
+        prompt=prompt,
+        model=model,
+        temperature=0.0,
+        response_schema=POOL_REVIEW_SCHEMA,
+        max_output_tokens=32768,
+        thinking_level=thinking_level,
+    )
     return review_candidate_pool(candidates=candidates, gemini_response=response)
 
 

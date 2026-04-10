@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 import subprocess
@@ -8,6 +9,22 @@ import tempfile
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_EMOTION2VEC_MODEL_ID = "iic/emotion2vec_plus_large"
+_DEFAULT_FUNASR_MODEL_SOURCE = "hf"
+
+
+def _resolve_funasr_hub() -> str:
+    source = (
+        os.getenv("FUNASR_MODEL_SOURCE", _DEFAULT_FUNASR_MODEL_SOURCE).strip().lower()
+    )
+    if source in {"hf", "huggingface"}:
+        return "hf"
+    logger.warning(
+        "[emotion2vec] unsupported FUNASR_MODEL_SOURCE=%r; forcing HuggingFace",
+        source,
+    )
+    return "hf"
 
 
 def _default_turn_clipper(*, audio_path: Path, start_ms: int, end_ms: int) -> Path:
@@ -43,9 +60,11 @@ def _build_default_model():
         raise RuntimeError(
             "funasr is required for live emotion2vec+ execution."
         ) from exc
-    logger.info("[emotion2vec] loading iic/emotion2vec_plus_large ...")
+    model_id = os.getenv("EMOTION2VEC_MODEL_ID", _DEFAULT_EMOTION2VEC_MODEL_ID)
+    hub = _resolve_funasr_hub()
+    logger.info("[emotion2vec] loading %s (hub=%s) ...", model_id, hub)
     t0 = time.perf_counter()
-    model = AutoModel(model="iic/emotion2vec_plus_large")
+    model = AutoModel(model=model_id, hub=hub, disable_update=True)
     logger.info("[emotion2vec] model loaded in %.1f s", time.perf_counter() - t0)
     return model
 

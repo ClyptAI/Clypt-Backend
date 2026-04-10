@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -17,6 +19,8 @@ from .prompts import (
 from .turn_neighborhoods import build_turn_neighborhoods
 from ..contracts import AudioEventTimeline, CanonicalTimeline, SemanticGraphNode, SpeechEmotionTimeline
 
+logger = logging.getLogger(__name__)
+
 
 def run_merge_and_classify_batches(
     *,
@@ -26,6 +30,7 @@ def run_merge_and_classify_batches(
     llm_client: Any,
     target_turn_count: int = 8,
     halo_turn_count: int = 2,
+    merge_max_output_tokens: int = 32768,
     model: str | None = None,
 ) -> tuple[list[SemanticGraphNode], list[dict[str, Any]]]:
     """Merge/classify per neighborhood batch only (no boundary reconciliation).
@@ -38,14 +43,25 @@ def run_merge_and_classify_batches(
         target_turn_count=target_turn_count,
         halo_turn_count=halo_turn_count,
     )
+    turn_word_ids_by_turn_id = {
+        turn.turn_id: list(turn.word_ids)
+        for turn in canonical_timeline.turns
+    }
     nodes: list[SemanticGraphNode] = []
     debug: list[dict[str, Any]] = []
     for neighborhood in neighborhoods:
         prompt = build_merge_and_classify_prompt(neighborhood_payload=neighborhood)
-        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=MERGE_AND_CLASSIFY_SCHEMA, max_output_tokens=2048)
+        response = llm_client.generate_json(
+            prompt=prompt,
+            model=model,
+            temperature=0.0,
+            response_schema=MERGE_AND_CLASSIFY_SCHEMA,
+            max_output_tokens=merge_max_output_tokens,
+        )
         merged_nodes = merge_and_classify_neighborhood(
             neighborhood_payload=neighborhood,
             gemini_response=response,
+            turn_word_ids_by_turn_id=turn_word_ids_by_turn_id,
         )
         nodes.extend(merged_nodes)
         debug.append(
@@ -66,8 +82,12 @@ def run_merge_classify_and_reconcile(
     llm_client: Any,
     target_batch_count: int = 5,
     max_turns_per_batch: int = 25,
+    merge_max_output_tokens: int = 32768,
+    boundary_max_output_tokens: int = 32768,
     model: str | None = None,
     max_concurrent: int = 5,
+    merge_thinking_level: str | None = None,
+    boundary_thinking_level: str | None = None,
 ) -> tuple[list[SemanticGraphNode], list[dict[str, Any]], list[dict[str, Any]]]:
     """Full Phase 2A + 2B: merge/classify per neighborhood batch, then boundary
     reconciliation between every adjacent batch pair.  Calls are dispatched in
@@ -92,17 +112,38 @@ def run_merge_classify_and_reconcile(
         target_turn_count=batch_size,
         halo_turn_count=halo_size,
     )
+    turn_word_ids_by_turn_id = {
+        turn.turn_id: list(turn.word_ids)
+        for turn in canonical_timeline.turns
+    }
 
     def _call_merge(neighborhood):
         prompt = build_merge_and_classify_prompt(neighborhood_payload=neighborhood)
-        response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=MERGE_AND_CLASSIFY_SCHEMA, max_output_tokens=2048)
+        response = llm_client.generate_json(
+            prompt=prompt,
+            model=model,
+            temperature=0.0,
+            response_schema=MERGE_AND_CLASSIFY_SCHEMA,
+            max_output_tokens=merge_max_output_tokens,
+            thinking_level=merge_thinking_level,
+        )
         return merge_and_classify_neighborhood(
-            neighborhood_payload=neighborhood, gemini_response=response
+            neighborhood_payload=neighborhood,
+            gemini_response=response,
+            turn_word_ids_by_turn_id=turn_word_ids_by_turn_id,
         ), {"batch_id": neighborhood["batch_id"], "prompt": prompt, "response": response}
 
+    merge_started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
         merge_futures = [pool.submit(_call_merge, n) for n in neighborhoods]
         batch_results = [f.result() for f in merge_futures]  # preserves order
+    merge_duration_s = time.perf_counter() - merge_started
+    logger.info(
+        "[phase2] merge/classify batches done in %.1f s (batches=%d, thinking=%s)",
+        merge_duration_s,
+        len(neighborhoods),
+        merge_thinking_level or "default",
+    )
 
     batch_nodes = [r[0] for r in batch_results]
     merge_debug = [r[1] for r in batch_results]
@@ -119,6 +160,8 @@ def run_merge_classify_and_reconcile(
             right_batch_nodes=right,
             llm_client=llm_client,
             model=model,
+            max_output_tokens=boundary_max_output_tokens,
+            thinking_level=boundary_thinking_level,
         )
         return idx, reconciled, {
             "left_batch_id": neighborhoods[idx - 1]["batch_id"],
@@ -129,11 +172,19 @@ def run_merge_classify_and_reconcile(
     seam_indices = range(1, len(batch_nodes))
     seam_results: dict[int, tuple] = {}
     if seam_indices:
+        boundary_started = time.perf_counter()
         with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
             seam_futures = {pool.submit(_call_boundary, i): i for i in seam_indices}
             for f in as_completed(seam_futures):
                 idx, reconciled, debug = f.result()
                 seam_results[idx] = (reconciled, debug)
+        boundary_duration_s = time.perf_counter() - boundary_started
+        logger.info(
+            "[phase2] boundary reconciliation done in %.1f s (seams=%d, thinking=%s)",
+            boundary_duration_s,
+            len(batch_nodes) - 1,
+            boundary_thinking_level or "default",
+        )
 
     # Stitch in order
     final_nodes: list[SemanticGraphNode] = list(batch_nodes[0])
@@ -155,14 +206,23 @@ def run_boundary_reconciliation(
     left_batch_nodes: list[SemanticGraphNode],
     right_batch_nodes: list[SemanticGraphNode],
     llm_client: Any,
+    max_output_tokens: int = 32768,
     model: str | None = None,
+    thinking_level: str | None = None,
 ) -> tuple[list[SemanticGraphNode], dict[str, Any]]:
     overlap_payload = {
         "left_batch_nodes": [node.model_dump(mode="json") for node in left_batch_nodes],
         "right_batch_nodes": [node.model_dump(mode="json") for node in right_batch_nodes],
     }
     prompt = build_boundary_reconciliation_prompt(overlap_payload=overlap_payload)
-    response = llm_client.generate_json(prompt=prompt, model=model, temperature=0.0, response_schema=BOUNDARY_RECONCILIATION_SCHEMA, max_output_tokens=1024)
+    response = llm_client.generate_json(
+        prompt=prompt,
+        model=model,
+        temperature=0.0,
+        response_schema=BOUNDARY_RECONCILIATION_SCHEMA,
+        max_output_tokens=max_output_tokens,
+        thinking_level=thinking_level,
+    )
     reconciled = reconcile_boundary_nodes(
         left_batch_nodes=left_batch_nodes,
         right_batch_nodes=right_batch_nodes,
@@ -183,11 +243,26 @@ def embed_semantic_nodes_live(
     if len(multimodal_media) != len(nodes):
         raise ValueError("multimodal_media must align one-to-one with nodes")
     texts = [build_semantic_embedding_payload(node=node) for node in nodes]
+    semantic_started = time.perf_counter()
     semantic_embeddings = embedding_client.embed_texts(
         texts,
         task_type="RETRIEVAL_DOCUMENT",
     )
+    semantic_duration_s = time.perf_counter() - semantic_started
+    logger.info(
+        "[phase2] semantic embeddings done in %.1f s (nodes=%d)",
+        semantic_duration_s,
+        len(nodes),
+    )
+
+    multimodal_started = time.perf_counter()
     multimodal_embeddings = embedding_client.embed_media_uris(multimodal_media)
+    multimodal_duration_s = time.perf_counter() - multimodal_started
+    logger.info(
+        "[phase2] multimodal embeddings done in %.1f s (nodes=%d)",
+        multimodal_duration_s,
+        len(nodes),
+    )
     embedded_nodes: list[SemanticGraphNode] = []
     for node, semantic_embedding, multimodal_embedding in zip(
         nodes,

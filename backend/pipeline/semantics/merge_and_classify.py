@@ -3,7 +3,12 @@ from __future__ import annotations
 from ..contracts import SemanticGraphNode, SemanticNodeEvidence
 
 
-def merge_and_classify_neighborhood(*, neighborhood_payload: dict, gemini_response: dict | None = None) -> list[SemanticGraphNode]:
+def merge_and_classify_neighborhood(
+    *,
+    neighborhood_payload: dict,
+    gemini_response: dict | None = None,
+    turn_word_ids_by_turn_id: dict[str, list[str]] | None = None,
+) -> list[SemanticGraphNode]:
     """Convert one Gemini neighborhood response into proposed merged semantic nodes."""
     if gemini_response is None:
         raise ValueError("gemini_response is required")
@@ -39,7 +44,11 @@ def merge_and_classify_neighborhood(*, neighborhood_payload: dict, gemini_respon
         emotion_labels: list[str] = []
         audio_events: list[str] = []
         for turn in ordered_turns:
-            word_ids.extend(turn.get("word_ids") or [])
+            turn_id = str(turn.get("turn_id") or "")
+            if turn_word_ids_by_turn_id is not None:
+                word_ids.extend(turn_word_ids_by_turn_id.get(turn_id, []))
+            else:
+                word_ids.extend(turn.get("word_ids") or [])
             transcript_segments.append(str(turn.get("transcript_text") or "").strip())
             for emotion_label in turn.get("emotion_labels") or []:
                 if emotion_label not in emotion_labels:
