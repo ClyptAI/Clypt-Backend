@@ -69,7 +69,7 @@ Do **not** silently fall back to a non-GPU droplet shape. If no H100/H200 slot i
 
 ## DO Project
 
-Use the DigitalOcean project: `Clypt-V3`
+Use the DigitalOcean project: `Clypt-V3M`
 
 This is separate from the GCP project: `clypt-v3`
 
@@ -86,7 +86,7 @@ rsync -az --delete \
   --exclude='outputs' \
   --exclude='*.egg-info' \
   -e "ssh -i ~/.ssh/clypt_do_ed25519" \
-  /Users/rithvik/Clypt-V3/ \
+  /Users/rithvik/Clypt-Backend/ \
   root@<DROPLET_IP>:/opt/clypt-phase1/repo/
 ```
 
@@ -349,7 +349,7 @@ The GCS bucket uses **uniform bucket-level access**. `blob.make_public()` fails 
 ```bash
 # Upload existing key from local machine
 scp -i ~/.ssh/clypt_do_ed25519 \
-  /Users/rithvik/Clypt-V3/.tmp/clypt-phase1-worker-key.json \
+  /Users/rithvik/Clypt-Backend/.tmp/clypt-phase1-worker-key.json \
   root@<DROPLET_IP>:/opt/clypt-phase1/sa-key.json
 
 ssh -i ~/.ssh/clypt_do_ed25519 root@<DROPLET_IP> \
