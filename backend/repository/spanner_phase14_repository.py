@@ -338,7 +338,8 @@ def apply_ddl_statements(
         return
     for index, statement in enumerate(cleaned, start=1):
         try:
-            operation = database.update_ddl([statement], operation_id=f"{operation_id}-{index:02d}")
+            safe_operation_id = f"{operation_id}_{index:02d}".replace("-", "_")
+            operation = database.update_ddl([statement], operation_id=safe_operation_id)
         except Exception as exc:
             if _is_expected_bootstrap_error(exc):
                 continue

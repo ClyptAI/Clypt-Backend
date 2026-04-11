@@ -84,6 +84,13 @@ class SignalConfig:
     hop_decay_2: float = field(default_factory=lambda: float(os.getenv("CLYPT_SIGNAL_HOP_DECAY_2") or "0.55"))
     coverage_weight: float = field(default_factory=lambda: float(os.getenv("CLYPT_SIGNAL_COVERAGE_WEIGHT") or "0.30"))
     direct_ratio_weight: float = field(default_factory=lambda: float(os.getenv("CLYPT_SIGNAL_DIRECT_RATIO_WEIGHT") or "0.15"))
+    max_concurrent: int = field(
+        default_factory=lambda: int(
+            os.getenv("CLYPT_SIGNAL_MAX_CONCURRENT")
+            or os.getenv("CLYPT_GEMINI_MAX_CONCURRENT")
+            or "8"
+        )
+    )
     llm: SignalLLMCallConfig = field(default_factory=SignalLLMCallConfig)
 
     def __post_init__(self) -> None:

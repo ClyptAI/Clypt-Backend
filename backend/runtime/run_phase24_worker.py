@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
 import uvicorn
 
@@ -20,7 +21,7 @@ def configure_logging() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Clypt Phase24 FastAPI worker.")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8081)
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8080")))
     return parser
 
 

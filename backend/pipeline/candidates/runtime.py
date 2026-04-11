@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import json
+import time
 from typing import Any
 
 from ..signals.contracts import SignalPromptSpec
@@ -112,6 +114,7 @@ def run_subgraph_reviews(
     subgraph_provenance_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[SubgraphReviewResponse], list[dict[str, Any]]]:
     def _call_review(subgraph):
+        started = time.perf_counter()
         payload = subgraph.model_dump(mode="json")
         provenance_payload = None
         if subgraph_provenance_by_id is not None:
@@ -125,11 +128,34 @@ def run_subgraph_reviews(
             max_output_tokens=32768,
             thinking_level=thinking_level,
         )
-        return review_local_subgraph(subgraph=subgraph, gemini_response=response), {
+        review = review_local_subgraph(subgraph=subgraph, gemini_response=response)
+        latency_ms = (time.perf_counter() - started) * 1000.0
+        prompt_chars = len(prompt)
+        debug_payload = {
             "subgraph_id": subgraph.subgraph_id,
+            "seed_node_id": subgraph.seed_node_id,
+            "diagnostics": {
+                "latency_ms": latency_ms,
+                "node_count": len(subgraph.nodes),
+                "span_ms": max(0, int(subgraph.end_ms) - int(subgraph.start_ms)),
+                "prompt_chars": prompt_chars,
+                # Heuristic estimator for quick operator diagnostics (not billing-accurate).
+                "prompt_token_estimate": max(1, round(prompt_chars / 4.0)),
+                "payload_chars": len(json.dumps(payload, ensure_ascii=True, separators=(",", ":"))),
+                "provenance_payload_chars": (
+                    len(json.dumps(provenance_payload, ensure_ascii=True, separators=(",", ":")))
+                    if provenance_payload is not None
+                    else 0
+                ),
+                "response_chars": len(json.dumps(response, ensure_ascii=True, separators=(",", ":"))),
+                "reject_all": review.reject_all,
+                "candidate_count": len(review.candidates),
+                "invalid_structured_output": review.reject_reason.startswith("invalid_structured_output:"),
+            },
             "prompt": prompt,
             "response": response,
         }
+        return review, debug_payload
 
     with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
         futures = [pool.submit(_call_review, sg) for sg in subgraphs]
@@ -147,12 +173,30 @@ def run_candidate_pool_review(
     model: str | None = None,
     thinking_level: str | None = None,
 ) -> PooledCandidateReviewResponse:
+    pooled, _ = run_candidate_pool_review_with_debug(
+        candidates=candidates,
+        llm_client=llm_client,
+        model=model,
+        thinking_level=thinking_level,
+    )
+    return pooled
+
+
+def run_candidate_pool_review_with_debug(
+    *,
+    candidates: list[ClipCandidate],
+    llm_client: Any,
+    model: str | None = None,
+    thinking_level: str | None = None,
+) -> tuple[PooledCandidateReviewResponse, dict[str, Any]]:
     if llm_client is None:
         raise ValueError("llm_client is required for pooled candidate review.")
     payload = {
         "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
     }
+    payload_chars = len(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
     prompt = build_pooled_candidate_review_prompt(candidate_payload=payload)
+    started = time.perf_counter()
     response = llm_client.generate_json(
         prompt=prompt,
         model=model,
@@ -161,12 +205,30 @@ def run_candidate_pool_review(
         max_output_tokens=32768,
         thinking_level=thinking_level,
     )
-    return review_candidate_pool(candidates=candidates, gemini_response=response)
+    latency_ms = (time.perf_counter() - started) * 1000.0
+    pooled = review_candidate_pool(candidates=candidates, gemini_response=response)
+    max_pool_rank = max(
+        (decision.pool_rank or 0) for decision in pooled.ranked_candidates
+    ) if pooled.ranked_candidates else 0
+    debug = {
+        "candidate_count": len(candidates),
+        "kept_candidate_count": len(pooled.ranked_candidates),
+        "dropped_candidate_count": len(pooled.dropped_candidate_temp_ids),
+        "max_pool_rank": max_pool_rank,
+        "latency_ms": latency_ms,
+        "prompt_chars": len(prompt),
+        # Heuristic estimator for quick operator diagnostics (not billing-accurate).
+        "prompt_token_estimate": max(1, round(len(prompt) / 4.0)),
+        "payload_chars": payload_chars,
+        "response_chars": len(json.dumps(response, ensure_ascii=True, separators=(",", ":"))),
+    }
+    return pooled, debug
 
 
 __all__ = [
     "embed_prompt_texts_live",
     "generate_meta_prompts_live",
     "run_candidate_pool_review",
+    "run_candidate_pool_review_with_debug",
     "run_subgraph_reviews",
 ]

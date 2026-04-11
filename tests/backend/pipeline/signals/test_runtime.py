@@ -174,11 +174,13 @@ def test_build_comments_output_uses_callpoint10_consolidated_text_for_downstream
         ],
     )
 
-    def _classify(**kwargs):
-        seen_texts.append(kwargs["signal"].text)
-        return {"quality": "high_signal", "reason": "good"}
+    def _classify_batch(**kwargs):
+        batch = list(kwargs["signals"])
+        for signal in batch:
+            seen_texts.append(signal.text)
+        return [{"quality": "high_signal", "reason": "good"} for _ in batch]
 
-    monkeypatch.setattr(signal_runtime, "classify_comment_with_llm", _classify)
+    monkeypatch.setattr(signal_runtime, "classify_comments_with_llm_batch", _classify_batch)
     monkeypatch.setattr(
         signal_runtime,
         "cluster_signals",

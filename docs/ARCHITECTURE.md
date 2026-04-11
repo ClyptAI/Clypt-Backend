@@ -66,7 +66,7 @@ flowchart TD
   phase24Preflight --> commentsFlag
   phase24Preflight --> trendsFlag
 
-  phase24Preflight -->| "invalid preflight" | preflightFail
+  phase24Preflight -->|invalid preflight| preflightFail
 
   mediaResolve --> p1Launch
   p1Launch --> p1VisualExtract --> p1VisualArtifacts --> p1Join
@@ -76,8 +76,8 @@ flowchart TD
   queueDecision --> modeQueue
   modeQueue --> phase2
 
-  commentsFlag -->| "enabled" | commentsFuture
-  trendsFlag -->| "enabled and after phase2" | trendsFuture
+  commentsFlag -->|enabled| commentsFuture
+  trendsFlag -->|enabled and after phase2| trendsFuture
 
   phase2 --> phase3
   phase2 --> trendsFuture
@@ -85,9 +85,9 @@ flowchart TD
   commentsFuture --> hardJoin
   trendsFuture --> hardJoin
 
-  commentsFuture -->| "future failed" | signalFail
-  trendsFuture -->| "future failed" | signalFail
-  hardJoin -->| "invalid signal payload" | signalFail
+  commentsFuture -->|future failed| signalFail
+  trendsFuture -->|future failed| signalFail
+  hardJoin -->|invalid signal payload| signalFail
 
   hardJoin --> phase4
   phase4 --> spannerPersist

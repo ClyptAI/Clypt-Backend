@@ -38,6 +38,17 @@ COMMENT_CLASSIFICATION_SCHEMA = {
     "required": ["quality"],
 }
 
+COMMENT_CLASSIFICATION_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": COMMENT_CLASSIFICATION_SCHEMA,
+        },
+    },
+    "required": ["results"],
+}
+
 CLUSTER_PROMPT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -62,6 +73,17 @@ TREND_RELEVANCE_SCHEMA = {
         "reason": {"type": "string"},
     },
     "required": ["keep", "relevance"],
+}
+
+TREND_RELEVANCE_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": TREND_RELEVANCE_SCHEMA,
+        },
+    },
+    "required": ["results"],
 }
 
 CLUSTER_SPAN_SCHEMA = {
@@ -209,6 +231,40 @@ def classify_comment_with_llm(
         event_logger=event_logger,
     )
 
+def classify_comments_with_llm_batch(
+    *,
+    llm_client: Any,
+    model: str,
+    thinking_level: str,
+    signals: list[ExternalSignal],
+    fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
+) -> list[dict[str, Any]]:
+    if not signals:
+        return []
+    prompt = (
+        "Classify each audience signal quality for clip-seeding usefulness.\n"
+        "Return one result per signal in order with quality in {high_signal, contextual, low_signal, spam}.\n"
+        f"Signals:\n{_compact([signal.model_dump(mode='json') for signal in signals])}"
+    )
+    response = _call_json(
+        llm_client=llm_client,
+        callpoint_id="3",
+        prompt=prompt,
+        model=model,
+        thinking_level=thinking_level,
+        response_schema=COMMENT_CLASSIFICATION_BATCH_SCHEMA,
+        fail_fast=fail_fast,
+        event_logger=event_logger,
+    )
+    results = list(response.get("results") or [])
+    if len(results) != len(signals):
+        raise ValueError(
+            "callpoint_3_batch_classification response length mismatch: "
+            f"expected={len(signals)} got={len(results)}"
+        )
+    return [dict(item or {}) for item in results]
+
 
 def generate_cluster_prompt_with_llm(
     *,
@@ -294,6 +350,42 @@ def adjudicate_trend_relevance_with_llm(
         event_logger=event_logger,
     )
 
+def adjudicate_trend_relevance_with_llm_batch(
+    *,
+    llm_client: Any,
+    model: str,
+    thinking_level: str,
+    trend_items: list[dict[str, Any]],
+    video_context: dict[str, Any],
+    fail_fast: bool = True,
+    event_logger: Callable[..., None] | None = None,
+) -> list[dict[str, Any]]:
+    if not trend_items:
+        return []
+    prompt = (
+        "Decide if each trend signal is relevant to the target video context.\n"
+        "Return one result per trend item in order with keep boolean and relevance score 0..1.\n"
+        f"Video context:\n{_compact(video_context)}\n"
+        f"Trend items:\n{_compact(trend_items)}"
+    )
+    response = _call_json(
+        llm_client=llm_client,
+        callpoint_id="2",
+        prompt=prompt,
+        model=model,
+        thinking_level=thinking_level,
+        response_schema=TREND_RELEVANCE_BATCH_SCHEMA,
+        fail_fast=fail_fast,
+        event_logger=event_logger,
+    )
+    results = list(response.get("results") or [])
+    if len(results) != len(trend_items):
+        raise ValueError(
+            "callpoint_2_batch_adjudication response length mismatch: "
+            f"expected={len(trend_items)} got={len(results)}"
+        )
+    return [dict(item or {}) for item in results]
+
 
 def resolve_cluster_span_with_llm(
     *,
@@ -355,7 +447,9 @@ def explain_candidate_attribution_with_llm(
 
 __all__ = [
     "adjudicate_trend_relevance_with_llm",
+    "adjudicate_trend_relevance_with_llm_batch",
     "classify_comment_with_llm",
+    "classify_comments_with_llm_batch",
     "consolidate_thread_with_llm",
     "SignalLLMCallError",
     "explain_candidate_attribution_with_llm",

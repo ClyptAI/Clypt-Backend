@@ -264,7 +264,9 @@ This deployment guide keeps only the interface contract needed after Phase 1 com
    - `[phase24] queue-mode handoff complete — Cloud Task enqueued while RF-DETR finishes`
 3. Confirm Cloud Run worker receives the task:
    - `gcloud run services logs read clypt-phase24-worker --region=us-east4 --project=clypt-v3 --follow`
-4. Confirm run status in Spanner transitions to `PHASE24_DONE` (or terminal failure requiring rerun).
+4. Ensure Spanner schema is current before replay/benchmark runs that include comments/trends + provenance writes:
+   - `python3 scripts/spanner/ensure_phase24_signal_schema.py --project clypt-v3 --instance clypt-spanner-v3 --database clypt-graph-db-v3`
+5. Confirm run status in Spanner transitions to `PHASE24_DONE` (or terminal failure requiring rerun).
 
 Phase 2-4 worker defaults, comments/trends signal defaults, and Phase 2-4 caveats are documented in the runtime guide.
 

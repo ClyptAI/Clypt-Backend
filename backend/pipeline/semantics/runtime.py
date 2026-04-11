@@ -243,21 +243,39 @@ def embed_semantic_nodes_live(
     if len(multimodal_media) != len(nodes):
         raise ValueError("multimodal_media must align one-to-one with nodes")
     texts = [build_semantic_embedding_payload(node=node) for node in nodes]
-    semantic_started = time.perf_counter()
-    semantic_embeddings = embedding_client.embed_texts(
-        texts,
-        task_type="RETRIEVAL_DOCUMENT",
-    )
-    semantic_duration_s = time.perf_counter() - semantic_started
+    
+    def _embed_semantic() -> tuple[list[list[float]], float]:
+        started = time.perf_counter()
+        embeddings = embedding_client.embed_texts(
+            texts,
+            task_type="RETRIEVAL_DOCUMENT",
+        )
+        return embeddings, time.perf_counter() - started
+
+    def _embed_multimodal() -> tuple[list[list[float]], float]:
+        started = time.perf_counter()
+        embeddings = embedding_client.embed_media_uris(multimodal_media)
+        return embeddings, time.perf_counter() - started
+
+    futures: dict[Any, str] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures[pool.submit(_embed_semantic)] = "semantic"
+        futures[pool.submit(_embed_multimodal)] = "multimodal"
+        results: dict[str, tuple[list[list[float]], float]] = {}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                results[name] = future.result()
+            except Exception as exc:  # pragma: no cover - passthrough
+                raise RuntimeError(f"Phase 2 {name} embedding request failed.") from exc
+
+    semantic_embeddings, semantic_duration_s = results["semantic"]
+    multimodal_embeddings, multimodal_duration_s = results["multimodal"]
     logger.info(
         "[phase2] semantic embeddings done in %.1f s (nodes=%d)",
         semantic_duration_s,
         len(nodes),
     )
-
-    multimodal_started = time.perf_counter()
-    multimodal_embeddings = embedding_client.embed_media_uris(multimodal_media)
-    multimodal_duration_s = time.perf_counter() - multimodal_started
     logger.info(
         "[phase2] multimodal embeddings done in %.1f s (nodes=%d)",
         multimodal_duration_s,

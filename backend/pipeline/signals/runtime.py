@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Callable
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from typing import Any, Callable, TypeVar
 
 from backend.pipeline.contracts import SemanticGraphNode
 
@@ -15,13 +15,32 @@ from .comments_client import (
 )
 from .contracts import ExternalSignal, SignalPipelineOutput, SignalPromptSpec
 from .llm_runtime import (
-    adjudicate_trend_relevance_with_llm,
-    classify_comment_with_llm,
+    adjudicate_trend_relevance_with_llm_batch,
+    classify_comments_with_llm_batch,
     consolidate_thread_with_llm,
     generate_cluster_prompt_with_llm,
     synthesize_trend_queries_with_llm,
 )
 from .trends_client import TrendSpygClient, to_external_signals_from_trends
+
+_COMMENT_CLASSIFY_BATCH_SIZE = 12
+_TREND_RELEVANCE_BATCH_SIZE = 12
+_T = TypeVar("_T")
+
+
+def _chunked(items: list[_T], size: int) -> list[list[_T]]:
+    if size <= 0:
+        raise ValueError("chunk size must be positive")
+    if not items:
+        return []
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _signal_max_workers(*, cfg: Any, task_count: int) -> int:
+    if task_count <= 0:
+        return 1
+    configured = int(getattr(cfg, "max_concurrent", 8) or 8)
+    return max(1, min(configured, task_count))
 
 
 def start_comments_future(
@@ -138,34 +157,57 @@ def _build_comments_output(
     )
     selected_threads = list(threads[:top_threads_count])
 
-    # Fetch full replies and enrich each selected thread.
-    for thread in selected_threads:
+    # Fetch full replies and enrich each selected thread (parallel fan-out).
+    def _fetch_replies_for_thread(thread: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
         top_comment = (thread.get("snippet") or {}).get("topLevelComment") or {}
         parent_id = str(top_comment.get("id") or "")
         if not parent_id:
-            continue
+            return "", []
         full_replies = comments_client.fetch_replies(
             parent_id=parent_id,
             max_replies=cfg.comment_max_replies_per_thread,
         )
-        thread["replies"] = {"comments": full_replies}
+        return parent_id, full_replies
+
+    with ThreadPoolExecutor(
+        max_workers=_signal_max_workers(cfg=cfg, task_count=len(selected_threads))
+    ) as pool:
+        futures = {
+            pool.submit(_fetch_replies_for_thread, thread): idx
+            for idx, thread in enumerate(selected_threads)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            parent_id, full_replies = future.result()
+            if not parent_id:
+                continue
+            selected_threads[idx]["replies"] = {"comments": full_replies}
     replies_total = sum(
         len(((thread.get("replies") or {}).get("comments") or []))
         for thread in selected_threads
     )
 
-    # Callpoint #10: per-thread consolidation.
-    thread_intents: list[dict[str, Any]] = []
-    for thread in selected_threads:
-        consolidated = consolidate_thread_with_llm(
-            llm_client=llm_client,
-            model=cfg.llm.model_10,
-            thinking_level=cfg.llm.thinking_10,
-            thread_payload=thread,
-            fail_fast=cfg.llm_fail_fast,
-            event_logger=signal_event_logger,
-        )
-        thread_intents.append(consolidated)
+    # Callpoint #10: per-thread consolidation (parallel).
+    thread_intents: list[dict[str, Any] | None] = [None] * len(selected_threads)
+    with ThreadPoolExecutor(
+        max_workers=_signal_max_workers(cfg=cfg, task_count=len(selected_threads))
+    ) as pool:
+        futures = {
+            pool.submit(
+                consolidate_thread_with_llm,
+                llm_client=llm_client,
+                model=cfg.llm.model_10,
+                thinking_level=cfg.llm.thinking_10,
+                thread_payload=thread,
+                fail_fast=cfg.llm_fail_fast,
+                event_logger=signal_event_logger,
+            ): idx
+            for idx, thread in enumerate(selected_threads)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            thread_intents[idx] = future.result()
+    thread_intents = [item or {} for item in thread_intents]
 
     signals = to_external_signals_from_threads(thread_items=selected_threads, include_replies=True)
     thread_signal_text_by_id = {
@@ -182,23 +224,40 @@ def _build_comments_output(
         signal.metadata["thread_signal_text"] = merged_text
         signal.text = merged_text
 
-    # Callpoint #3: quality filter.
+    # Callpoint #3: quality filter (micro-batched + parallel).
     filtered_signals: list[ExternalSignal] = []
-    for signal in signals:
-        classified = classify_comment_with_llm(
-            llm_client=llm_client,
-            model=cfg.llm.model_3,
-            thinking_level=cfg.llm.thinking_3,
-            signal=signal,
-            fail_fast=cfg.llm_fail_fast,
-            event_logger=signal_event_logger,
-        )
-        quality = str(classified.get("quality") or "").strip().lower()
-        signal.metadata["quality"] = quality
-        signal.metadata["quality_reason"] = str(classified.get("reason") or "")
-        if quality in {"spam", "low_signal"}:
-            continue
-        filtered_signals.append(signal)
+    signal_batches = _chunked(signals, _COMMENT_CLASSIFY_BATCH_SIZE)
+    classified_batches: list[list[dict[str, Any]] | None] = [None] * len(signal_batches)
+    with ThreadPoolExecutor(
+        max_workers=_signal_max_workers(cfg=cfg, task_count=len(signal_batches))
+    ) as pool:
+        futures = {
+            pool.submit(
+                classify_comments_with_llm_batch,
+                llm_client=llm_client,
+                model=cfg.llm.model_3,
+                thinking_level=cfg.llm.thinking_3,
+                signals=batch,
+                fail_fast=cfg.llm_fail_fast,
+                event_logger=signal_event_logger,
+            ): idx
+            for idx, batch in enumerate(signal_batches)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            classified_batches[idx] = future.result()
+    for batch_signals, batch_classifications in zip(
+        signal_batches,
+        [item or [] for item in classified_batches],
+        strict=True,
+    ):
+        for signal, classified in zip(batch_signals, batch_classifications, strict=True):
+            quality = str(classified.get("quality") or "").strip().lower()
+            signal.metadata["quality"] = quality
+            signal.metadata["quality_reason"] = str(classified.get("reason") or "")
+            if quality in {"spam", "low_signal"}:
+                continue
+            filtered_signals.append(signal)
 
     if not filtered_signals:
         return SignalPipelineOutput(metadata={"youtube_video_id": video_id, "threads_total": total_threads})
@@ -214,24 +273,36 @@ def _build_comments_output(
         similarity_threshold=float(cfg.comment_cluster_sim_threshold),
     )
     prompt_specs: list[SignalPromptSpec] = []
-    for idx, cluster in enumerate(clusters, start=1):
-        prompt_text = generate_cluster_prompt_with_llm(
-            llm_client=llm_client,
-            model=cfg.llm.model_1,
-            thinking_level=cfg.llm.thinking_1,
-            cluster=cluster,
-            fail_fast=cfg.llm_fail_fast,
-            event_logger=signal_event_logger,
-        )
-        prompt_specs.append(
-            SignalPromptSpec(
-                prompt_id=f"comment_prompt_{idx:03d}",
-                text=prompt_text,
-                prompt_source_type="comment",
-                source_cluster_id=cluster.cluster_id,
-                source_cluster_type="comment",
+    if clusters:
+        prompt_texts: list[str | None] = [None] * len(clusters)
+        with ThreadPoolExecutor(
+            max_workers=_signal_max_workers(cfg=cfg, task_count=len(clusters))
+        ) as pool:
+            futures = {
+                pool.submit(
+                    generate_cluster_prompt_with_llm,
+                    llm_client=llm_client,
+                    model=cfg.llm.model_1,
+                    thinking_level=cfg.llm.thinking_1,
+                    cluster=cluster,
+                    fail_fast=cfg.llm_fail_fast,
+                    event_logger=signal_event_logger,
+                ): idx
+                for idx, cluster in enumerate(clusters)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                prompt_texts[idx] = future.result()
+        for idx, (cluster, prompt_text) in enumerate(zip(clusters, prompt_texts, strict=True), start=1):
+            prompt_specs.append(
+                SignalPromptSpec(
+                    prompt_id=f"comment_prompt_{idx:03d}",
+                    text=str(prompt_text or "").strip(),
+                    prompt_source_type="comment",
+                    source_cluster_id=cluster.cluster_id,
+                    source_cluster_type="comment",
+                )
             )
-        )
 
     return SignalPipelineOutput(
         external_signals=filtered_signals,
@@ -288,19 +359,61 @@ def _build_trends_output(
     trend_client = TrendSpygClient(max_items=int(cfg.trend_max_items))
     retained_signals: list[ExternalSignal] = []
     trend_items_count = 0
-    for query in queries:
-        trend_items = trend_client.fetch_related(query=query)
-        trend_items_count += len(trend_items)
-        for item in trend_items:
-            adjudication = adjudicate_trend_relevance_with_llm(
-                llm_client=llm_client,
-                model=cfg.llm.model_2,
-                thinking_level=cfg.llm.thinking_2,
-                trend_item=item,
-                video_context=video_context,
-                fail_fast=cfg.llm_fail_fast,
-                event_logger=signal_event_logger,
+    # Fetch related trend items per query in parallel.
+    trend_items_by_query: list[list[dict[str, Any]] | None] = [None] * len(queries)
+    with ThreadPoolExecutor(
+        max_workers=_signal_max_workers(cfg=cfg, task_count=len(queries))
+    ) as pool:
+        futures = {
+            pool.submit(trend_client.fetch_related, query=query): idx
+            for idx, query in enumerate(queries)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            trend_items_by_query[idx] = future.result()
+    trend_items_by_query = [items or [] for items in trend_items_by_query]
+    trend_items_count = sum(len(items) for items in trend_items_by_query)
+
+    # Callpoint #2: adjudicate relevance in micro-batches with bounded concurrency.
+    batch_jobs: list[tuple[int, list[dict[str, Any]]]] = []
+    for query_idx, trend_items in enumerate(trend_items_by_query):
+        for batch in _chunked(trend_items, _TREND_RELEVANCE_BATCH_SIZE):
+            batch_jobs.append((query_idx, batch))
+
+    batch_results: list[list[dict[str, Any]] | None] = [None] * len(batch_jobs)
+    if batch_jobs:
+        with ThreadPoolExecutor(
+            max_workers=_signal_max_workers(cfg=cfg, task_count=len(batch_jobs))
+        ) as pool:
+            futures = {
+                pool.submit(
+                    adjudicate_trend_relevance_with_llm_batch,
+                    llm_client=llm_client,
+                    model=cfg.llm.model_2,
+                    thinking_level=cfg.llm.thinking_2,
+                    trend_items=batch,
+                    video_context=video_context,
+                    fail_fast=cfg.llm_fail_fast,
+                    event_logger=signal_event_logger,
+                ): idx
+                for idx, (_, batch) in enumerate(batch_jobs)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                batch_results[idx] = future.result()
+
+    # Rebuild per-query adjudications in original item order.
+    adjudications_by_query: list[list[dict[str, Any]]] = [[] for _ in queries]
+    for (query_idx, _batch_items), adjudications in zip(batch_jobs, [item or [] for item in batch_results], strict=True):
+        adjudications_by_query[query_idx].extend(adjudications)
+
+    for query, trend_items, adjudications in zip(queries, trend_items_by_query, adjudications_by_query, strict=True):
+        if len(adjudications) != len(trend_items):
+            raise ValueError(
+                "trend adjudication count mismatch for query "
+                f"{query!r}: expected {len(trend_items)} got {len(adjudications)}"
             )
+        for item, adjudication in zip(trend_items, adjudications, strict=True):
             keep = bool(adjudication.get("keep"))
             relevance = float(adjudication.get("relevance") or 0.0)
             if not keep and relevance < float(cfg.trend_relevance_threshold):
@@ -323,24 +436,36 @@ def _build_trends_output(
     )
 
     prompt_specs: list[SignalPromptSpec] = []
-    for idx, cluster in enumerate(clusters, start=1):
-        prompt_text = generate_cluster_prompt_with_llm(
-            llm_client=llm_client,
-            model=cfg.llm.model_1,
-            thinking_level=cfg.llm.thinking_1,
-            cluster=cluster,
-            fail_fast=cfg.llm_fail_fast,
-            event_logger=signal_event_logger,
-        )
-        prompt_specs.append(
-            SignalPromptSpec(
-                prompt_id=f"trend_prompt_{idx:03d}",
-                text=prompt_text,
-                prompt_source_type="trend",
-                source_cluster_id=cluster.cluster_id,
-                source_cluster_type="trend",
+    if clusters:
+        prompt_texts: list[str | None] = [None] * len(clusters)
+        with ThreadPoolExecutor(
+            max_workers=_signal_max_workers(cfg=cfg, task_count=len(clusters))
+        ) as pool:
+            futures = {
+                pool.submit(
+                    generate_cluster_prompt_with_llm,
+                    llm_client=llm_client,
+                    model=cfg.llm.model_1,
+                    thinking_level=cfg.llm.thinking_1,
+                    cluster=cluster,
+                    fail_fast=cfg.llm_fail_fast,
+                    event_logger=signal_event_logger,
+                ): idx
+                for idx, cluster in enumerate(clusters)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                prompt_texts[idx] = future.result()
+        for idx, (cluster, prompt_text) in enumerate(zip(clusters, prompt_texts, strict=True), start=1):
+            prompt_specs.append(
+                SignalPromptSpec(
+                    prompt_id=f"trend_prompt_{idx:03d}",
+                    text=str(prompt_text or "").strip(),
+                    prompt_source_type="trend",
+                    source_cluster_id=cluster.cluster_id,
+                    source_cluster_type="trend",
+                )
             )
-        )
 
     return SignalPipelineOutput(
         external_signals=retained_signals,

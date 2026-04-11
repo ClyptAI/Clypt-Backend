@@ -16,7 +16,7 @@ from backend.pipeline.candidates.dedupe_candidates import dedupe_clip_candidates
 from backend.pipeline.candidates.runtime import (
     embed_prompt_texts_live,
     generate_meta_prompts_live,
-    run_candidate_pool_review,
+    run_candidate_pool_review_with_debug,
     run_subgraph_reviews,
 )
 from backend.pipeline.candidates.seed_retrieval import retrieve_seed_nodes
@@ -638,19 +638,94 @@ class V31LivePhase14Runner:
             subgraph_provenance_by_id=subgraph_provenance_by_id,
         )
         logger.info("[phase4] subgraph reviews done in %.1f s", time.perf_counter() - subgraph_review_started)
+        subgraph_review_diagnostics = [
+            dict(item.get("diagnostics") or {})
+            for item in subgraph_debug
+            if isinstance(item, dict)
+        ]
+
+        def _diag_mean(key: str) -> float:
+            values = [float(diag.get(key) or 0.0) for diag in subgraph_review_diagnostics]
+            return sum(values) / len(values) if values else 0.0
+
+        def _diag_p95(key: str) -> float:
+            values = sorted(float(diag.get(key) or 0.0) for diag in subgraph_review_diagnostics)
+            if not values:
+                return 0.0
+            rank = max(0, int((len(values) - 1) * 0.95))
+            return values[rank]
+
+        def _diag_max(key: str) -> float:
+            values = [float(diag.get(key) or 0.0) for diag in subgraph_review_diagnostics]
+            return max(values) if values else 0.0
+
+        invalid_structured_output_count = sum(
+            1 for diag in subgraph_review_diagnostics if bool(diag.get("invalid_structured_output"))
+        )
+        reject_all_count = sum(
+            1 for diag in subgraph_review_diagnostics if bool(diag.get("reject_all"))
+        )
+        total_reviewed_candidates = sum(
+            int(diag.get("candidate_count") or 0) for diag in subgraph_review_diagnostics
+        )
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="phase4",
+            event="subgraph_review_diagnostics",
+            attempt=attempt,
+            status="success",
+            reviewed_subgraph_count=len(subgraph_review_diagnostics),
+            rejected_subgraph_count=reject_all_count,
+            invalid_structured_output_count=invalid_structured_output_count,
+            reviewed_candidate_count=total_reviewed_candidates,
+            avg_latency_ms=_diag_mean("latency_ms"),
+            p95_latency_ms=_diag_p95("latency_ms"),
+            max_latency_ms=_diag_max("latency_ms"),
+            avg_node_count=_diag_mean("node_count"),
+            max_node_count=_diag_max("node_count"),
+            avg_span_ms=_diag_mean("span_ms"),
+            max_span_ms=_diag_max("span_ms"),
+            avg_prompt_chars=_diag_mean("prompt_chars"),
+            p95_prompt_chars=_diag_p95("prompt_chars"),
+            avg_prompt_token_estimate=_diag_mean("prompt_token_estimate"),
+            max_prompt_token_estimate=_diag_max("prompt_token_estimate"),
+        )
         raw_candidates: list[ClipCandidate] = []
         for review in reviews:
             raw_candidates.extend(review.candidates)
         deduped_candidates = dedupe_clip_candidates(candidates=raw_candidates)
         pool_review_started = time.perf_counter()
-        pooled = run_candidate_pool_review(
-            candidates=deduped_candidates,
-            llm_client=self.llm_client,
-            model=self.flash_model,
-            thinking_level=self.config.phase4_pool_thinking_level,
-        ) if deduped_candidates else None
+        pool_review_debug: dict[str, Any] = {
+            "candidate_count": len(deduped_candidates),
+            "kept_candidate_count": 0,
+            "dropped_candidate_count": 0,
+            "max_pool_rank": 0,
+            "latency_ms": 0.0,
+            "prompt_chars": 0,
+            "prompt_token_estimate": 0,
+            "payload_chars": 0,
+            "response_chars": 0,
+        }
+        pooled = None
+        if deduped_candidates:
+            pooled, pool_review_debug = run_candidate_pool_review_with_debug(
+                candidates=deduped_candidates,
+                llm_client=self.llm_client,
+                model=self.flash_model,
+                thinking_level=self.config.phase4_pool_thinking_level,
+            )
         if deduped_candidates:
             logger.info("[phase4] pooled candidate review done in %.1f s", time.perf_counter() - pool_review_started)
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="phase4",
+            event="pooled_review_diagnostics",
+            attempt=attempt,
+            status="success" if deduped_candidates else "skipped",
+            **pool_review_debug,
+        )
 
         final_candidates: list[ClipCandidate] = []
         if pooled:
@@ -685,6 +760,7 @@ class V31LivePhase14Runner:
             time_window_ms=self.config.signals.time_window_ms,
             fail_fast=self.config.signals.llm_fail_fast,
             signal_event_logger=self._build_signal_event_logger(run_id=run_id, job_id=job_id, attempt=attempt),
+            max_concurrent=self.config.gemini_max_concurrent,
         )
         self._emit_log(
             run_id=run_id,
@@ -882,6 +958,50 @@ class V31LivePhase14Runner:
         self._save_debug_json(paths.candidate_dedup_debug, [candidate.model_dump(mode="json") for candidate in deduped_candidates])
         self._save_debug_json(paths.clip_candidates, [candidate.model_dump(mode="json") for candidate in final_candidates])
         self._save_debug_json(paths.candidates_dir / "subgraph_review_debug.json", subgraph_debug)
+        self._save_debug_json(
+            paths.candidates_dir / "pool_review_diagnostics.json",
+            pool_review_debug,
+        )
+        self._save_debug_json(
+            paths.candidates_dir / "subgraph_review_diagnostics.json",
+            {
+                "run_id": run_id,
+                "reviewed_subgraph_count": len(subgraph_review_diagnostics),
+                "rejected_subgraph_count": reject_all_count,
+                "invalid_structured_output_count": invalid_structured_output_count,
+                "reviewed_candidate_count": total_reviewed_candidates,
+                "latency_ms": {
+                    "avg": _diag_mean("latency_ms"),
+                    "p95": _diag_p95("latency_ms"),
+                    "max": _diag_max("latency_ms"),
+                },
+                "node_count": {
+                    "avg": _diag_mean("node_count"),
+                    "max": _diag_max("node_count"),
+                },
+                "span_ms": {
+                    "avg": _diag_mean("span_ms"),
+                    "max": _diag_max("span_ms"),
+                },
+                "prompt_chars": {
+                    "avg": _diag_mean("prompt_chars"),
+                    "p95": _diag_p95("prompt_chars"),
+                },
+                "prompt_token_estimate": {
+                    "avg": _diag_mean("prompt_token_estimate"),
+                    "max": _diag_max("prompt_token_estimate"),
+                },
+                "per_subgraph": [
+                    {
+                        "subgraph_id": str(item.get("subgraph_id") or ""),
+                        "seed_node_id": str(item.get("seed_node_id") or ""),
+                        **dict(item.get("diagnostics") or {}),
+                    }
+                    for item in subgraph_debug
+                    if isinstance(item, dict)
+                ],
+            },
+        )
         self._save_debug_json(paths.candidates_dir / "prompt_source_links_debug.json", [link.model_dump(mode="json") for link in prompt_source_links])
         self._save_debug_json(
             paths.candidates_dir / "subgraph_provenance_debug.json",
@@ -898,6 +1018,28 @@ class V31LivePhase14Runner:
                 "prompt_count": len(embedded_prompts),
                 "seed_count": len(seeds),
                 "subgraph_count": len(subgraphs),
+                "subgraph_reviewed_candidate_count": total_reviewed_candidates,
+                "subgraph_rejected_count": reject_all_count,
+                "subgraph_invalid_structured_output_count": invalid_structured_output_count,
+                "subgraph_review_avg_latency_ms": _diag_mean("latency_ms"),
+                "subgraph_review_p95_latency_ms": _diag_p95("latency_ms"),
+                "subgraph_review_max_latency_ms": _diag_max("latency_ms"),
+                "subgraph_review_avg_node_count": _diag_mean("node_count"),
+                "subgraph_review_max_node_count": _diag_max("node_count"),
+                "subgraph_review_avg_span_ms": _diag_mean("span_ms"),
+                "subgraph_review_max_span_ms": _diag_max("span_ms"),
+                "subgraph_review_avg_prompt_chars": _diag_mean("prompt_chars"),
+                "subgraph_review_p95_prompt_chars": _diag_p95("prompt_chars"),
+                "subgraph_review_avg_prompt_token_estimate": _diag_mean("prompt_token_estimate"),
+                "subgraph_review_max_prompt_token_estimate": _diag_max("prompt_token_estimate"),
+                "pooled_review_candidate_count": int(pool_review_debug.get("candidate_count") or 0),
+                "pooled_review_kept_candidate_count": int(pool_review_debug.get("kept_candidate_count") or 0),
+                "pooled_review_dropped_candidate_count": int(pool_review_debug.get("dropped_candidate_count") or 0),
+                "pooled_review_latency_ms": float(pool_review_debug.get("latency_ms") or 0.0),
+                "pooled_review_prompt_chars": int(pool_review_debug.get("prompt_chars") or 0),
+                "pooled_review_prompt_token_estimate": int(pool_review_debug.get("prompt_token_estimate") or 0),
+                "pooled_review_payload_chars": int(pool_review_debug.get("payload_chars") or 0),
+                "pooled_review_response_chars": int(pool_review_debug.get("response_chars") or 0),
                 "raw_candidate_count": len(raw_candidates),
                 "deduped_candidate_count": len(deduped_candidates),
                 "final_candidate_count": len(final_candidates),

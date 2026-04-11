@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 from typing import Any, Callable
 
@@ -28,6 +29,7 @@ def build_node_signal_links(
     time_window_ms: int,
     fail_fast: bool = True,
     signal_event_logger: Callable[..., None] | None = None,
+    max_concurrent: int = 8,
 ) -> list[NodeSignalLink]:
     if not clusters:
         return []
@@ -44,14 +46,13 @@ def build_node_signal_links(
         adjacency[edge.source_node_id].append((edge.target_node_id, edge.edge_type))
         adjacency[edge.target_node_id].append((edge.source_node_id, edge.edge_type))
 
-    output: list[NodeSignalLink] = []
-    for cluster_id, cluster in cluster_by_id.items():
+    def _build_links_for_cluster(cluster_id: str, cluster: ExternalSignalCluster) -> list[NodeSignalLink]:
         prompt = prompt_by_cluster.get(cluster_id)
         if prompt is None:
-            continue
+            return []
         prompt_embedding = prompt_embeddings.get(prompt.prompt_id)
         if not prompt_embedding:
-            continue
+            return []
 
         seed_hits = retrieve_seed_nodes(
             prompts=[{"prompt_id": prompt.prompt_id, "embedding": prompt_embedding}],
@@ -59,7 +60,7 @@ def build_node_signal_links(
             top_k_per_prompt=5,
         )
         if not seed_hits:
-            continue
+            return []
 
         seed_ids = [hit["node_id"] for hit in seed_hits]
         hit_by_id = {hit["node_id"]: hit for hit in seed_hits}
@@ -97,13 +98,14 @@ def build_node_signal_links(
                 ),
             )
 
+        cluster_links: list[NodeSignalLink] = []
         for node_id in direct_ids:
             node = node_by_id[node_id]
             similarity = float(hit_by_id.get(node_id, {}).get("retrieval_score") or 0.0)
             if similarity == 0.0 and node.semantic_embedding:
                 sim = cosine_similarity(prompt_embedding, node.semantic_embedding)
                 similarity = 0.0 if sim == float("-inf") else float(sim)
-            output.append(
+            cluster_links.append(
                 NodeSignalLink(
                     node_id=node_id,
                     cluster_id=cluster_id,
@@ -119,7 +121,7 @@ def build_node_signal_links(
             )
 
         if max_hops <= 0:
-            continue
+            return cluster_links
 
         expansion_seeds = [
             {
@@ -170,7 +172,7 @@ def build_node_signal_links(
                 if neighbor.semantic_embedding:
                     sim = cosine_similarity(prompt_embedding, neighbor.semantic_embedding)
                     similarity = 0.0 if sim == float("-inf") else float(sim)
-                output.append(
+                cluster_links.append(
                     NodeSignalLink(
                         node_id=neighbor_id,
                         cluster_id=cluster_id,
@@ -186,6 +188,22 @@ def build_node_signal_links(
                     )
                 )
 
+        return cluster_links
+
+    cluster_items = sorted(cluster_by_id.items(), key=lambda item: item[0])
+    output_by_cluster: list[list[NodeSignalLink] | None] = [None] * len(cluster_items)
+    with ThreadPoolExecutor(max_workers=max(1, min(int(max_concurrent or 1), len(cluster_items) or 1))) as pool:
+        futures = {
+            pool.submit(_build_links_for_cluster, cluster_id, cluster): idx
+            for idx, (cluster_id, cluster) in enumerate(cluster_items)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            output_by_cluster[idx] = future.result()
+
+    output: list[NodeSignalLink] = []
+    for links in output_by_cluster:
+        output.extend(links or [])
     return _dedupe_node_signal_links(output)
 
 

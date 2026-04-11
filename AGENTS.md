@@ -17,6 +17,15 @@ Operational startup and maintenance guide for coding agents and maintainers.
 4. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 5. [docs/specs/SPEC_INDEX.md](docs/specs/SPEC_INDEX.md)
 
+## Documentation-First Rule (Required)
+
+When in doubt, read documentation before making changes or running operational commands.
+
+- Start with the required read order above.
+- Treat docs as the source of truth for runtime/deploy behavior unless code has clearly diverged.
+- If behavior is unclear, re-check `RUNTIME_GUIDE.md` and `PHASE_1_DEPLOYMENT.md` before proceeding.
+- If you discover a docs/code mismatch, call it out and fix docs or code intentionally (do not guess).
+
 ## Canonical Run Commands
 
 ### Local setup
@@ -50,6 +59,7 @@ python -m backend.runtime.run_phase1 \
 - Phase 1 audio chain must launch immediately after ASR completion.
 - Phase 2-4 production worker profile defaults to `us-east4` L4 GPU-accelerated.
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
+- Phase 2-4 worker runtime requires `ffmpeg`; deploy from `docker/phase24-worker/Dockerfile` (use `scripts/deploy_phase24_worker.sh`, not generic source buildpacks).
 
 ## Critical Maintenance Rule
 

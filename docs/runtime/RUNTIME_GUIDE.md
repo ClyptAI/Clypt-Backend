@@ -10,6 +10,7 @@ This is the canonical runtime reference for implemented backend behavior (Phases
 - **Phase 1 host:** GPU droplet (`run_phase1`, API service, worker loop).
 - **ASR path:** `VibeVoiceVLLMProvider` against local `clypt-vllm-vibevoice.service`.
 - **Phase 2-4 execution path:** Cloud Tasks dispatch to Cloud Run worker (`us-east4`), defaulting to an L4 GPU-accelerated worker profile.
+- **Phase 2-4 region boundary:** only `us-east4` is the active production worker region; remove stale duplicate services in other regions.
 - **Generation backend:** Gemini Developer API only (`GENAI_GENERATION_BACKEND=developer`).
 - **Embedding backend:** Vertex (`VERTEX_EMBEDDING_BACKEND=vertex`).
 
@@ -73,7 +74,18 @@ tail -f /var/log/clypt/v3_1_phase1/<job_log>.log
 gcloud run services logs read clypt-phase24-worker --region=us-east4 --project=clypt-v3 --follow
 ```
 
-### 4.5 Verify run in Spanner
+### 4.5 Sync Spanner schema (required before replay/deploy benchmarks)
+
+Run this once after pulling backend changes that touch comments/trends or Phase 4 provenance persistence:
+
+```bash
+python3 scripts/spanner/ensure_phase24_signal_schema.py \
+  --project clypt-v3 \
+  --instance clypt-spanner-v3 \
+  --database clypt-graph-db-v3
+```
+
+### 4.6 Verify run in Spanner
 
 ```bash
 gcloud spanner databases execute-sql clypt-graph-db-v3 \
@@ -249,6 +261,10 @@ Expect these log gates in successful Phase 2-4 runs:
 4. Strict long-range validation:
    - non-shortlisted long-range edge proposals are hard failures by design.
    - queue retries may recover; repeated failures usually require rerun.
+5. Cloud Run GPU availability / quota pressure:
+   - task dispatch can return `429 no available instance` before worker code starts.
+   - this is typically quota/capacity pressure on `run.googleapis.com/nvidia_l4_gpu_allocation_no_zonal_redundancy` (per-project, per-region).
+   - keep Cloud Tasks serial (`maxConcurrentDispatches=1`) when running a single-GPU worker profile.
 
 See [ERROR_LOG.md](../ERROR_LOG.md) for incident history and recoveries.
 
