@@ -2,7 +2,7 @@
 
 Integration notes for backend contract alignment with the current frontend repo:
 
-- Frontend repo path: `/Users/rithvik/clypt-frontend`
+- Frontend repo path: `/Users/rithvik/Clypt-Frontend`
 
 ## Current Backend Outputs Relevant To Frontend
 
