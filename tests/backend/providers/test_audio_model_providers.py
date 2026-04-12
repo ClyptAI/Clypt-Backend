@@ -133,3 +133,51 @@ def test_yamnet_provider_merges_adjacent_patch_events():
         {"event_label": "Music", "start_ms": 2500, "end_ms": 2900, "confidence": 0.61},
     ]
     assert provider.device == "gpu"
+
+
+def test_vibevoice_vllm_payload_wires_sampling_and_beam_controls(tmp_path: Path):
+    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
+
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"fake-audio")
+
+    provider = VibeVoiceVLLMProvider(
+        base_url="http://127.0.0.1:8000",
+        do_sample=True,
+        temperature=0.2,
+        top_p=0.91,
+        repetition_penalty=0.97,
+        num_beams=4,
+    )
+
+    payload = provider._build_payload(audio_path=audio, context="", duration_s=2.5)
+
+    assert payload["temperature"] == 0.2
+    assert payload["top_p"] == 0.91
+    assert payload["repetition_penalty"] == 0.97
+    assert payload["use_beam_search"] is True
+    assert payload["best_of"] == 4
+
+
+def test_vibevoice_vllm_payload_disables_sampling_when_do_sample_off(tmp_path: Path):
+    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
+
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"fake-audio")
+
+    provider = VibeVoiceVLLMProvider(
+        base_url="http://127.0.0.1:8000",
+        do_sample=False,
+        temperature=0.8,
+        top_p=0.6,
+        repetition_penalty=0.97,
+        num_beams=1,
+    )
+
+    payload = provider._build_payload(audio_path=audio, context="", duration_s=1.0)
+
+    assert payload["temperature"] == 0.0
+    assert payload["top_p"] == 1.0
+    assert payload["repetition_penalty"] == 0.97
+    assert "use_beam_search" not in payload
+    assert "best_of" not in payload

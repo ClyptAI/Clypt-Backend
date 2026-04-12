@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-04-10
+**Last updated:** 2026-04-12
 
 This is the canonical runtime reference for implemented backend behavior (Phases 1-4) plus comments/trends augmentation in Phase 2-4.
 
@@ -10,6 +10,7 @@ This is the canonical runtime reference for implemented backend behavior (Phases
 - **Phase 1 host:** GPU droplet (`run_phase1`, API service, worker loop).
 - **ASR path:** `VibeVoiceVLLMProvider` against local `clypt-vllm-vibevoice.service`.
 - **Phase 2-4 execution path:** Cloud Tasks dispatch to Cloud Run worker (`us-east4`), defaulting to an L4 GPU-accelerated worker profile.
+- **Queue handoff timing:** Phase 2-4 enqueue is triggered when the audio chain completes, and can happen while RF-DETR is still finishing.
 - **Phase 2-4 region boundary:** only `us-east4` is the active production worker region; remove stale duplicate services in other regions.
 - **Generation backend:** Gemini Developer API only (`GENAI_GENERATION_BACKEND=developer`).
 - **Embedding backend:** Vertex (`VERTEX_EMBEDDING_BACKEND=vertex`).
@@ -110,7 +111,8 @@ Required regardless of run type:
 Important defaults:
 
 - `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1`
-- `CLYPT_PHASE1_YAMNET_DEVICE=cpu`
+- YAMNet device defaults to CPU when `CLYPT_PHASE1_YAMNET_DEVICE` is unset.
+- VibeVoice decoding defaults: `VIBEVOICE_DO_SAMPLE=0.0`, `VIBEVOICE_TOP_P=1.0`, `VIBEVOICE_NUM_BEAMS=1.0`, `VIBEVOICE_REPETITION_PENALTY=0.97`.
 - `CLYPT_GEMINI_MAX_CONCURRENT=8`
 - `CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY=8`
 - `CLYPT_PHASE3_TARGET_BATCH_COUNT=3`

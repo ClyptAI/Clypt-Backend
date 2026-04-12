@@ -9,7 +9,7 @@ Operational startup and maintenance guide for coding agents and maintainers.
 - Planned: Phases 5-6
 - Current ASR backend: vLLM VibeVoice only
 
-## Read Order (Required)
+## Read Order (Required - You MUST read these before reporting back to the user.)
 
 1. [README.md](README.md)
 2. [docs/runtime/RUNTIME_GUIDE.md](docs/runtime/RUNTIME_GUIDE.md)
@@ -23,7 +23,8 @@ Operational startup and maintenance guide for coding agents and maintainers.
 When in doubt, read documentation before making changes or running operational commands.
 
 - Start with the required read order above.
-- Always use GitNexus for codebase retrieval/search before falling back to ad-hoc file scanning. Initialize it at the beginning of a session if it hasn't been already.
+- Always use GitNexus for codebase retrieval/search before falling back to ad-hoc file scanning. 
+- If this is a brand new agent session, run `npx gitnexus analyze` as soon as you finish reading this doc.
 - IF YOU ARE OPENAI CODEX, you may NOT at any cost do "invocation": { "server": "codebase-retrieval", "tool": "codebase-retrieval" }. Use GitNexus for retrieval ALWAYS.
 - Always double-check `.gitignore` coverage before committing to avoid accidental local artifact commits.
 - Treat docs as the source of truth for runtime/deploy behavior unless code has clearly diverged.
@@ -101,7 +102,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (2477 symbols, 6285 relationships, 196 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (2531 symbols, 6341 relationships, 196 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

@@ -26,6 +26,36 @@ def _read_env(*names: str) -> str | None:
     return None
 
 
+def _read_bool_env(*names: str, default: bool = False) -> bool:
+    raw = _read_env(*names)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "1.0", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "0.0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ValueError(
+        f"Invalid boolean value {raw!r} for {', '.join(names)}; "
+        "expected one of 0/1, true/false, yes/no."
+    )
+
+
+def _read_int_env(*names: str, default: int) -> int:
+    raw = _read_env(*names)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        parsed = float(raw)
+        if not parsed.is_integer():
+            raise ValueError(
+                f"Invalid integer value {raw!r} for {', '.join(names)}; expected a whole number."
+            )
+        return int(parsed)
+
+
 def _discover_gcloud_project() -> str | None:
     try:
         result = subprocess.run(
@@ -64,7 +94,7 @@ class VibeVoiceSettings:
     do_sample: bool = False
     temperature: float = 0.0
     top_p: float = 1.0
-    repetition_penalty: float = 1.0
+    repetition_penalty: float = 0.97
     num_beams: int = 1
 
 
@@ -142,7 +172,7 @@ class Phase1RuntimeSettings:
             os.getenv("CLYPT_PHASE1_WORK_ROOT", "backend/outputs/v3_1_phase1_work")
         )
     )
-    run_yamnet_on_gpu: bool = True
+    run_yamnet_on_gpu: bool = False
     keep_workdir: bool = False
     input_mode: str = "test_bank"
     test_bank_path: str | None = None
@@ -210,11 +240,11 @@ def load_provider_settings() -> ProviderSettings:
         vibevoice=VibeVoiceSettings(
             hotwords_context=hotwords_context,
             max_new_tokens=int(_read_env("VIBEVOICE_MAX_NEW_TOKENS") or "32768"),
-            do_sample=(_read_env("VIBEVOICE_DO_SAMPLE") or "0") == "1",
+            do_sample=_read_bool_env("VIBEVOICE_DO_SAMPLE", default=False),
             temperature=float(_read_env("VIBEVOICE_TEMPERATURE") or "0"),
-            top_p=float(_read_env("VIBEVOICE_TOP_P") or "1"),
-            repetition_penalty=float(_read_env("VIBEVOICE_REPETITION_PENALTY") or "1"),
-            num_beams=int(_read_env("VIBEVOICE_NUM_BEAMS") or "1"),
+            top_p=float(_read_env("VIBEVOICE_TOP_P") or "1.0"),
+            repetition_penalty=float(_read_env("VIBEVOICE_REPETITION_PENALTY") or "0.97"),
+            num_beams=_read_int_env("VIBEVOICE_NUM_BEAMS", default=1),
         ),
         vllm_vibevoice=vllm_settings,
         vertex=VertexSettings(
@@ -349,7 +379,7 @@ def load_provider_settings() -> ProviderSettings:
             working_root=Path(
                 _read_env("CLYPT_PHASE1_WORK_ROOT") or "backend/outputs/v3_1_phase1_work"
             ),
-            run_yamnet_on_gpu=(_read_env("CLYPT_PHASE1_YAMNET_DEVICE") or "gpu").lower()
+            run_yamnet_on_gpu=(_read_env("CLYPT_PHASE1_YAMNET_DEVICE") or "cpu").lower()
             == "gpu",
             keep_workdir=(_read_env("CLYPT_PHASE1_KEEP_WORKDIR") or "0") == "1",
             input_mode=(_read_env("CLYPT_PHASE1_INPUT_MODE") or "test_bank").strip().lower(),

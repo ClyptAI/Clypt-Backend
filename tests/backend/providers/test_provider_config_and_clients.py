@@ -34,13 +34,16 @@ def test_load_provider_settings_uses_env_and_gcloud_fallback(
     assert settings.vllm_vibevoice.model == "vibevoice"
     assert settings.vibevoice.max_new_tokens == 32768
     assert settings.vibevoice.do_sample is False
+    assert settings.vibevoice.top_p == 1.0
+    assert settings.vibevoice.num_beams == 1
+    assert settings.vibevoice.repetition_penalty == 0.97
     assert settings.vertex.project == "clypt-v3"
     assert settings.vertex.generation_location == "global"
     assert settings.vertex.embedding_location == "us-central1"
     assert settings.storage.gcs_bucket == "bucket-a"
     assert settings.vertex.generation_model
     assert settings.vertex.embedding_model
-    assert settings.phase1_runtime.run_yamnet_on_gpu is True
+    assert settings.phase1_runtime.run_yamnet_on_gpu is False
 
 
 def test_load_provider_settings_vllm_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,6 +62,9 @@ def test_load_provider_settings_vllm_defaults(tmp_path: Path, monkeypatch: pytes
     assert settings.vllm_vibevoice.model == "vibevoice"
     assert settings.vibevoice.max_new_tokens == 32768
     assert settings.vibevoice.do_sample is False
+    assert settings.vibevoice.top_p == 1.0
+    assert settings.vibevoice.num_beams == 1
+    assert settings.vibevoice.repetition_penalty == 0.97
 
 
 def test_load_provider_settings_raises_without_gcs_bucket(
@@ -96,7 +102,10 @@ def test_load_provider_settings_reads_untracked_env_local(
                 "VIBEVOICE_BACKEND=vllm",
                 "VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000",
                 "VIBEVOICE_VLLM_MODEL=vibevoice",
-                "VIBEVOICE_DO_SAMPLE=1",
+                "VIBEVOICE_DO_SAMPLE=1.0",
+                "VIBEVOICE_TOP_P=0.91",
+                "VIBEVOICE_NUM_BEAMS=4.0",
+                "VIBEVOICE_REPETITION_PENALTY=0.97",
                 "GOOGLE_CLOUD_PROJECT=clypt-v3",
                 "GENAI_GENERATION_LOCATION=global",
                 "VERTEX_EMBEDDING_LOCATION=us-central1",
@@ -111,11 +120,14 @@ def test_load_provider_settings_reads_untracked_env_local(
     assert settings.vllm_vibevoice.base_url == "http://127.0.0.1:8000"
     assert settings.vllm_vibevoice.model == "vibevoice"
     assert settings.vibevoice.do_sample is True
+    assert settings.vibevoice.top_p == 0.91
+    assert settings.vibevoice.num_beams == 4
+    assert settings.vibevoice.repetition_penalty == 0.97
     assert settings.vertex.project == "clypt-v3"
     assert settings.vertex.generation_location == "global"
     assert settings.vertex.embedding_location == "us-central1"
     assert settings.storage.gcs_bucket == "clypt-storage-v3"
-    assert settings.phase1_runtime.run_yamnet_on_gpu is True
+    assert settings.phase1_runtime.run_yamnet_on_gpu is False
 
 
 def test_load_provider_settings_vibevoice_custom_hotwords(

@@ -1,7 +1,7 @@
 # ARCHITECTURE
 
 **Status:** Mixed (implemented + planned)  
-**Last updated:** 2026-04-10
+**Last updated:** 2026-04-12
 
 This is the technical source of truth for:
 
@@ -36,6 +36,7 @@ flowchart TD
       p1TimelineAssemble["AssembleCanonicalTimeline"]
     end
 
+    p1AudioReady["AudioChainReadyForPhase24Handoff"]
     p1Join["Phase1JoinAndSidecarOutputsReady"]
   end
 
@@ -70,9 +71,9 @@ flowchart TD
 
   mediaResolve --> p1Launch
   p1Launch --> p1VisualExtract --> p1VisualArtifacts --> p1Join
-  p1Launch --> p1Asr --> p1Align --> p1Emotion --> p1Yamnet --> p1TimelineAssemble --> p1Join
+  p1Launch --> p1Asr --> p1Align --> p1Emotion --> p1Yamnet --> p1TimelineAssemble --> p1AudioReady --> p1Join
 
-  p1Join --> queueDecision
+  p1AudioReady --> queueDecision
   queueDecision --> modeQueue
   modeQueue --> phase2
 
@@ -112,6 +113,7 @@ flowchart TD
 - Visual and ASR execute concurrently.
 - Audio chain starts immediately after ASR completion.
 - Audio chain remains serial (`aligner -> emotion -> yamnet`) while visual continues.
+- Queue-mode Phase 2-4 handoff triggers when audio chain outputs are ready, while RF-DETR may still be running.
 
 ### Key artifacts
 
@@ -202,6 +204,7 @@ flowchart LR
 ## 4.1 Queue handoff (production)
 
 - Phase 1 host enqueues Phase 2-4 work to Cloud Tasks.
+- Queue handoff is triggered from the audio-chain completion callback; it does not wait for RF-DETR completion.
 - Cloud Run worker executes Phase 2-4 (default profile: `us-east4` L4 GPU-accelerated).
 - All production runs use this path.
 

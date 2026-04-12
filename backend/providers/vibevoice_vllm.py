@@ -73,7 +73,7 @@ class VibeVoiceVLLMProvider:
         do_sample: bool = False,
         temperature: float = 0.0,
         top_p: float = 1.0,
-        repetition_penalty: float = 1.0,
+        repetition_penalty: float = 0.97,
         num_beams: int = 1,
     ) -> None:
         if not base_url:
@@ -282,7 +282,7 @@ class VibeVoiceVLLMProvider:
                 f"please transcribe it with these keys: " + ", ".join(_SHOW_KEYS)
             )
 
-        return {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -298,10 +298,15 @@ class VibeVoiceVLLMProvider:
                 },
             ],
             "max_tokens": self.max_new_tokens,
-            "temperature": self.temperature,
+            "temperature": self.temperature if self.do_sample else 0.0,
             "stream": True,
-            "top_p": 1.0,
+            "top_p": self.top_p if self.do_sample else 1.0,
+            "repetition_penalty": self.repetition_penalty,
         }
+        if self.num_beams > 1:
+            payload["use_beam_search"] = True
+            payload["best_of"] = self.num_beams
+        return payload
 
     def _parse_content(self, content: str) -> list[dict[str, Any]]:
         try:

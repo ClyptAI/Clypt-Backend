@@ -217,7 +217,6 @@ CLYPT_V31_OUTPUT_ROOT=backend/outputs/v3_1
 CLYPT_PHASE1_WORK_ROOT=backend/outputs/v3_1_phase1_work
 CLYPT_PHASE1_KEEP_WORKDIR=0
 CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1
-CLYPT_PHASE1_YAMNET_DEVICE=cpu
 ```
 
 ### VibeVoice vLLM backend
@@ -231,7 +230,10 @@ VIBEVOICE_VLLM_HEALTHCHECK_PATH=/health
 VIBEVOICE_VLLM_MAX_RETRIES=1
 VIBEVOICE_MAX_NEW_TOKENS=32768
 VIBEVOICE_TEMPERATURE=0
-VIBEVOICE_TOP_P=1
+VIBEVOICE_DO_SAMPLE=0.0
+VIBEVOICE_TOP_P=1.0
+VIBEVOICE_NUM_BEAMS=1.0
+VIBEVOICE_REPETITION_PENALTY=0.97
 VIBEVOICE_HOTWORDS_CONTEXT="I, you, he, she, it, we, they, me, him, her, us, them, my, your, his, hers, its, our, their, mine, yours, ours, theirs, this, that, these, those, who, whom, whose, which, what, and, but, or, nor, for, so, yet, after, although, as, because, before, if, since, that, though, unless, until, when, whenever, where, whereas, while, however, therefore, moreover, furthermore, also, additionally, meanwhile, consequently, otherwise, nevertheless, for example, in addition, on the other hand, similarly, likewise, in contrast, thus, hence, indeed, finally, first, second, third"
 ```
 
@@ -296,7 +298,6 @@ Use these as the current baseline for `/etc/clypt-phase1/v3_1_phase1.env`:
 CLYPT_V31_OUTPUT_ROOT=backend/outputs/v3_1
 CLYPT_PHASE1_WORK_ROOT=backend/outputs/v3_1_phase1_work
 CLYPT_PHASE1_KEEP_WORKDIR=0
-CLYPT_PHASE1_YAMNET_DEVICE=cpu
 
 CLYPT_PHASE1_VISUAL_BACKEND=pytorch_cuda_fp16
 CLYPT_PHASE1_VISUAL_BATCH_SIZE=4
@@ -315,7 +316,10 @@ VIBEVOICE_VLLM_HEALTHCHECK_PATH=/health
 VIBEVOICE_VLLM_MAX_RETRIES=1
 VIBEVOICE_MAX_NEW_TOKENS=32768
 VIBEVOICE_TEMPERATURE=0
-VIBEVOICE_TOP_P=1
+VIBEVOICE_DO_SAMPLE=0.0
+VIBEVOICE_TOP_P=1.0
+VIBEVOICE_NUM_BEAMS=1.0
+VIBEVOICE_REPETITION_PENALTY=0.97
 VIBEVOICE_HOTWORDS_CONTEXT=I,you,he,she,it,we,they,me,him,her,us,them,my,your,his,hers,its,our,their,mine,yours,ours,theirs,this,that,these,those,who,whom,whose,which,what,and,but,or,nor,for,so,yet,after,although,as,because,before,if,since,that,though,unless,until,when,whenever,where,whereas,while,however,therefore,moreover,furthermore,also,additionally,meanwhile,consequently,otherwise,nevertheless,forexample,inaddition,ontheotherhand,similarly,likewise,incontrast,thus,hence,indeed,finally,first,second,third
 
 GOOGLE_CLOUD_PROJECT=clypt-v3
@@ -338,6 +342,7 @@ FUNASR_MODEL_SOURCE=hf
 ```
 
 If `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT` is omitted, runtime default is `1` (strict mode).
+VibeVoice decoding defaults are `VIBEVOICE_DO_SAMPLE=0.0`, `VIBEVOICE_TOP_P=1.0`, `VIBEVOICE_NUM_BEAMS=1.0`, and `VIBEVOICE_REPETITION_PENALTY=0.97`.
 Legacy experiment keys (`VIBEVOICE_OUTPUT_MODE`, `VIBEVOICE_WORD_*`) are ignored by the main pipeline; deploy script warns if they are present.
 
 ### GCS service account key (required for video upload + Vertex)
@@ -634,7 +639,7 @@ setuptools==69.5.1
 
 If you hit this on an existing droplet: `pip install 'setuptools==69.5.1'`. NeMo reports a conflict warning but works fine at this version.
 
-### YAMNet must run on CPU (CLYPT_PHASE1_YAMNET_DEVICE=cpu)
+### YAMNet defaults to CPU (leave CLYPT_PHASE1_YAMNET_DEVICE unset)
 
 TensorFlow GPU init is unreliable on current GPU droplets for this stack — the error is:
 
@@ -643,13 +648,7 @@ Cannot dlopen some GPU libraries.
 RuntimeError: YAMNet was configured for GPU but no TensorFlow GPU device is available.
 ```
 
-PyTorch (RF-DETR, emotion2vec+, NFA) uses CUDA correctly; only TensorFlow's GPU runtime fails. YAMNet runs in ~0.5s on CPU for a 6-minute clip, so keep it on CPU:
-
-```
-CLYPT_PHASE1_YAMNET_DEVICE=cpu
-```
-
-This is included in the reference `.env` below.
+PyTorch (RF-DETR, emotion2vec+, NFA) uses CUDA correctly; only TensorFlow's GPU runtime fails. YAMNet runs in ~0.5s on CPU for a 6-minute clip, and runtime now defaults to CPU when `CLYPT_PHASE1_YAMNET_DEVICE` is unset.
 
 ### `youtokentome` requires Cython at build time
 
