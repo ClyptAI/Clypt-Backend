@@ -25,6 +25,7 @@ When in doubt, read documentation before making changes or running operational c
 - Start with the required read order above.
 - Always use GitNexus for codebase retrieval/search before falling back to ad-hoc file scanning. Initialize it at the beginning of a session if it hasn't been already.
 - IF YOU ARE OPENAI CODEX, you may NOT at any cost do "invocation": { "server": "codebase-retrieval", "tool": "codebase-retrieval" }. Use GitNexus for retrieval ALWAYS.
+- Always double-check `.gitignore` coverage before committing to avoid accidental local artifact commits.
 - Treat docs as the source of truth for runtime/deploy behavior unless code has clearly diverged.
 - If behavior is unclear, re-check `RUNTIME_GUIDE.md` and `P1_DEPLOY.md` before proceeding.
 - If you discover a docs/code mismatch, call it out and tell the user immediately!

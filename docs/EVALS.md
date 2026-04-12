@@ -28,7 +28,7 @@ python -m pytest tests/backend/pipeline -q
 | Refactors/renames with blast-radius checks | `gitnexus/gitnexus-refactoring`, `gitnexus/gitnexus-impact-analysis`, `superpowers/skills/receiving-code-review` |
 | Code review readiness | `superpowers/skills/requesting-code-review`, `superpowers/skills/verification-before-completion`, `gstack/review`, `gstack/codex` |
 | QA test/report/fix loops | `gstack/qa`, `gstack/qa-only`, `gstack/browse`, `gstack/setup-browser-cookies` |
-| Frontend UX/design quality | `react-best-practices`, `react-view-transitions`, `composition-patterns`, `web-design-guidelines`, `gstack/design-review`, `gstack/design-consultation` |
+| Frontend UX/design quality | `gstack/design-review`, `gstack/design-consultation` |
 | Deploy/ship operations | `do-app-platform-skills/skills/deployment`, `do-app-platform-skills/skills/troubleshooting`, `gstack/ship`, `gstack/setup-deploy`, `gstack/careful`, `gstack/guard` |
 | DigitalOcean infra/data concerns | `do-app-platform-skills/skills/networking`, `do-app-platform-skills/skills/spaces`, `do-app-platform-skills/skills/managed-db-services`, `do-app-platform-skills/skills/postgres`, `do-app-platform-skills/skills/migration` |
 | Gemini / Vertex API work | `gemini-skills/skills/gemini-api-dev`, `gemini-skills/skills/vertex-ai-api-dev`, `gemini-skills/skills/gemini-live-api-dev`, `gemini-skills/skills/gemini-interactions-api` |
@@ -149,19 +149,3 @@ These are pointer links only. Load on demand per task type.
 - [`sandbox`](../.agents/skills/do-app-platform-skills/skills/sandbox/SKILL.md)
 - [`spaces`](../.agents/skills/do-app-platform-skills/skills/spaces/SKILL.md)
 - [`troubleshooting`](../.agents/skills/do-app-platform-skills/skills/troubleshooting/SKILL.md)
-
-### Vercel Skill (react-best-practices)
-
-- [`react-best-practices`](../.agents/skills/react-best-practices/SKILL.md)
-
-### Vercel Skill (react-view-transitions)
-
-- [`react-view-transitions`](../.agents/skills/react-view-transitions/SKILL.md)
-
-### Vercel Skill (composition-patterns)
-
-- [`composition-patterns`](../.agents/skills/composition-patterns/SKILL.md)
-
-### Vercel Skill (web-design-guidelines)
-
-- [`web-design-guidelines`](../.agents/skills/web-design-guidelines/SKILL.md)
