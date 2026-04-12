@@ -3,9 +3,7 @@
 
 # Local tooling/editor state
 .claude/
-.vscode/
-.superpowers/
-.understand-anything/
+.agents/
 .tmp/
 .gitnexus/
 
@@ -20,15 +18,12 @@ __pycache__/
 .venv/
 .pytest-venv/
 .pytest_cache/
-.mypy_cache/
 
 # Local outputs/artifacts
 backend/outputs/
-.parallel_runs/
 videos/
 
 # Logs
 *.log
 
 .worktrees/
-docs/specs/lovable_prompts/

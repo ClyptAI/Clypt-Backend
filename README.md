@@ -40,26 +40,36 @@ See [2026-04-09_comments_trends_augment_spec.md](docs/specs/2026-04-09_comments_
 
 - Runtime execution and env contract: [RUNTIME_GUIDE.md](docs/runtime/RUNTIME_GUIDE.md)
 - Baseline runs and reference outputs: [RUN_REFERENCE.md](docs/runtime/RUN_REFERENCE.md)
-- Deployment runbook: [PHASE_1_DEPLOYMENT.md](docs/deployment/PHASE_1_DEPLOYMENT.md)
+- Deployment runbook: [P1_DEPLOY.md](docs/deployment/P1_DEPLOY.md)
 - Architecture (implemented + planned): [ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Active specs index: [docs/specs/SPEC_INDEX.md](docs/specs/SPEC_INDEX.md)
 - Agent/operator startup + maintenance rules: [AGENTS.md](AGENTS.md)
 - Historical incident/recovery log: [ERROR_LOG.md](docs/ERROR_LOG.md)
 
-## Setup
+## Setup (Local Dev / Tests)
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-pip install -r requirements-do-phase1.txt
+python -m pip install -r requirements-local.txt
 ```
+
+`requirements-local.txt` is for local repo work (tests, API/runtime code paths, tooling).  
+`requirements-do-phase1.txt` is the standalone Phase 1 runtime dependency set for DO GPU hosts.
 
 ## Tests
 
 ```bash
 source .venv/bin/activate
 python -m pytest tests/backend/pipeline -q
+```
+
+## Phase 1 Runtime Deps (DO GPU Host)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-do-phase1.txt
 ```
 
 ## Repository Structure

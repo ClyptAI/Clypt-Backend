@@ -108,7 +108,7 @@ What `deploy_vllm_service.sh` does:
 2. Installs Docker CE if absent
 3. Installs `nvidia-container-toolkit` and configures the nvidia Docker runtime (`nvidia-ctk runtime configure --runtime=docker && systemctl restart docker`) — **required** for `--gpus all` to work
 4. Validates `/etc/clypt-phase1/v3_1_phase1.env` and auto-quotes `VIBEVOICE_HOTWORDS_CONTEXT` if it contains shell-unsafe spaces
-5. Installs main worker pip deps from `requirements-do-phase1.txt` into `.venv` (**no** native VibeVoice venv — the vLLM path does not need one), including guarded handling for the `youtokentome` build gotcha and resolver fallback
+5. Installs main worker pip deps from standalone `requirements-do-phase1.txt` into `.venv` (**no** native VibeVoice venv — the vLLM path does not need one), including guarded handling for the `youtokentome` build gotcha and resolver fallback
 6. Validates `torchaudio` import in the main venv
 7. Stops Phase 1 API/worker, then prewarms emotion2vec+ and NFA into persistent host cache (`/opt/clypt-phase1/.cache`) with timeout+retries (default enabled; keep `PREWARM_PHASE1_MODELS=1`), so the first real Phase 1 job does not block on large downloads
 8. Installs Phase 1 API + worker systemd units
@@ -458,7 +458,9 @@ tail -f "$LOG"
 
 ## Runtime Dependencies
 
-From `requirements-do-phase1.txt` (main venv — no second venv needed for vLLM):
+From standalone `requirements-do-phase1.txt` (main venv — no second venv needed for vLLM):
+
+- This file does not include `requirements-local.txt`; overlap is intentionally duplicated so GPU runtime installs can run from this single file.
 
 - `rfdetr[onnx]` — RF-DETR Small + ONNX export for TensorRT path
 - `supervision` — detection/annotation primitives
@@ -656,9 +658,9 @@ This is now handled directly by `deploy_vllm_service.sh` (it preinstalls Cython 
 If you are installing dependencies manually, use:
 
 ```bash
-pip install Cython setuptools
-pip install --no-build-isolation youtokentome
-pip install -r requirements-do-phase1.txt
+python -m pip install Cython setuptools
+python -m pip install --no-build-isolation youtokentome
+python -m pip install -r requirements-do-phase1.txt
 ```
 
 ### Pip resolver backtracking can fail on `datasets/pyarrow` (auto-recovered)

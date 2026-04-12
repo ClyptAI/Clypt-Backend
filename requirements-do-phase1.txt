@@ -1,5 +1,18 @@
 --extra-index-url https://download.pytorch.org/whl/cu124
--r requirements.txt
+
+# Shared baseline deps are duplicated intentionally so this file is fully
+# standalone for Phase 1 runtime installation on GPU hosts.
+pydantic>=2.11.0
+pytest>=8.4.0
+httpx>=0.28.0
+python-dotenv>=1.0.1
+google-genai>=1.17.0
+google-cloud-storage>=2.19.0
+google-cloud-spanner>=3.50.0
+google-cloud-tasks>=2.16.0
+fastapi>=0.116.0
+uvicorn>=0.35.0
+
 torch==2.6.0+cu124
 torchvision==0.21.0+cu124
 torchaudio==2.6.0+cu124

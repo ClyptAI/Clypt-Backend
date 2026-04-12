@@ -269,6 +269,6 @@ flowchart LR
 
 - Runtime and runbooks: [RUNTIME_GUIDE.md](runtime/RUNTIME_GUIDE.md)
 - Reference runs: [RUN_REFERENCE.md](runtime/RUN_REFERENCE.md)
-- Deployment operations: [PHASE_1_DEPLOYMENT.md](deployment/PHASE_1_DEPLOYMENT.md)
+- Deployment operations: [P1_DEPLOY.md](deployment/P1_DEPLOY.md)
 - Active specs index: [SPEC_INDEX.md](specs/SPEC_INDEX.md)
 - Planned Phase 5-6 spec: [2026-04-10_phase5_6_spec.md](specs/2026-04-10_phase5_6_spec.md)
