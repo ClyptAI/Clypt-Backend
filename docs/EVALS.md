@@ -39,6 +39,7 @@ python -m pytest tests/backend/pipeline -q
 ## Installed Skill Pointers (Newly Installed)
 
 These are pointer links only. Load on demand per task type.
+If the active agent is Claude, use the same relative paths but swap `../.agents/` with `../.claude/`.
 
 ### Superpowers (obra/superpowers)
 
