@@ -121,6 +121,7 @@ def run_phase1_sidecars(
     *,
     source_url: str,
     video_gcs_uri: str,
+    audio_gcs_uri: str | None = None,
     workspace: Phase1Workspace,
     vibevoice_provider: Any,
     forced_aligner: Any,
@@ -156,15 +157,24 @@ def run_phase1_sidecars(
     t_overlap = time.perf_counter()
 
     with ThreadPoolExecutor(max_workers=3) as pool:
+        def _run_asr_with_optional_gcs_audio() -> list[dict]:
+            if audio_gcs_uri:
+                try:
+                    return vibevoice_provider.run(
+                        audio_path=workspace.audio_path,
+                        audio_gcs_uri=audio_gcs_uri,
+                    )
+                except TypeError as exc:
+                    if "audio_gcs_uri" not in str(exc):
+                        raise
+            return vibevoice_provider.run(audio_path=workspace.audio_path)
+
         visual_future = pool.submit(
             visual_extractor.extract,
             video_path=workspace.video_path,
             workspace=workspace,
         )
-        asr_future = pool.submit(
-            vibevoice_provider.run,
-            audio_path=workspace.audio_path,
-        )
+        asr_future = pool.submit(_run_asr_with_optional_gcs_audio)
 
         vibevoice_turns = asr_future.result()
         logger.info(
@@ -187,6 +197,7 @@ def run_phase1_sidecars(
                 phase1_audio={
                     "source_audio": source_url,
                     "video_gcs_uri": video_gcs_uri,
+                    "audio_gcs_uri": audio_gcs_uri,
                     "local_video_path": str(workspace.video_path),
                     "local_audio_path": str(workspace.audio_path),
                 },
@@ -213,6 +224,7 @@ def run_phase1_sidecars(
         phase1_audio={
             "source_audio": source_url,
             "video_gcs_uri": video_gcs_uri,
+            "audio_gcs_uri": audio_gcs_uri,
             "local_video_path": str(workspace.video_path),
             "local_audio_path": str(workspace.audio_path),
         },

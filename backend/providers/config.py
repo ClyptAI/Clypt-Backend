@@ -107,7 +107,7 @@ class VibeVoiceVLLMSettings:
     timeout_s: float = 7200.0
     healthcheck_path: str = "/health"
     max_retries: int = 1
-    audio_mode: str = "base64"
+    audio_mode: str = "url"
 
 
 @dataclass(slots=True)
@@ -220,7 +220,7 @@ def load_provider_settings() -> ProviderSettings:
         timeout_s=float(_read_env("VIBEVOICE_VLLM_TIMEOUT_S") or "7200"),
         healthcheck_path=_read_env("VIBEVOICE_VLLM_HEALTHCHECK_PATH") or "/health",
         max_retries=int(_read_env("VIBEVOICE_VLLM_MAX_RETRIES") or "1"),
-        audio_mode=_read_env("VIBEVOICE_VLLM_AUDIO_MODE") or "base64",
+        audio_mode=_read_env("VIBEVOICE_VLLM_AUDIO_MODE") or "url",
     )
 
     generation_backend = ((_read_env("GENAI_GENERATION_BACKEND") or "developer").strip().lower())

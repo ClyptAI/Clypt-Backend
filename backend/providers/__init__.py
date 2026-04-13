@@ -12,7 +12,10 @@ from .config import (
 )
 from .forced_aligner import ForcedAlignmentProvider
 from .task_queue import Phase24TaskQueueClient
-from .vibevoice_vllm import VibeVoiceVLLMProvider
+from .vibevoice_vllm import (
+    VibeVoiceVLLMProvider,
+    build_gcs_uri_url_resolver,
+)
 from .vertex import VertexEmbeddingClient, VertexGeminiClient
 
 __all__ = [
@@ -29,6 +32,7 @@ __all__ = [
     "VertexSettings",
     "VibeVoiceSettings",
     "VibeVoiceVLLMProvider",
+    "build_gcs_uri_url_resolver",
     "VibeVoiceVLLMSettings",
     "load_provider_settings",
 ]

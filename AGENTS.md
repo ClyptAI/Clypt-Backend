@@ -33,7 +33,7 @@ When in doubt, read documentation before making changes or running operational c
 
 ## Resolver-First Rule (Required)
 
-Before starting any task, read [docs/EVALS.md](docs/EVALS.md) and load the relevant skill pointers for that task type.
+Before starting any task, read [docs/EVALS.md](docs/EVALS.md) and load the relevant skill pointers for that task type. If all the skills listed there are not installed into project-local .agents/skills/ and .claude/skills/ then do so ASAP.
 
 - Keep context lightweight: load only the skills needed for the current task.
 - For prompt/scoring/behavior changes, run pipeline evals and compare against baseline before shipping.

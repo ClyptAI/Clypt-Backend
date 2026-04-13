@@ -69,3 +69,30 @@ def test_phase1_input_resolver_rejects_unmapped_source_url(tmp_path: Path):
 
     with pytest.raises(Phase1InputResolutionError, match="No test-bank mapping found"):
         resolver.resolve_source_path(source_url="https://youtube.com/watch?v=missing")
+
+
+def test_phase1_input_resolver_allows_missing_local_when_gcs_uri_present(tmp_path: Path):
+    from backend.phase1_runtime.input_resolver import Phase1InputResolver
+
+    mapping_path = tmp_path / "mapping.json"
+    mapping_path.write_text(
+        """
+{
+  "https://youtu.be/abc123?si=test": {
+    "local_video_path": "cache/abc123.mp4",
+    "local_audio_path": "cache/abc123.wav",
+    "video_gcs_uri": "gs://bucket/test-bank/abc123.mp4",
+    "audio_gcs_uri": "gs://bucket/test-bank/abc123.wav"
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    resolver = Phase1InputResolver.from_mapping_file(mapping_path)
+    asset = resolver.resolve_source_asset(source_url="https://youtu.be/abc123?si=different")
+
+    assert asset.local_video_path == (tmp_path / "cache" / "abc123.mp4").resolve()
+    assert asset.local_audio_path == (tmp_path / "cache" / "abc123.wav").resolve()
+    assert asset.video_gcs_uri == "gs://bucket/test-bank/abc123.mp4"
+    assert asset.audio_gcs_uri == "gs://bucket/test-bank/abc123.wav"

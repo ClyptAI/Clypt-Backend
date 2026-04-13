@@ -7,6 +7,7 @@ from backend.providers import (
     ForcedAlignmentProvider,
     Phase24TaskQueueClient,
     VibeVoiceVLLMProvider,
+    build_gcs_uri_url_resolver,
     load_provider_settings,
 )
 from backend.providers.emotion2vec import Emotion2VecPlusProvider
@@ -52,6 +53,7 @@ def _build_phase14_repository(*, settings) -> SpannerPhase14Repository | None:
 def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -> Phase1JobRunner:
     settings = load_provider_settings()
     vv = settings.vllm_vibevoice
+    storage_client = GCSStorageClient(settings=settings.storage)
     vibevoice_provider = VibeVoiceVLLMProvider(
         base_url=vv.base_url,
         model=vv.model,
@@ -59,6 +61,7 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
         healthcheck_path=vv.healthcheck_path,
         max_retries=vv.max_retries,
         audio_mode=vv.audio_mode,
+        audio_gcs_url_resolver=build_gcs_uri_url_resolver(storage_client=storage_client),
         hotwords_context=settings.vibevoice.hotwords_context,
         max_new_tokens=settings.vibevoice.max_new_tokens,
         do_sample=settings.vibevoice.do_sample,
@@ -69,7 +72,6 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
     )
 
     forced_aligner = ForcedAlignmentProvider()
-    storage_client = GCSStorageClient(settings=settings.storage)
     phase14_repository = _build_phase14_repository(settings=settings)
     phase24_task_queue_client = _build_phase24_task_queue_client(settings=settings)
     visual_config = VisualPipelineConfig.from_env()

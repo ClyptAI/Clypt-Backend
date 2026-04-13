@@ -9,11 +9,15 @@ Examples (GPU droplet, repo at /opt/clypt-phase1/repo):
   cd /opt/clypt-phase1/repo
   source .venv/bin/activate
   export PYTHONPATH=.
-  python scripts/run_vibevoice_only.py --audio /tmp/joeroganxflagrant.wav
+  python scripts/run_vibevoice_only.py \
+    --audio /tmp/joeroganxflagrant.wav \
+    --audio-gcs-uri gs://clypt-storage-v3/test-bank/canonical/audio/joeroganflagrant.wav
 
 Local one-liner after scp:
 
-  PYTHONPATH=. .venv/bin/python scripts/run_vibevoice_only.py --audio /path/to/file.wav
+  PYTHONPATH=. .venv/bin/python scripts/run_vibevoice_only.py \
+    --audio /path/to/file.wav \
+    --audio-gcs-uri gs://<bucket>/test-bank/canonical/audio/<name>.wav
 """
 
 from __future__ import annotations
@@ -44,6 +48,12 @@ def main() -> int:
         help="Path to WAV/MP3/MP4/audio-video input accepted by the vLLM path.",
     )
     parser.add_argument(
+        "--audio-gcs-uri",
+        type=str,
+        default=None,
+        help="Canonical gs:// or signed https:// audio URI to use when VIBEVOICE_VLLM_AUDIO_MODE=url.",
+    )
+    parser.add_argument(
         "--output-json",
         type=Path,
         default=None,
@@ -67,11 +77,22 @@ def main() -> int:
         sys.path.insert(0, str(repo_root))
 
     from backend.providers.config import load_provider_settings
-    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
+    from backend.providers.storage import GCSStorageClient
+    from backend.providers.vibevoice_vllm import (
+        VibeVoiceVLLMProvider,
+        build_gcs_uri_url_resolver,
+    )
 
     settings = load_provider_settings()
     v = settings.vibevoice
     vv = settings.vllm_vibevoice
+    if vv.audio_mode == "url" and not args.audio_gcs_uri:
+        logger.error(
+            "VIBEVOICE_VLLM_AUDIO_MODE=url requires --audio-gcs-uri (canonical gs:// or signed https://)."
+        )
+        return 2
+
+    storage_client = GCSStorageClient(settings=settings.storage)
     provider = VibeVoiceVLLMProvider(
         base_url=vv.base_url,
         model=vv.model,
@@ -79,6 +100,7 @@ def main() -> int:
         healthcheck_path=vv.healthcheck_path,
         max_retries=vv.max_retries,
         audio_mode=vv.audio_mode,
+        audio_gcs_url_resolver=build_gcs_uri_url_resolver(storage_client=storage_client),
         hotwords_context=v.hotwords_context,
         max_new_tokens=v.max_new_tokens,
         do_sample=v.do_sample,
@@ -90,7 +112,7 @@ def main() -> int:
     logger.info("backend=vllm model=%s url=%s audio=%s", vv.model, vv.base_url, audio)
     t0 = time.perf_counter()
     provider.load()
-    turns = provider.run(audio_path=audio)
+    turns = provider.run(audio_path=audio, audio_gcs_uri=args.audio_gcs_uri)
     elapsed = time.perf_counter() - t0
     logger.info("Done in %.1f s — %d turns", elapsed, len(turns))
 

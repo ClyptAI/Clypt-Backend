@@ -32,6 +32,7 @@ def test_load_provider_settings_uses_env_and_gcloud_fallback(
 
     assert settings.vllm_vibevoice.base_url == "http://127.0.0.1:8000"
     assert settings.vllm_vibevoice.model == "vibevoice"
+    assert settings.vllm_vibevoice.audio_mode == "url"
     assert settings.vibevoice.max_new_tokens == 32768
     assert settings.vibevoice.do_sample is False
     assert settings.vibevoice.top_p == 1.0
@@ -60,6 +61,7 @@ def test_load_provider_settings_vllm_defaults(tmp_path: Path, monkeypatch: pytes
 
     assert settings.vllm_vibevoice.base_url == "http://127.0.0.1:8000"
     assert settings.vllm_vibevoice.model == "vibevoice"
+    assert settings.vllm_vibevoice.audio_mode == "url"
     assert settings.vibevoice.max_new_tokens == 32768
     assert settings.vibevoice.do_sample is False
     assert settings.vibevoice.top_p == 1.0
@@ -119,6 +121,7 @@ def test_load_provider_settings_reads_untracked_env_local(
 
     assert settings.vllm_vibevoice.base_url == "http://127.0.0.1:8000"
     assert settings.vllm_vibevoice.model == "vibevoice"
+    assert settings.vllm_vibevoice.audio_mode == "url"
     assert settings.vibevoice.do_sample is True
     assert settings.vibevoice.top_p == 0.91
     assert settings.vibevoice.num_beams == 4

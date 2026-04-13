@@ -29,14 +29,14 @@ class TestVisualPipelineConfig:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig.from_env()
-        assert config.detector_backend == "pytorch_cuda_fp16"
-        assert config.detector_batch_size == 4
+        assert config.detector_backend == "tensorrt_fp16"
+        assert config.detector_batch_size == 16
         assert config.detection_threshold == pytest.approx(0.35)
         assert config.detector_resolution == 640
         assert config.tracker_backend == "bytetrack"
-        assert config.frame_decode_backend == "cpu"
+        assert config.frame_decode_backend == "gpu"
         assert config.use_fp16 is True
-        assert config.use_tensorrt is False
+        assert config.use_tensorrt is True
         assert config.is_cuda_required is True
         assert config.tensorrt_engine_dir == "backend/outputs/tensorrt_engines"
 
@@ -57,6 +57,13 @@ class TestVisualPipelineConfig:
         assert config.use_tensorrt is True
         assert config.is_cuda_required is True
 
+    def test_from_env_rejects_cpu_decode_backend(self, monkeypatch):
+        from backend.phase1_runtime.visual_config import VisualPipelineConfig
+
+        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_DECODE", "cpu")
+        with pytest.raises(ValueError, match="GPU decode is required"):
+            VisualPipelineConfig.from_env()
+
     def test_person_class_id(self):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
@@ -74,7 +81,7 @@ class TestVisualPipelineConfig:
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
-            frame_decode_backend="cpu",
+            frame_decode_backend="gpu",
             tensorrt_engine_dir="/tmp/engines",
         )
         expected = Path("/tmp/engines/rfdetr_small_b4_r560_fp16.engine")
@@ -123,6 +130,14 @@ class TestFrameDecode:
         batches = list(batch_frames(iter(frames), batch_size=3))
         assert len(batches) == 2
         assert all(len(b) == 3 for b in batches)
+
+    def test_decode_video_frames_rejects_non_gpu_backend(self, tmp_path: Path):
+        from backend.phase1_runtime.frame_decode import decode_video_frames
+
+        video = tmp_path / "sample.mp4"
+        video.write_bytes(b"not-a-real-video")
+        with pytest.raises(ValueError, match="only 'gpu' is supported"):
+            next(decode_video_frames(video_path=video, decode_backend="cpu"))
 
 
 # ---------- rfdetr_detector tests ----------
@@ -213,7 +228,7 @@ class TestTensorRTDetector:
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
-            frame_decode_backend="cpu",
+            frame_decode_backend="gpu",
             tensorrt_engine_dir=str(tmp_path / "engines"),
         )
 
@@ -266,7 +281,7 @@ class TestTensorRTDetector:
 
 
 class TestDetectorFactory:
-    def test_factory_picks_pytorch_by_default(self):
+    def test_factory_picks_pytorch_when_configured(self):
         from backend.phase1_runtime.rfdetr_detector import RFDETRPersonDetector
         from backend.phase1_runtime.visual import _make_detector
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
@@ -279,7 +294,7 @@ class TestDetectorFactory:
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
-            frame_decode_backend="cpu",
+            frame_decode_backend="gpu",
             tensorrt_engine_dir="/tmp/engines",
         )
         det = _make_detector(config)
@@ -298,7 +313,7 @@ class TestDetectorFactory:
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
-            frame_decode_backend="cpu",
+            frame_decode_backend="gpu",
             tensorrt_engine_dir="/tmp/engines",
         )
         det = _make_detector(config)

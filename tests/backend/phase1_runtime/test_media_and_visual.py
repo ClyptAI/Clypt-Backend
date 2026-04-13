@@ -31,6 +31,30 @@ def test_prepare_workspace_media_copies_local_video_and_extracts_audio(tmp_path:
     assert calls == ["audio:source_video.mp4"]
 
 
+def test_prepare_workspace_media_prefers_mapped_source_audio_when_provided(tmp_path: Path):
+    from backend.phase1_runtime.media import prepare_workspace_media
+    from backend.phase1_runtime.models import Phase1Workspace
+
+    source_video = tmp_path / "input.mp4"
+    source_video.write_text("video", encoding="utf-8")
+    source_audio = tmp_path / "input.wav"
+    source_audio.write_text("audio-from-cache", encoding="utf-8")
+
+    def should_not_be_called(*, video_path: Path, audio_path: Path) -> None:
+        raise AssertionError("audio extractor should not run when source_audio_path is provided")
+
+    workspace = Phase1Workspace.create(root=tmp_path, run_id="run_002")
+    prepared = prepare_workspace_media(
+        source_path=str(source_video),
+        source_audio_path=str(source_audio),
+        workspace=workspace,
+        audio_extractor=should_not_be_called,
+    )
+
+    assert prepared.audio_path == workspace.audio_path
+    assert workspace.audio_path.read_text(encoding="utf-8") == "audio-from-cache"
+
+
 def test_simple_visual_extractor_emits_single_shot_payload(tmp_path: Path):
     from backend.phase1_runtime.models import Phase1Workspace
     from backend.phase1_runtime.visual import V31VisualExtractor

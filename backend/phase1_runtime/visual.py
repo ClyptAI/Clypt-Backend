@@ -3,7 +3,7 @@
 This module orchestrates:
 1. video metadata probing
 2. shot boundary detection
-3. frame decoding (CPU)
+3. frame decoding (GPU / NVDEC)
 4. RF-DETR Small person detection (GPU)
 5. ByteTrack tracking
 6. post-processing into the canonical artifact schemas
@@ -158,7 +158,10 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
     _last_log_frame = -1
 
     try:
-        frame_stream = decode_video_frames(video_path=video_path)
+        frame_stream = decode_video_frames(
+            video_path=video_path,
+            decode_backend=config.frame_decode_backend,
+        )
         for frame_batch in batch_frames(frame_stream, batch_size=config.detector_batch_size):
             rgb_arrays = [f.rgb for f in frame_batch]
             frame_indices = [f.frame_idx for f in frame_batch]
@@ -229,6 +232,7 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
         "tracker_backend": f"bytetrack",
         "inference_backend": config.detector_backend,
         "batch_size": config.detector_batch_size,
+        "frame_decode_backend": config.frame_decode_backend,
         "shape": config.detector_resolution,
         "half_precision": config.use_fp16,
         "tensor_rt_enabled": config.use_tensorrt,

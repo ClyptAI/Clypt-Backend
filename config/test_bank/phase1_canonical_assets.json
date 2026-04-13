@@ -1,0 +1,38 @@
+{
+  "https://youtu.be/2jW9lmlfiKQ?si=BJTUvwWnSCxDD_f6": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/mrbeastflagrant.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/mrbeastflagrant.wav",
+    "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/mrbeastflagrant.mp4",
+    "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/mrbeastflagrant.wav"
+  },
+  "https://youtu.be/DFL281EcVHY?si=7kmuTKmAoNlylBLQ": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/billycarsonflagrant.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/billycarsonflagrant.wav",
+    "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/billycarsonflagrant.mp4",
+    "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/billycarsonflagrant.wav"
+  },
+  "https://youtu.be/64qBE35S0ek?si=bul2StVGVzUE8EL6": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/joeroganflagrant.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/joeroganflagrant.wav",
+    "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/joeroganflagrant.mp4",
+    "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/joeroganflagrant.wav"
+  },
+  "https://youtu.be/ASABxNenD_U?si=b18e6dXSuHErKE24": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/verticalagentsyc.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/verticalagentsyc.wav",
+    "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/verticalagentsyc.mp4",
+    "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/verticalagentsyc.wav"
+  },
+  "https://youtu.be/MGsalg2f9js?si=EE6NpZDFBwPr00s0": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/zuckyc.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/zuckyc.wav",
+    "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/zuckyc.mp4",
+    "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/zuckyc.wav"
+  },
+  "https://youtu.be/4uzGDAoNOZc?si=UKyxkUwkuXRPsOD8": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/openclawyc.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/openclawyc.wav",
+    "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/openclawyc.mp4",
+    "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/openclawyc.wav"
+  }
+}

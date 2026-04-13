@@ -143,6 +143,7 @@ def test_vibevoice_vllm_payload_wires_sampling_and_beam_controls(tmp_path: Path)
 
     provider = VibeVoiceVLLMProvider(
         base_url="http://127.0.0.1:8000",
+        audio_mode="base64",
         do_sample=True,
         temperature=0.2,
         top_p=0.91,
@@ -167,6 +168,7 @@ def test_vibevoice_vllm_payload_disables_sampling_when_do_sample_off(tmp_path: P
 
     provider = VibeVoiceVLLMProvider(
         base_url="http://127.0.0.1:8000",
+        audio_mode="base64",
         do_sample=False,
         temperature=0.8,
         top_p=0.6,
@@ -181,3 +183,103 @@ def test_vibevoice_vllm_payload_disables_sampling_when_do_sample_off(tmp_path: P
     assert payload["repetition_penalty"] == 0.97
     assert "use_beam_search" not in payload
     assert "best_of" not in payload
+
+
+def test_vibevoice_vllm_payload_uses_url_audio_when_configured(tmp_path: Path):
+    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
+
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"fake-audio")
+
+    provider = VibeVoiceVLLMProvider(
+        base_url="http://127.0.0.1:8000",
+        audio_mode="url",
+    )
+
+    payload = provider._build_payload(
+        audio_path=audio,
+        context="",
+        duration_s=1.0,
+        audio_url="https://example.com/signed/audio.wav?sig=abc",
+    )
+
+    audio_part = payload["messages"][1]["content"][0]
+    assert audio_part["audio_url"]["url"].startswith("https://example.com/signed/audio.wav")
+    assert "base64" not in audio_part["audio_url"]["url"]
+
+
+def test_build_gcs_uri_url_resolver_signs_uri():
+    from backend.providers.vibevoice_vllm import build_gcs_uri_url_resolver
+
+    class _FakeStorageClient:
+        def __init__(self):
+            self.expiry_hours = None
+
+        def get_https_url(self, gcs_uri: str, expiry_hours: int = 24) -> str:
+            self.expiry_hours = expiry_hours
+            assert gcs_uri == "gs://bucket/key.wav"
+            return "https://storage.googleapis.com/bucket/key.wav?sig=123"
+
+    fake_storage = _FakeStorageClient()
+    resolver = build_gcs_uri_url_resolver(storage_client=fake_storage, signed_url_expiry_hours=3)
+    resolved_url = resolver("gs://bucket/key.wav")
+
+    assert resolved_url.startswith("https://storage.googleapis.com/bucket/key.wav")
+    assert fake_storage.expiry_hours == 3
+
+
+def test_vibevoice_vllm_prefers_audio_gcs_uri_signing_when_available(tmp_path: Path):
+    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
+
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"fake-audio")
+
+    provider = VibeVoiceVLLMProvider(
+        base_url="http://127.0.0.1:8000",
+        audio_mode="url",
+        audio_gcs_url_resolver=lambda gcs_uri: f"https://signed.example.com/{gcs_uri.rsplit('/', 1)[-1]}",
+    )
+
+    resolved = provider._resolve_audio_url(audio_gcs_uri="gs://bucket/path/canonical.wav")
+
+    assert resolved == "https://signed.example.com/canonical.wav"
+
+
+def test_vibevoice_vllm_url_mode_requires_audio_gcs_uri(tmp_path: Path):
+    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
+
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"fake-audio")
+
+    provider = VibeVoiceVLLMProvider(
+        base_url="http://127.0.0.1:8000",
+        audio_mode="url",
+        audio_gcs_url_resolver=lambda gcs_uri: "https://signed.example.com/audio.wav",
+    )
+
+    try:
+        provider._resolve_audio_url(audio_gcs_uri=None)
+    except RuntimeError as exc:
+        assert "requires audio_gcs_uri" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected RuntimeError when audio_gcs_uri is missing in URL mode")
+
+
+def test_vibevoice_vllm_url_mode_requires_signer_for_gcs_uri(tmp_path: Path):
+    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
+
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"fake-audio")
+
+    provider = VibeVoiceVLLMProvider(
+        base_url="http://127.0.0.1:8000",
+        audio_mode="url",
+        audio_gcs_url_resolver=None,
+    )
+
+    try:
+        provider._resolve_audio_url(audio_gcs_uri="gs://bucket/canonical.wav")
+    except RuntimeError as exc:
+        assert "no signer is configured" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected RuntimeError when signer is missing for gs:// URI")

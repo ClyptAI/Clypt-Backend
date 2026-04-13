@@ -41,6 +41,7 @@ class PreparedWorkspaceMedia:
 def prepare_workspace_media(
     *,
     source_path: str | None,
+    source_audio_path: str | None = None,
     workspace,
     audio_extractor=None,
 ) -> PreparedWorkspaceMedia:
@@ -59,8 +60,21 @@ def prepare_workspace_media(
         shutil.copy2(src, dst)
         logger.info("[media]  copied → %s", workspace.video_path)
 
-    extractor = audio_extractor or _default_audio_extractor
-    extractor(video_path=workspace.video_path, audio_path=workspace.audio_path)
+    if source_audio_path:
+        src_audio = Path(source_audio_path).resolve()
+        dst_audio = Path(workspace.audio_path).resolve()
+        if not src_audio.exists():
+            raise ValueError(f"Mapped source_audio_path does not exist: {source_audio_path}")
+        if src_audio == dst_audio:
+            logger.info("[media]  source_audio_path is already workspace audio — skipping copy")
+        else:
+            logger.info("[media]  copying local audio file: %s", source_audio_path)
+            shutil.copy2(src_audio, dst_audio)
+            logger.info("[media]  copied audio → %s", workspace.audio_path)
+    else:
+        extractor = audio_extractor or _default_audio_extractor
+        extractor(video_path=workspace.video_path, audio_path=workspace.audio_path)
+
     return PreparedWorkspaceMedia(
         video_path=workspace.video_path,
         audio_path=workspace.audio_path,

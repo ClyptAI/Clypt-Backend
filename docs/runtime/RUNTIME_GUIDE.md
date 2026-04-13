@@ -107,16 +107,28 @@ Required regardless of run type:
 - `VIBEVOICE_BACKEND=vllm`
 - `VIBEVOICE_VLLM_BASE_URL`
 - `VIBEVOICE_VLLM_MODEL=vibevoice`
+- `CLYPT_PHASE1_INPUT_MODE=test_bank`
+- `CLYPT_PHASE1_TEST_BANK_PATH`
 
 Important defaults:
 
 - `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1`
 - YAMNet device defaults to CPU when `CLYPT_PHASE1_YAMNET_DEVICE` is unset.
+- Phase 1 visual defaults: `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`, `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`, `CLYPT_PHASE1_VISUAL_DECODE=gpu`.
+- VibeVoice transport default: `VIBEVOICE_VLLM_AUDIO_MODE=url` (signed canonical `audio_gcs_uri` URL payload, fail-fast if missing/un-signable).
 - VibeVoice decoding defaults: `VIBEVOICE_DO_SAMPLE=0.0`, `VIBEVOICE_TOP_P=1.0`, `VIBEVOICE_NUM_BEAMS=1.0`, `VIBEVOICE_REPETITION_PENALTY=0.97`.
+- vLLM launch defaults (in `clypt-vllm-vibevoice.service`): `--max-num-seqs 8`, `--gpu-memory-utilization 0.8`.
 - `CLYPT_GEMINI_MAX_CONCURRENT=8`
 - `CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY=8`
 - `CLYPT_PHASE3_TARGET_BATCH_COUNT=3`
 - `CLYPT_PHASE3_MAX_NODES_PER_BATCH=24`
+
+Phase 1 source URL semantics:
+
+- Test-bank mapping entries now support canonical GCS asset URIs (`video_gcs_uri`, `audio_gcs_uri`) alongside local cache paths.
+- When a mapped local cache file is missing, runtime hydrates from canonical GCS URI before Phase 1 media prep.
+- Comments/trends still use the original posted YouTube `source_url`; canonical GCS assets are only for media hydration and ASR audio URL transport.
+- ASR URL mode requires mapped canonical `audio_gcs_uri` and signs it directly; there is no local upload fallback.
 
 ### 5.1 Phase 2-4 worker defaults (future runs)
 

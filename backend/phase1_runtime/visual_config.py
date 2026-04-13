@@ -25,9 +25,9 @@ class VisualPipelineConfig:
 
     @classmethod
     def from_env(cls) -> VisualPipelineConfig:
-        return cls(
-            detector_backend=_env("CLYPT_PHASE1_VISUAL_BACKEND", "pytorch_cuda_fp16"),
-            detector_batch_size=int(_env("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "4")),
+        config = cls(
+            detector_backend=_env("CLYPT_PHASE1_VISUAL_BACKEND", "tensorrt_fp16"),
+            detector_batch_size=int(_env("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "16")),
             detection_threshold=float(_env("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.35")),
             detector_resolution=int(_env("CLYPT_PHASE1_VISUAL_SHAPE", "640")),
             tracker_backend=_env("CLYPT_PHASE1_VISUAL_TRACKER", "bytetrack"),
@@ -35,12 +35,18 @@ class VisualPipelineConfig:
             tracker_match_threshold=float(
                 _env("CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH", "0.7")
             ),
-            frame_decode_backend=_env("CLYPT_PHASE1_VISUAL_DECODE", "cpu"),
+            frame_decode_backend=_env("CLYPT_PHASE1_VISUAL_DECODE", "gpu"),
             tensorrt_engine_dir=_env(
                 "CLYPT_PHASE1_VISUAL_TRT_ENGINE_DIR",
                 "backend/outputs/tensorrt_engines",
             ),
         )
+        if config.frame_decode_backend != "gpu":
+            raise ValueError(
+                "Unsupported CLYPT_PHASE1_VISUAL_DECODE="
+                f"{config.frame_decode_backend!r}; GPU decode is required."
+            )
+        return config
 
     @property
     def use_fp16(self) -> bool:

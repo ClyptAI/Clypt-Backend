@@ -561,10 +561,110 @@ def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_non_strict(
         input_resolver_strict=False,
     )
 
-    with pytest.raises(Phase1InputResolutionError, match="URL download mode has been removed"):
+    with pytest.raises(Phase1InputResolutionError, match="No test-bank mapping found"):
         runner.run_job(
             job_id="job_unmapped_nonstrict",
             source_url="https://youtube.com/watch?v=unknown",
             source_path=None,
             runtime_controls={},
         )
+
+
+def test_phase1_job_runner_hydrates_canonical_assets_and_uses_mapped_gcs_uris(tmp_path: Path):
+    from backend.phase1_runtime.input_resolver import Phase1InputResolver
+    from backend.phase1_runtime.runner import Phase1JobRunner
+
+    captured: dict[str, object] = {}
+    mapping_path = tmp_path / "mapping.json"
+    mapping_path.write_text(
+        """
+{
+  "https://youtu.be/abc123?si=orig": {
+    "local_video_path": "cache/abc123.mp4",
+    "local_audio_path": "cache/abc123.wav",
+    "video_gcs_uri": "gs://bucket/canonical/abc123.mp4",
+    "audio_gcs_uri": "gs://bucket/canonical/abc123.wav"
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class _FakeStorage:
+        def __init__(self):
+            self.downloaded: list[tuple[str, Path]] = []
+            self.uploaded: list[tuple[Path, str]] = []
+
+        def download_file(self, *, gcs_uri: str, local_path: Path) -> Path:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = "video-cache" if local_path.suffix == ".mp4" else "audio-cache"
+            local_path.write_text(payload, encoding="utf-8")
+            self.downloaded.append((gcs_uri, local_path))
+            return local_path
+
+        def upload_file(self, *, local_path: Path, object_name: str) -> str:
+            self.uploaded.append((local_path, object_name))
+            return f"gs://bucket/{object_name}"
+
+    class _FakeVibeVoice:
+        supports_concurrent_visual = True
+
+        def run(self, *, audio_path: Path, context_info=None, audio_gcs_uri=None):
+            captured["asr_audio_file"] = audio_path.read_text(encoding="utf-8")
+            captured["asr_audio_gcs_uri"] = audio_gcs_uri
+            return [{"Start": 0.0, "End": 0.2, "Speaker": 0, "Content": "hello"}]
+
+    class _FakeForcedAligner:
+        def run(self, *, audio_path: Path, turns: list[dict]):
+            return [{"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"}]
+
+    class _FakeVisual:
+        def extract(self, *, video_path: Path, workspace):
+            captured["visual_video_contents"] = video_path.read_text(encoding="utf-8")
+            return {
+                "video_metadata": {"fps": 30.0, "duration_ms": 1000},
+                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+                "tracks": [],
+            }
+
+    class _FakeEmotion:
+        def run(self, *, audio_path: Path, turns: list[dict]):
+            return {"segments": []}
+
+    class _FakeYamnet:
+        def run(self, *, audio_path: Path):
+            return {"events": []}
+
+    storage = _FakeStorage()
+    runner = Phase1JobRunner(
+        working_root=tmp_path,
+        audio_extractor=object(),
+        storage_client=storage,
+        vibevoice_provider=_FakeVibeVoice(),
+        forced_aligner=_FakeForcedAligner(),
+        visual_extractor=_FakeVisual(),
+        emotion_provider=_FakeEmotion(),
+        yamnet_provider=_FakeYamnet(),
+        phase24_task_queue_client=None,
+        input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
+    )
+
+    result = runner.run_job(
+        job_id="job_cache_hydrate",
+        source_url="https://youtu.be/abc123?si=another",
+        source_path=None,
+        runtime_controls={},
+    )
+
+    phase1_audio = result["phase1"]["phase1_audio"]
+    assert phase1_audio["source_audio"] == "https://youtu.be/abc123?si=another"
+    assert phase1_audio["video_gcs_uri"] == "gs://bucket/canonical/abc123.mp4"
+    assert phase1_audio["audio_gcs_uri"] == "gs://bucket/canonical/abc123.wav"
+    assert captured["visual_video_contents"] == "video-cache"
+    assert captured["asr_audio_file"] == "audio-cache"
+    assert captured["asr_audio_gcs_uri"] == "gs://bucket/canonical/abc123.wav"
+    assert storage.downloaded == [
+        ("gs://bucket/canonical/abc123.mp4", (tmp_path / "cache" / "abc123.mp4").resolve()),
+        ("gs://bucket/canonical/abc123.wav", (tmp_path / "cache" / "abc123.wav").resolve()),
+    ]
+    assert storage.uploaded == []

@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.phase1_runtime.extract import run_phase1_sidecars
-from backend.phase1_runtime.input_resolver import Phase1InputResolutionError, Phase1InputResolver
+from backend.phase1_runtime.input_resolver import (
+    Phase1InputResolutionError,
+    Phase1InputResolver,
+    Phase1SourceAsset,
+)
 from backend.phase1_runtime.media import prepare_workspace_media
 from backend.phase1_runtime.models import Phase1SidecarOutputs, Phase1Workspace
 from backend.repository import Phase24JobRecord, RunRecord
@@ -198,6 +202,40 @@ class Phase1JobRunner:
         logger.info("[gcs]    phase24 handoff uploaded → %s", handoff_gcs_uri)
         return handoff_gcs_uri
 
+    def _hydrate_test_bank_asset_if_needed(
+        self,
+        *,
+        asset: Phase1SourceAsset,
+    ) -> dict[str, bool]:
+        hydration: dict[str, bool] = {}
+
+        local_video = asset.local_video_path
+        if local_video.exists():
+            hydration["video_cache_hit"] = True
+        else:
+            if not asset.video_gcs_uri:
+                raise Phase1InputResolutionError(
+                    f"Mapped local video path is missing and video_gcs_uri is not set: {local_video}"
+                )
+            logger.info("[media]  cache miss for video; hydrating from %s", asset.video_gcs_uri)
+            self.storage_client.download_file(gcs_uri=asset.video_gcs_uri, local_path=local_video)
+            hydration["video_cache_hydrated"] = True
+            logger.info("[media]  video cache hydrated → %s", local_video)
+
+        if asset.local_audio_path is not None:
+            local_audio = asset.local_audio_path
+            if local_audio.exists():
+                hydration["audio_cache_hit"] = True
+            elif asset.audio_gcs_uri:
+                logger.info("[media]  cache miss for audio; hydrating from %s", asset.audio_gcs_uri)
+                self.storage_client.download_file(gcs_uri=asset.audio_gcs_uri, local_path=local_audio)
+                hydration["audio_cache_hydrated"] = True
+                logger.info("[media]  audio cache hydrated → %s", local_audio)
+            else:
+                hydration["audio_cache_unavailable"] = True
+
+        return hydration
+
     def run_job(
         self,
         *,
@@ -211,6 +249,10 @@ class Phase1JobRunner:
             raise ValueError("Provide exactly one of source_url or source_path")
 
         resolved_source_path = source_path
+        resolved_source_audio_path: str | None = None
+        resolved_video_gcs_uri: str | None = None
+        resolved_audio_gcs_uri: str | None = None
+        hydration_metadata: dict[str, bool] = {}
         if source_url is not None:
             if self.input_resolver is None:
                 raise Phase1InputResolutionError(
@@ -218,11 +260,18 @@ class Phase1JobRunner:
                     "Provide source_path or configure CLYPT_PHASE1_TEST_BANK_PATH."
                 )
             try:
-                resolved_source_path = str(self.input_resolver.resolve_source_path(source_url=source_url))
+                asset = self.input_resolver.resolve_source_asset(source_url=source_url)
+                hydration_metadata = self._hydrate_test_bank_asset_if_needed(asset=asset)
+                resolved_source_path = str(asset.local_video_path)
+                resolved_source_audio_path = (
+                    str(asset.local_audio_path) if asset.local_audio_path is not None else None
+                )
+                resolved_video_gcs_uri = asset.video_gcs_uri
+                resolved_audio_gcs_uri = asset.audio_gcs_uri
                 logger.info("[media]  test-bank source_url resolved to %s", resolved_source_path)
             except Phase1InputResolutionError as exc:
                 raise Phase1InputResolutionError(
-                    f"{exc} URL download mode has been removed; add test-bank mapping or use source_path."
+                    f"{exc} Add a test-bank mapping or use source_path."
                 ) from exc
 
         if resolved_source_path is None:
@@ -232,7 +281,7 @@ class Phase1JobRunner:
             )
         if self.input_resolver is not None and source_url is not None and not self.input_resolver_strict:
             logger.info(
-                "[media]  input_resolver_strict=0 is ignored now that URL download is removed."
+                "[media]  input_resolver_strict=0 is currently advisory; source_url still requires a mapping."
                 )
         workspace = Phase1Workspace.create(root=self.working_root, run_id=job_id)
         logger.info("[media]  workspace: %s", workspace.root)
@@ -240,18 +289,23 @@ class Phase1JobRunner:
         t_media = time.perf_counter()
         prepare_workspace_media(
             source_path=resolved_source_path,
+            source_audio_path=resolved_source_audio_path,
             workspace=workspace,
             audio_extractor=self.audio_extractor,
         )
         logger.info("[media]  local media + audio prep done in %.1f s", time.perf_counter() - t_media)
 
-        t_upload = time.perf_counter()
-        logger.info("[gcs]    uploading video to GCS ...")
-        video_gcs_uri = self.storage_client.upload_file(
-            local_path=workspace.video_path,
-            object_name=f"phase1/{job_id}/source_video.mp4",
-        )
-        logger.info("[gcs]    uploaded → %s (%.1f s)", video_gcs_uri, time.perf_counter() - t_upload)
+        if resolved_video_gcs_uri:
+            video_gcs_uri = resolved_video_gcs_uri
+            logger.info("[gcs]    using canonical video URI from test-bank mapping: %s", video_gcs_uri)
+        else:
+            t_upload = time.perf_counter()
+            logger.info("[gcs]    uploading video to GCS ...")
+            video_gcs_uri = self.storage_client.upload_file(
+                local_path=workspace.video_path,
+                object_name=f"phase1/{job_id}/source_video.mp4",
+            )
+            logger.info("[gcs]    uploaded → %s (%.1f s)", video_gcs_uri, time.perf_counter() - t_upload)
 
         source_ref = source_url or str(source_path)
         result: dict[str, Any] = {}
@@ -293,6 +347,7 @@ class Phase1JobRunner:
             phase1_outputs = run_phase1_sidecars(
                 source_url=source_ref,
                 video_gcs_uri=video_gcs_uri,
+                audio_gcs_uri=resolved_audio_gcs_uri,
                 workspace=workspace,
                 vibevoice_provider=self.vibevoice_provider,
                 forced_aligner=self.forced_aligner,
@@ -316,6 +371,7 @@ class Phase1JobRunner:
             phase1_outputs = run_phase1_sidecars(
                 source_url=source_ref,
                 video_gcs_uri=video_gcs_uri,
+                audio_gcs_uri=resolved_audio_gcs_uri,
                 workspace=workspace,
                 vibevoice_provider=self.vibevoice_provider,
                 forced_aligner=self.forced_aligner,
@@ -329,7 +385,11 @@ class Phase1JobRunner:
                 source_url=source_ref,
                 source_video_gcs_uri=video_gcs_uri,
                 status="PHASE1_DONE",
-                metadata={"query_version": self.phase24_query_version},
+                metadata={
+                    "query_version": self.phase24_query_version,
+                    "audio_gcs_uri": resolved_audio_gcs_uri,
+                    **hydration_metadata,
+                },
             )
 
         return result

@@ -13,7 +13,7 @@ For copy/paste end-to-end repro commands (Phase 1 + queue-mode Phase 2-4 + verif
 ## Current Working Setup
 
 - **ASR:** VibeVoice via persistent Docker-managed vLLM service (`clypt-vllm-vibevoice.service`)
-- **Visual:** RF-DETR Small + ByteTrack (`pytorch_cuda_fp16` default)
+- **Visual:** RF-DETR Small + ByteTrack (`tensorrt_fp16` default)
 - **Execution:** visual extraction + ASR run **concurrently**; NFA / emotion2vec+ / YAMNet start immediately after ASR (not waiting for RF-DETR), running concurrent with visual — serial with each other
 - **Phase 2-4 queue worker default profile:** `us-east4` L4 GPU-accelerated (CPU encoder path is fallback/degraded)
 - **Model served as:** `vibevoice` (NOT `microsoft/VibeVoice-ASR` — see model ID gotcha below)
@@ -128,7 +128,7 @@ When the `clypt-vllm-vibevoice.service` container starts for the first time, `st
 2. `pip install -e /app[vllm]` — installs the VibeVoice plugin as an editable package from the cloned repo (this is what registers the `vibevoice` model architecture with vLLM — **not** from PyPI)
 3. `snapshot_download("microsoft/VibeVoice-ASR")` — downloads ~17GB of model weights to `/root/.cache/huggingface/` (mounted at `/opt/clypt-phase1/hf-cache`)
 4. Generates tokenizer files
-5. Starts vLLM: `vllm serve <model_path> --served-model-name vibevoice --trust-remote-code ...`
+5. Starts vLLM: `vllm serve <model_path> --served-model-name vibevoice --max-num-seqs 8 --gpu-memory-utilization 0.8 --trust-remote-code ...`
 
 Steps 1–2 run on every container start (~1–2 min). The model download (step 3) only happens once because the HF cache volume is persistent. Subsequent starts skip the download and reach `/health` in ~2–3 minutes.
 
@@ -161,6 +161,8 @@ The vLLM service registers the model as `vibevoice` via `--served-model-name vib
 ```bash
 VIBEVOICE_VLLM_MODEL=vibevoice
 ```
+
+vLLM launch defaults are pinned in `clypt-vllm-vibevoice.service` as `--max-num-seqs 8` and `--gpu-memory-utilization 0.8`.
 
 ### Post-deploy first-run checklist
 
@@ -217,6 +219,9 @@ CLYPT_V31_OUTPUT_ROOT=backend/outputs/v3_1
 CLYPT_PHASE1_WORK_ROOT=backend/outputs/v3_1_phase1_work
 CLYPT_PHASE1_KEEP_WORKDIR=0
 CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1
+CLYPT_PHASE1_INPUT_MODE=test_bank
+CLYPT_PHASE1_TEST_BANK_PATH=/opt/clypt-phase1/repo/config/test_bank/phase1_canonical_assets.json
+CLYPT_PHASE1_TEST_BANK_STRICT=1
 ```
 
 ### VibeVoice vLLM backend
@@ -228,6 +233,7 @@ VIBEVOICE_VLLM_MODEL=vibevoice
 VIBEVOICE_VLLM_TIMEOUT_S=7200
 VIBEVOICE_VLLM_HEALTHCHECK_PATH=/health
 VIBEVOICE_VLLM_MAX_RETRIES=1
+VIBEVOICE_VLLM_AUDIO_MODE=url
 VIBEVOICE_MAX_NEW_TOKENS=32768
 VIBEVOICE_TEMPERATURE=0
 VIBEVOICE_DO_SAMPLE=0.0
@@ -236,6 +242,41 @@ VIBEVOICE_NUM_BEAMS=1.0
 VIBEVOICE_REPETITION_PENALTY=0.97
 VIBEVOICE_HOTWORDS_CONTEXT="I, you, he, she, it, we, they, me, him, her, us, them, my, your, his, hers, its, our, their, mine, yours, ours, theirs, this, that, these, those, who, whom, whose, which, what, and, but, or, nor, for, so, yet, after, although, as, because, before, if, since, that, though, unless, until, when, whenever, where, whereas, while, however, therefore, moreover, furthermore, also, additionally, meanwhile, consequently, otherwise, nevertheless, for example, in addition, on the other hand, similarly, likewise, in contrast, thus, hence, indeed, finally, first, second, third"
 ```
+
+The vLLM container launch defaults are `--max-num-seqs 8` and `--gpu-memory-utilization 0.8` (configured in the systemd unit, not via env in this guide).
+`VIBEVOICE_VLLM_AUDIO_MODE` defaults to `url`, which requires and signs mapped canonical `audio_gcs_uri` for ASR requests (fail-fast if missing or unsignable); set it to `base64` only for explicit non-canonical debug runs.
+
+### Phase 1 test-bank canonical mapping (URL -> GCS assets -> local cache)
+
+```bash
+CLYPT_PHASE1_INPUT_MODE=test_bank
+CLYPT_PHASE1_TEST_BANK_PATH=/opt/clypt-phase1/repo/config/test_bank/phase1_canonical_assets.json
+CLYPT_PHASE1_TEST_BANK_STRICT=1
+```
+
+Canonical mapping file shipped in repo:
+
+- `config/test_bank/phase1_canonical_assets.json`
+
+Entry shape:
+
+```json
+{
+  "<youtube_url>": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/<name>.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/<name>.wav",
+    "video_gcs_uri": "gs://<bucket>/test-bank/canonical/videos/<name>.mp4",
+    "audio_gcs_uri": "gs://<bucket>/test-bank/canonical/audio/<name>.wav"
+  }
+}
+```
+
+Runtime behavior:
+
+1. Source URL is resolved through test-bank mapping (exact URL or matching YouTube video ID).
+2. If local cache files are missing, runtime hydrates from canonical `gs://` URIs.
+3. Comments/trends still read the original YouTube URL.
+4. ASR URL mode signs `audio_gcs_uri` and sends that URL to vLLM.
 
 ### GCP / Gemini
 
@@ -298,15 +339,18 @@ Use these as the current baseline for `/etc/clypt-phase1/v3_1_phase1.env`:
 CLYPT_V31_OUTPUT_ROOT=backend/outputs/v3_1
 CLYPT_PHASE1_WORK_ROOT=backend/outputs/v3_1_phase1_work
 CLYPT_PHASE1_KEEP_WORKDIR=0
+CLYPT_PHASE1_INPUT_MODE=test_bank
+CLYPT_PHASE1_TEST_BANK_PATH=/opt/clypt-phase1/repo/config/test_bank/phase1_canonical_assets.json
+CLYPT_PHASE1_TEST_BANK_STRICT=1
 
-CLYPT_PHASE1_VISUAL_BACKEND=pytorch_cuda_fp16
-CLYPT_PHASE1_VISUAL_BATCH_SIZE=4
+CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16
+CLYPT_PHASE1_VISUAL_BATCH_SIZE=16
 CLYPT_PHASE1_VISUAL_THRESHOLD=0.35
 CLYPT_PHASE1_VISUAL_SHAPE=640
 CLYPT_PHASE1_VISUAL_TRACKER=bytetrack
 CLYPT_PHASE1_VISUAL_TRACKER_BUFFER=30
 CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH=0.7
-CLYPT_PHASE1_VISUAL_DECODE=cpu
+CLYPT_PHASE1_VISUAL_DECODE=gpu
 
 VIBEVOICE_BACKEND=vllm
 VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
@@ -314,6 +358,7 @@ VIBEVOICE_VLLM_MODEL=vibevoice
 VIBEVOICE_VLLM_TIMEOUT_S=7200
 VIBEVOICE_VLLM_HEALTHCHECK_PATH=/health
 VIBEVOICE_VLLM_MAX_RETRIES=1
+VIBEVOICE_VLLM_AUDIO_MODE=url
 VIBEVOICE_MAX_NEW_TOKENS=32768
 VIBEVOICE_TEMPERATURE=0
 VIBEVOICE_DO_SAMPLE=0.0
@@ -345,9 +390,10 @@ If `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT` is omitted, runtime default is `1` (s
 VibeVoice decoding defaults are `VIBEVOICE_DO_SAMPLE=0.0`, `VIBEVOICE_TOP_P=1.0`, `VIBEVOICE_NUM_BEAMS=1.0`, and `VIBEVOICE_REPETITION_PENALTY=0.97`.
 Legacy experiment keys (`VIBEVOICE_OUTPUT_MODE`, `VIBEVOICE_WORD_*`) are ignored by the main pipeline; deploy script warns if they are present.
 
-### GCS service account key (required for video upload + Vertex)
+### GCS service account key (required for canonical asset hydration/signing + Vertex)
 
 The GCS bucket uses **uniform bucket-level access**. `blob.make_public()` fails with `400 BadRequest`. The only working path is V4 signed URLs via a service account key.
+This key is also required for Phase 1 canonical test-bank hydration and ASR URL-mode signing of mapped `audio_gcs_uri`.
 
 **The key already exists on the local machine** at `.tmp/clypt-phase1-worker-key.json` (gitignored). After provisioning a new droplet, upload it:
 
@@ -403,14 +449,14 @@ The `videos/` directory must exist on the droplet (`mkdir -p /opt/clypt-phase1/v
 ### Visual pipeline
 
 ```bash
-CLYPT_PHASE1_VISUAL_BACKEND=pytorch_cuda_fp16
-CLYPT_PHASE1_VISUAL_BATCH_SIZE=4
+CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16
+CLYPT_PHASE1_VISUAL_BATCH_SIZE=16
 CLYPT_PHASE1_VISUAL_THRESHOLD=0.35
 CLYPT_PHASE1_VISUAL_SHAPE=640
 CLYPT_PHASE1_VISUAL_TRACKER=bytetrack
 CLYPT_PHASE1_VISUAL_TRACKER_BUFFER=30
 CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH=0.7
-CLYPT_PHASE1_VISUAL_DECODE=cpu
+CLYPT_PHASE1_VISUAL_DECODE=gpu
 ```
 
 **Critical:** `CLYPT_PHASE1_VISUAL_SHAPE` must be `640`. RF-DETR's backbone requires inputs divisible by 32 with patch size 16 — `560` triggers an `AssertionError` at runtime.
@@ -717,14 +763,11 @@ Implications:
 
 The systemd env file lives outside the repo directory and must be managed manually after each new droplet provisioning.
 
-## Benchmarking (Pending)
+## Benchmarking (Current)
 
-Before making TensorRT the production-default visual backend, benchmark on the target GPU:
+Current production defaults are `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`, `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`, and `CLYPT_PHASE1_VISUAL_DECODE=gpu`.
 
-1. `CLYPT_PHASE1_VISUAL_BACKEND=pytorch_cuda_fp16` — baseline
-2. `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16` — optimized (ONNX export + engine build on first run)
-
-Success condition: TensorRT preserves or improves detection/tracking quality vs PyTorch CUDA and is faster in effective FPS.
+Use Phase 1 tracking/runtime logs to monitor effective FPS and detector latency after deploy. Spanner currently stores Phase 2-4 phase metrics only (`phase2`, `phase24`, `phase3`, `phase4`), so RF-DETR timing is not persisted there today.
 
 ---
 

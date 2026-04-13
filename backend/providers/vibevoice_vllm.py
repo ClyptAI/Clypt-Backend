@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -49,8 +50,10 @@ class VibeVoiceVLLMProvider:
 
     Sends audio to a Docker-managed vLLM server over localhost HTTP using the
     OpenAI-compatible ``/v1/chat/completions`` endpoint with streaming.
+    Default transport is signed canonical GCS URL mode.
+    Inline base64 mode is supported only when explicitly configured.
     Video files (MP4 etc.) are extracted to MP3 before sending.
-    No native subprocess, no HF in-process loading, no fallback — fail fast.
+    No native subprocess, no HF in-process loading, no URL fallback — fail fast.
 
     Outputs: ``[{"Start": float, "End": float, "Speaker": int, "Content": str}, ...]``
     """
@@ -67,7 +70,8 @@ class VibeVoiceVLLMProvider:
         timeout_s: float = 7200.0,
         healthcheck_path: str = "/health",
         max_retries: int = 1,
-        audio_mode: str = "base64",
+        audio_mode: str = "url",
+        audio_gcs_url_resolver: Callable[[str], str] | None = None,
         hotwords_context: str | None = None,
         max_new_tokens: int = 32768,
         do_sample: bool = False,
@@ -85,7 +89,15 @@ class VibeVoiceVLLMProvider:
         self.timeout_s = float(timeout_s)
         self.healthcheck_path = healthcheck_path
         self.max_retries = max(0, int(max_retries))
-        self.audio_mode = audio_mode
+        normalized_audio_mode = (audio_mode or "url").strip().lower()
+        if normalized_audio_mode in {"data_url", "inline"}:
+            normalized_audio_mode = "base64"
+        if normalized_audio_mode not in {"url", "base64"}:
+            raise ValueError(
+                f"Unsupported VibeVoice audio_mode={audio_mode!r}; expected 'url' or 'base64'."
+            )
+        self.audio_mode = normalized_audio_mode
+        self.audio_gcs_url_resolver = audio_gcs_url_resolver
         self.hotwords_context = (
             hotwords_context if hotwords_context is not None else _DEFAULT_HOTWORDS
         )
@@ -127,6 +139,7 @@ class VibeVoiceVLLMProvider:
         self,
         audio_path: str | Path,
         context_info: str | None = None,
+        audio_gcs_uri: str | None = None,
     ) -> list[dict[str, Any]]:
         audio_path = Path(audio_path)
         context = context_info if context_info is not None else self.hotwords_context
@@ -134,16 +147,18 @@ class VibeVoiceVLLMProvider:
         audio_for_req, is_temp = self._extract_audio_if_needed(audio_path)
         try:
             duration_s = self._probe_duration(audio_for_req)
+            audio_url = self._resolve_audio_url(audio_gcs_uri=audio_gcs_uri)
             logger.info(
-                "[vibevoice-vllm] ASR request: model=%s url=%s audio=%s (%.1f s) context=%d chars",
+                "[vibevoice-vllm] ASR request: model=%s url=%s audio=%s (%.1f s) context=%d chars mode=%s",
                 self.model,
                 self.base_url,
                 audio_path.name,
                 duration_s,
                 len(context),
+                "url" if audio_url else "base64",
             )
             t0 = time.perf_counter()
-            turns = self._request_with_retry(audio_for_req, context, duration_s)
+            turns = self._request_with_retry(audio_for_req, context, duration_s, audio_url)
             elapsed = time.perf_counter() - t0
         finally:
             if is_temp:
@@ -194,7 +209,7 @@ class VibeVoiceVLLMProvider:
             return 0.0
 
     def _request_with_retry(
-        self, audio_path: Path, context: str, duration_s: float
+        self, audio_path: Path, context: str, duration_s: float, audio_url: str | None
     ) -> list[dict[str, Any]]:
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
@@ -205,7 +220,7 @@ class VibeVoiceVLLMProvider:
                     self.max_retries,
                 )
             try:
-                return self._do_request(audio_path, context, duration_s)
+                return self._do_request(audio_path, context, duration_s, audio_url)
             except RuntimeError:
                 # Contract/parse errors are not transient — don't retry.
                 raise
@@ -220,9 +235,9 @@ class VibeVoiceVLLMProvider:
         ) from last_exc
 
     def _do_request(
-        self, audio_path: Path, context: str, duration_s: float
+        self, audio_path: Path, context: str, duration_s: float, audio_url: str | None
     ) -> list[dict[str, Any]]:
-        payload = self._build_payload(audio_path, context, duration_s)
+        payload = self._build_payload(audio_path, context, duration_s, audio_url=audio_url)
         body = json.dumps(payload).encode("utf-8")
         url = self.base_url + "/v1/chat/completions"
         req = urllib.request.Request(
@@ -265,10 +280,24 @@ class VibeVoiceVLLMProvider:
         return self._parse_content("".join(content_parts))
 
     def _build_payload(
-        self, audio_path: Path, context: str, duration_s: float
+        self, audio_path: Path, context: str, duration_s: float, *, audio_url: str | None = None
     ) -> dict[str, Any]:
-        audio_b64 = base64.b64encode(audio_path.read_bytes()).decode("ascii")
-        mime = _MIME_MAP.get(audio_path.suffix.lower(), "audio/wav")
+        if self.audio_mode == "url":
+            if not audio_url:
+                raise RuntimeError(
+                    "[vibevoice-vllm] audio_mode=url requires a signed canonical audio URL."
+                )
+            audio_part: dict[str, Any] = {
+                "type": "audio_url",
+                "audio_url": {"url": audio_url},
+            }
+        else:
+            audio_b64 = base64.b64encode(audio_path.read_bytes()).decode("ascii")
+            mime = _MIME_MAP.get(audio_path.suffix.lower(), "audio/wav")
+            audio_part = {
+                "type": "audio_url",
+                "audio_url": {"url": f"data:{mime};base64,{audio_b64}"},
+            }
 
         if context.strip():
             prompt_text = (
@@ -289,10 +318,7 @@ class VibeVoiceVLLMProvider:
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "audio_url",
-                            "audio_url": {"url": f"data:{mime};base64,{audio_b64}"},
-                        },
+                        audio_part,
                         {"type": "text", "text": prompt_text},
                     ],
                 },
@@ -307,6 +333,32 @@ class VibeVoiceVLLMProvider:
             payload["use_beam_search"] = True
             payload["best_of"] = self.num_beams
         return payload
+
+    def _resolve_audio_url(self, *, audio_gcs_uri: str | None = None) -> str | None:
+        if self.audio_mode != "url":
+            return None
+
+        if not audio_gcs_uri:
+            raise RuntimeError(
+                "[vibevoice-vllm] audio_mode=url requires audio_gcs_uri from canonical test-bank mapping."
+            )
+        if audio_gcs_uri.startswith(("https://", "http://")):
+            return audio_gcs_uri
+        if self.audio_gcs_url_resolver is None:
+            raise RuntimeError(
+                "[vibevoice-vllm] audio_mode=url received gs:// audio_gcs_uri but no signer is configured."
+            )
+        try:
+            resolved = self.audio_gcs_url_resolver(audio_gcs_uri)
+        except Exception as exc:
+            raise RuntimeError(
+                f"[vibevoice-vllm] failed to sign canonical audio_gcs_uri={audio_gcs_uri!r}: {exc}"
+            ) from exc
+        if not resolved:
+            raise RuntimeError(
+                f"[vibevoice-vllm] signer returned empty URL for canonical audio_gcs_uri={audio_gcs_uri!r}."
+            )
+        return resolved
 
     def _parse_content(self, content: str) -> list[dict[str, Any]]:
         try:
@@ -367,4 +419,18 @@ class VibeVoiceVLLMProvider:
         pass  # nothing to clean up — the service is persistent
 
 
-__all__ = ["VibeVoiceVLLMProvider"]
+def build_gcs_uri_url_resolver(
+    *,
+    storage_client: Any,
+    signed_url_expiry_hours: int = 6,
+) -> Callable[[str], str]:
+    def _resolver(gcs_uri: str) -> str:
+        return storage_client.get_https_url(gcs_uri, expiry_hours=signed_url_expiry_hours)
+
+    return _resolver
+
+
+__all__ = [
+    "VibeVoiceVLLMProvider",
+    "build_gcs_uri_url_resolver",
+]
