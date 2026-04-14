@@ -12,11 +12,20 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.phase1_runtime.models import Phase1SidecarOutputs
-from backend.providers import VertexEmbeddingClient, VertexGeminiClient, load_provider_settings
+from backend.providers import (
+    LocalOpenAIQwenClient,
+    VertexEmbeddingClient,
+    load_provider_settings,
+)
 from backend.providers.storage import GCSStorageClient
 from backend.repository import Phase24JobRecord, RunRecord, SpannerPhase14Repository
 
 from .phase14_live import V31LivePhase14Runner
+from .phase24_error_policy import (
+    Phase24FailFastError,
+    Phase24FailureClass,
+    classify_phase24_exception,
+)
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -57,6 +66,9 @@ class Phase24WorkerService:
     default_query_version: str
     max_attempts: int = 3
     running_lease_timeout_s: int = 1800
+    fail_fast_p95_latency_ms: float = 0.0
+    fail_fast_preemption_threshold: int = 0
+    admission_metrics_path: str | None = None
 
     @staticmethod
     def _payload_video_gcs_uri(payload: Phase24TaskPayload) -> str | None:
@@ -199,14 +211,15 @@ class Phase24WorkerService:
             runner = replace(
                 self.runner,
                 query_version=query_version,
-                log_event=lambda **event: self._emit_log(**event),
+                log_event=lambda **event: self._emit_and_check_admission(**event),
             )
         except TypeError:
             runner = self.runner
             runner.query_version = query_version
-            runner.log_event = lambda **event: self._emit_log(**event)
+            runner.log_event = lambda **event: self._emit_and_check_admission(**event)
         phase1_outputs_payload, temp_video_dir = self._prepare_phase1_outputs(payload)
         try:
+            self._assert_preemption_fail_fast()
             summary = runner.run(
                 run_id=payload.run_id,
                 source_url=payload.source_reference,
@@ -216,13 +229,32 @@ class Phase24WorkerService:
                 job_id=job_id,
                 attempt=attempt,
             )
+            summary_payload = (
+                summary.model_dump(mode="json")
+                if hasattr(summary, "model_dump")
+                else dict(summary)
+            )
+            p95_latency_ms = self._extract_p95_latency_ms(summary_payload)
+            if (
+                self.fail_fast_p95_latency_ms > 0
+                and p95_latency_ms is not None
+                and p95_latency_ms > self.fail_fast_p95_latency_ms
+            ):
+                raise Phase24FailFastError(
+                    "p95 latency threshold breached: "
+                    f"p95_ms={p95_latency_ms:.2f} threshold_ms={self.fail_fast_p95_latency_ms:.2f}"
+                )
         except Exception as exc:
             failed_at = datetime.now(UTC)
             error_payload = {
                 "code": exc.__class__.__name__,
                 "message": str(exc)[:2048],
             }
-            is_terminal = attempt >= self.max_attempts
+            failure_class = classify_phase24_exception(exc)
+            should_retry = (
+                failure_class == Phase24FailureClass.TRANSIENT and attempt < self.max_attempts
+            )
+            is_terminal = not should_retry
             self.repository.upsert_phase24_job(
                 Phase24JobRecord(
                     run_id=payload.run_id,
@@ -266,6 +298,21 @@ class Phase24WorkerService:
                     status="retrying",
                     error_code=error_payload["code"],
                     error_message=error_payload["message"],
+                    failure_class=failure_class.value,
+                )
+            else:
+                self._emit_log(
+                    run_id=payload.run_id,
+                    job_id=job_id,
+                    phase="phase24",
+                    event="run_terminal",
+                    attempt=attempt,
+                    query_version=query_version,
+                    status="terminal_failure",
+                    error_code=error_payload["code"],
+                    error_message=error_payload["message"],
+                    final_status="FAILED",
+                    failure_class=failure_class.value,
                 )
             raise
         finally:
@@ -273,7 +320,6 @@ class Phase24WorkerService:
                 temp_video_dir.cleanup()
 
         completed_at = datetime.now(UTC)
-        summary_payload = summary.model_dump(mode="json") if hasattr(summary, "model_dump") else dict(summary)
         self.repository.upsert_phase24_job(
             Phase24JobRecord(
                 run_id=payload.run_id,
@@ -389,6 +435,52 @@ class Phase24WorkerService:
             phase1_outputs_payload["phase1_audio"] = phase1_audio
         return phase1_outputs_payload, None
 
+    @staticmethod
+    def _extract_p95_latency_ms(summary_payload: dict[str, Any]) -> float | None:
+        metadata = summary_payload.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            return None
+        candidates = [
+            metadata.get("subgraph_review_p95_latency_ms"),
+            ((metadata.get("diagnostics") or {}).get("latency_ms") or {}).get("p95"),
+            ((metadata.get("phase4") or {}).get("diagnostics") or {}).get("latency_ms", {}).get("p95"),
+        ]
+        for value in candidates:
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _read_preemption_count(self) -> int | None:
+        if self.fail_fast_preemption_threshold <= 0 or not self.admission_metrics_path:
+            return None
+        metrics_path = Path(self.admission_metrics_path)
+        if not metrics_path.exists():
+            return None
+        try:
+            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        try:
+            return int(payload.get("preemption_count") or 0)
+        except (TypeError, ValueError):
+            return None
+
+    def _assert_preemption_fail_fast(self) -> None:
+        if self.fail_fast_preemption_threshold <= 0:
+            return
+        preemption_count = self._read_preemption_count()
+        if preemption_count is None:
+            return
+        if preemption_count >= self.fail_fast_preemption_threshold:
+            raise Phase24FailFastError(
+                "preemption threshold breached: "
+                f"count={preemption_count} threshold={self.fail_fast_preemption_threshold}"
+            )
+
     def _emit_log(
         self,
         *,
@@ -432,12 +524,23 @@ class Phase24WorkerService:
         else:
             logger.info(message)
 
+    def _emit_and_check_admission(self, **event: Any) -> None:
+        self._emit_log(**event)
+        self._assert_preemption_fail_fast()
+
 
 def build_default_phase24_worker_service() -> Phase24WorkerService:
     settings = load_provider_settings()
     repository = SpannerPhase14Repository.from_settings(settings=settings.spanner)
+    generation_backend = (settings.vertex.generation_backend or "").strip().lower()
+    if generation_backend != "local_openai":
+        raise ValueError(
+            "Phase24 local runtime supports only GENAI_GENERATION_BACKEND=local_openai "
+            f"(got {generation_backend!r})."
+        )
+    llm_client = LocalOpenAIQwenClient(settings=settings.local_generation)
     runner = V31LivePhase14Runner.from_env(
-        llm_client=VertexGeminiClient(settings=settings.vertex),
+        llm_client=llm_client,
         embedding_client=VertexEmbeddingClient(settings=settings.vertex),
         flash_model=settings.vertex.flash_model,
         storage_client=GCSStorageClient(settings=settings.storage),
@@ -452,6 +555,9 @@ def build_default_phase24_worker_service() -> Phase24WorkerService:
         environment=settings.phase24_worker.environment,
         default_query_version=settings.phase24_worker.query_version,
         max_attempts=settings.phase24_worker.max_attempts,
+        fail_fast_p95_latency_ms=settings.phase24_worker.fail_fast_p95_latency_ms,
+        fail_fast_preemption_threshold=settings.phase24_worker.fail_fast_preemption_threshold,
+        admission_metrics_path=settings.phase24_worker.admission_metrics_path,
     )
 
 

@@ -61,7 +61,7 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
             captured["run_id"] = run_id
             captured["payload"] = payload
             captured["worker_url"] = worker_url
-            return "projects/test/locations/us-central1/queues/phase24/tasks/run-001"
+            return "local-sqlite:00000000-0000-0000-0000-000000000001"
 
     class _FakeRepository:
         def __init__(self) -> None:
@@ -104,7 +104,7 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
     assert result["summary"] == {
         "run_id": "job_001",
         "status": "queued",
-        "task_name": "projects/test/locations/us-central1/queues/phase24/tasks/run-001",
+        "task_name": "local-sqlite:00000000-0000-0000-0000-000000000001",
         "artifact_paths": {},
     }
     assert captured["run_id"] == "job_001"
@@ -122,7 +122,7 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
     assert repository.job_record is not None
     assert repository.job_record.run_id == "job_001"
     assert repository.job_record.status == "queued"
-    assert repository.job_record.task_name == "projects/test/locations/us-central1/queues/phase24/tasks/run-001"
+    assert repository.job_record.task_name == "local-sqlite:00000000-0000-0000-0000-000000000001"
     assert repository.job_record.metadata["query_version"] == "graph-v2"
     assert calls == [
         "audio:source_video.mp4",
@@ -191,7 +191,7 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
         def enqueue_phase24(self, *, run_id: str, payload: dict, worker_url: str | None = None) -> str:
             calls.append(f"enqueue:{run_id}")
             queue_called.set()
-            return "projects/test/locations/us-central1/queues/phase24/tasks/run-002"
+            return "local-sqlite:00000000-0000-0000-0000-000000000002"
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
@@ -270,7 +270,7 @@ def test_phase1_job_runner_enforces_queue_mode_for_run_phase14(tmp_path: Path):
     class _FakeQueueClient:
         def enqueue_phase24(self, *, run_id: str, payload: dict, worker_url: str | None = None) -> str:
             calls.append(f"enqueue:{run_id}")
-            return "projects/test/locations/us-central1/queues/phase24/tasks/run-queue-only"
+            return "local-sqlite:00000000-0000-0000-0000-000000000099"
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
@@ -319,7 +319,7 @@ def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(t
         phase24_task_queue_client=None,
     )
 
-    with pytest.raises(RuntimeError, match="Cloud Tasks client is unavailable"):
+    with pytest.raises(RuntimeError, match="local queue client is unavailable"):
         runner.run_job(
             job_id="job_001",
             source_url=None,

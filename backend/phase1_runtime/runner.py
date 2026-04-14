@@ -173,7 +173,7 @@ class Phase1JobRunner:
             task_name=task_name,
             metadata=metadata,
         )
-        logger.info("[phase24] enqueued Cloud Task %s", task_name)
+        logger.info("[phase24] enqueued local queue task %s", task_name)
         return {
             "run_id": job_id,
             "status": "queued",
@@ -314,8 +314,8 @@ class Phase1JobRunner:
         if run_phase14:
             if self.phase24_task_queue_client is None:
                 raise RuntimeError(
-                    "run_phase14 requested with queue mode, but Cloud Tasks client is unavailable. "
-                    "Set CLYPT_PHASE24_WORKER_URL and ensure google-cloud-tasks is installed."
+                    "run_phase14 requested with queue mode, but the Phase 2–4 local queue client is unavailable. "
+                    "Use build_default_phase1_job_runner() with CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite."
                 )
             enqueue_done = threading.Event()
             enqueue_error: list[Exception] = []
@@ -337,7 +337,7 @@ class Phase1JobRunner:
                     )
                     enqueue_summary.append(summary)
                     logger.info(
-                        "[phase24] queue-mode handoff complete — Cloud Task enqueued while RF-DETR finishes"
+                        "[phase24] queue-mode handoff complete — local Phase 2–4 task enqueued while RF-DETR finishes"
                     )
                 except Exception as exc:  # pragma: no cover - defensive passthrough
                     enqueue_error.append(exc)

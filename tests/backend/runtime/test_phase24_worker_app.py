@@ -223,7 +223,7 @@ def test_phase24_worker_app_marks_non_terminal_failures_as_queued():
 
     class _FailingRunner(_FakeRunner):
         def run(self, **kwargs):
-            raise RuntimeError("boom")
+            raise TimeoutError("boom")
 
     repository = _FakeRepository()
     service = Phase24WorkerService(
@@ -235,7 +235,7 @@ def test_phase24_worker_app_marks_non_terminal_failures_as_queued():
         max_attempts=3,
     )
 
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(TimeoutError, match="boom"):
         service.handle_task(
             payload=Phase24TaskPayload(**_build_payload()),
             job_id="task-001",
@@ -246,6 +246,36 @@ def test_phase24_worker_app_marks_non_terminal_failures_as_queued():
     assert repository.job_record.status == "queued"
     assert repository.run_record is not None
     assert repository.run_record.status == "PHASE24_QUEUED"
+
+
+def test_phase24_worker_app_marks_non_transient_failures_terminal():
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
+
+    class _FailingRunner(_FakeRunner):
+        def run(self, **kwargs):
+            raise ValueError("schema mismatch")
+
+    repository = _FakeRepository()
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=_FailingRunner(),
+        service_name="clypt-phase24-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=3,
+    )
+
+    with pytest.raises(ValueError, match="schema mismatch"):
+        service.handle_task(
+            payload=Phase24TaskPayload(**_build_payload()),
+            job_id="task-001",
+            attempt=1,
+        )
+
+    assert repository.job_record is not None
+    assert repository.job_record.status == "failed"
+    assert repository.run_record is not None
+    assert repository.run_record.status == "FAILED"
 
 
 def test_phase24_worker_app_stops_when_attempt_exceeds_max_attempts():
@@ -323,3 +353,92 @@ def test_phase24_worker_app_loads_phase1_outputs_from_gcs_pointer(tmp_path):
         runner.calls[0]["phase1_outputs"].phase1_audio["video_gcs_uri"] == "gs://bucket/video.mp4"
     )
     assert runner.storage_client.download_calls == ["gs://bucket/phase24_inputs/run_001.json"]
+
+
+def test_phase24_worker_app_failfast_on_p95_latency_threshold():
+    from backend.runtime.phase24_error_policy import Phase24FailFastError
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
+
+    class _HighLatencyRunner(_FakeRunner):
+        def run(self, **kwargs):
+            return type(
+                "Summary",
+                (),
+                {
+                    "model_dump": lambda self, mode="json": {
+                        "run_id": kwargs["run_id"],
+                        "artifact_paths": {},
+                        "metadata": {"subgraph_review_p95_latency_ms": 9000},
+                    }
+                },
+            )()
+
+    repository = _FakeRepository()
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=_HighLatencyRunner(),
+        service_name="clypt-phase24-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=3,
+        fail_fast_p95_latency_ms=5000,
+    )
+
+    with pytest.raises(Phase24FailFastError):
+        service.handle_task(
+            payload=Phase24TaskPayload(**_build_payload()),
+            job_id="task-001",
+            attempt=1,
+        )
+
+    assert repository.job_record is not None
+    assert repository.job_record.status == "failed"
+    assert repository.run_record is not None
+    assert repository.run_record.status == "FAILED"
+
+
+def test_phase24_worker_app_failfast_on_in_run_preemption_threshold(tmp_path):
+    from backend.runtime.phase24_error_policy import Phase24FailFastError
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
+
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text('{"preemption_count": 5}', encoding="utf-8")
+
+    class _RunnerWithEvent(_FakeRunner):
+        def run(self, **kwargs):
+            log_event = kwargs.get("log_event")
+            if callable(log_event):
+                log_event(
+                    run_id=kwargs["run_id"],
+                    job_id=kwargs["job_id"],
+                    phase="phase3",
+                    event="phase_progress",
+                    attempt=kwargs["attempt"],
+                    query_version="graph-v1",
+                    status="running",
+                )
+            return super().run(**kwargs)
+
+    repository = _FakeRepository()
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=_RunnerWithEvent(),
+        service_name="clypt-phase24-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=3,
+        fail_fast_preemption_threshold=3,
+        admission_metrics_path=str(metrics_path),
+    )
+
+    with pytest.raises(Phase24FailFastError):
+        service.handle_task(
+            payload=Phase24TaskPayload(**_build_payload()),
+            job_id="task-001",
+            attempt=1,
+        )
+
+    assert repository.job_record is not None
+    assert repository.job_record.status == "failed"
+    assert repository.run_record is not None
+    assert repository.run_record.status == "FAILED"

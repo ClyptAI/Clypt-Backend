@@ -5,7 +5,6 @@ from pathlib import Path
 
 from backend.providers import (
     ForcedAlignmentProvider,
-    Phase24TaskQueueClient,
     VibeVoiceVLLMProvider,
     build_gcs_uri_url_resolver,
     load_provider_settings,
@@ -14,6 +13,8 @@ from backend.providers.emotion2vec import Emotion2VecPlusProvider
 from backend.providers.storage import GCSStorageClient
 from backend.providers.yamnet import YAMNetProvider
 from backend.repository import SpannerPhase14Repository
+from backend.runtime.phase24_local_dispatcher import Phase24LocalDispatcherClient
+from backend.runtime.phase24_local_queue import Phase24LocalQueue
 
 from .input_resolver import Phase1InputResolver
 from .runner import Phase1JobRunner
@@ -23,23 +24,9 @@ from .visual_config import VisualPipelineConfig
 logger = logging.getLogger(__name__)
 
 
-def _build_phase24_task_queue_client(*, settings) -> Phase24TaskQueueClient | None:
-    if not settings.cloud_tasks.worker_url:
-        logger.warning(
-            "CLYPT_PHASE24_WORKER_URL is not set; run_phase14 queue mode will fail fast."
-        )
-        return None
-    try:
-        from google.cloud import tasks_v2
-    except ImportError:  # pragma: no cover - optional dependency in minimal environments
-        logger.warning(
-            "google-cloud-tasks is unavailable; run_phase14 queue mode will fail fast."
-        )
-        return None
-    return Phase24TaskQueueClient(
-        settings=settings.cloud_tasks,
-        tasks_client=tasks_v2.CloudTasksClient(),
-    )
+def _build_phase24_local_dispatcher(*, settings) -> Phase24LocalDispatcherClient:
+    queue = Phase24LocalQueue(path=settings.phase24_local_queue.path)
+    return Phase24LocalDispatcherClient(queue=queue)
 
 
 def _build_phase14_repository(*, settings) -> SpannerPhase14Repository | None:
@@ -52,6 +39,11 @@ def _build_phase14_repository(*, settings) -> SpannerPhase14Repository | None:
 
 def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -> Phase1JobRunner:
     settings = load_provider_settings()
+    if settings.phase24_local_queue.queue_backend != "local_sqlite":
+        raise ValueError(
+            "Phase1 local runtime requires CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite for Phase 2–4 "
+            f"(got {settings.phase24_local_queue.queue_backend!r})."
+        )
     vv = settings.vllm_vibevoice
     storage_client = GCSStorageClient(settings=settings.storage)
     vibevoice_provider = VibeVoiceVLLMProvider(
@@ -73,7 +65,7 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
 
     forced_aligner = ForcedAlignmentProvider()
     phase14_repository = _build_phase14_repository(settings=settings)
-    phase24_task_queue_client = _build_phase24_task_queue_client(settings=settings)
+    phase24_task_queue_client = _build_phase24_local_dispatcher(settings=settings)
     visual_config = VisualPipelineConfig.from_env()
     input_resolver = None
     input_mode = (settings.phase1_runtime.input_mode or "test_bank").strip().lower()

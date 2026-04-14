@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -164,7 +165,7 @@ def test_load_provider_settings_rejects_non_vllm_backend(
         load_provider_settings()
 
 
-def test_load_provider_settings_rejects_non_developer_generation_backend(
+def test_load_provider_settings_rejects_unknown_generation_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from backend.providers.config import load_provider_settings
@@ -175,8 +176,148 @@ def test_load_provider_settings_rejects_non_developer_generation_backend(
     monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("GENAI_GENERATION_BACKEND", "vertex")
 
-    with pytest.raises(ValueError, match="only 'developer' is supported"):
+    with pytest.raises(ValueError, match="expected 'developer' or 'local_openai'"):
         load_provider_settings()
+
+
+def test_load_provider_settings_defaults_local_openai_and_loads_local_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.delenv("GENAI_GENERATION_BACKEND", raising=False)
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_BASE_URL", "http://127.0.0.1:9000/v1")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_MODEL", "my-qwen")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_TIMEOUT_S", "120")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_MAX_RETRIES", "3")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_INITIAL_BACKOFF_S", "0.5")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_MAX_BACKOFF_S", "10")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_BACKOFF_MULTIPLIER", "1.5")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_JITTER_RATIO", "0.1")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_ENABLE_THINKING", "1")
+
+    settings = load_provider_settings()
+
+    assert settings.vertex.generation_backend == "local_openai"
+    assert settings.local_generation.base_url == "http://127.0.0.1:9000/v1"
+    assert settings.local_generation.model == "my-qwen"
+    assert settings.local_generation.timeout_s == 120.0
+    assert settings.local_generation.max_retries == 3
+    assert settings.local_generation.initial_backoff_s == 0.5
+    assert settings.local_generation.max_backoff_s == 10.0
+    assert settings.local_generation.backoff_multiplier == 1.5
+    assert settings.local_generation.jitter_ratio == 0.1
+    assert settings.local_generation.enable_thinking is True
+
+
+def test_local_openai_qwen_client_parses_json_and_validates_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from backend.providers.config import LocalGenerationSettings
+    from backend.providers.openai_local import LocalOpenAIQwenClient
+
+    settings = LocalGenerationSettings(model="qwen", max_retries=0)
+
+    def _install_response(content: str) -> None:
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": content}}]}
+        ).encode("utf-8")
+        mock_resp.__exit__.return_value = None
+        monkeypatch.setattr(
+            "backend.providers.openai_local.urllib.request.urlopen",
+            MagicMock(return_value=mock_resp),
+        )
+
+    _install_response('{"thread_summary": "x", "moment_hints": []}')
+    client = LocalOpenAIQwenClient(settings=settings)
+    schema = {
+        "type": "object",
+        "properties": {
+            "thread_summary": {"type": "string"},
+            "moment_hints": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["thread_summary", "moment_hints"],
+    }
+    out = client.generate_json(
+        prompt="p",
+        response_schema=schema,
+    )
+    assert out["thread_summary"] == "x"
+
+    _install_response("not-json")
+    with pytest.raises(ValueError, match="valid JSON"):
+        client.generate_json(prompt="p")
+
+    _install_response("{}")
+    with pytest.raises(ValueError, match="missing required"):
+        client.generate_json(prompt="p", response_schema=schema)
+
+
+def test_build_default_phase24_worker_service_enforces_local_openai_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.providers.config import (
+        LocalGenerationSettings,
+        ProviderSettings,
+        StorageSettings,
+        VertexSettings,
+        VibeVoiceSettings,
+        VibeVoiceVLLMSettings,
+    )
+    from backend.providers.openai_local import LocalOpenAIQwenClient
+    from backend.runtime import phase24_worker_app
+
+    base = dict(
+        vibevoice=VibeVoiceSettings(),
+        vllm_vibevoice=VibeVoiceVLLMSettings(base_url="http://127.0.0.1:8000"),
+        local_generation=LocalGenerationSettings(model="local-qwen"),
+        storage=StorageSettings(gcs_bucket="bucket-a"),
+    )
+
+    captured: dict[str, Any] = {}
+
+    class _FakeRepo:
+        @classmethod
+        def from_settings(cls, **kwargs):
+            return object()
+
+    class _FakeRunner:
+        @classmethod
+        def from_env(cls, **kwargs):
+            captured["llm_client"] = kwargs["llm_client"]
+            return object()
+
+    monkeypatch.setattr(phase24_worker_app, "SpannerPhase14Repository", _FakeRepo)
+    monkeypatch.setattr(phase24_worker_app, "V31LivePhase14Runner", _FakeRunner)
+    monkeypatch.setattr(phase24_worker_app, "GCSStorageClient", lambda **kwargs: object())
+
+    settings_local = ProviderSettings(
+        **base,
+        vertex=VertexSettings(project="clypt-v3", generation_backend="local_openai"),
+    )
+    monkeypatch.setattr(phase24_worker_app, "load_provider_settings", lambda: settings_local)
+    phase24_worker_app.build_default_phase24_worker_service()
+    assert isinstance(captured["llm_client"], LocalOpenAIQwenClient)
+    assert captured["llm_client"].settings.model == "local-qwen"
+
+    settings_dev = ProviderSettings(
+        **base,
+        vertex=VertexSettings(
+            project="clypt-v3",
+            generation_backend="developer",
+            gemini_api_key="test-key",
+        ),
+    )
+    monkeypatch.setattr(phase24_worker_app, "load_provider_settings", lambda: settings_dev)
+    with pytest.raises(ValueError, match="only GENAI_GENERATION_BACKEND=local_openai"):
+        phase24_worker_app.build_default_phase24_worker_service()
 
 
 def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
@@ -201,6 +342,24 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     monkeypatch.setenv("CLYPT_PHASE24_CONCURRENCY", "4")
     monkeypatch.setenv("CLYPT_DEBUG_SNAPSHOTS", "1")
     monkeypatch.setenv("CLYPT_PHASE24_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("CLYPT_PHASE24_FAILFAST_PREEMPTION_THRESHOLD", "7")
+    monkeypatch.setenv("CLYPT_PHASE24_FAILFAST_P95_LATENCY_MS", "4500")
+    monkeypatch.setenv("CLYPT_PHASE24_ADMISSION_METRICS_PATH", "/tmp/vllm_metrics.json")
+    monkeypatch.setenv("CLYPT_PHASE24_BLOCK_ON_PHASE1_ACTIVE", "1")
+    monkeypatch.setenv("CLYPT_PHASE24_MAX_VLLM_QUEUE_DEPTH", "15")
+    monkeypatch.setenv("CLYPT_PHASE24_MAX_VLLM_DECODE_BACKLOG", "33")
+    monkeypatch.setenv("CLYPT_PHASE24_QUEUE_BACKEND", "local_sqlite")
+    monkeypatch.setenv("CLYPT_PHASE24_LOCAL_QUEUE_PATH", "backend/outputs/phase24.sqlite")
+    monkeypatch.setenv("CLYPT_PHASE24_LOCAL_POLL_INTERVAL_MS", "700")
+    monkeypatch.setenv("CLYPT_PHASE24_LOCAL_LEASE_TIMEOUT_S", "1200")
+    monkeypatch.setenv("CLYPT_PHASE24_LOCAL_MAX_INFLIGHT", "3")
+    monkeypatch.setenv("CLYPT_PHASE24_LOCAL_MAX_REQUESTS_PER_WORKER", "11")
+    monkeypatch.setenv("CLYPT_VLLM_PROFILE", "conservative")
+    monkeypatch.setenv("CLYPT_VLLM_MAX_NUM_SEQS", "16")
+    monkeypatch.setenv("CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS", "16384")
+    monkeypatch.setenv("CLYPT_VLLM_GPU_MEMORY_UTILIZATION", "0.86")
+    monkeypatch.setenv("CLYPT_VLLM_MAX_MODEL_LEN", "131072")
+    monkeypatch.setenv("CLYPT_VLLM_SPECULATIVE_MODE", "off")
 
     settings = load_provider_settings()
 
@@ -219,6 +378,24 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     assert settings.phase24_worker.concurrency == 4
     assert settings.phase24_worker.debug_snapshots is True
     assert settings.phase24_worker.max_attempts == 5
+    assert settings.phase24_worker.fail_fast_preemption_threshold == 7
+    assert settings.phase24_worker.fail_fast_p95_latency_ms == 4500.0
+    assert settings.phase24_worker.admission_metrics_path == "/tmp/vllm_metrics.json"
+    assert settings.phase24_worker.block_on_phase1_active is True
+    assert settings.phase24_worker.max_vllm_queue_depth == 15
+    assert settings.phase24_worker.max_vllm_decode_backlog == 33
+    assert settings.phase24_local_queue.queue_backend == "local_sqlite"
+    assert str(settings.phase24_local_queue.path).endswith("backend/outputs/phase24.sqlite")
+    assert settings.phase24_local_queue.poll_interval_ms == 700
+    assert settings.phase24_local_queue.lease_timeout_s == 1200
+    assert settings.phase24_local_queue.max_inflight == 3
+    assert settings.phase24_local_queue.max_requests_per_worker == 11
+    assert settings.vllm_runtime.profile == "conservative"
+    assert settings.vllm_runtime.max_num_seqs == 16
+    assert settings.vllm_runtime.max_num_batched_tokens == 16384
+    assert settings.vllm_runtime.gpu_memory_utilization == 0.86
+    assert settings.vllm_runtime.max_model_len == 131072
+    assert settings.vllm_runtime.speculative_mode == "off"
 
 
 def test_load_provider_settings_exposes_split_generation_and_embedding_retry_settings(
