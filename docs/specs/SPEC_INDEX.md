@@ -4,6 +4,9 @@ Active specification documents for current and planned backend work.
 
 ## Active Specs
 
+- [2026-04-14_single_h200_qwen_phase24_local_spec.md](2026-04-14_single_h200_qwen_phase24_local_spec.md)  
+  Single-H200 local Qwen generation plan for Phase 2-4, local queue/worker, and vLLM tuning strategy.
+
 - [2026-04-09_comments_trends_augment_spec.md](2026-04-09_comments_trends_augment_spec.md)  
   Comment/trend signal augmentation, hard-join behavior, fail-fast policy, attribution scoring.
 
