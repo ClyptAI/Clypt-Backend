@@ -14,7 +14,7 @@ def test_build_vibevoice_start_command_uses_expected_defaults(monkeypatch: pytes
 
     assert command == [
         "python3",
-        "/app/vibevoice-repo/vllm_plugin/scripts/start_server.py",
+        "/app/vllm_plugin/scripts/start_server.py",
         "--max-num-seqs",
         "2",
         "--gpu-memory-utilization",

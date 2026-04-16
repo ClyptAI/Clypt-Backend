@@ -11,7 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 def build_vibevoice_start_command() -> list[str]:
-    repo_dir = os.getenv("CLYPT_L4_VIBEVOICE_REPO_DIR", "/app/vibevoice-repo")
+    # VibeVoice's vllm_plugin/scripts/start_server.py hardcodes `pip install -e /app[vllm]`,
+    # so the VibeVoice source tree must live at /app. This matches both the
+    # Cloud Run container layout (docker/phase24-media-prep/Dockerfile) and the DO
+    # droplet layout (scripts/do_phase1/systemd/clypt-vllm-vibevoice.service mounts
+    # /opt/clypt-phase1/vibevoice-repo to /app inside the container).
+    repo_dir = os.getenv("CLYPT_L4_VIBEVOICE_REPO_DIR", "/app")
     max_num_seqs = os.getenv("CLYPT_L4_VIBEVOICE_MAX_NUM_SEQS", "2")
     gpu_memory_utilization = os.getenv("CLYPT_L4_VIBEVOICE_GPU_MEMORY_UTILIZATION", "0.25")
     return [
