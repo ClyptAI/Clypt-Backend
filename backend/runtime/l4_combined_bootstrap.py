@@ -33,9 +33,14 @@ def wait_for_vibevoice_health(
     *,
     base_url: str,
     healthcheck_path: str = "/health",
-    timeout_s: float = 600.0,
+    timeout_s: float = 1500.0,
     poll_interval_s: float = 5.0,
 ) -> None:
+    # Cold-start on Cloud Run L4 can legitimately take 10-15 minutes because
+    # VibeVoice's start_server.py does `pip install -e /app[vllm]` (2-3 min),
+    # then snapshot_download from HuggingFace (1-3 min), then vLLM model load
+    # onto the GPU (2-5 min). 600s was too tight; 25 min gives headroom without
+    # hiding genuine hangs.
     deadline = time.monotonic() + timeout_s
     health_url = base_url.rstrip("/") + healthcheck_path
     while True:
@@ -65,7 +70,7 @@ def launch_vibevoice_server() -> subprocess.Popen[bytes]:
         wait_for_vibevoice_health(
             base_url=os.getenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000"),
             healthcheck_path=os.getenv("VIBEVOICE_VLLM_HEALTHCHECK_PATH", "/health"),
-            timeout_s=float(os.getenv("CLYPT_L4_VIBEVOICE_STARTUP_TIMEOUT_S", "600")),
+            timeout_s=float(os.getenv("CLYPT_L4_VIBEVOICE_STARTUP_TIMEOUT_S", "1500")),
             poll_interval_s=float(os.getenv("CLYPT_L4_VIBEVOICE_HEALTH_POLL_INTERVAL_S", "5")),
         )
     except Exception:
