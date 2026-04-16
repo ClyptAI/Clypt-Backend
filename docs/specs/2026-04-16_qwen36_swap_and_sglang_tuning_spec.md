@@ -29,6 +29,7 @@ The `rg` gate in §8 enforces this doctrine.
    - `--kv-cache-dtype fp8_e4m3` (halves KV memory on H200; matches pre-SGLang vLLM unit).
    - Radix cache stays enabled (SGLang default in 0.5.10; only `--disable-radix-cache` exists, so we emit no flag unless the operator sets `SG_ENABLE_RADIX_CACHE=0`).
    - `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4` (NextN MTP; Qwen3.6 ships draft heads).
+   - `--mamba-scheduler-strategy extra_buffer` plus `SGLANG_ENABLE_SPEC_V2=1` as an environment variable. Qwen3.6 is a hybrid Mamba/Attention MoE and SGLang 0.5.10 refuses to start with speculative decoding + radix cache unless both are set.
    - `--mem-fraction-static 0.78` (VibeVoice no longer co-resident after `2026-04-16_phase14_l4_offload_concurrency_revamp_spec.md`; H200 has headroom).
    - `--context-length 131072`, `--chunked-prefill-size 8192`, `--schedule-policy lpm` (unchanged).
    - `--reasoning-parser qwen3` (required for Qwen3.6 response format).
@@ -122,8 +123,10 @@ No client-side logic changes. `LocalOpenAIQwenClient.generate_json` already sets
     --schedule-policy lpm --chunked-prefill-size 8192 \
     --mem-fraction-static 0.78 --context-length 131072 \
     --kv-cache-dtype fp8_e4m3 \
+    --mamba-scheduler-strategy extra_buffer \
     --speculative-algorithm NEXTN --speculative-num-steps 3 \
     --speculative-eagle-topk 1 --speculative-num-draft-tokens 4
+  # plus Environment=SGLANG_ENABLE_SPEC_V2=1
   ```
   (The deploy script regex-rewrites this line at install time, but the committed unit must match so a direct-boot without the deploy script still serves the right model.)
 
@@ -324,7 +327,7 @@ This swap is complete when **all** of the following hold:
 1. `Qwen/Qwen3.6-35B-A3B` is the only model id referenced by active code, env, systemd, deploy scripts, and runbook docs.
 2. `scripts/do_phase1/systemd/clypt-vllm-qwen.service` no longer exists in the repo.
 3. SGLang `>= 0.5.10` is pinned in `deploy_sglang_qwen_service.sh`.
-4. The systemd ExecStart on H200 includes `--kv-cache-dtype fp8_e4m3` and the four `--speculative-*` flags for NextN MTP. Radix cache is inherited from SGLang's default-on behavior; absence of `--disable-radix-cache` is the correct acceptance signal.
+4. The systemd ExecStart on H200 includes `--kv-cache-dtype fp8_e4m3`, `--mamba-scheduler-strategy extra_buffer`, and the four `--speculative-*` flags for NextN MTP. The unit exports `Environment=SGLANG_ENABLE_SPEC_V2=1`. Radix cache is inherited from SGLang's default-on behavior; absence of `--disable-radix-cache` is the correct acceptance signal.
 5. `SG_MEM_FRACTION_STATIC` is at least `0.72` and validated under load.
 6. Production `LocalGenerationSettings` defaults are `temperature=0.0`, `top_p=1.0`, `top_k=40`, `min_p=0.0`, `presence_penalty=0.0`, `repetition_penalty=1.0`.
 7. `tmp/qwen36_swap/qwen36/` shows non-regression on all six scenarios and ≥ 1.3× rps on at least one of `phase4_subgraph`, `phase3_long_range`, `phase2_merge`.

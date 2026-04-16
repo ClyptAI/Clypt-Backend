@@ -124,7 +124,11 @@ _radix = enable_radix_cache.strip().lower()
 if _radix in {"0", "false", "off", "no", "disable"}:
     optional_flags.append("--disable-radix-cache")
 if speculative_mode.strip().lower() == "nextn":
+    # Qwen3.6-35B-A3B is a hybrid Mamba/Attention MoE. Pair NextN MTP with the
+    # extra_buffer mamba-scheduler-strategy; the systemd unit separately exports
+    # SGLANG_ENABLE_SPEC_V2=1 so radix cache + MTP can coexist.
     optional_flags.extend([
+        "--mamba-scheduler-strategy", "extra_buffer",
         "--speculative-algorithm", "NEXTN",
         "--speculative-num-steps", speculative_num_steps.strip(),
         "--speculative-eagle-topk", speculative_topk.strip(),
