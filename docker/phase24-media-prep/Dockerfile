@@ -29,5 +29,8 @@ EXPOSE 8080
 
 # The vllm/vllm-openai base image sets ENTRYPOINT=["vllm"], which would prepend
 # "vllm" to our CMD and break CLI parsing. Clear it so CMD runs unmodified.
+# The base image ships only /usr/bin/python3 (no bare "python" on PATH), so CMD
+# must invoke python3 directly; using "python" causes "Application exec likely
+# failed" with no stderr (exec fails before any Python code runs).
 ENTRYPOINT []
-CMD ["python", "-m", "backend.runtime.run_l4_combined_service", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python3", "-m", "backend.runtime.run_l4_combined_service", "--host", "0.0.0.0", "--port", "8080"]
