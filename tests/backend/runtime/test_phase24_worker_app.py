@@ -472,7 +472,7 @@ def test_build_default_phase24_worker_service_uses_local_model_for_flash(monkeyp
             flash_model="gemini-3-flash-preview",
         ),
         local_generation=SimpleNamespace(
-            model="Qwen/Qwen3.5-27B",
+            model="Qwen/Qwen3.6-35B-A3B",
         ),
         storage=SimpleNamespace(),
         phase24_media_prep=SimpleNamespace(
@@ -505,4 +505,4 @@ def test_build_default_phase24_worker_service_uses_local_model_for_flash(monkeyp
 
     assert service.runner is fake_runner
     assert bootstrap_calls == ["bootstrapped"]
-    assert captured["flash_model"] == "Qwen/Qwen3.5-27B"
+    assert captured["flash_model"] == "Qwen/Qwen3.6-35B-A3B"

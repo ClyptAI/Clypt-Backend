@@ -382,7 +382,7 @@ def parse_args() -> argparse.Namespace:
         help="Requests per worker level are concurrency * rounds.",
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8001/v1")
-    parser.add_argument("--model", default="Qwen/Qwen3.5-27B")
+    parser.add_argument("--model", default="Qwen/Qwen3.6-35B-A3B")
     parser.add_argument("--timeout-s", type=float, default=300.0)
     parser.add_argument("--output-json", type=Path, default=None)
     return parser.parse_args()

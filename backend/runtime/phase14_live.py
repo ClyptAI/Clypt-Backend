@@ -76,7 +76,7 @@ class V31LivePhase14Runner:
     config: V31Config
     llm_client: Any
     embedding_client: Any
-    flash_model: str = "Qwen/Qwen3.5-27B"
+    flash_model: str = "Qwen/Qwen3.6-35B-A3B"
     storage_client: Any | None = None
     node_media_preparer: Any | None = None
     repository: Phase14Repository | None = None
@@ -93,7 +93,7 @@ class V31LivePhase14Runner:
         *,
         llm_client: Any,
         embedding_client: Any,
-        flash_model: str = "Qwen/Qwen3.5-27B",
+        flash_model: str = "Qwen/Qwen3.6-35B-A3B",
         storage_client: Any | None = None,
         node_media_preparer: Any | None = None,
         repository: Phase14Repository | None = None,

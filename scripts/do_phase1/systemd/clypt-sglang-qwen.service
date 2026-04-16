@@ -11,7 +11,7 @@ Environment=TOKENIZERS_PARALLELISM=false
 Restart=always
 RestartSec=5
 TimeoutStartSec=3600
-ExecStart=/opt/clypt-phase1/venvs/sglang/bin/python -m sglang.launch_server --model-path Qwen/Qwen3.5-27B --host 127.0.0.1 --port 8001 --reasoning-parser qwen3 --grammar-backend xgrammar --schedule-policy lpm --chunked-prefill-size 8192 --mem-fraction-static 0.55 --context-length 131072
+ExecStart=/opt/clypt-phase1/venvs/sglang/bin/python -m sglang.launch_server --model-path Qwen/Qwen3.6-35B-A3B --host 127.0.0.1 --port 8001 --reasoning-parser qwen3 --grammar-backend xgrammar --schedule-policy lpm --chunked-prefill-size 8192 --mem-fraction-static 0.78 --context-length 131072 --kv-cache-dtype fp8_e4m3 --enable-radix-cache --speculative-algo NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4
 
 [Install]
 WantedBy=multi-user.target

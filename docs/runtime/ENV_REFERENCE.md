@@ -31,7 +31,7 @@ VIBEVOICE_VLLM_MODEL=vibevoice
 
 GENAI_GENERATION_BACKEND=local_openai
 CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1
-CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.5-27B
+CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.6-35B-A3B
 VERTEX_EMBEDDING_BACKEND=vertex
 
 CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite
@@ -55,7 +55,7 @@ VIBEVOICE_VLLM_MODEL=vibevoice
 
 GENAI_GENERATION_BACKEND=local_openai
 CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1
-CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.5-27B
+CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.6-35B-A3B
 VERTEX_EMBEDDING_BACKEND=vertex
 
 CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite
@@ -127,11 +127,11 @@ Fail-fast guardrails in current code:
 | `CLYPT_LOCAL_LLM_MAX_BACKOFF_S` | `30.0` | Retry tuning. |
 | `CLYPT_LOCAL_LLM_BACKOFF_MULTIPLIER` | `2.0` | Retry tuning. |
 | `CLYPT_LOCAL_LLM_JITTER_RATIO` | `0.2` | Retry tuning. |
-| `CLYPT_LOCAL_LLM_TEMPERATURE` | `0.7` | Generation tuning. |
-| `CLYPT_LOCAL_LLM_TOP_P` | `0.8` | Generation tuning. |
-| `CLYPT_LOCAL_LLM_TOP_K` | `20` | Generation tuning. |
+| `CLYPT_LOCAL_LLM_TEMPERATURE` | `0.0` | Generation tuning; strict-JSON profile (see `2026-04-16_qwen36_swap_and_sglang_tuning_spec.md`). |
+| `CLYPT_LOCAL_LLM_TOP_P` | `1.0` | Generation tuning; strict-JSON profile. |
+| `CLYPT_LOCAL_LLM_TOP_K` | `40` | Generation tuning; strict-JSON profile. |
 | `CLYPT_LOCAL_LLM_MIN_P` | `0.0` | Generation tuning. |
-| `CLYPT_LOCAL_LLM_PRESENCE_PENALTY` | `1.5` | Generation tuning. |
+| `CLYPT_LOCAL_LLM_PRESENCE_PENALTY` | `0.0` | Generation tuning; must be `0.0` for strict-schema JSON so repeated keys aren't penalized. |
 | `CLYPT_LOCAL_LLM_REPETITION_PENALTY` | `1.0` | Generation tuning. |
 
 The local OpenAI-compatible Qwen path always sends `chat_template_kwargs.enable_thinking=false`.
@@ -145,8 +145,8 @@ The local OpenAI-compatible Qwen path always sends `chat_template_kwargs.enable_
 | `GOOGLE_CLOUD_LOCATION` | `global` | Fallback generation location. |
 | `GENAI_GENERATION_LOCATION` | `global` | Generation location. |
 | `VERTEX_EMBEDDING_LOCATION` | `us-central1` | Embedding location. |
-| `GENAI_GENERATION_MODEL` | `Qwen/Qwen3.5-27B` | Provider default. |
-| `GENAI_FLASH_MODEL` | `Qwen/Qwen3.5-27B` | Default flash model. |
+| `GENAI_GENERATION_MODEL` | `Qwen/Qwen3.6-35B-A3B` | Provider default. |
+| `GENAI_FLASH_MODEL` | `Qwen/Qwen3.6-35B-A3B` | Default flash model. |
 | `VERTEX_EMBEDDING_MODEL` | `gemini-embedding-2-preview` | Embedding model. |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | unset | Developer API path only. |
 | `GENAI_GENERATION_API_MAX_RETRIES` | `6` | Developer API retry tuning. |
@@ -306,13 +306,13 @@ These are currently code defaults only, not env-driven:
 
 | Env | Default |
 |---|---|
-| `CLYPT_SIGNAL_LLM_MODEL_1` | `Qwen/Qwen3.5-27B` |
-| `CLYPT_SIGNAL_LLM_MODEL_2` | `Qwen/Qwen3.5-27B` |
-| `CLYPT_SIGNAL_LLM_MODEL_3` | `Qwen/Qwen3.5-27B` |
-| `CLYPT_SIGNAL_LLM_MODEL_5` | `Qwen/Qwen3.5-27B` |
-| `CLYPT_SIGNAL_LLM_MODEL_9` | `Qwen/Qwen3.5-27B` |
-| `CLYPT_SIGNAL_LLM_MODEL_10` | `Qwen/Qwen3.5-27B` |
-| `CLYPT_SIGNAL_LLM_MODEL_11` | `Qwen/Qwen3.5-27B` |
+| `CLYPT_SIGNAL_LLM_MODEL_1` | `Qwen/Qwen3.6-35B-A3B` |
+| `CLYPT_SIGNAL_LLM_MODEL_2` | `Qwen/Qwen3.6-35B-A3B` |
+| `CLYPT_SIGNAL_LLM_MODEL_3` | `Qwen/Qwen3.6-35B-A3B` |
+| `CLYPT_SIGNAL_LLM_MODEL_5` | `Qwen/Qwen3.6-35B-A3B` |
+| `CLYPT_SIGNAL_LLM_MODEL_9` | `Qwen/Qwen3.6-35B-A3B` |
+| `CLYPT_SIGNAL_LLM_MODEL_10` | `Qwen/Qwen3.6-35B-A3B` |
+| `CLYPT_SIGNAL_LLM_MODEL_11` | `Qwen/Qwen3.6-35B-A3B` |
 
 ## 7) vLLM Runtime Tuning Surface
 

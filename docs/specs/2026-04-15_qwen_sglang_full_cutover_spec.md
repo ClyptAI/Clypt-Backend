@@ -1,6 +1,6 @@
 # Clypt V3.1 Spec: Full Qwen Cutover from vLLM to SGLang (VibeVoice Unchanged)
 
-**Status:** Active (service/env split implemented; full Phase 1-4 validation pending)  
+**Status:** Superseded by [`2026-04-16_qwen36_swap_and_sglang_tuning_spec.md`](2026-04-16_qwen36_swap_and_sglang_tuning_spec.md) (model moved from `Qwen/Qwen3.5-27B` to `Qwen/Qwen3.6-35B-A3B`; SGLang launch line retuned for FP8 KV, NextN MTP, and `mem-fraction-static=0.78`). The vLLM→SGLang cutover documented here is landed and historical.  
 **Date:** 2026-04-15  
 **Owner:** Backend runtime / inference  
 **Scope:** Replace Qwen serving runtime from vLLM to SGLang for Phase 2-4 generation only. Keep VibeVoice ASR on existing vLLM path.

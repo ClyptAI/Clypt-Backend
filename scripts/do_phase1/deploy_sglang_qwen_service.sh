@@ -4,15 +4,21 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/opt/clypt-phase1/repo}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase1/v3_1_phase1.env}"
 SGLANG_VENV_DIR="${SGLANG_VENV_DIR:-/opt/clypt-phase1/venvs/sglang}"
-SG_PACKAGE_SPEC="${SG_PACKAGE_SPEC:-sglang[all]}"
+SG_PACKAGE_SPEC="${SG_PACKAGE_SPEC:-sglang[all]==0.5.10}"
 SG_BASE_URL="${SG_BASE_URL:-http://127.0.0.1:8001}"
 SG_PORT="${SG_PORT:-8001}"
-SG_MODEL="${SG_MODEL:-Qwen/Qwen3.5-27B}"
+SG_MODEL="${SG_MODEL:-Qwen/Qwen3.6-35B-A3B}"
 SG_GRAMMAR_BACKEND="${SG_GRAMMAR_BACKEND:-xgrammar}"
 SG_SCHEDULE_POLICY="${SG_SCHEDULE_POLICY:-lpm}"
 SG_CHUNKED_PREFILL_SIZE="${SG_CHUNKED_PREFILL_SIZE:-8192}"
-SG_MEM_FRACTION_STATIC="${SG_MEM_FRACTION_STATIC:-0.55}"
+SG_MEM_FRACTION_STATIC="${SG_MEM_FRACTION_STATIC:-0.78}"
 SG_CONTEXT_LENGTH="${SG_CONTEXT_LENGTH:-131072}"
+SG_KV_CACHE_DTYPE="${SG_KV_CACHE_DTYPE:-fp8_e4m3}"
+SG_ENABLE_RADIX_CACHE="${SG_ENABLE_RADIX_CACHE:-1}"
+SG_SPECULATIVE_MODE="${SG_SPECULATIVE_MODE:-nextn}"
+SG_SPECULATIVE_NUM_STEPS="${SG_SPECULATIVE_NUM_STEPS:-3}"
+SG_SPECULATIVE_TOPK="${SG_SPECULATIVE_TOPK:-1}"
+SG_SPECULATIVE_DRAFT_TOKENS="${SG_SPECULATIVE_DRAFT_TOKENS:-4}"
 SG_EXTRA_ARGS="${SG_EXTRA_ARGS:-}"
 SG_READY_TIMEOUT_S="${SG_READY_TIMEOUT_S:-1800}"
 SG_SYSTEMD_UNIT="${SG_SYSTEMD_UNIT:-clypt-sglang-qwen.service}"
@@ -42,15 +48,21 @@ set +a
 REPO_DIR="${REPO_DIR:-/opt/clypt-phase1/repo}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase1/v3_1_phase1.env}"
 SGLANG_VENV_DIR="${SGLANG_VENV_DIR:-/opt/clypt-phase1/venvs/sglang}"
-SG_PACKAGE_SPEC="${SG_PACKAGE_SPEC:-sglang[all]}"
+SG_PACKAGE_SPEC="${SG_PACKAGE_SPEC:-sglang[all]==0.5.10}"
 SG_BASE_URL="${SG_BASE_URL:-http://127.0.0.1:8001}"
 SG_PORT="${SG_PORT:-8001}"
-SG_MODEL="${SG_MODEL:-Qwen/Qwen3.5-27B}"
+SG_MODEL="${SG_MODEL:-Qwen/Qwen3.6-35B-A3B}"
 SG_GRAMMAR_BACKEND="${SG_GRAMMAR_BACKEND:-xgrammar}"
 SG_SCHEDULE_POLICY="${SG_SCHEDULE_POLICY:-lpm}"
 SG_CHUNKED_PREFILL_SIZE="${SG_CHUNKED_PREFILL_SIZE:-8192}"
-SG_MEM_FRACTION_STATIC="${SG_MEM_FRACTION_STATIC:-0.55}"
+SG_MEM_FRACTION_STATIC="${SG_MEM_FRACTION_STATIC:-0.78}"
 SG_CONTEXT_LENGTH="${SG_CONTEXT_LENGTH:-131072}"
+SG_KV_CACHE_DTYPE="${SG_KV_CACHE_DTYPE:-fp8_e4m3}"
+SG_ENABLE_RADIX_CACHE="${SG_ENABLE_RADIX_CACHE:-1}"
+SG_SPECULATIVE_MODE="${SG_SPECULATIVE_MODE:-nextn}"
+SG_SPECULATIVE_NUM_STEPS="${SG_SPECULATIVE_NUM_STEPS:-3}"
+SG_SPECULATIVE_TOPK="${SG_SPECULATIVE_TOPK:-1}"
+SG_SPECULATIVE_DRAFT_TOKENS="${SG_SPECULATIVE_DRAFT_TOKENS:-4}"
 SG_EXTRA_ARGS="${SG_EXTRA_ARGS:-}"
 SG_READY_TIMEOUT_S="${SG_READY_TIMEOUT_S:-1800}"
 SG_SYSTEMD_UNIT="${SG_SYSTEMD_UNIT:-clypt-sglang-qwen.service}"
@@ -76,7 +88,7 @@ install -D -m 0644 \
   "/etc/systemd/system/${SG_SYSTEMD_UNIT}"
 
 echo "[deploy-sglang-qwen] updating unit with configured runtime values ..."
-python3 - <<'PY' "$SG_SYSTEMD_UNIT" "$SGLANG_VENV_DIR" "$SG_MODEL" "$SG_PORT" "$SG_GRAMMAR_BACKEND" "$SG_SCHEDULE_POLICY" "$SG_CHUNKED_PREFILL_SIZE" "$SG_MEM_FRACTION_STATIC" "$SG_CONTEXT_LENGTH" "$SG_EXTRA_ARGS"
+python3 - <<'PY' "$SG_SYSTEMD_UNIT" "$SGLANG_VENV_DIR" "$SG_MODEL" "$SG_PORT" "$SG_GRAMMAR_BACKEND" "$SG_SCHEDULE_POLICY" "$SG_CHUNKED_PREFILL_SIZE" "$SG_MEM_FRACTION_STATIC" "$SG_CONTEXT_LENGTH" "$SG_EXTRA_ARGS" "$SG_KV_CACHE_DTYPE" "$SG_ENABLE_RADIX_CACHE" "$SG_SPECULATIVE_MODE" "$SG_SPECULATIVE_NUM_STEPS" "$SG_SPECULATIVE_TOPK" "$SG_SPECULATIVE_DRAFT_TOKENS"
 from pathlib import Path
 import re
 import sys
@@ -92,6 +104,12 @@ import sys
     mem_fraction,
     context_len,
     extra_args,
+    kv_cache_dtype,
+    enable_radix_cache,
+    speculative_mode,
+    speculative_num_steps,
+    speculative_topk,
+    speculative_draft_tokens,
 ) = sys.argv[1:]
 unit_path = Path("/etc/systemd/system") / unit_name
 text = unit_path.read_text(encoding="utf-8")
@@ -100,6 +118,20 @@ if schedule_policy.strip():
     optional_flags.extend(["--schedule-policy", schedule_policy.strip()])
 if chunked_prefill_size.strip() and chunked_prefill_size.strip() != "0":
     optional_flags.extend(["--chunked-prefill-size", chunked_prefill_size.strip()])
+if kv_cache_dtype.strip():
+    optional_flags.extend(["--kv-cache-dtype", kv_cache_dtype.strip()])
+_radix = enable_radix_cache.strip().lower()
+if _radix in {"1", "true", "on", "yes", "pin"}:
+    optional_flags.append("--enable-radix-cache")
+elif _radix in {"0", "false", "off", "no", "disable"}:
+    optional_flags.append("--disable-radix-cache")
+if speculative_mode.strip().lower() == "nextn":
+    optional_flags.extend([
+        "--speculative-algo", "NEXTN",
+        "--speculative-num-steps", speculative_num_steps.strip(),
+        "--speculative-eagle-topk", speculative_topk.strip(),
+        "--speculative-num-draft-tokens", speculative_draft_tokens.strip(),
+    ])
 if extra_args.strip():
     optional_flags.append(extra_args.strip())
 exec_line = (
@@ -174,5 +206,11 @@ echo "  SG_SCHEDULE_POLICY=${SG_SCHEDULE_POLICY}"
 echo "  SG_CHUNKED_PREFILL_SIZE=${SG_CHUNKED_PREFILL_SIZE}"
 echo "  SG_MEM_FRACTION_STATIC=${SG_MEM_FRACTION_STATIC}"
 echo "  SG_CONTEXT_LENGTH=${SG_CONTEXT_LENGTH}"
+echo "  SG_KV_CACHE_DTYPE=${SG_KV_CACHE_DTYPE}"
+echo "  SG_ENABLE_RADIX_CACHE=${SG_ENABLE_RADIX_CACHE}"
+echo "  SG_SPECULATIVE_MODE=${SG_SPECULATIVE_MODE}"
+echo "  SG_SPECULATIVE_NUM_STEPS=${SG_SPECULATIVE_NUM_STEPS}"
+echo "  SG_SPECULATIVE_TOPK=${SG_SPECULATIVE_TOPK}"
+echo "  SG_SPECULATIVE_DRAFT_TOKENS=${SG_SPECULATIVE_DRAFT_TOKENS}"
 echo "  CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0"
 echo "  CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1"

@@ -65,13 +65,13 @@ class Phase4SubgraphConfig:
 
 @dataclass(slots=True)
 class SignalLLMCallConfig:
-    model_1: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_1") or "Qwen/Qwen3.5-27B")
-    model_2: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_2") or "Qwen/Qwen3.5-27B")
-    model_3: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_3") or "Qwen/Qwen3.5-27B")
-    model_5: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_5") or "Qwen/Qwen3.5-27B")
-    model_9: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_9") or "Qwen/Qwen3.5-27B")
-    model_10: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_10") or "Qwen/Qwen3.5-27B")
-    model_11: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_11") or "Qwen/Qwen3.5-27B")
+    model_1: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_1") or "Qwen/Qwen3.6-35B-A3B")
+    model_2: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_2") or "Qwen/Qwen3.6-35B-A3B")
+    model_3: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_3") or "Qwen/Qwen3.6-35B-A3B")
+    model_5: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_5") or "Qwen/Qwen3.6-35B-A3B")
+    model_9: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_9") or "Qwen/Qwen3.6-35B-A3B")
+    model_10: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_10") or "Qwen/Qwen3.6-35B-A3B")
+    model_11: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_11") or "Qwen/Qwen3.6-35B-A3B")
 
 
 @dataclass(slots=True)

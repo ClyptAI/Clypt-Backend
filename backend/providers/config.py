@@ -135,11 +135,11 @@ class LocalGenerationSettings:
     max_backoff_s: float = 30.0
     backoff_multiplier: float = 2.0
     jitter_ratio: float = 0.2
-    temperature: float = 0.7
-    top_p: float = 0.8
-    top_k: int = 20
+    temperature: float = 0.0
+    top_p: float = 1.0
+    top_k: int = 40
     min_p: float = 0.0
-    presence_penalty: float = 1.5
+    presence_penalty: float = 0.0
     repetition_penalty: float = 1.0
 
 
@@ -151,9 +151,9 @@ class VertexSettings:
     gemini_api_key: str | None = None
     generation_location: str = "global"
     embedding_location: str = "us-central1"
-    generation_model: str = "Qwen/Qwen3.5-27B"
+    generation_model: str = "Qwen/Qwen3.6-35B-A3B"
     embedding_model: str = "gemini-embedding-2-preview"
-    flash_model: str = "Qwen/Qwen3.5-27B"
+    flash_model: str = "Qwen/Qwen3.6-35B-A3B"
     generation_api_max_retries: int = 6
     generation_api_initial_backoff_s: float = 1.0
     generation_api_max_backoff_s: float = 30.0
@@ -373,11 +373,11 @@ def load_provider_settings() -> ProviderSettings:
             0.0,
             float(_read_env("CLYPT_LOCAL_LLM_JITTER_RATIO") or "0.2"),
         ),
-        temperature=float(_read_env("CLYPT_LOCAL_LLM_TEMPERATURE") or "0.7"),
-        top_p=float(_read_env("CLYPT_LOCAL_LLM_TOP_P") or "0.8"),
-        top_k=max(1, int(_read_env("CLYPT_LOCAL_LLM_TOP_K") or "20")),
+        temperature=float(_read_env("CLYPT_LOCAL_LLM_TEMPERATURE") or "0.0"),
+        top_p=float(_read_env("CLYPT_LOCAL_LLM_TOP_P") or "1.0"),
+        top_k=max(1, int(_read_env("CLYPT_LOCAL_LLM_TOP_K") or "40")),
         min_p=max(0.0, float(_read_env("CLYPT_LOCAL_LLM_MIN_P") or "0.0")),
-        presence_penalty=float(_read_env("CLYPT_LOCAL_LLM_PRESENCE_PENALTY") or "1.5"),
+        presence_penalty=float(_read_env("CLYPT_LOCAL_LLM_PRESENCE_PENALTY") or "0.0"),
         repetition_penalty=float(_read_env("CLYPT_LOCAL_LLM_REPETITION_PENALTY") or "1.0"),
     )
 
@@ -403,9 +403,9 @@ def load_provider_settings() -> ProviderSettings:
             or _read_env("GOOGLE_CLOUD_LOCATION")
             or "global",
             embedding_location=_read_env("VERTEX_EMBEDDING_LOCATION") or "us-central1",
-            generation_model=_read_env("GENAI_GENERATION_MODEL") or "Qwen/Qwen3.5-27B",
+            generation_model=_read_env("GENAI_GENERATION_MODEL") or "Qwen/Qwen3.6-35B-A3B",
             embedding_model=_read_env("VERTEX_EMBEDDING_MODEL") or "gemini-embedding-2-preview",
-            flash_model=_read_env("GENAI_FLASH_MODEL") or "Qwen/Qwen3.5-27B",
+            flash_model=_read_env("GENAI_FLASH_MODEL") or "Qwen/Qwen3.6-35B-A3B",
             generation_api_max_retries=max(
                 0,
                 int(
