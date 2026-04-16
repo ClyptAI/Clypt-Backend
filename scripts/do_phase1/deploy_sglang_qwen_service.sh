@@ -121,13 +121,11 @@ if chunked_prefill_size.strip() and chunked_prefill_size.strip() != "0":
 if kv_cache_dtype.strip():
     optional_flags.extend(["--kv-cache-dtype", kv_cache_dtype.strip()])
 _radix = enable_radix_cache.strip().lower()
-if _radix in {"1", "true", "on", "yes", "pin"}:
-    optional_flags.append("--enable-radix-cache")
-elif _radix in {"0", "false", "off", "no", "disable"}:
+if _radix in {"0", "false", "off", "no", "disable"}:
     optional_flags.append("--disable-radix-cache")
 if speculative_mode.strip().lower() == "nextn":
     optional_flags.extend([
-        "--speculative-algo", "NEXTN",
+        "--speculative-algorithm", "NEXTN",
         "--speculative-num-steps", speculative_num_steps.strip(),
         "--speculative-eagle-topk", speculative_topk.strip(),
         "--speculative-num-draft-tokens", speculative_draft_tokens.strip(),
