@@ -280,11 +280,9 @@ class LocalOpenAIQwenClient:
             "top_p": float(self.settings.top_p),
             "presence_penalty": float(self.settings.presence_penalty),
             "repetition_penalty": float(self.settings.repetition_penalty),
-            "extra_body": {
-                "top_k": int(self.settings.top_k),
-                "min_p": float(self.settings.min_p),
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
+            "top_k": int(self.settings.top_k),
+            "min_p": float(self.settings.min_p),
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         payload["response_format"] = {
             "type": "json_schema",

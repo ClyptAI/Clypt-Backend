@@ -167,7 +167,7 @@ def _scenario_phase2_merge() -> ScenarioSpec:
         name="phase2_merge",
         prompt=build_merge_and_classify_prompt(neighborhood_payload=neighborhood_payload),
         response_schema=MERGE_AND_CLASSIFY_SCHEMA,
-        max_output_tokens=2048,
+        max_output_tokens=32768,
     )
 
 
@@ -194,7 +194,7 @@ def _scenario_phase3_local() -> ScenarioSpec:
         name="phase3_local",
         prompt=build_local_semantic_edge_prompt(batch_payload=batch_payload),
         response_schema=LOCAL_SEMANTIC_EDGE_SCHEMA,
-        max_output_tokens=1536,
+        max_output_tokens=4096,
     )
 
 
@@ -213,7 +213,7 @@ def _scenario_phase3_long_range() -> ScenarioSpec:
         name="phase3_long_range",
         prompt=build_long_range_edge_prompt(pair_payload={"candidate_pairs": candidate_pairs}),
         response_schema=LONG_RANGE_EDGE_SCHEMA,
-        max_output_tokens=1792,
+        max_output_tokens=4096,
     )
 
 
@@ -233,7 +233,7 @@ def _scenario_phase4_meta() -> ScenarioSpec:
         name="phase4_meta",
         prompt=build_meta_prompt_generation_prompt(node_summaries=node_summaries, target_count=8),
         response_schema=META_PROMPT_GENERATION_SCHEMA,
-        max_output_tokens=1024,
+        max_output_tokens=2048,
     )
 
 
@@ -258,7 +258,7 @@ def _scenario_phase4_subgraph() -> ScenarioSpec:
             provenance_payload=provenance_payload,
         ),
         response_schema=SUBGRAPH_REVIEW_SCHEMA,
-        max_output_tokens=2048,
+        max_output_tokens=4096,
     )
 
 
@@ -269,7 +269,7 @@ def _scenario_phase4_pool() -> ScenarioSpec:
             candidate_payload=_compact_candidate_payload(_pool_candidates())
         ),
         response_schema=POOL_REVIEW_SCHEMA,
-        max_output_tokens=768,
+        max_output_tokens=2048,
     )
 
 
@@ -406,7 +406,6 @@ def main() -> None:
             max_backoff_s=2.0,
             backoff_multiplier=2.0,
             jitter_ratio=0.0,
-            enable_thinking=False,
             temperature=0.0,
             top_p=1.0,
             top_k=40,

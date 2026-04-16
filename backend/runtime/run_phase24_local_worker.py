@@ -38,8 +38,6 @@ def main() -> None:
         fail_fast_preemption_threshold=settings.phase24_worker.fail_fast_preemption_threshold,
         admission_metrics_path=settings.phase24_worker.admission_metrics_path,
         block_on_phase1_active=settings.phase24_worker.block_on_phase1_active,
-        max_vllm_queue_depth=settings.phase24_worker.max_vllm_queue_depth,
-        max_vllm_decode_backlog=settings.phase24_worker.max_vllm_decode_backlog,
     )
     loop.run_forever()
 

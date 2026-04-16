@@ -11,7 +11,6 @@ from .config import (
     VertexSettings,
     VibeVoiceSettings,
     VibeVoiceVLLMSettings,
-    VLLMRuntimeSettings,
     load_provider_settings,
 )
 from .openai_local import LocalOpenAIQwenClient
@@ -43,7 +42,6 @@ __all__ = [
     "VertexEmbeddingClient",
     "VertexGenerationClient",
     "VertexSettings",
-    "VLLMRuntimeSettings",
     "VibeVoiceSettings",
     "VibeVoiceVLLMProvider",
     "build_gcs_uri_url_resolver",

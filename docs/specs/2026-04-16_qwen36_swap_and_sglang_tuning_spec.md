@@ -34,7 +34,7 @@ The `rg` gate in §8 enforces this doctrine.
    - `--context-length 131072`, `--chunked-prefill-size 8192`, `--schedule-policy lpm` (unchanged).
    - `--reasoning-parser qwen3` (required for Qwen3.6 response format).
    - `--grammar-backend xgrammar` (kept for step 1 to isolate the model swap from a grammar-backend swap; §6 R1 describes the `llguidance` follow-up).
-4. **Thinking mode:** disabled at every call site via `chat_template_kwargs.enable_thinking=False`. Qwen3.6 **does not** support the `/think` / `/nothink` soft switch; the OpenAI-compatible `extra_body` path is the only correct toggle, and the existing `LocalOpenAIQwenClient.generate_json` already sets it.
+4. **Thinking mode:** disabled at every call site via `chat_template_kwargs.enable_thinking=False`. Qwen3.6 **does not** support the `/think` / `/nothink` soft switch; the chat-template kwarg is the only correct toggle. `LocalOpenAIQwenClient.generate_json` sends it as a top-level field on the chat-completion payload (alongside `top_k` and `min_p`) because the client uses stdlib `urllib.request`, not the OpenAI Python SDK, so SDK-side `extra_body` unwrapping does not apply.
 5. **Production sampler defaults** (strict-schema JSON path):
    - `temperature=0.0`, `top_p=1.0`, `top_k=40`, `min_p=0.0`, `presence_penalty=0.0`, `repetition_penalty=1.0`.
    - These replace the Qwen3.5-era generic defaults (`temp=0.7, top_p=0.8, presence=1.5`) which were actively harmful for strict JSON (presence penalty pushes the sampler away from repeated schema keys).

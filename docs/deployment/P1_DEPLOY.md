@@ -133,12 +133,14 @@ VIBEVOICE_BACKEND=vllm
 GENAI_GENERATION_BACKEND=local_openai
 CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1
 CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.6-35B-A3B
-CLYPT_PHASE2_MAX_CONCURRENT=8
-CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT=10
+# Max in-flight LLM request caps per stage (Qwen3.6 on H200, 2026-04-16 bench).
+# Smaller videos won't saturate these; only large videos scale up.
+CLYPT_PHASE2_MERGE_MAX_CONCURRENT=16
+CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT=16
 CLYPT_SIGNAL_MAX_CONCURRENT=8
-CLYPT_PHASE3_LOCAL_MAX_CONCURRENT=8
-CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT=8
-CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT=10
+CLYPT_PHASE3_LOCAL_MAX_CONCURRENT=24
+CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT=24
+CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT=16
 SG_SCHEDULE_POLICY=lpm
 SG_CHUNKED_PREFILL_SIZE=8192
 SG_MEM_FRACTION_STATIC=0.55
@@ -239,7 +241,7 @@ python -m backend.runtime.run_phase1 \
 - The H200 host should invoke the private Cloud Run L4 combined service with a signing-capable service account so it can mint an ID token for the endpoint.
 - The intended TensorRT visual path on H200 is now GPU resize + GPU preprocess, not full-resolution host decode followed by OpenCV resize.
 - `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; do not leave it in the live env because startup should fail fast when it is present.
-- Current target env surface is explicit per-stage concurrency: `CLYPT_PHASE2_MAX_CONCURRENT`, `CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT`, `CLYPT_SIGNAL_MAX_CONCURRENT`, `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT`, `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT`, and `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT`.
+- Current target env surface is explicit per-stage concurrency: `CLYPT_PHASE2_MERGE_MAX_CONCURRENT`, `CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT`, `CLYPT_SIGNAL_MAX_CONCURRENT`, `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT`, `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT`, and `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT`. All of these are max in-flight LLM request caps per stage, not targets.
 - If `CLYPT_PHASE1_ASR_BACKEND=cloud_run_l4`, the caller must set `CLYPT_PHASE1_ASR_SERVICE_URL` and must not set `VIBEVOICE_VLLM_BASE_URL`.
 - On the 2026-04-15 Billy Carson reference replay, the optimized TensorRT path sustained about `240.1 fps` (`35705` frames in `148678.5 ms`) versus roughly `51.5 fps` before the decode/preprocess move to GPU.
 - If a fresh host replay is still near `~50 fps`, re-sync the repo to the droplet and verify the runtime includes `scale_cuda` in the decode filter chain and CUDA-side preprocess in `backend/phase1_runtime/tensorrt_detector.py`.

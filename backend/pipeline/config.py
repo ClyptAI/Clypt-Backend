@@ -6,6 +6,11 @@ import os
 
 
 _REMOVED_GLOBAL_CONCURRENCY_ENV = "CLYPT_GEMINI_MAX_CONCURRENT"
+_RENAMED_CONCURRENCY_ENVS = {
+    # old name -> new name (renamed for suffix/stage consistency)
+    "CLYPT_PHASE2_MAX_CONCURRENT": "CLYPT_PHASE2_MERGE_MAX_CONCURRENT",
+    "CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY": "CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT",
+}
 _REMOVED_THINKING_ENVS = (
     "CLYPT_PHASE2_MERGE_THINKING_LEVEL",
     "CLYPT_PHASE2_BOUNDARY_THINKING_LEVEL",
@@ -30,6 +35,11 @@ def _raise_if_removed_global_concurrency_env_present() -> None:
             f"{_REMOVED_GLOBAL_CONCURRENCY_ENV} has been removed; "
             "set explicit per-phase concurrency env vars instead."
         )
+    for old, new in _RENAMED_CONCURRENCY_ENVS.items():
+        if os.getenv(old) is not None:
+            raise ValueError(
+                f"{old} has been renamed to {new}; update your env file."
+            )
 
 
 def _raise_if_removed_thinking_env_present() -> None:
@@ -140,11 +150,11 @@ class V31Config:
     phase2_max_turns_per_batch: int = field(
         default_factory=lambda: int(os.getenv("CLYPT_PHASE2_MAX_TURNS_PER_BATCH") or "25")
     )
-    phase2_max_concurrent: int = field(
-        default_factory=lambda: int(os.getenv("CLYPT_PHASE2_MAX_CONCURRENT") or "8")
+    phase2_merge_max_concurrent: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE2_MERGE_MAX_CONCURRENT") or "16")
     )
     phase2_boundary_max_concurrent: int = field(
-        default_factory=lambda: int(os.getenv("CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT") or "10")
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT") or "16")
     )
     phase2_merge_max_output_tokens: int = field(
         default_factory=lambda: int(
@@ -179,10 +189,10 @@ class V31Config:
         default_factory=lambda: int(os.getenv("CLYPT_PHASE3_LONG_RANGE_PAIRS_PER_SHARD") or "24")
     )
     phase3_long_range_max_concurrent: int = field(
-        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT") or "4")
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT") or "24")
     )
     phase3_local_max_concurrent: int = field(
-        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_LOCAL_MAX_CONCURRENT") or "2")
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_LOCAL_MAX_CONCURRENT") or "24")
     )
     phase4_meta_max_output_tokens: int = field(
         default_factory=lambda: int(
@@ -200,7 +210,7 @@ class V31Config:
         )
     )
     phase4_subgraph_max_concurrent: int = field(
-        default_factory=lambda: int(os.getenv("CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT") or "2")
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT") or "16")
     )
     signals: SignalConfig = field(default_factory=SignalConfig)
 

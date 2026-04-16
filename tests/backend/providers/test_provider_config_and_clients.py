@@ -344,7 +344,10 @@ def test_local_openai_qwen_client_parses_json_and_validates_schema(
         captured_payloads[0]["response_format"]["json_schema"]["schema"]["additionalProperties"]
         is False
     )
-    assert captured_payloads[0]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert captured_payloads[0]["chat_template_kwargs"]["enable_thinking"] is False
+    assert captured_payloads[0]["top_k"] == 40
+    assert captured_payloads[0]["min_p"] == 0.0
+    assert "extra_body" not in captured_payloads[0]
     assert "JSON" in captured_payloads[0]["messages"][0]["content"]
 
     _install_response("not-json")
@@ -413,15 +416,39 @@ def test_v31_config_reads_phase3_and_phase4_output_caps(monkeypatch: pytest.Monk
 def test_v31_config_reads_phase2_and_signal_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
     from backend.pipeline.config import V31Config
 
-    monkeypatch.setenv("CLYPT_PHASE2_MAX_CONCURRENT", "8")
+    monkeypatch.setenv("CLYPT_PHASE2_MERGE_MAX_CONCURRENT", "8")
     monkeypatch.setenv("CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT", "10")
     monkeypatch.setenv("CLYPT_SIGNAL_MAX_CONCURRENT", "6")
 
     config = V31Config()
 
-    assert config.phase2_max_concurrent == 8
+    assert config.phase2_merge_max_concurrent == 8
     assert config.phase2_boundary_max_concurrent == 10
     assert config.signals.max_concurrent == 6
+
+
+def test_v31_config_defaults_match_recommended_bench_caps() -> None:
+    from backend.pipeline.config import V31Config
+
+    config = V31Config()
+
+    # Defaults reflect the bench-validated max-in-flight caps (2026-04-16 Qwen3.6 on H200).
+    assert config.phase2_merge_max_concurrent == 16
+    assert config.phase2_boundary_max_concurrent == 16
+    assert config.phase3_local_max_concurrent == 24
+    assert config.phase3_long_range_max_concurrent == 24
+    assert config.phase4_subgraph_max_concurrent == 16
+
+
+def test_v31_config_rejects_renamed_concurrency_envs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.pipeline.config import V31Config
+
+    monkeypatch.setenv("CLYPT_PHASE2_MAX_CONCURRENT", "8")
+
+    with pytest.raises(ValueError, match="CLYPT_PHASE2_MERGE_MAX_CONCURRENT"):
+        V31Config()
 
 
 def test_v31_config_rejects_removed_global_concurrency_env(
@@ -559,10 +586,8 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     monkeypatch.setenv("CLYPT_PHASE24_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("CLYPT_PHASE24_FAILFAST_PREEMPTION_THRESHOLD", "7")
     monkeypatch.setenv("CLYPT_PHASE24_FAILFAST_P95_LATENCY_MS", "4500")
-    monkeypatch.setenv("CLYPT_PHASE24_ADMISSION_METRICS_PATH", "/tmp/vllm_metrics.json")
+    monkeypatch.setenv("CLYPT_PHASE24_ADMISSION_METRICS_PATH", "/tmp/admission_metrics.json")
     monkeypatch.setenv("CLYPT_PHASE24_BLOCK_ON_PHASE1_ACTIVE", "1")
-    monkeypatch.setenv("CLYPT_PHASE24_MAX_VLLM_QUEUE_DEPTH", "15")
-    monkeypatch.setenv("CLYPT_PHASE24_MAX_VLLM_DECODE_BACKLOG", "33")
     monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_BACKEND", "cloud_run_l4")
     monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_SERVICE_URL", "https://phase24-media-prep.example.com")
     monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_AUTH_MODE", "id_token")
@@ -574,13 +599,6 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     monkeypatch.setenv("CLYPT_PHASE24_LOCAL_LEASE_TIMEOUT_S", "1200")
     monkeypatch.setenv("CLYPT_PHASE24_LOCAL_MAX_INFLIGHT", "3")
     monkeypatch.setenv("CLYPT_PHASE24_LOCAL_MAX_REQUESTS_PER_WORKER", "11")
-    monkeypatch.setenv("CLYPT_VLLM_PROFILE", "conservative")
-    monkeypatch.setenv("CLYPT_VLLM_MAX_NUM_SEQS", "16")
-    monkeypatch.setenv("CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS", "16384")
-    monkeypatch.setenv("CLYPT_VLLM_GPU_MEMORY_UTILIZATION", "0.86")
-    monkeypatch.setenv("CLYPT_VLLM_MAX_MODEL_LEN", "131072")
-    monkeypatch.setenv("CLYPT_VLLM_LANGUAGE_MODEL_ONLY", "1")
-    monkeypatch.setenv("CLYPT_VLLM_SPECULATIVE_MODE", "off")
 
     settings = load_provider_settings()
 
@@ -601,10 +619,8 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     assert settings.phase24_worker.max_attempts == 5
     assert settings.phase24_worker.fail_fast_preemption_threshold == 7
     assert settings.phase24_worker.fail_fast_p95_latency_ms == 4500.0
-    assert settings.phase24_worker.admission_metrics_path == "/tmp/vllm_metrics.json"
+    assert settings.phase24_worker.admission_metrics_path == "/tmp/admission_metrics.json"
     assert settings.phase24_worker.block_on_phase1_active is True
-    assert settings.phase24_worker.max_vllm_queue_depth == 15
-    assert settings.phase24_worker.max_vllm_decode_backlog == 33
     assert settings.phase24_media_prep.backend == "cloud_run_l4"
     assert settings.phase24_media_prep.service_url == "https://phase24-media-prep.example.com"
     assert settings.phase24_media_prep.auth_mode == "id_token"
@@ -616,13 +632,6 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     assert settings.phase24_local_queue.lease_timeout_s == 1200
     assert settings.phase24_local_queue.max_inflight == 3
     assert settings.phase24_local_queue.max_requests_per_worker == 11
-    assert settings.vllm_runtime.profile == "conservative"
-    assert settings.vllm_runtime.max_num_seqs == 16
-    assert settings.vllm_runtime.max_num_batched_tokens == 16384
-    assert settings.vllm_runtime.gpu_memory_utilization == 0.86
-    assert settings.vllm_runtime.max_model_len == 131072
-    assert settings.vllm_runtime.language_model_only is True
-    assert settings.vllm_runtime.speculative_mode == "off"
 
 
 def test_load_provider_settings_exposes_split_generation_and_embedding_retry_settings(

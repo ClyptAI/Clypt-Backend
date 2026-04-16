@@ -21,6 +21,22 @@ _REMOVED_LOCAL_GENERATION_ENVS = (
     "CLYPT_LOCAL_LLM_ENABLE_THINKING",
 )
 
+# Archaic env vars that were loaded but never consumed (pre-SGLang era).
+# Hard-fail if any are set so stale deployments surface immediately.
+_REMOVED_VLLM_RUNTIME_ENVS = (
+    "CLYPT_VLLM_PROFILE",
+    "CLYPT_VLLM_MAX_NUM_SEQS",
+    "CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS",
+    "CLYPT_VLLM_GPU_MEMORY_UTILIZATION",
+    "CLYPT_VLLM_MAX_MODEL_LEN",
+    "CLYPT_VLLM_LANGUAGE_MODEL_ONLY",
+    "CLYPT_VLLM_SPECULATIVE_MODE",
+    "CLYPT_VLLM_SPECULATIVE_NUM_TOKENS",
+    # Admission-gating keys whose metrics producers never shipped.
+    "CLYPT_PHASE24_MAX_VLLM_QUEUE_DEPTH",
+    "CLYPT_PHASE24_MAX_VLLM_DECODE_BACKLOG",
+)
+
 
 def _read_env(*names: str) -> str | None:
     for name in names:
@@ -95,6 +111,12 @@ def _raise_if_removed_local_generation_env_present() -> None:
             raise ValueError(
                 f"{name} has been removed because the local OpenAI-compatible Qwen path "
                 "always runs with thinking disabled."
+            )
+    for name in _REMOVED_VLLM_RUNTIME_ENVS:
+        if os.getenv(name) is not None:
+            raise ValueError(
+                f"{name} has been removed; Phase 2-4 serves Qwen via SGLang and no "
+                "code consumes this setting. Remove it from your env file."
             )
 
 
@@ -200,8 +222,6 @@ class Phase24WorkerSettings:
     fail_fast_p95_latency_ms: float = 0.0
     admission_metrics_path: str | None = None
     block_on_phase1_active: bool = False
-    max_vllm_queue_depth: int = 0
-    max_vllm_decode_backlog: int = 0
 
 
 @dataclass(slots=True)
@@ -229,20 +249,6 @@ class Phase24LocalQueueSettings:
     queue_backend: str = "local_sqlite"
     reclaim_expired_leases: bool = False
     fail_fast_on_stale_running: bool = True
-
-
-@dataclass(slots=True)
-class VLLMRuntimeSettings:
-    """Runtime tuning surface for local vLLM-hosted generation."""
-
-    profile: str = "conservative"
-    max_num_seqs: int | None = None
-    max_num_batched_tokens: int | None = None
-    gpu_memory_utilization: float | None = None
-    max_model_len: int | None = None
-    language_model_only: bool = False
-    speculative_mode: str = "off"
-    speculative_num_tokens: int | None = None
 
 
 @dataclass(slots=True)
@@ -281,7 +287,6 @@ class ProviderSettings:
     phase24_worker: Phase24WorkerSettings = field(default_factory=Phase24WorkerSettings)
     phase24_media_prep: Phase24MediaPrepSettings = field(default_factory=Phase24MediaPrepSettings)
     phase24_local_queue: Phase24LocalQueueSettings = field(default_factory=Phase24LocalQueueSettings)
-    vllm_runtime: VLLMRuntimeSettings = field(default_factory=VLLMRuntimeSettings)
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
 
 
@@ -531,12 +536,6 @@ def load_provider_settings() -> ProviderSettings:
             block_on_phase1_active=_read_bool_env(
                 "CLYPT_PHASE24_BLOCK_ON_PHASE1_ACTIVE", default=False
             ),
-            max_vllm_queue_depth=int(
-                _read_env("CLYPT_PHASE24_MAX_VLLM_QUEUE_DEPTH") or "0"
-            ),
-            max_vllm_decode_backlog=int(
-                _read_env("CLYPT_PHASE24_MAX_VLLM_DECODE_BACKLOG") or "0"
-            ),
         ),
         phase24_media_prep=Phase24MediaPrepSettings(
             backend=((_read_env("CLYPT_PHASE24_MEDIA_PREP_BACKEND") or "local").strip().lower()),
@@ -564,38 +563,6 @@ def load_provider_settings() -> ProviderSettings:
                 "CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING", default=True
             ),
         ),
-        vllm_runtime=VLLMRuntimeSettings(
-            profile=((_read_env("CLYPT_VLLM_PROFILE") or "conservative").strip().lower()),
-            max_num_seqs=(
-                int(_read_env("CLYPT_VLLM_MAX_NUM_SEQS"))
-                if _read_env("CLYPT_VLLM_MAX_NUM_SEQS") is not None
-                else None
-            ),
-            max_num_batched_tokens=(
-                int(_read_env("CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS"))
-                if _read_env("CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS") is not None
-                else None
-            ),
-            gpu_memory_utilization=(
-                float(_read_env("CLYPT_VLLM_GPU_MEMORY_UTILIZATION"))
-                if _read_env("CLYPT_VLLM_GPU_MEMORY_UTILIZATION") is not None
-                else None
-            ),
-            max_model_len=(
-                int(_read_env("CLYPT_VLLM_MAX_MODEL_LEN"))
-                if _read_env("CLYPT_VLLM_MAX_MODEL_LEN") is not None
-                else None
-            ),
-            language_model_only=_read_bool_env(
-                "CLYPT_VLLM_LANGUAGE_MODEL_ONLY", default=False
-            ),
-            speculative_mode=((_read_env("CLYPT_VLLM_SPECULATIVE_MODE") or "off").strip().lower()),
-            speculative_num_tokens=(
-                int(_read_env("CLYPT_VLLM_SPECULATIVE_NUM_TOKENS"))
-                if _read_env("CLYPT_VLLM_SPECULATIVE_NUM_TOKENS") is not None
-                else None
-            ),
-        ),
         phase1_runtime=Phase1RuntimeSettings(
             working_root=Path(
                 _read_env("CLYPT_PHASE1_WORK_ROOT") or "backend/outputs/v3_1_phase1_work"
@@ -614,7 +581,6 @@ __all__ = [
     "LocalGenerationSettings",
     "Phase24LocalQueueSettings",
     "Phase24MediaPrepSettings",
-    "VLLMRuntimeSettings",
     "Phase1RuntimeSettings",
     "Phase1ASRSettings",
     "ProviderSettings",

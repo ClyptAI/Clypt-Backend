@@ -315,7 +315,7 @@ def test_phase14_live_uses_phase_specific_concurrency_knobs(monkeypatch, tmp_pat
     runner = V31LivePhase14Runner(
         config=V31Config(
             output_root=tmp_path,
-            phase2_max_concurrent=8,
+            phase2_merge_max_concurrent=8,
             phase3_local_max_concurrent=8,
             phase4_subgraph_max_concurrent=10,
         ),
@@ -328,7 +328,7 @@ def test_phase14_live_uses_phase_specific_concurrency_knobs(monkeypatch, tmp_pat
     seen: dict[str, int] = {}
 
     def _fake_phase2(**kwargs):
-        seen["phase2_max_concurrent"] = kwargs["max_concurrent"]
+        seen["phase2_merge_max_concurrent"] = kwargs["max_concurrent"]
         return [node], [], []
 
     def _fake_local_edges(**kwargs):
@@ -474,7 +474,7 @@ def test_phase14_live_uses_phase_specific_concurrency_knobs(monkeypatch, tmp_pat
         signal_output=SignalPipelineOutput(),
     )
 
-    assert seen["phase2_max_concurrent"] == 8
+    assert seen["phase2_merge_max_concurrent"] == 8
     assert seen["phase3_local_max_concurrent"] == 8
     assert seen["phase4_subgraph_max_concurrent"] == 10
     assert seen["signals_max_concurrent"] == 6

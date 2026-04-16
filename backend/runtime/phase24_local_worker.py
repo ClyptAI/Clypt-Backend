@@ -34,8 +34,6 @@ class Phase24LocalWorkerLoop:
         fail_fast_preemption_threshold: int = 0,
         admission_metrics_path: str | None = None,
         block_on_phase1_active: bool = False,
-        max_vllm_queue_depth: int = 0,
-        max_vllm_decode_backlog: int = 0,
     ) -> None:
         self._queue = queue
         self._service = service
@@ -49,8 +47,6 @@ class Phase24LocalWorkerLoop:
         self._fail_fast_preemption_threshold = max(0, int(fail_fast_preemption_threshold))
         self._admission_metrics_path = Path(admission_metrics_path) if admission_metrics_path else None
         self._block_on_phase1_active = bool(block_on_phase1_active)
-        self._max_vllm_queue_depth = max(0, int(max_vllm_queue_depth))
-        self._max_vllm_decode_backlog = max(0, int(max_vllm_decode_backlog))
         self._processed_count = 0
 
     def _read_admission_metrics(self) -> dict[str, Any] | None:
@@ -83,14 +79,6 @@ class Phase24LocalWorkerLoop:
             return True
         if self._block_on_phase1_active and bool(metrics.get("phase1_gpu_active")):
             return False
-        if self._max_vllm_queue_depth > 0:
-            queue_depth = int(metrics.get("vllm_queue_depth") or 0)
-            if queue_depth > self._max_vllm_queue_depth:
-                return False
-        if self._max_vllm_decode_backlog > 0:
-            decode_backlog = int(metrics.get("vllm_decode_backlog") or 0)
-            if decode_backlog > self._max_vllm_decode_backlog:
-                return False
         return True
 
     def run_once(self) -> bool:

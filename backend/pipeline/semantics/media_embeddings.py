@@ -16,16 +16,21 @@ def _format_seconds(value_ms: int) -> str:
 
 
 def _read_max_concurrency(*, node_count: int, max_concurrent: int | None) -> int:
+    if os.getenv("CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY") is not None:
+        raise ValueError(
+            "CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY has been renamed to "
+            "CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT; update your env file."
+        )
     if max_concurrent is None:
-        raw_value = os.getenv("CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY") or "8"
+        raw_value = os.getenv("CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT") or "8"
         try:
             max_concurrent = int(raw_value)
         except ValueError as exc:
             raise ValueError(
-                "CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY must be a positive integer."
+                "CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT must be a positive integer."
             ) from exc
     if max_concurrent < 1:
-        raise ValueError("CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY must be >= 1.")
+        raise ValueError("CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT must be >= 1.")
     return min(max_concurrent, node_count) if node_count > 0 else 1
 
 

@@ -124,27 +124,30 @@ This preserves compatibility with `embed_semantic_nodes_live()`, which zips node
 - always sends OpenAI-compatible `/chat/completions`
 - always uses `response_format.type=json_schema` with `strict=true`
 - enforces `additionalProperties=false` recursively on object schemas
-- forces non-thinking payload (`extra_body.chat_template_kwargs.enable_thinking=false`)
+- forces non-thinking payload (top-level `chat_template_kwargs.enable_thinking=false`; sent flat, not under `extra_body`, because the client posts JSON directly via stdlib and does not rely on OpenAI-SDK `extra_body` unwrapping)
 - forwards configured `max_output_tokens` as a real `max_tokens` request cap on structured-output calls
 - warns when the serving backend returns `finish_reason=length`, because that is the strongest signal that a structured JSON reply was token-capped
 - validates parsed response against required/type/enum subset
 
 ## 6) Phase 2-4 Concurrency Guidance
 
+All Phase 2-4 stage concurrency envs are **max in-flight LLM request caps**,
+not throughput targets. Smaller videos will naturally stay well below these
+caps; only large videos will scale up to them. Defaults were validated against
+Qwen3.6-35B-A3B on H200 (2026-04-16 bench, see
+`docs/specs/2026-04-16_qwen36_swap_and_sglang_tuning_spec.md`).
+
 Current code-backed defaults:
 
-- `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; startup should fail if it is still set
-- use explicit per-stage envs instead:
-  - `CLYPT_PHASE2_MAX_CONCURRENT=8`
-  - `CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT=10`
+- `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; startup fails if it is still set
+- `CLYPT_PHASE2_MAX_CONCURRENT` has been renamed to `CLYPT_PHASE2_MERGE_MAX_CONCURRENT`; the old name now raises at config load
+- use explicit per-stage envs:
+  - `CLYPT_PHASE2_MERGE_MAX_CONCURRENT=16`
+  - `CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT=16`
   - `CLYPT_SIGNAL_MAX_CONCURRENT=8`
-  - `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT=2`
-  - `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT=4`
-  - `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT=2`
-- recommended DO H200 working pins can be higher, and the current checked-in examples use:
-  - `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT=8`
-  - `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT=8`
-  - `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT=10`
+  - `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT=24`
+  - `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT=24`
+  - `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT=16`
 - keep Phase 3 long-range shortlist controls explicit:
   - `CLYPT_PHASE3_LONG_RANGE_TOP_K=2`
   - `CLYPT_PHASE3_LONG_RANGE_PAIRS_PER_SHARD=24`

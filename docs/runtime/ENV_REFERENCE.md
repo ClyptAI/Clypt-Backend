@@ -201,8 +201,11 @@ These are still supported by config, but the current local runtime path uses the
 | `CLYPT_PHASE24_FAILFAST_P95_LATENCY_MS` | `0` | Admission guard. |
 | `CLYPT_PHASE24_ADMISSION_METRICS_PATH` | unset | Optional JSON metrics file. |
 | `CLYPT_PHASE24_BLOCK_ON_PHASE1_ACTIVE` | `0` | Admission guard. |
-| `CLYPT_PHASE24_MAX_VLLM_QUEUE_DEPTH` | `0` | Admission guard. |
-| `CLYPT_PHASE24_MAX_VLLM_DECODE_BACKLOG` | `0` | Admission guard. |
+
+> Removed (2026-04-16 SGLang cutover): `CLYPT_PHASE24_MAX_VLLM_QUEUE_DEPTH` and
+> `CLYPT_PHASE24_MAX_VLLM_DECODE_BACKLOG`. Loading any of these now raises
+> `ValueError` at config load. There is no metrics producer under SGLang, so the
+> admission guards were dead code.
 
 ### 4.2 Node-media prep
 
@@ -214,11 +217,15 @@ These are still supported by config, but the current local runtime path uses the
 | `CLYPT_PHASE24_MEDIA_PREP_AUDIENCE` | unset | Optional, defaults to service URL in callers. |
 | `CLYPT_PHASE24_MEDIA_PREP_TIMEOUT_S` | `600` | Remote request timeout. |
 | `CLYPT_PHASE24_FFMPEG_DEVICE` | `auto` | `auto`, `gpu`, or `cpu`. |
-| `CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY` | `8` | Clip extraction worker pool size. |
+| `CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT` | `8` | Clip extraction worker pool size. Renamed from `CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY`; the old name now raises at config load. |
 
 ## 5) Phase 2-4 Pipeline Tuning Env Surface
 
-Current code enforces explicit per-stage concurrency. There is no global concurrency fallback anymore.
+Current code enforces explicit per-stage concurrency. There is no global
+concurrency fallback anymore. All `*_MAX_CONCURRENT` values are **max in-flight
+LLM request caps** per stage (validated 2026-04-16 against Qwen3.6-35B-A3B on
+H200). Smaller videos stay well below these caps; only large videos scale up
+to them.
 
 ### 5.1 Phase 2-4 orchestration
 
@@ -226,8 +233,8 @@ Current code enforces explicit per-stage concurrency. There is no global concurr
 |---|---|
 | `CLYPT_PHASE2_TARGET_BATCH_COUNT` | `5` |
 | `CLYPT_PHASE2_MAX_TURNS_PER_BATCH` | `25` |
-| `CLYPT_PHASE2_MAX_CONCURRENT` | `8` |
-| `CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT` | `10` |
+| `CLYPT_PHASE2_MERGE_MAX_CONCURRENT` | `16` |
+| `CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT` | `16` |
 | `CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS` | `32768` |
 | `CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS` | `32768` |
 | `CLYPT_PHASE3_TARGET_BATCH_COUNT` | `3` |
@@ -236,12 +243,16 @@ Current code enforces explicit per-stage concurrency. There is no global concurr
 | `CLYPT_PHASE3_LONG_RANGE_MAX_OUTPUT_TOKENS` | `4096` |
 | `CLYPT_PHASE3_LONG_RANGE_TOP_K` | `2` |
 | `CLYPT_PHASE3_LONG_RANGE_PAIRS_PER_SHARD` | `24` |
-| `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT` | `4` |
-| `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT` | `2` |
+| `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT` | `24` |
+| `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT` | `24` |
 | `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS` | `2048` |
 | `CLYPT_PHASE4_SUBGRAPH_MAX_OUTPUT_TOKENS` | `4096` |
 | `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS` | `2048` |
-| `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT` | `2` |
+| `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT` | `16` |
+
+> Renamed (2026-04-16): `CLYPT_PHASE2_MAX_CONCURRENT` is now
+> `CLYPT_PHASE2_MERGE_MAX_CONCURRENT` (to mirror `*_BOUNDARY_MAX_CONCURRENT`).
+> The old name now raises `ValueError` at config load.
 | `CLYPT_PHASE4_SUBGRAPH_OVERLAP_DEDUPE_THRESHOLD` | `0.70` |
 
 ### 5.2 Phase 4 budget knobs
@@ -314,20 +325,19 @@ These are currently code defaults only, not env-driven:
 | `CLYPT_SIGNAL_LLM_MODEL_10` | `Qwen/Qwen3.6-35B-A3B` |
 | `CLYPT_SIGNAL_LLM_MODEL_11` | `Qwen/Qwen3.6-35B-A3B` |
 
-## 7) vLLM Runtime Tuning Surface
+## 7) SGLang Runtime Tuning Surface (Qwen3.6)
 
-These settings are loaded into `VLLMRuntimeSettings` and are primarily for local vLLM-hosted generation tuning:
+SGLang startup flags for the Qwen3.6 service are driven by `SG_*` knobs in
+`scripts/do_phase1/deploy_sglang_qwen_service.sh` and the
+`clypt-sglang-qwen.service` systemd unit, not via Python-level envs.
 
-| Env | Default |
-|---|---|
-| `CLYPT_VLLM_PROFILE` | `conservative` |
-| `CLYPT_VLLM_MAX_NUM_SEQS` | unset |
-| `CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS` | unset |
-| `CLYPT_VLLM_GPU_MEMORY_UTILIZATION` | unset |
-| `CLYPT_VLLM_MAX_MODEL_LEN` | unset |
-| `CLYPT_VLLM_LANGUAGE_MODEL_ONLY` | `0` |
-| `CLYPT_VLLM_SPECULATIVE_MODE` | `off` |
-| `CLYPT_VLLM_SPECULATIVE_NUM_TOKENS` | unset |
+> Removed (2026-04-16 Qwen3.6 + SGLang cutover): `CLYPT_VLLM_PROFILE`,
+> `CLYPT_VLLM_MAX_NUM_SEQS`, `CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS`,
+> `CLYPT_VLLM_GPU_MEMORY_UTILIZATION`, `CLYPT_VLLM_MAX_MODEL_LEN`,
+> `CLYPT_VLLM_LANGUAGE_MODEL_ONLY`, `CLYPT_VLLM_SPECULATIVE_MODE`,
+> `CLYPT_VLLM_SPECULATIVE_NUM_TOKENS`. They were loaded into
+> `VLLMRuntimeSettings` but never consumed. Setting any of them now raises
+> `ValueError` at `load_provider_settings()`.
 
 ## 8) Deploy-Script-Only Env Surface
 

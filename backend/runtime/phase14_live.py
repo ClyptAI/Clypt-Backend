@@ -605,7 +605,7 @@ class V31LivePhase14Runner:
             merge_max_output_tokens=self.config.phase2_merge_max_output_tokens,
             boundary_max_output_tokens=self.config.phase2_boundary_max_output_tokens,
             model=self.flash_model,
-            max_concurrent=self.config.phase2_max_concurrent,
+            max_concurrent=self.config.phase2_merge_max_concurrent,
             boundary_max_concurrent=self.config.phase2_boundary_max_concurrent,
         )
         merge_boundary_duration_ms = (time.perf_counter() - merge_boundary_started) * 1000.0
