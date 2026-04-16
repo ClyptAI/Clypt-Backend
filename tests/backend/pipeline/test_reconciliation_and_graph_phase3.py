@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from backend.pipeline.contracts import SemanticGraphNode, SemanticNodeEvidence
 from backend.pipeline.graph.structural_edges import build_structural_edges
-from backend.pipeline.semantics.boundary_reconciliation import reconcile_boundary_nodes
+from backend.pipeline.semantics.boundary_reconciliation import (
+    reconcile_boundary_nodes,
+    should_skip_boundary_reconciliation,
+)
 
 
 def _node(
@@ -41,7 +44,7 @@ def test_reconcile_boundary_nodes_keeps_distinct_nodes_when_requested():
     reconciled = reconcile_boundary_nodes(
         left_batch_nodes=left_nodes,
         right_batch_nodes=right_nodes,
-        gemini_response={
+        llm_response={
             "resolution": "keep_both",
             "nodes": [
                 {
@@ -76,7 +79,7 @@ def test_reconcile_boundary_nodes_merges_overlapping_boundary_nodes():
     reconciled = reconcile_boundary_nodes(
         left_batch_nodes=left_nodes,
         right_batch_nodes=right_nodes,
-        gemini_response={
+        llm_response={
             "resolution": "merge",
             "merged_node": {
                 "source_turn_ids": ["t_000003", "t_000004"],
@@ -94,6 +97,54 @@ def test_reconcile_boundary_nodes_merges_overlapping_boundary_nodes():
     assert node.end_ms == 2200
     assert node.node_type == "explanation"
     assert node.node_flags == ["high_resonance_candidate"]
+
+
+def test_should_skip_boundary_reconciliation_for_clear_time_gap():
+    decision = should_skip_boundary_reconciliation(
+        left_node=_node(
+            "node_left",
+            0,
+            1000,
+            ["t_000001"],
+            node_type="claim",
+            summary="Opens a question about a product launch.",
+        ),
+        right_node=_node(
+            "node_right",
+            9000,
+            10000,
+            ["t_000006"],
+            node_type="reaction_beat",
+            summary="Audience reacts to a later joke.",
+        ),
+    )
+
+    assert decision["skip_llm"] is True
+    assert decision["reason"] == "large_time_gap"
+
+
+def test_should_skip_boundary_reconciliation_keeps_ambiguous_adjacent_nodes_on_llm_path():
+    decision = should_skip_boundary_reconciliation(
+        left_node=_node(
+            "node_left",
+            0,
+            1000,
+            ["t_000001", "t_000002"],
+            node_type="setup_payoff",
+            summary="He sets up the reveal with a short teaser.",
+        ),
+        right_node=_node(
+            "node_right",
+            1100,
+            1900,
+            ["t_000003"],
+            node_type="setup_payoff",
+            summary="The reveal lands right after the teaser.",
+        ),
+    )
+
+    assert decision["skip_llm"] is False
+    assert decision["reason"] == "ambiguous_default"
 
 
 def test_build_structural_edges_draws_next_prev_and_overlap_edges():

@@ -4,13 +4,40 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Callable
 
 from backend.pipeline.timeline.vibevoice_merge import merge_vibevoice_outputs
 
 from .models import Phase1SidecarOutputs, Phase1Workspace
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_stage_event(
+    stage_event_logger: Callable[..., None] | None,
+    *,
+    stage_name: str,
+    status: str,
+    duration_ms: float | None = None,
+    metadata: dict[str, Any] | None = None,
+    error_payload: dict[str, Any] | None = None,
+) -> None:
+    if stage_event_logger is None:
+        return
+    try:
+        stage_event_logger(
+            stage_name=stage_name,
+            status=status,
+            duration_ms=duration_ms,
+            metadata=metadata or {},
+            error_payload=error_payload,
+        )
+    except Exception:  # pragma: no cover - defensive logging path
+        logger.exception(
+            "[extract] stage_event_logger failed for stage=%s status=%s",
+            stage_name,
+            status,
+        )
 
 
 def _is_forced_alignment_required() -> bool:
@@ -24,6 +51,7 @@ def _run_audio_chain(
     forced_aligner: Any,
     emotion_provider: Any,
     yamnet_provider: Any,
+    stage_event_logger: Callable[..., None] | None = None,
 ) -> tuple[dict, Any, Any]:
     """
     NFA → emotion2vec+ → YAMNet, always serial with each other to avoid
@@ -48,10 +76,19 @@ def _run_audio_chain(
 
     logger.info("[extract] starting forced-alignment on %d turns ...", len(prelim_turns))
     t_fa = time.perf_counter()
-    word_alignments = forced_aligner.run(
-        audio_path=workspace.audio_path,
-        turns=prelim_turns,
-    )
+    try:
+        word_alignments = forced_aligner.run(
+            audio_path=workspace.audio_path,
+            turns=prelim_turns,
+        )
+    except Exception as exc:
+        _emit_stage_event(
+            stage_event_logger,
+            stage_name="forced_alignment",
+            status="failed",
+            error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
+        )
+        raise
     logger.info(
         "[extract] forced-alignment done in %.1f s — %d words",
         time.perf_counter() - t_fa,
@@ -69,10 +106,26 @@ def _run_audio_chain(
             "this indicates NFA is unhealthy."
         )
         if _is_forced_alignment_required():
+            _emit_stage_event(
+                stage_event_logger,
+                stage_name="forced_alignment",
+                status="failed",
+                duration_ms=(time.perf_counter() - t_fa) * 1000.0,
+                metadata={"turn_count": len(prelim_turns), "word_count": len(word_alignments)},
+                error_payload={"code": "RuntimeError", "message": msg[:2048]},
+            )
             raise RuntimeError(
                 f"{msg} Set CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=0 only for temporary debugging bypass."
             )
         logger.warning("%s Continuing because CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=0.", msg)
+
+    _emit_stage_event(
+        stage_event_logger,
+        stage_name="forced_alignment",
+        status="succeeded",
+        duration_ms=(time.perf_counter() - t_fa) * 1000.0,
+        metadata={"turn_count": len(prelim_turns), "word_count": len(word_alignments)},
+    )
 
     merged = merge_vibevoice_outputs(
         vibevoice_turns=vibevoice_turns,
@@ -98,20 +151,53 @@ def _run_audio_chain(
 
     logger.info("[extract] starting emotion2vec+ on %d turns ...", len(turns))
     t_emotion = time.perf_counter()
-    emotion2vec_payload = emotion_provider.run(
-        audio_path=workspace.audio_path,
-        turns=turns,
-    )
+    try:
+        emotion2vec_payload = emotion_provider.run(
+            audio_path=workspace.audio_path,
+            turns=turns,
+        )
+    except Exception as exc:
+        _emit_stage_event(
+            stage_event_logger,
+            stage_name="emotion2vec",
+            status="failed",
+            error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
+        )
+        raise
     logger.info("[extract] emotion2vec+ done in %.1f s", time.perf_counter() - t_emotion)
+    emotion_segments = len((emotion2vec_payload or {}).get("segments") or [])
+    _emit_stage_event(
+        stage_event_logger,
+        stage_name="emotion2vec",
+        status="succeeded",
+        duration_ms=(time.perf_counter() - t_emotion) * 1000.0,
+        metadata={"turn_count": len(turns), "segment_count": emotion_segments},
+    )
 
     logger.info("[extract] starting YAMNet ...")
     t_yamnet = time.perf_counter()
-    yamnet_payload = yamnet_provider.run(audio_path=workspace.audio_path)
+    try:
+        yamnet_payload = yamnet_provider.run(audio_path=workspace.audio_path)
+    except Exception as exc:
+        _emit_stage_event(
+            stage_event_logger,
+            stage_name="yamnet",
+            status="failed",
+            error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
+        )
+        raise
     yamnet_event_count = len((yamnet_payload or {}).get("events") or [])
     logger.info(
         "[extract] YAMNet done in %.1f s — %d events",
         time.perf_counter() - t_yamnet,
         yamnet_event_count,
+    )
+    _emit_stage_event(
+        stage_event_logger,
+        stage_name="yamnet",
+        status="succeeded",
+        duration_ms=(time.perf_counter() - t_yamnet) * 1000.0,
+        metadata={"event_count": yamnet_event_count},
     )
 
     return diarization_payload, emotion2vec_payload, yamnet_payload
@@ -129,6 +215,7 @@ def run_phase1_sidecars(
     emotion_provider: Any,
     yamnet_provider: Any,
     on_audio_chain_complete: Any | None = None,
+    stage_event_logger: Callable[..., None] | None = None,
 ) -> Phase1SidecarOutputs:
     """
     Run Phase 1 sidecar tasks for the vLLM-only pipeline.
@@ -169,14 +256,32 @@ def run_phase1_sidecars(
                         raise
             return vibevoice_provider.run(audio_path=workspace.audio_path)
 
+        t_visual = time.perf_counter()
         visual_future = pool.submit(
             visual_extractor.extract,
             video_path=workspace.video_path,
             workspace=workspace,
         )
+        t_asr = time.perf_counter()
         asr_future = pool.submit(_run_asr_with_optional_gcs_audio)
 
-        vibevoice_turns = asr_future.result()
+        try:
+            vibevoice_turns = asr_future.result()
+        except Exception as exc:
+            _emit_stage_event(
+                stage_event_logger,
+                stage_name="vibevoice_asr",
+                status="failed",
+                error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
+            )
+            raise
+        _emit_stage_event(
+            stage_event_logger,
+            stage_name="vibevoice_asr",
+            status="succeeded",
+            duration_ms=(time.perf_counter() - t_asr) * 1000.0,
+            metadata={"turn_count": len(vibevoice_turns)},
+        )
         logger.info(
             "[extract] ASR done (%d turns) — starting audio chain while RF-DETR still running ...",
             len(vibevoice_turns),
@@ -188,6 +293,7 @@ def run_phase1_sidecars(
             forced_aligner=forced_aligner,
             emotion_provider=emotion_provider,
             yamnet_provider=yamnet_provider,
+            stage_event_logger=stage_event_logger,
         )
 
         diarization_payload, emotion2vec_payload, yamnet_payload = audio_chain_future.result()
@@ -211,7 +317,26 @@ def run_phase1_sidecars(
                 "[extract] audio-chain callback fired — Phases 2-4 starting while RF-DETR finishes"
             )
 
-        phase1_visual = visual_future.result()
+        try:
+            phase1_visual = visual_future.result()
+        except Exception as exc:
+            _emit_stage_event(
+                stage_event_logger,
+                stage_name="visual_extraction",
+                status="failed",
+                error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
+            )
+            raise
+        _emit_stage_event(
+            stage_event_logger,
+            stage_name="visual_extraction",
+            status="succeeded",
+            duration_ms=(time.perf_counter() - t_visual) * 1000.0,
+            metadata={
+                "shot_change_count": len((phase1_visual or {}).get("shot_changes") or []),
+                "track_count": len((phase1_visual or {}).get("tracks") or []),
+            },
+        )
 
     logger.info(
         "[extract] visual + audio chain both done in %.1f s",

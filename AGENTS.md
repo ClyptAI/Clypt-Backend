@@ -7,7 +7,9 @@ Operational startup and maintenance guide for coding agents and maintainers.
 - Product: Clypt V3.1 backend
 - Implemented: Phases 1-4
 - Planned: Phases 5-6
-- Current ASR backend: vLLM VibeVoice only
+- Current Phase 1 ASR modes: local vLLM VibeVoice or remote Cloud Run L4 combined service
+- Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint
+- Optional combined L4 service: `POST /tasks/asr` and `POST /tasks/node-media-prep`
 
 ## Read Order (Required - You MUST read these before reporting back to the user.)
 
@@ -17,6 +19,7 @@ Operational startup and maintenance guide for coding agents and maintainers.
 4. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 5. [docs/specs/SPEC_INDEX.md](docs/specs/SPEC_INDEX.md)
 6. [docs/EVALS.md](docs/EVALS.md)
+7. [docs/ERROR_LOG.md](docs/ERROR_LOG.md)
 
 ## Documentation-First Rule (Required)
 
@@ -75,14 +78,25 @@ python -m backend.runtime.run_phase1 \
   --run-phase14
 ```
 
+### Phase 2-4 local worker
+
+```bash
+python -m backend.runtime.run_phase24_local_worker --worker-id local-worker-1
+```
+
 ## Runtime Truths To Preserve
 
 - `VIBEVOICE_VLLM_MODEL` must be `vibevoice`.
 - `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required even for VibeVoice-only runs.
 - Phase 1 audio chain must launch immediately after ASR completion.
-- Phase 2-4 production worker profile defaults to `us-east4` L4 GPU-accelerated.
+- Phase 1 local runtime requires `CLYPT_PHASE1_INPUT_MODE=test_bank`.
+- `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; use explicit per-stage concurrency envs instead.
+- Phase 2-4 local runtime requires `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`.
+- Phase 2-4 local worker currently enforces `GENAI_GENERATION_BACKEND=local_openai`.
+- Default crash handling mode is fail-fast (`CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`, `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`).
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
-- Phase 2-4 worker runtime requires `ffmpeg`; deploy from `docker/phase24-worker/Dockerfile` (use `scripts/deploy_phase24_worker.sh`, not generic source buildpacks).
+- Qwen serving target is the SGLang service on `127.0.0.1:8001`.
+- If `CLYPT_PHASE1_ASR_BACKEND=cloud_run_l4`, the caller must set `CLYPT_PHASE1_ASR_SERVICE_URL` and must not set `VIBEVOICE_VLLM_BASE_URL`.
 
 ## Critical Maintenance Rule
 
@@ -102,7 +116,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (2578 symbols, 6463 relationships, 195 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (2782 symbols, 7052 relationships, 211 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

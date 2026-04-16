@@ -116,6 +116,20 @@ class PhaseMetricRecord(StrictModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class PhaseSubstepRecord(StrictModel):
+    run_id: str
+    phase_name: str
+    step_name: str
+    step_key: str
+    status: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    duration_ms: float | None = None
+    error_payload: dict[str, Any] | None = None
+    query_version: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class Phase24JobRecord(StrictModel):
     run_id: str
     status: JobStatus
@@ -230,6 +244,7 @@ __all__ = [
     "Phase14RunStatus",
     "Phase24JobRecord",
     "PhaseMetricRecord",
+    "PhaseSubstepRecord",
     "PromptSourceLinkRecord",
     "PromptSourceType",
     "RunRecord",

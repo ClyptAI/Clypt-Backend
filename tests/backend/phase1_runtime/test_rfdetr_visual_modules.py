@@ -104,7 +104,12 @@ class TestFrameDecode:
         from backend.phase1_runtime.frame_decode import DecodedFrame, batch_frames
 
         frames = [
-            DecodedFrame(frame_idx=i, rgb=np.zeros((2, 2, 3), dtype=np.uint8))
+            DecodedFrame(
+                frame_idx=i,
+                rgb=np.zeros((2, 2, 3), dtype=np.uint8),
+                source_width=2,
+                source_height=2,
+            )
             for i in range(7)
         ]
         batches = list(batch_frames(iter(frames), batch_size=3))
@@ -124,7 +129,12 @@ class TestFrameDecode:
         from backend.phase1_runtime.frame_decode import DecodedFrame, batch_frames
 
         frames = [
-            DecodedFrame(frame_idx=i, rgb=np.zeros((1, 1, 3), dtype=np.uint8))
+            DecodedFrame(
+                frame_idx=i,
+                rgb=np.zeros((1, 1, 3), dtype=np.uint8),
+                source_width=1,
+                source_height=1,
+            )
             for i in range(6)
         ]
         batches = list(batch_frames(iter(frames), batch_size=3))
@@ -138,6 +148,131 @@ class TestFrameDecode:
         video.write_bytes(b"not-a-real-video")
         with pytest.raises(ValueError, match="only 'gpu' is supported"):
             next(decode_video_frames(video_path=video, decode_backend="cpu"))
+
+    def test_decode_video_frames_uses_nv12_then_rgb24_filter(self, monkeypatch, tmp_path: Path):
+        from backend.phase1_runtime.frame_decode import decode_video_frames
+
+        video = tmp_path / "sample.mp4"
+        video.write_bytes(b"not-a-real-video")
+
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode._probe_frame_dimensions",
+            lambda **_: (2, 2),
+        )
+
+        class _DummyStdout:
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
+                self._served = False
+
+            def read(self, _n: int) -> bytes:
+                if self._served:
+                    return b""
+                self._served = True
+                return self._payload
+
+            def close(self) -> None:
+                return None
+
+        class _DummyStderr:
+            def read(self) -> bytes:
+                return b""
+
+            def close(self) -> None:
+                return None
+
+        class _DummyProcess:
+            def __init__(self, payload: bytes) -> None:
+                self.stdout = _DummyStdout(payload)
+                self.stderr = _DummyStderr()
+                self.returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                return self.returncode
+
+        captured_cmd: list[str] = []
+
+        def _fake_popen(cmd, stdout=None, stderr=None):  # noqa: ARG001
+            captured_cmd.extend(cmd)
+            return _DummyProcess(payload=(b"\x00" * (2 * 2 * 3)))
+
+        monkeypatch.setattr("backend.phase1_runtime.frame_decode.subprocess.Popen", _fake_popen)
+
+        frames = list(decode_video_frames(video_path=video, decode_backend="gpu"))
+        assert len(frames) == 1
+        vf_index = captured_cmd.index("-vf")
+        assert captured_cmd[vf_index + 1] == "hwdownload,format=nv12,format=rgb24"
+
+    def test_decode_video_frames_can_resize_on_gpu_and_preserve_source_dimensions(self, monkeypatch, tmp_path: Path):
+        from backend.phase1_runtime.frame_decode import decode_video_frames
+
+        video = tmp_path / "sample.mp4"
+        video.write_bytes(b"not-a-real-video")
+
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode._probe_frame_dimensions",
+            lambda **_: (4, 3),
+        )
+
+        class _DummyStdout:
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
+                self._served = False
+
+            def read(self, _n: int) -> bytes:
+                if self._served:
+                    return b""
+                self._served = True
+                return self._payload
+
+            def close(self) -> None:
+                return None
+
+        class _DummyStderr:
+            def read(self) -> bytes:
+                return b""
+
+            def close(self) -> None:
+                return None
+
+        class _DummyProcess:
+            def __init__(self, payload: bytes) -> None:
+                self.stdout = _DummyStdout(payload)
+                self.stderr = _DummyStderr()
+                self.returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                return self.returncode
+
+        captured_cmd: list[str] = []
+
+        def _fake_popen(cmd, stdout=None, stderr=None):  # noqa: ARG001
+            captured_cmd.extend(cmd)
+            return _DummyProcess(payload=(b"\x00" * (2 * 2 * 3)))
+
+        monkeypatch.setattr("backend.phase1_runtime.frame_decode.subprocess.Popen", _fake_popen)
+
+        frames = list(
+            decode_video_frames(
+                video_path=video,
+                decode_backend="gpu",
+                target_width=2,
+                target_height=2,
+            )
+        )
+
+        assert len(frames) == 1
+        assert frames[0].rgb.shape == (2, 2, 3)
+        assert frames[0].source_width == 4
+        assert frames[0].source_height == 3
+        vf_index = captured_cmd.index("-vf")
+        assert captured_cmd[vf_index + 1] == "scale_cuda=2:2,hwdownload,format=nv12,format=rgb24"
 
 
 # ---------- rfdetr_detector tests ----------
@@ -240,17 +375,74 @@ class TestTensorRTDetector:
         with pytest.raises(RuntimeError, match="not loaded"):
             det.detect_batch([np.zeros((10, 10, 3), dtype=np.uint8)])
 
-    def test_preprocess_batch_shape_and_normalization(self, tmp_path):
+    def test_preprocess_batch_shape_and_normalization(self, tmp_path, monkeypatch):
+        import sys
+        import types
+
         from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
 
         config = self._make_tensorrt_config(tmp_path)
         det = TensorRTDetector(config)
+
+        class FakeTensor:
+            def __init__(self, array, *, device="cpu", dtype=None):
+                self._array = np.asarray(array, dtype=dtype)
+                self.device = device
+                self.dtype = self._array.dtype
+
+            @property
+            def shape(self):
+                return self._array.shape
+
+            def to(self, device=None, dtype=None):
+                return FakeTensor(
+                    self._array.astype(dtype or self._array.dtype, copy=False),
+                    device=device or self.device,
+                    dtype=dtype or self._array.dtype,
+                )
+
+            def permute(self, *dims):
+                return FakeTensor(np.transpose(self._array, dims), device=self.device)
+
+            def contiguous(self):
+                return self
+
+            def div_(self, value):
+                rhs = value._array if isinstance(value, FakeTensor) else value
+                self._array = self._array / rhs
+                self.dtype = self._array.dtype
+                return self
+
+            def sub_(self, value):
+                rhs = value._array if isinstance(value, FakeTensor) else value
+                self._array = self._array - rhs
+                self.dtype = self._array.dtype
+                return self
+
+        class FakeTorch:
+            float32 = np.float32
+            nn = types.SimpleNamespace(
+                functional=types.SimpleNamespace(
+                    interpolate=lambda tensor, size, mode, align_corners: FakeTensor(
+                        np.zeros((tensor.shape[0], tensor.shape[1], size[0], size[1]), dtype=tensor.dtype),
+                        device=tensor.device,
+                        dtype=tensor.dtype,
+                    )
+                )
+            )
+
+            @staticmethod
+            def from_numpy(arr):
+                return FakeTensor(arr)
+
+        monkeypatch.setitem(sys.modules, "torch", FakeTorch)
         frames = [
             np.full((480, 640, 3), 128, dtype=np.uint8),
             np.full((480, 640, 3), 64, dtype=np.uint8),
         ]
         batch = det._preprocess_batch(frames)
         assert batch.shape == (2, 3, 560, 560)
+        assert batch.device == "cuda"
         assert batch.dtype == np.float32
 
     def test_ensure_engine_reuses_existing(self, tmp_path):
@@ -275,6 +467,211 @@ class TestTensorRTDetector:
         det.unload()
         assert det._context is None
         assert det._engine is None
+
+    def test_allocate_buffers_converts_trt_dims_to_tuple(self, tmp_path, monkeypatch):
+        import sys
+        import types
+
+        from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
+
+        config = self._make_tensorrt_config(tmp_path)
+        det = TensorRTDetector(config)
+
+        class FakeDims:
+            def __init__(self, *values):
+                self._values = values
+
+            def __iter__(self):
+                return iter(self._values)
+
+            def __contains__(self, item):
+                return item in self._values
+
+        class FakeEngine:
+            num_io_tensors = 2
+
+            def get_tensor_name(self, idx):
+                return ["input", "boxes"][idx]
+
+            def get_tensor_shape(self, name):
+                if name == "input":
+                    return FakeDims(-1, 3, 560, 560)
+                return FakeDims(2, 300, 4)
+
+            def get_tensor_dtype(self, name):
+                return "float32"
+
+            def get_tensor_mode(self, name):
+                return fake_trt.TensorIOMode.INPUT if name == "input" else "output"
+
+        class FakeContext:
+            def __init__(self):
+                self.input_shapes = {}
+                self.tensor_addresses = {}
+
+            def set_input_shape(self, name, shape):
+                self.input_shapes[name] = shape
+
+            def get_tensor_shape(self, name):
+                return self.input_shapes.get(name, (2, 300, 4))
+
+            def set_tensor_address(self, name, address):
+                self.tensor_addresses[name] = address
+
+        class FakeBuffer:
+            def __init__(self, shape, dtype, device):
+                self.shape = shape
+                self.dtype = dtype
+                self.device = device
+
+            def data_ptr(self):
+                return 12345
+
+        class FakeTorch:
+            float32 = "float32"
+
+            @staticmethod
+            def from_numpy(_arr):
+                return types.SimpleNamespace(dtype=FakeTorch.float32)
+
+            @staticmethod
+            def empty(shape, dtype=None, device=None):
+                if not isinstance(shape, tuple):
+                    raise TypeError(f"expected tuple shape, got {type(shape).__name__}")
+                return FakeBuffer(shape=shape, dtype=dtype, device=device)
+
+        fake_trt = types.SimpleNamespace(
+            TensorIOMode=types.SimpleNamespace(INPUT="input"),
+            nptype=lambda dtype: np.float32,
+        )
+
+        monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+
+        det._engine = FakeEngine()
+        det._context = FakeContext()
+
+        det._allocate_buffers(FakeTorch)
+
+        assert det._context.input_shapes["input"] == (2, 3, 560, 560)
+        assert det._bindings["input"]["shape"] == (2, 3, 560, 560)
+        assert det._bindings["boxes"]["shape"] == (2, 300, 4)
+
+    def test_postprocess_decodes_class_logits_before_thresholding(self, tmp_path, monkeypatch):
+        import sys
+        import types
+
+        from backend.phase1_runtime.rfdetr_detector import COCO_PERSON_CLASS_ID
+        from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
+
+        config = self._make_tensorrt_config(tmp_path)
+        det = TensorRTDetector(config)
+
+        class FakeDetections:
+            def __init__(self, *, xyxy, confidence, class_id):
+                self.xyxy = xyxy
+                self.confidence = confidence
+                self.class_id = class_id
+
+        monkeypatch.setitem(
+            sys.modules,
+            "supervision",
+            types.SimpleNamespace(Detections=FakeDetections),
+        )
+
+        boxes = np.array(
+            [
+                [
+                    [10.0, 20.0, 30.0, 40.0],
+                    [50.0, 60.0, 70.0, 80.0],
+                ]
+            ],
+            dtype=np.float32,
+        )
+        logits = np.full((1, 2, 91), -20.0, dtype=np.float32)
+        logits[0, 0, COCO_PERSON_CLASS_ID] = 8.0
+        logits[0, 1, 5] = 9.0
+
+        detections = det._postprocess(
+            boxes=boxes,
+            scores=logits,
+            labels=np.zeros_like(logits, dtype=np.int32),
+            orig_sizes=[(560, 560)],
+            batch_len=1,
+        )
+
+        assert len(detections) == 1
+        assert detections[0].xyxy.shape == (1, 4)
+        assert np.allclose(detections[0].xyxy[0], [10.0, 20.0, 30.0, 40.0])
+        assert detections[0].class_id.tolist() == [COCO_PERSON_CLASS_ID]
+
+    def test_detect_batch_uses_explicit_original_sizes_for_rescaling(self, tmp_path, monkeypatch):
+        import sys
+        import types
+
+        from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
+
+        config = self._make_tensorrt_config(tmp_path)
+        det = TensorRTDetector(config)
+
+        class _FakeTensor:
+            def __init__(self, array):
+                self._array = np.asarray(array)
+
+            def to(self, *_args, **_kwargs):
+                return self
+
+            def cpu(self):
+                return self
+
+            def numpy(self):
+                return self._array
+
+            def copy_(self, other):
+                self._array = np.asarray(getattr(other, "_array", other))
+                return self
+
+        class _FakeTorch:
+            @staticmethod
+            def from_numpy(arr):
+                return _FakeTensor(arr)
+
+        det._context = types.SimpleNamespace(
+            execute_async_v3=lambda *_args, **_kwargs: True,
+        )
+        det._stream = types.SimpleNamespace(
+            cuda_stream=object(),
+            synchronize=lambda: None,
+        )
+        det._bindings = {
+            "input": {"is_input": True, "buffer": _FakeTensor(np.zeros((2, 3, 560, 560), dtype=np.float16))},
+            "boxes": {"is_input": False, "buffer": _FakeTensor(np.zeros((2, 300, 4), dtype=np.float32))},
+            "scores": {"is_input": False, "buffer": _FakeTensor(np.zeros((2, 300, 91), dtype=np.float32))},
+        }
+
+        monkeypatch.setitem(sys.modules, "torch", _FakeTorch)
+        monkeypatch.setattr(
+            det,
+            "_preprocess_batch",
+            lambda batch: _FakeTensor(np.zeros((len(batch), 3, 560, 560), dtype=np.float16)),
+        )
+
+        captured: dict[str, object] = {}
+
+        def _fake_postprocess(boxes, scores, labels, orig_sizes, batch_len):
+            captured["orig_sizes"] = orig_sizes
+            captured["batch_len"] = batch_len
+            return ["ok"] * batch_len
+
+        monkeypatch.setattr(det, "_postprocess", _fake_postprocess)
+
+        out = det.detect_batch(
+            [np.zeros((560, 560, 3), dtype=np.uint8)],
+            orig_sizes=[(1080, 1920)],
+        )
+
+        assert out == ["ok"]
+        assert captured["orig_sizes"] == [(1080, 1920)]
+        assert captured["batch_len"] == 1
 
 
 # ---------- detector factory tests ----------

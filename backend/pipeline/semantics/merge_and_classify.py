@@ -6,18 +6,18 @@ from ..contracts import SemanticGraphNode, SemanticNodeEvidence
 def merge_and_classify_neighborhood(
     *,
     neighborhood_payload: dict,
-    gemini_response: dict | None = None,
+    llm_response: dict | None = None,
     turn_word_ids_by_turn_id: dict[str, list[str]] | None = None,
 ) -> list[SemanticGraphNode]:
-    """Convert one Gemini neighborhood response into proposed merged semantic nodes."""
-    if gemini_response is None:
-        raise ValueError("gemini_response is required")
+    """Convert one Qwen neighborhood response into proposed merged semantic nodes."""
+    if llm_response is None:
+        raise ValueError("llm_response is required")
 
     turns = list(neighborhood_payload.get("turns") or [])
     turn_map = {turn["turn_id"]: turn for turn in turns}
     target_turn_ids = list(neighborhood_payload.get("target_turn_ids") or [])
     target_turn_id_set = set(target_turn_ids)
-    merged_nodes = list(gemini_response.get("merged_nodes") or [])
+    merged_nodes = list(llm_response.get("merged_nodes") or [])
 
     seen_target_turn_ids: list[str] = []
     results: list[SemanticGraphNode] = []

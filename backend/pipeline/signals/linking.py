@@ -24,7 +24,6 @@ def build_node_signal_links(
     edges: list[SemanticGraphEdge],
     llm_client: Any,
     model: str,
-    thinking_level: str,
     max_hops: int,
     time_window_ms: int,
     fail_fast: bool = True,
@@ -83,7 +82,6 @@ def build_node_signal_links(
         selected_ids = resolve_cluster_span_with_llm(
             llm_client=llm_client,
             model=model,
-            thinking_level=thinking_level,
             cluster=cluster,
             neighborhood_payload=neighborhood_payload,
             fail_fast=fail_fast,

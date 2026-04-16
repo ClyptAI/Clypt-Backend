@@ -122,7 +122,6 @@ def test_build_node_signal_links_returns_direct_and_inferred_links(monkeypatch: 
         edges=edges,
         llm_client=llm_client,
         model="gemini-3-flash",
-        thinking_level="minimal",
         max_hops=2,
         time_window_ms=10_000,
     )
@@ -183,7 +182,6 @@ def test_build_node_signal_links_fails_hard_when_callpoint5_selects_no_valid_nod
             edges=[],
             llm_client=_FakeLLM(),
             model="gemini-3-flash",
-            thinking_level="minimal",
             max_hops=2,
             time_window_ms=10_000,
         )

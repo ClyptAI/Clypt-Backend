@@ -15,15 +15,33 @@ MERGE_AND_CLASSIFY_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "source_turn_ids": {"type": "array", "items": {"type": "string"}},
+                    "source_turn_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1},
+                    },
                     "node_type": {
                         "type": "string",
                         "enum": ["claim", "explanation", "example", "anecdote",
                                  "reaction_beat", "qa_exchange", "challenge_exchange",
                                  "setup_payoff", "reveal", "transition"],
                     },
-                    "node_flags": {"type": "array", "items": {"type": "string"}},
-                    "summary": {"type": "string"},
+                    "node_flags": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "topic_pivot",
+                                "callback_candidate",
+                                "high_resonance_candidate",
+                                "backchannel_dense",
+                                "interruption_heavy",
+                                "overlap_heavy",
+                                "resumed_topic",
+                            ],
+                        },
+                    },
+                    "summary": {"type": "string", "minLength": 1},
                 },
                 "required": ["source_turn_ids", "node_type", "node_flags", "summary"],
             },
@@ -41,11 +59,34 @@ BOUNDARY_RECONCILIATION_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "existing_node_id": {"type": "string"},
-                    "source_turn_ids": {"type": "array", "items": {"type": "string"}},
-                    "node_type": {"type": "string"},
-                    "node_flags": {"type": "array", "items": {"type": "string"}},
-                    "summary": {"type": "string"},
+                    "existing_node_id": {"type": "string", "minLength": 1},
+                    "source_turn_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                    "node_type": {
+                        "type": "string",
+                        "enum": ["claim", "explanation", "example", "anecdote",
+                                 "reaction_beat", "qa_exchange", "challenge_exchange",
+                                 "setup_payoff", "reveal", "transition"],
+                    },
+                    "node_flags": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "topic_pivot",
+                                "callback_candidate",
+                                "high_resonance_candidate",
+                                "backchannel_dense",
+                                "interruption_heavy",
+                                "overlap_heavy",
+                                "resumed_topic",
+                            ],
+                        },
+                    },
+                    "summary": {"type": "string", "minLength": 1},
                 },
                 "required": ["existing_node_id", "source_turn_ids", "node_type", "node_flags", "summary"],
             },
@@ -53,10 +94,33 @@ BOUNDARY_RECONCILIATION_SCHEMA = {
         "merged_node": {
             "type": "object",
             "properties": {
-                "source_turn_ids": {"type": "array", "items": {"type": "string"}},
-                "node_type": {"type": "string"},
-                "node_flags": {"type": "array", "items": {"type": "string"}},
-                "summary": {"type": "string"},
+                "source_turn_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "node_type": {
+                    "type": "string",
+                    "enum": ["claim", "explanation", "example", "anecdote",
+                             "reaction_beat", "qa_exchange", "challenge_exchange",
+                             "setup_payoff", "reveal", "transition"],
+                },
+                "node_flags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "topic_pivot",
+                            "callback_candidate",
+                            "high_resonance_candidate",
+                            "backchannel_dense",
+                            "interruption_heavy",
+                            "overlap_heavy",
+                            "resumed_topic",
+                        ],
+                    },
+                },
+                "summary": {"type": "string", "minLength": 1},
             },
             "required": ["source_turn_ids", "node_type", "node_flags", "summary"],
         },
@@ -90,7 +154,7 @@ _NODE_FLAGS = (
 
 
 def build_merge_and_classify_prompt(*, neighborhood_payload: dict) -> str:
-    """Build the Gemini prompt for local merged-unit construction and classification."""
+    """Build the Qwen prompt for local merged-unit construction and classification."""
     return (
         "You are analyzing a neighborhood of speaker turns from a long-form audio/video conversation.\n\n"
         "TASK: merge contiguous TARGET turns into semantic units (nodes) and classify each unit.\n\n"
@@ -98,6 +162,9 @@ def build_merge_and_classify_prompt(*, neighborhood_payload: dict) -> str:
         '- Only use turns with role="target". Ignore halo turns (role="halo") — they are context only.\n'
         "- Every target turn must appear in exactly one merged node (complete partition, no gaps, no skipped turns).\n"
         "- Each node's source_turn_ids must be contiguous within the target sequence.\n"
+        "- NEVER group non-adjacent target turns by semantic similarity while skipping intervening target turns.\n"
+        "- If a story/explanation is interleaved with reactions, you must still output contiguous segments: either include the intervening reaction turns in the same node, or end the current node and start a new contiguous node after the interruption.\n"
+        "- Invalid pattern example: [t_10, t_12, t_14] while omitting [t_11, t_13]. Do not do this.\n"
         "- Do NOT invent timestamps. Do NOT split individual turns.\n\n"
         "OUTPUT: Return ONLY this JSON object, no other text:\n"
         "{\n"
@@ -117,7 +184,7 @@ def build_merge_and_classify_prompt(*, neighborhood_payload: dict) -> str:
 
 
 def build_boundary_reconciliation_prompt(*, overlap_payload: dict) -> str:
-    """Build the Gemini prompt for edge-batch boundary reconciliation."""
+    """Build the Qwen prompt for edge-batch boundary reconciliation."""
     return (
         "You are reviewing two adjacent node proposals at the boundary between two semantic batches.\n"
         "Decide whether to KEEP BOTH nodes as distinct semantic units, or MERGE them into one.\n\n"

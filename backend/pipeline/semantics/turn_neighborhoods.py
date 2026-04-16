@@ -11,7 +11,7 @@ def build_turn_neighborhoods(
     target_turn_count: int = 8,
     halo_turn_count: int = 2,
 ) -> list[dict]:
-    """Build overlapping local turn neighborhoods for Gemini merge/classify calls."""
+    """Build overlapping local turn neighborhoods for Qwen merge/classify calls."""
     turns = list(canonical_timeline.turns)
     if target_turn_count <= 0:
         raise ValueError("target_turn_count must be positive")

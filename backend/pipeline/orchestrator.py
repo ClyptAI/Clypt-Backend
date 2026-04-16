@@ -111,7 +111,7 @@ class V31Phase14Orchestrator:
                 raise ValueError(f"missing phase 2 merge response for batch {batch_id}")
             nodes = merge_and_classify_neighborhood(
                 neighborhood_payload=neighborhood,
-                gemini_response=response,
+                llm_response=response,
             )
             batch_nodes.append(nodes)
             merge_debug.append({"batch_id": batch_id, "response": response})
@@ -130,7 +130,7 @@ class V31Phase14Orchestrator:
                     reconciled_boundary_nodes = reconcile_boundary_nodes(
                         left_batch_nodes=[final_nodes[-1]],
                         right_batch_nodes=[next_nodes[0]],
-                        gemini_response=boundary_response,
+                        llm_response=boundary_response,
                     )
                     final_nodes = [*final_nodes[:-1], *reconciled_boundary_nodes, *next_nodes[1:]]
                 else:
@@ -151,7 +151,7 @@ class V31Phase14Orchestrator:
         structural_edges = build_structural_edges(nodes=nodes)
         local_semantic_edges = build_local_semantic_edges(
             nodes=nodes,
-            gemini_responses=inputs.phase3_local_edge_responses or [],
+            llm_responses=inputs.phase3_local_edge_responses or [],
         )
         long_range_pairs = shortlist_long_range_pairs(
             nodes=nodes,
@@ -159,7 +159,7 @@ class V31Phase14Orchestrator:
         )
         long_range_edges = build_long_range_edges(
             candidate_pairs=long_range_pairs,
-            gemini_response=inputs.phase3_long_range_response or {"edges": []},
+            llm_response=inputs.phase3_long_range_response or {"edges": []},
         )
         reconciled_semantic_edges = reconcile_semantic_edges(
             edges=[*local_semantic_edges, *long_range_edges]
@@ -203,7 +203,7 @@ class V31Phase14Orchestrator:
             response = subgraph_responses.get(subgraph.subgraph_id)
             if response is None:
                 raise ValueError(f"missing phase 4 subgraph review response for {subgraph.subgraph_id}")
-            reviewed = review_local_subgraph(subgraph=subgraph, gemini_response=response)
+            reviewed = review_local_subgraph(subgraph=subgraph, llm_response=response)
             reviewed_subgraphs.append(reviewed)
             raw_candidates.extend(reviewed.candidates)
 
@@ -214,7 +214,7 @@ class V31Phase14Orchestrator:
         if deduped_candidates:
             pooled = review_candidate_pool(
                 candidates=deduped_candidates,
-                gemini_response=inputs.phase4_pool_response,
+                llm_response=inputs.phase4_pool_response,
             )
             candidate_by_id = {
                 (candidate.clip_id or f"cand_tmp_{idx:03d}"): candidate

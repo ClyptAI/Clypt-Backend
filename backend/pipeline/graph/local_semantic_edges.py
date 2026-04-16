@@ -15,14 +15,14 @@ LOCAL_EDGE_TYPES = {
 }
 
 
-def build_local_semantic_edges(*, nodes: list[SemanticGraphNode], gemini_responses: list[dict] | None = None) -> list[SemanticGraphEdge]:
+def build_local_semantic_edges(*, nodes: list[SemanticGraphNode], llm_responses: list[dict] | None = None) -> list[SemanticGraphEdge]:
     """Build local rhetorical graph edges from overlapping node neighborhoods."""
-    if gemini_responses is None:
-        raise ValueError("gemini_responses is required")
+    if llm_responses is None:
+        raise ValueError("llm_responses is required")
 
     node_ids = {node.node_id for node in nodes}
     edges: list[SemanticGraphEdge] = []
-    for response in gemini_responses:
+    for response in llm_responses:
         batch_id = str(response.get("batch_id") or "").strip()
         if not batch_id:
             raise ValueError("batch_id is required for local semantic edge batches")

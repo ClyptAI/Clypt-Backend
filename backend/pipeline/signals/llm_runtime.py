@@ -23,8 +23,11 @@ class SignalLLMCallError(RuntimeError):
 THREAD_CONSOLIDATION_SCHEMA = {
     "type": "object",
     "properties": {
-        "thread_summary": {"type": "string"},
-        "moment_hints": {"type": "array", "items": {"type": "string"}},
+        "thread_summary": {"type": "string", "minLength": 1},
+        "moment_hints": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
     },
     "required": ["thread_summary", "moment_hints"],
 }
@@ -33,7 +36,7 @@ COMMENT_CLASSIFICATION_SCHEMA = {
     "type": "object",
     "properties": {
         "quality": {"type": "string", "enum": ["high_signal", "contextual", "low_signal", "spam"]},
-        "reason": {"type": "string"},
+        "reason": {"type": "string", "minLength": 1},
     },
     "required": ["quality"],
 }
@@ -43,6 +46,7 @@ COMMENT_CLASSIFICATION_BATCH_SCHEMA = {
     "properties": {
         "results": {
             "type": "array",
+            "minItems": 1,
             "items": COMMENT_CLASSIFICATION_SCHEMA,
         },
     },
@@ -52,7 +56,7 @@ COMMENT_CLASSIFICATION_BATCH_SCHEMA = {
 CLUSTER_PROMPT_SCHEMA = {
     "type": "object",
     "properties": {
-        "prompt": {"type": "string"},
+        "prompt": {"type": "string", "minLength": 1},
     },
     "required": ["prompt"],
 }
@@ -60,7 +64,10 @@ CLUSTER_PROMPT_SCHEMA = {
 TREND_QUERY_SCHEMA = {
     "type": "object",
     "properties": {
-        "queries": {"type": "array", "items": {"type": "string"}},
+        "queries": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
     },
     "required": ["queries"],
 }
@@ -69,8 +76,8 @@ TREND_RELEVANCE_SCHEMA = {
     "type": "object",
     "properties": {
         "keep": {"type": "boolean"},
-        "relevance": {"type": "number"},
-        "reason": {"type": "string"},
+        "relevance": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "reason": {"type": "string", "minLength": 1},
     },
     "required": ["keep", "relevance"],
 }
@@ -80,6 +87,7 @@ TREND_RELEVANCE_BATCH_SCHEMA = {
     "properties": {
         "results": {
             "type": "array",
+            "minItems": 1,
             "items": TREND_RELEVANCE_SCHEMA,
         },
     },
@@ -89,8 +97,11 @@ TREND_RELEVANCE_BATCH_SCHEMA = {
 CLUSTER_SPAN_SCHEMA = {
     "type": "object",
     "properties": {
-        "node_ids": {"type": "array", "items": {"type": "string"}},
-        "reason": {"type": "string"},
+        "node_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
+        "reason": {"type": "string", "minLength": 1},
     },
     "required": ["node_ids"],
 }
@@ -98,7 +109,7 @@ CLUSTER_SPAN_SCHEMA = {
 ATTRIBUTION_EXPLANATION_SCHEMA = {
     "type": "object",
     "properties": {
-        "explanation": {"type": "string"},
+        "explanation": {"type": "string", "minLength": 1},
     },
     "required": ["explanation"],
 }
@@ -110,7 +121,6 @@ def _call_json(
     callpoint_id: str,
     prompt: str,
     model: str,
-    thinking_level: str,
     response_schema: dict[str, Any],
     fail_fast: bool = True,
     event_logger: Callable[..., None] | None = None,
@@ -124,13 +134,11 @@ def _call_json(
             status="start",
             callpoint_id=callpoint_id,
             model=model,
-            thinking_level=thinking_level,
         )
     logger.info(
-        "[signals_llm_call_start] callpoint=%s model=%s thinking=%s",
+        "[signals_llm_call_start] callpoint=%s model=%s",
         callpoint_id,
         model,
-        thinking_level,
     )
     try:
         response = llm_client.generate_json(
@@ -139,7 +147,6 @@ def _call_json(
             temperature=0.0,
             response_schema=response_schema,
             max_output_tokens=32768,
-            thinking_level=thinking_level,
         )
     except Exception as exc:
         if event_logger is not None:
@@ -151,20 +158,18 @@ def _call_json(
                 failed_callpoint_id=callpoint_id,
             )
         logger.exception(
-            "[signals_llm_call_error] callpoint=%s model=%s thinking=%s",
+            "[signals_llm_call_error] callpoint=%s model=%s",
             callpoint_id,
             model,
-            thinking_level,
         )
         raise SignalLLMCallError(
             callpoint_id=callpoint_id,
             message=f"signal_llm_call_failed callpoint={callpoint_id}: {exc}",
         ) from exc
     logger.info(
-        "[signals_llm_call_done] callpoint=%s model=%s thinking=%s latency_ms=%.1f",
+        "[signals_llm_call_done] callpoint=%s model=%s latency_ms=%.1f",
         callpoint_id,
         model,
-        thinking_level,
         (time.perf_counter() - started) * 1000.0,
     )
     if event_logger is not None:
@@ -173,7 +178,6 @@ def _call_json(
             status="success",
             callpoint_id=callpoint_id,
             model=model,
-            thinking_level=thinking_level,
             latency_ms=(time.perf_counter() - started) * 1000.0,
         )
     return response
@@ -183,7 +187,6 @@ def consolidate_thread_with_llm(
     *,
     llm_client: Any,
     model: str,
-    thinking_level: str,
     thread_payload: dict[str, Any],
     fail_fast: bool = True,
     event_logger: Callable[..., None] | None = None,
@@ -199,7 +202,6 @@ def consolidate_thread_with_llm(
         callpoint_id="10",
         prompt=prompt,
         model=model,
-        thinking_level=thinking_level,
         response_schema=THREAD_CONSOLIDATION_SCHEMA,
         fail_fast=fail_fast,
         event_logger=event_logger,
@@ -210,7 +212,6 @@ def classify_comment_with_llm(
     *,
     llm_client: Any,
     model: str,
-    thinking_level: str,
     signal: ExternalSignal,
     fail_fast: bool = True,
     event_logger: Callable[..., None] | None = None,
@@ -225,7 +226,6 @@ def classify_comment_with_llm(
         callpoint_id="3",
         prompt=prompt,
         model=model,
-        thinking_level=thinking_level,
         response_schema=COMMENT_CLASSIFICATION_SCHEMA,
         fail_fast=fail_fast,
         event_logger=event_logger,
@@ -235,7 +235,6 @@ def classify_comments_with_llm_batch(
     *,
     llm_client: Any,
     model: str,
-    thinking_level: str,
     signals: list[ExternalSignal],
     fail_fast: bool = True,
     event_logger: Callable[..., None] | None = None,
@@ -252,7 +251,6 @@ def classify_comments_with_llm_batch(
         callpoint_id="3",
         prompt=prompt,
         model=model,
-        thinking_level=thinking_level,
         response_schema=COMMENT_CLASSIFICATION_BATCH_SCHEMA,
         fail_fast=fail_fast,
         event_logger=event_logger,
@@ -270,7 +268,6 @@ def generate_cluster_prompt_with_llm(
     *,
     llm_client: Any,
     model: str,
-    thinking_level: str,
     cluster: ExternalSignalCluster,
     fail_fast: bool = True,
     event_logger: Callable[..., None] | None = None,
@@ -285,7 +282,6 @@ def generate_cluster_prompt_with_llm(
         callpoint_id="1",
         prompt=prompt,
         model=model,
-        thinking_level=thinking_level,
         response_schema=CLUSTER_PROMPT_SCHEMA,
         fail_fast=fail_fast,
         event_logger=event_logger,
@@ -300,7 +296,6 @@ def synthesize_trend_queries_with_llm(
     *,
     llm_client: Any,
     model: str,
-    thinking_level: str,
     video_context: dict[str, Any],
     fail_fast: bool = True,
     event_logger: Callable[..., None] | None = None,
@@ -314,7 +309,6 @@ def synthesize_trend_queries_with_llm(
         callpoint_id="9",
         prompt=prompt,
         model=model,
-        thinking_level=thinking_level,
         response_schema=TREND_QUERY_SCHEMA,
         fail_fast=fail_fast,
         event_logger=event_logger,
@@ -327,7 +321,6 @@ def adjudicate_trend_relevance_with_llm(
     *,
     llm_client: Any,
     model: str,
-    thinking_level: str,
     trend_item: dict[str, Any],
     video_context: dict[str, Any],
     fail_fast: bool = True,
@@ -344,7 +337,6 @@ def adjudicate_trend_relevance_with_llm(
         callpoint_id="2",
         prompt=prompt,
         model=model,
-        thinking_level=thinking_level,
         response_schema=TREND_RELEVANCE_SCHEMA,
         fail_fast=fail_fast,
         event_logger=event_logger,
@@ -354,7 +346,6 @@ def adjudicate_trend_relevance_with_llm_batch(
     *,
     llm_client: Any,
     model: str,
-    thinking_level: str,
     trend_items: list[dict[str, Any]],
     video_context: dict[str, Any],
     fail_fast: bool = True,
@@ -373,7 +364,6 @@ def adjudicate_trend_relevance_with_llm_batch(
         callpoint_id="2",
         prompt=prompt,
         model=model,
-        thinking_level=thinking_level,
         response_schema=TREND_RELEVANCE_BATCH_SCHEMA,
         fail_fast=fail_fast,
         event_logger=event_logger,
@@ -391,7 +381,6 @@ def resolve_cluster_span_with_llm(
     *,
     llm_client: Any,
     model: str,
-    thinking_level: str,
     cluster: ExternalSignalCluster,
     neighborhood_payload: dict[str, Any],
     fail_fast: bool = True,
@@ -408,7 +397,6 @@ def resolve_cluster_span_with_llm(
         callpoint_id="5",
         prompt=prompt,
         model=model,
-        thinking_level=thinking_level,
         response_schema=CLUSTER_SPAN_SCHEMA,
         fail_fast=fail_fast,
         event_logger=event_logger,
@@ -421,7 +409,6 @@ def explain_candidate_attribution_with_llm(
     *,
     llm_client: Any,
     model: str,
-    thinking_level: str,
     evidence_payload: dict[str, Any],
     fail_fast: bool = True,
     event_logger: Callable[..., None] | None = None,
@@ -436,7 +423,6 @@ def explain_candidate_attribution_with_llm(
         callpoint_id="11",
         prompt=prompt,
         model=model,
-        thinking_level=thinking_level,
         response_schema=ATTRIBUTION_EXPLANATION_SCHEMA,
         fail_fast=fail_fast,
         event_logger=event_logger,

@@ -15,24 +15,24 @@ def _invalid_subgraph_response(*, subgraph: LocalSubgraph, reason: str) -> Subgr
     )
 
 
-def review_local_subgraph(*, subgraph: LocalSubgraph, gemini_response: dict | None = None) -> SubgraphReviewResponse:
-    """Validate or adapt one Gemini subgraph-review response."""
-    if gemini_response is None:
-        raise ValueError("gemini_response is required")
+def review_local_subgraph(*, subgraph: LocalSubgraph, llm_response: dict | None = None) -> SubgraphReviewResponse:
+    """Validate or adapt one Qwen subgraph-review response."""
+    if llm_response is None:
+        raise ValueError("llm_response is required")
 
     node_order = [node.node_id for node in subgraph.nodes]
     node_id_set = set(node_order)
     node_by_id = {node.node_id: node for node in subgraph.nodes}
 
     try:
-        if gemini_response.get("subgraph_id") != subgraph.subgraph_id:
+        if llm_response.get("subgraph_id") != subgraph.subgraph_id:
             raise ValueError("subgraph_id must match the reviewed subgraph")
-        if gemini_response.get("seed_node_id") != subgraph.seed_node_id:
+        if llm_response.get("seed_node_id") != subgraph.seed_node_id:
             raise ValueError("seed_node_id must match the reviewed subgraph")
 
-        reject_all = bool(gemini_response.get("reject_all"))
-        reject_reason = str(gemini_response.get("reject_reason") or "")
-        raw_candidates = list(gemini_response.get("candidates") or [])
+        reject_all = bool(llm_response.get("reject_all"))
+        reject_reason = str(llm_response.get("reject_reason") or "")
+        raw_candidates = list(llm_response.get("candidates") or [])
 
         if len(raw_candidates) > 3:
             raise ValueError("subgraph review may return at most 3 candidates")
@@ -41,6 +41,8 @@ def review_local_subgraph(*, subgraph: LocalSubgraph, gemini_response: dict | No
         if not reject_all and not raw_candidates:
             raise ValueError("reject_all=false requires at least one candidate")
         if reject_all:
+            if not reject_reason.strip():
+                raise ValueError("reject_all=true requires a non-empty reject_reason")
             return SubgraphReviewResponse(
                 subgraph_id=subgraph.subgraph_id,
                 seed_node_id=subgraph.seed_node_id,

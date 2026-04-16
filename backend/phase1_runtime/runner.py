@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,7 @@ from backend.phase1_runtime.input_resolver import (
 )
 from backend.phase1_runtime.media import prepare_workspace_media
 from backend.phase1_runtime.models import Phase1SidecarOutputs, Phase1Workspace
-from backend.repository import Phase24JobRecord, RunRecord
+from backend.repository import Phase24JobRecord, PhaseMetricRecord, RunRecord
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -127,6 +127,58 @@ class Phase1JobRunner:
                 completed_at=existing.completed_at if existing is not None else None,
                 metadata=merged_metadata,
             )
+        )
+
+    def _write_phase1_stage_metric(
+        self,
+        *,
+        run_id: str,
+        stage_name: str,
+        status: str,
+        duration_ms: float | None = None,
+        metadata: dict[str, Any] | None = None,
+        error_payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self.phase14_repository is None:
+            return
+        write_phase_metric = getattr(self.phase14_repository, "write_phase_metric", None)
+        if not callable(write_phase_metric):
+            return
+        ended_at = datetime.now(UTC)
+        started_at = (
+            ended_at - timedelta(milliseconds=max(0.0, float(duration_ms)))
+            if duration_ms is not None
+            else ended_at
+        )
+        try:
+            write_phase_metric(
+                PhaseMetricRecord(
+                    run_id=run_id,
+                    phase_name=f"phase1_{stage_name}",
+                    status=status,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    duration_ms=float(duration_ms) if duration_ms is not None else None,
+                    error_payload=error_payload,
+                    query_version=self.phase24_query_version,
+                    metadata=metadata or {},
+                )
+            )
+        except Exception:
+            logger.exception(
+                "[phase1-metric] failed to persist stage metric run_id=%s stage=%s",
+                run_id,
+                stage_name,
+            )
+            return
+        logger.info(
+            "[phase1-metric] run_id=%s stage=%s status=%s duration_ms=%s metadata=%s error=%s",
+            run_id,
+            stage_name,
+            status,
+            f"{duration_ms:.1f}" if duration_ms is not None else "n/a",
+            metadata or {},
+            error_payload or {},
         )
 
     def _enqueue_phase24(
@@ -344,6 +396,23 @@ class Phase1JobRunner:
                 finally:
                     enqueue_done.set()
 
+            def _on_stage_event(
+                *,
+                stage_name: str,
+                status: str,
+                duration_ms: float | None = None,
+                metadata: dict[str, Any] | None = None,
+                error_payload: dict[str, Any] | None = None,
+            ) -> None:
+                self._write_phase1_stage_metric(
+                    run_id=job_id,
+                    stage_name=stage_name,
+                    status=status,
+                    duration_ms=duration_ms,
+                    metadata=metadata,
+                    error_payload=error_payload,
+                )
+
             phase1_outputs = run_phase1_sidecars(
                 source_url=source_ref,
                 video_gcs_uri=video_gcs_uri,
@@ -355,6 +424,7 @@ class Phase1JobRunner:
                 emotion_provider=self.emotion_provider,
                 yamnet_provider=self.yamnet_provider,
                 on_audio_chain_complete=_on_audio_done,
+                stage_event_logger=_on_stage_event,
             )
             result["phase1"] = _jsonable(phase1_outputs)
             if not enqueue_done.is_set():
@@ -368,6 +438,23 @@ class Phase1JobRunner:
             result["summary"] = enqueue_summary[0]
         else:
             # Original path: run sidecars, no phases 2-4
+            def _on_stage_event(
+                *,
+                stage_name: str,
+                status: str,
+                duration_ms: float | None = None,
+                metadata: dict[str, Any] | None = None,
+                error_payload: dict[str, Any] | None = None,
+            ) -> None:
+                self._write_phase1_stage_metric(
+                    run_id=job_id,
+                    stage_name=stage_name,
+                    status=status,
+                    duration_ms=duration_ms,
+                    metadata=metadata,
+                    error_payload=error_payload,
+                )
+
             phase1_outputs = run_phase1_sidecars(
                 source_url=source_ref,
                 video_gcs_uri=video_gcs_uri,
@@ -378,6 +465,7 @@ class Phase1JobRunner:
                 visual_extractor=self.visual_extractor,
                 emotion_provider=self.emotion_provider,
                 yamnet_provider=self.yamnet_provider,
+                stage_event_logger=_on_stage_event,
             )
             result["phase1"] = _jsonable(phase1_outputs)
             self._upsert_run_record(

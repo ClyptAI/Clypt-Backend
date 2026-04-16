@@ -15,15 +15,15 @@ LOCAL_SEMANTIC_EDGE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "source_node_id": {"type": "string"},
-                    "target_node_id": {"type": "string"},
+                    "source_node_id": {"type": "string", "minLength": 1},
+                    "target_node_id": {"type": "string", "minLength": 1},
                     "edge_type": {
                         "type": "string",
                         "enum": ["answers", "challenges", "contradicts", "supports",
                                  "elaborates", "setup_for", "payoff_of", "reaction_to", "escalates"],
                     },
                     "rationale": {"type": "string"},
-                    "confidence": {"type": "number"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 },
                 "required": ["source_node_id", "target_node_id", "edge_type"],
             },
@@ -40,14 +40,14 @@ LONG_RANGE_EDGE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "source_node_id": {"type": "string"},
-                    "target_node_id": {"type": "string"},
+                    "source_node_id": {"type": "string", "minLength": 1},
+                    "target_node_id": {"type": "string", "minLength": 1},
                     "edge_type": {
                         "type": "string",
                         "enum": ["callback_to", "topic_recurrence"],
                     },
                     "rationale": {"type": "string"},
-                    "confidence": {"type": "number"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 },
                 "required": ["source_node_id", "target_node_id", "edge_type"],
             },
@@ -103,6 +103,17 @@ def build_long_range_edge_prompt(*, pair_payload: dict) -> str:
         "RULES:\n"
         "- Only emit edges for pairs listed in candidate_pairs.\n"
         "- source_node_id must be the later_node_id; target_node_id must be the earlier_node_id.\n"
+        "- NEVER reverse direction: invalid example is source=earlier_node_id and target=later_node_id.\n"
+        "- Treat candidate_pairs as a strict allowlist of exact tuples. For every emitted edge, "
+        "the (source_node_id, target_node_id) tuple must exactly match one candidate_pairs entry.\n"
+        "- You must copy source_node_id and target_node_id verbatim from the same candidate_pairs row. "
+        "Do not synthesize IDs or combine IDs from different rows.\n"
+        "- Do NOT emit \"nearby\" or \"overlapping\" alternatives that are not explicitly listed, even if "
+        "they look semantically related.\n"
+        "- Invalid examples (do not do this):\n"
+        "  * choosing a pair with the correct source but a different earlier target that is not in candidate_pairs\n"
+        "  * choosing a pair with the correct target but a different later source that is not in candidate_pairs\n"
+        "  * emitting any tuple not present in candidate_pairs, even when edge_type is valid\n"
         "- Valid edge types: 'callback_to' and 'topic_recurrence' ONLY.\n"
         "  'callback_to'      — the later node explicitly refers back to the earlier node's specific moment or claim.\n"
         "  'topic_recurrence' — the later node revisits the same general topic, but is not an explicit reference.\n"

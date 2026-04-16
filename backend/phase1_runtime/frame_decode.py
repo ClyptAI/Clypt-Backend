@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 class DecodedFrame:
     frame_idx: int
     rgb: np.ndarray
+    source_width: int
+    source_height: int
 
 
 def _probe_frame_dimensions(*, video_path: Path) -> tuple[int, int]:
@@ -60,6 +62,8 @@ def decode_video_frames(
     video_path: Path,
     decode_backend: str = "gpu",
     stride: int = 1,
+    target_width: int | None = None,
+    target_height: int | None = None,
 ) -> Iterator[DecodedFrame]:
     """Yield all frames from the video as RGB numpy arrays.
 
@@ -77,11 +81,19 @@ def decode_video_frames(
         raise ValueError("stride must be >= 1")
 
     width, height = _probe_frame_dimensions(video_path=video_path)
-    frame_bytes = width * height * 3
+    output_width = int(target_width or width)
+    output_height = int(target_height or height)
+    if output_width < 1 or output_height < 1:
+        raise ValueError("target_width and target_height must be >= 1 when provided")
+    frame_bytes = output_width * output_height * 3
     if frame_bytes <= 0:
         raise RuntimeError(
             f"Invalid decode frame size for {video_path}: {width}x{height}."
         )
+
+    vf_chain = "hwdownload,format=nv12,format=rgb24"
+    if output_width != width or output_height != height:
+        vf_chain = f"scale_cuda={output_width}:{output_height},{vf_chain}"
 
     cmd = [
         "ffmpeg",
@@ -95,7 +107,9 @@ def decode_video_frames(
         "-i",
         str(video_path),
         "-vf",
-        "hwdownload,format=rgb24",
+        # Resize on-GPU when requested, then download as NV12 before RGB conversion.
+        # Some ffmpeg/NVDEC builds reject direct hwdownload->rgb24 conversion.
+        vf_chain,
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -128,8 +142,13 @@ def decode_video_frames(
             if stride > 1 and (frame_idx % stride) != 0:
                 frame_idx += 1
                 continue
-            rgb = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3)).copy()
-            yield DecodedFrame(frame_idx=frame_idx, rgb=rgb)
+            rgb = np.frombuffer(raw_frame, dtype=np.uint8).reshape((output_height, output_width, 3)).copy()
+            yield DecodedFrame(
+                frame_idx=frame_idx,
+                rgb=rgb,
+                source_width=width,
+                source_height=height,
+            )
             frame_idx += 1
     finally:
         if process.stdout is not None:

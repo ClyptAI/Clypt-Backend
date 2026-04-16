@@ -31,6 +31,7 @@
 #   REPO_DIR             — repo root (default: /opt/clypt-phase1/repo)
 #   ENV_FILE             — systemd env file (default: /etc/clypt-phase1/v3_1_phase1.env)
 #   REQUIREMENTS_FILE    — pip requirements for main venv (default: requirements-do-phase1.txt)
+#   PHASE1_VENV_DIR      — dedicated Phase 1/runtime venv (default: /opt/clypt-phase1/venvs/phase1)
 #   VLLM_IMAGE_TAG       — Docker image tag (default: clypt-vllm-vibevoice:latest)
 #   VLLM_HOST_PORT       — loopback port for vLLM (default: 8000)
 #   VLLM_HEALTH_URL      — full health URL to poll (default: http://127.0.0.1:8000/health)
@@ -50,6 +51,7 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/opt/clypt-phase1/repo}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase1/v3_1_phase1.env}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-requirements-do-phase1.txt}"
+PHASE1_VENV_DIR="${PHASE1_VENV_DIR:-/opt/clypt-phase1/venvs/phase1}"
 VLLM_IMAGE_TAG="${VLLM_IMAGE_TAG:-clypt-vllm-vibevoice:latest}"
 VLLM_HOST_PORT="${VLLM_HOST_PORT:-8000}"
 VLLM_HEALTH_URL="${VLLM_HEALTH_URL:-http://127.0.0.1:${VLLM_HOST_PORT}/health}"
@@ -88,6 +90,7 @@ cd "$REPO_DIR"
 echo "[deploy-vllm] ensuring host prerequisites are installed ..."
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  build-essential \
   ca-certificates \
   curl \
   ffmpeg \
@@ -207,8 +210,9 @@ done
 
 # --- 5. Main worker venv — pip install (no native venv, no flash-attn) ----
 echo "[deploy-vllm] installing main worker requirements ($REQUIREMENTS_FILE) ..."
-python3 -m venv .venv
-. .venv/bin/activate
+install -d -m 0755 "$(dirname "$PHASE1_VENV_DIR")"
+python3 -m venv "$PHASE1_VENV_DIR"
+. "$PHASE1_VENV_DIR/bin/activate"
 python -m pip install --upgrade pip wheel
 python -m pip install "setuptools==69.5.1" "Cython<3.1"
 # youtokentome can fail to build in isolated mode without Cython in the build env.
@@ -223,6 +227,20 @@ if ! python -m pip install -r "$REQUIREMENTS_FILE"; then
 fi
 # Keep tensorflow-hub compatible on fresh images that bootstrap newer setuptools.
 python -m pip install "setuptools==69.5.1"
+
+if [[ "${CLYPT_PHASE1_VISUAL_BACKEND:-}" == tensorrt* ]]; then
+  echo "[deploy-vllm] installing TensorRT host/runtime dependencies for ${CLYPT_PHASE1_VISUAL_BACKEND} ..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y libnvinfer-bin
+  python -m pip install tensorrt-cu13
+  if ! command -v trtexec >/dev/null 2>&1; then
+    echo "[deploy-vllm] ERROR: trtexec not found after installing libnvinfer-bin." >&2
+    exit 1
+  fi
+  python - <<'PY'
+import tensorrt as trt
+print(f"[deploy-vllm] Phase 1 TensorRT runtime OK: {trt.__version__}")
+PY
+fi
 
 # --- 6. Validate torchaudio (used by NFA and emotion2vec+ in main venv) ---
 python - <<'PY'
@@ -298,8 +316,12 @@ install -D -m 0644 \
   scripts/do_phase1/systemd/clypt-v31-phase1-worker.service \
   /etc/systemd/system/clypt-v31-phase1-worker.service
 
+install -D -m 0644 \
+  scripts/do_phase1/systemd/clypt-v31-phase24-local-worker.service \
+  /etc/systemd/system/clypt-v31-phase24-local-worker.service
+
 systemctl daemon-reload
-systemctl enable clypt-v31-phase1-api.service clypt-v31-phase1-worker.service
+systemctl enable clypt-v31-phase1-api.service clypt-v31-phase1-worker.service clypt-v31-phase24-local-worker.service
 
 # --- 9. Clone/update VibeVoice repo for container mount --------------------
 if [[ -d "$VIBEVOICE_REPO_DIR/.git" ]]; then

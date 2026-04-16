@@ -42,6 +42,8 @@ class TensorRTDetector:
         self._stream = None
         self._bindings: dict[str, dict] = {}
         self._metrics = DetectorMetrics()
+        self._torch_mean = None
+        self._torch_std = None
 
     @property
     def metrics(self) -> DetectorMetrics:
@@ -195,7 +197,7 @@ class TensorRTDetector:
         self._bindings = {}
         for i in range(self._engine.num_io_tensors):
             name = self._engine.get_tensor_name(i)
-            shape = self._engine.get_tensor_shape(name)
+            shape = tuple(int(dim) for dim in self._engine.get_tensor_shape(name))
             dtype_trt = self._engine.get_tensor_dtype(name)
             mode = self._engine.get_tensor_mode(name)
 
@@ -204,6 +206,7 @@ class TensorRTDetector:
                 shape[0] = self._config.detector_batch_size
                 shape = tuple(shape)
                 self._context.set_input_shape(name, shape)
+                shape = tuple(int(dim) for dim in self._context.get_tensor_shape(name))
 
             np_dtype = trt.nptype(dtype_trt)
             torch_dtype = torch.from_numpy(np.empty(0, dtype=np_dtype)).dtype
@@ -218,19 +221,36 @@ class TensorRTDetector:
             }
             self._context.set_tensor_address(name, buf.data_ptr())
 
-    def _preprocess_batch(self, frames: list[np.ndarray]) -> np.ndarray:
-        """Resize, normalize, and stack frames into NCHW float32 batch."""
-        import cv2
+    def _preprocess_batch(self, frames: list[np.ndarray]):
+        """Move frames to CUDA, normalize there, and return an NCHW tensor."""
+        import torch
 
         res = self._config.detector_resolution
-        processed = []
-        for frame in frames:
-            img = cv2.resize(frame, (res, res))
-            img = img.astype(np.float32) / 255.0
-            img = (img - _IMAGENET_MEAN) / _IMAGENET_STD
-            img = np.transpose(img, (2, 0, 1))
-            processed.append(img)
-        return np.stack(processed, axis=0)
+        batch_np = np.stack(frames, axis=0)
+        batch = torch.from_numpy(batch_np).to(device="cuda", dtype=torch.float32)
+        batch = batch.permute(0, 3, 1, 2).contiguous()
+        if batch.shape[-2:] != (res, res):
+            batch = torch.nn.functional.interpolate(
+                batch,
+                size=(res, res),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        if self._torch_mean is None or self._torch_std is None:
+            self._torch_mean = torch.from_numpy(_IMAGENET_MEAN.reshape(1, 3, 1, 1)).to(
+                device="cuda",
+                dtype=torch.float32,
+            )
+            self._torch_std = torch.from_numpy(_IMAGENET_STD.reshape(1, 3, 1, 1)).to(
+                device="cuda",
+                dtype=torch.float32,
+            )
+
+        batch = batch.div_(255.0)
+        batch = batch.sub_(self._torch_mean)
+        batch = batch.div_(self._torch_std)
+        return batch
 
     def _postprocess(
         self,
@@ -248,6 +268,17 @@ class TensorRTDetector:
             frame_scores = scores[i] if scores.ndim > 1 else scores
             frame_labels = labels[i] if labels.ndim > 1 else labels
             frame_boxes = boxes[i] if boxes.ndim > 2 else boxes
+
+            # RF-DETR ONNX/TensorRT export returns per-query class logits with
+            # shape [num_queries, num_classes(+background)], not final scores.
+            # Decode them to one score and one label per query before filtering.
+            if frame_scores.ndim == 2:
+                shifted = frame_scores - np.max(frame_scores, axis=-1, keepdims=True)
+                exp_scores = np.exp(shifted)
+                probs = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)
+                class_probs = probs[:, 1:] if probs.shape[-1] > 1 else probs
+                frame_scores = np.max(class_probs, axis=-1)
+                frame_labels = np.argmax(class_probs, axis=-1).astype(np.int32) + 1
 
             keep = frame_scores > self._config.detection_threshold
             f_scores = frame_scores[keep]
@@ -269,10 +300,17 @@ class TensorRTDetector:
             detections_list.append(det)
         return detections_list
 
-    def detect_batch(self, frames: list[np.ndarray]) -> list:
+    def detect_batch(
+        self,
+        frames: list[np.ndarray],
+        *,
+        orig_sizes: list[tuple[int, int]] | None = None,
+    ) -> list:
         """Run person detection on a batch of HWC uint8 RGB numpy frames."""
         if self._context is None:
             raise RuntimeError("TensorRT detector not loaded. Call load() first.")
+        if orig_sizes is not None and len(orig_sizes) != len(frames):
+            raise ValueError("orig_sizes must match the number of frames")
 
         import torch
 
@@ -281,23 +319,28 @@ class TensorRTDetector:
 
         for batch_start in range(0, len(frames), batch_size):
             batch = frames[batch_start: batch_start + batch_size]
-            orig_sizes = [(f.shape[0], f.shape[1]) for f in batch]
+            batch_orig_sizes = (
+                orig_sizes[batch_start: batch_start + batch_size]
+                if orig_sizes is not None
+                else [(f.shape[0], f.shape[1]) for f in batch]
+            )
             actual_batch_len = len(batch)
 
             if actual_batch_len < batch_size:
                 pad_frame = np.zeros_like(batch[0])
                 batch = batch + [pad_frame] * (batch_size - actual_batch_len)
 
-            input_np = self._preprocess_batch(batch).astype(np.float16)
+            input_tensor = self._preprocess_batch(batch)
 
             input_binding = None
             for name, info in self._bindings.items():
                 if info["is_input"]:
                     input_binding = info
                     break
-            input_binding["buffer"].copy_(
-                torch.from_numpy(input_np).to("cuda")
-            )
+            buffer_dtype = getattr(input_binding["buffer"], "dtype", None)
+            if buffer_dtype is not None:
+                input_tensor = input_tensor.to(dtype=buffer_dtype)
+            input_binding["buffer"].copy_(input_tensor)
 
             t0 = time.perf_counter()
             self._context.execute_async_v3(self._stream.cuda_stream)
@@ -332,7 +375,7 @@ class TensorRTDetector:
                 )
 
             dets = self._postprocess(
-                raw_boxes, raw_scores, raw_labels, orig_sizes, actual_batch_len
+                raw_boxes, raw_scores, raw_labels, batch_orig_sizes, actual_batch_len
             )
             all_detections.extend(dets)
 
@@ -347,6 +390,8 @@ class TensorRTDetector:
         self._engine = None
         self._stream = None
         self._bindings = {}
+        self._torch_mean = None
+        self._torch_std = None
         try:
             import torch
             torch.cuda.empty_cache()

@@ -18,6 +18,18 @@ Canonical eval command:
 python -m pytest tests/backend/pipeline -q
 ```
 
+Runtime-specific checks for local queue / fail-fast behavior:
+
+```bash
+python -m pytest tests/backend/runtime -q
+```
+
+For structured-output compatibility and schema behavior:
+
+```bash
+python -m pytest tests/backend/pipeline/test_subgraph_review_schema_compat.py -q
+```
+
 ## Task Router
 
 | Task Type | Load First |

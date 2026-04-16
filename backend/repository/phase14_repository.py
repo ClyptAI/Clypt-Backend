@@ -10,6 +10,7 @@ from .models import (
     ExternalSignalRecord,
     Phase24JobRecord,
     PhaseMetricRecord,
+    PhaseSubstepRecord,
     PromptSourceLinkRecord,
     RunRecord,
     SemanticEdgeRecord,
@@ -121,6 +122,19 @@ class Phase14Repository(ABC):
 
     @abstractmethod
     def list_phase_metrics(self, *, run_id: str) -> list[PhaseMetricRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def write_phase_substeps(self, *, run_id: str, substeps: Sequence[PhaseSubstepRecord]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_phase_substeps(
+        self,
+        *,
+        run_id: str,
+        phase_name: str | None = None,
+    ) -> list[PhaseSubstepRecord]:
         raise NotImplementedError
 
     @abstractmethod

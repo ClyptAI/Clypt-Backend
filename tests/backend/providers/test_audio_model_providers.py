@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import types
+
+import pytest
 
 
 def test_emotion2vec_plus_provider_clips_turns_and_normalizes_segments(tmp_path: Path):
@@ -283,3 +286,87 @@ def test_vibevoice_vllm_url_mode_requires_signer_for_gcs_uri(tmp_path: Path):
         assert "no signer is configured" in str(exc)
     else:  # pragma: no cover - defensive
         raise AssertionError("Expected RuntimeError when signer is missing for gs:// URI")
+
+
+def test_vibevoice_vllm_parse_failure_persists_full_raw_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
+
+    artifact_dir = tmp_path / "vibevoice-failures"
+    monkeypatch.setenv("CLYPT_VIBEVOICE_FAILURE_DIR", str(artifact_dir))
+    provider = VibeVoiceVLLMProvider(base_url="http://127.0.0.1:8000", audio_mode="base64")
+
+    partial_content = (
+        '[{"Start":0,"End":1.0,"Speaker":0,"Content":"I am not interested in being '
+        'around grizzly bears. Did you s'
+    )
+
+    with pytest.raises(RuntimeError, match="artifact=") as exc_info:
+        provider._parse_content(
+            partial_content,
+            finish_reason="length",
+            generated_chars=len(partial_content),
+            chunk_count=3,
+        )
+
+    msg = str(exc_info.value)
+    assert "finish_reason=length" in msg
+    assert f"generated_chars={len(partial_content)}" in msg
+    artifact_path = Path(msg.split("artifact=", 1)[1].split()[0])
+    assert artifact_path.exists()
+    assert artifact_path.read_text(encoding="utf-8") == partial_content
+
+
+def test_vibevoice_vllm_do_request_surfaces_stream_finish_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from backend.providers.vibevoice_vllm import VibeVoiceVLLMProvider
+
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"fake-audio")
+
+    provider = VibeVoiceVLLMProvider(base_url="http://127.0.0.1:8000", audio_mode="base64")
+
+    class _FakeStreamingResponse:
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = [line.encode("utf-8") for line in lines]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            _ = exc_type, exc, tb
+
+        def __iter__(self):
+            return iter(self._lines)
+
+    partial_content = '[{"Start":0,"End":1.0,"Speaker":0,"Content":"Did you s'
+    stream_lines = [
+        "data: "
+        + json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {"content": partial_content},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        ),
+        "data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "length"}]}),
+        "data: [DONE]",
+    ]
+
+    def _fake_urlopen(req, timeout):
+        _ = req, timeout
+        return _FakeStreamingResponse(stream_lines)
+
+    monkeypatch.setattr("backend.providers.vibevoice_vllm.urllib.request.urlopen", _fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="finish_reason=length") as exc_info:
+        provider._do_request(audio, "", 1.0, None)
+
+    assert "generated_chars=" in str(exc_info.value)

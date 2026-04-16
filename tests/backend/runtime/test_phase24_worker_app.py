@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 
-from fastapi.testclient import TestClient
 import pytest
 
 
@@ -102,6 +101,7 @@ def _build_payload() -> dict[str, object]:
 
 
 def test_phase24_worker_app_processes_task_and_updates_repository():
+    from fastapi.testclient import TestClient
     from backend.runtime.phase24_worker_app import Phase24WorkerService, create_app
 
     repository = _FakeRepository()
@@ -143,6 +143,7 @@ def test_phase24_worker_app_processes_task_and_updates_repository():
 
 
 def test_phase24_worker_app_short_circuits_completed_jobs():
+    from fastapi.testclient import TestClient
     from backend.repository.models import Phase24JobRecord
     from backend.runtime.phase24_worker_app import Phase24WorkerService, create_app
 
@@ -181,6 +182,7 @@ def test_phase24_worker_app_short_circuits_completed_jobs():
 
 
 def test_phase24_worker_app_short_circuits_running_jobs():
+    from fastapi.testclient import TestClient
     from backend.repository.models import Phase24JobRecord
     from backend.runtime.phase24_worker_app import Phase24WorkerService, create_app
 
@@ -442,3 +444,65 @@ def test_phase24_worker_app_failfast_on_in_run_preemption_threshold(tmp_path):
     assert repository.job_record.status == "failed"
     assert repository.run_record is not None
     assert repository.run_record.status == "FAILED"
+
+
+def test_build_default_phase24_worker_service_uses_local_model_for_flash(monkeypatch):
+    from types import SimpleNamespace
+
+    from backend.runtime import phase24_worker_app as module
+
+    captured: dict[str, object] = {}
+    fake_runner = object()
+    bootstrap_calls: list[str] = []
+
+    class _FakeRunnerFactory:
+        @staticmethod
+        def from_env(**kwargs):
+            captured.update(kwargs)
+            return fake_runner
+
+    class _FakeRepository:
+        def bootstrap_schema(self) -> None:
+            bootstrap_calls.append("bootstrapped")
+
+    settings = SimpleNamespace(
+        spanner=SimpleNamespace(),
+        vertex=SimpleNamespace(
+            generation_backend="local_openai",
+            flash_model="gemini-3-flash-preview",
+        ),
+        local_generation=SimpleNamespace(
+            model="Qwen/Qwen3.5-27B",
+        ),
+        storage=SimpleNamespace(),
+        phase24_media_prep=SimpleNamespace(
+            backend="local",
+        ),
+        phase24_worker=SimpleNamespace(
+            query_version="v1",
+            debug_snapshots=False,
+            service_name="clypt-phase24-worker",
+            environment="test",
+            max_attempts=3,
+            fail_fast_p95_latency_ms=0.0,
+            fail_fast_preemption_threshold=0,
+            admission_metrics_path=None,
+        ),
+    )
+
+    monkeypatch.setattr(module, "load_provider_settings", lambda: settings)
+    monkeypatch.setattr(
+        module.SpannerPhase14Repository,
+        "from_settings",
+        lambda settings: _FakeRepository(),
+    )
+    monkeypatch.setattr(module, "LocalOpenAIQwenClient", lambda settings: "llm")
+    monkeypatch.setattr(module, "VertexEmbeddingClient", lambda settings: "embed")
+    monkeypatch.setattr(module, "GCSStorageClient", lambda settings: "storage")
+    monkeypatch.setattr(module, "V31LivePhase14Runner", _FakeRunnerFactory)
+
+    service = module.build_default_phase24_worker_service()
+
+    assert service.runner is fake_runner
+    assert bootstrap_calls == ["bootstrapped"]
+    assert captured["flash_model"] == "Qwen/Qwen3.5-27B"

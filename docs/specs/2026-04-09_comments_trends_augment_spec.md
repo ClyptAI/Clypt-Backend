@@ -1,6 +1,6 @@
 # Clypt V3.1 Spec: Comment + Trend Signal Augmentation (Hard-Join, Fail-Fast)
 
-**Status:** Draft v1  
+**Status:** Active (implemented behavior reference)  
 **Date:** 2026-04-09  
 **Scope:** Add YouTube comments + trend signals to Phase 4 retrieval/ranking in augment mode, persist node/candidate attribution in Spanner, and use a local Phase 1 test-bank link mapping for deterministic input videos.
 
@@ -470,7 +470,7 @@ Add log events:
 5. `signals_hard_join_wait_start`, `signals_hard_join_wait_done`
 6. `signals_node_linking_done`
 7. `signals_candidate_attribution_done`
-8. `signals_llm_call_start` / `signals_llm_call_done` with `callpoint_id`, `model`, `thinking_level`, `latency_ms`
+8. `signals_llm_call_start` / `signals_llm_call_done` with `callpoint_id`, `model`, `latency_ms`
 9. terminal `signals_failure` with typed error code and `failed_callpoint_id` where applicable
 
 ---
@@ -514,19 +514,12 @@ Add env vars:
 - `CLYPT_PHASE4_SUBGRAPH_OVERLAP_DEDUPE_THRESHOLD=0.70`
 - `CLYPT_SIGNAL_LLM_FAIL_FAST=1`
 - `CLYPT_SIGNAL_LLM_MODEL_1=gemini-3-flash`
-- `CLYPT_SIGNAL_LLM_THINKING_1=low`
 - `CLYPT_SIGNAL_LLM_MODEL_2=gemini-3-flash`
-- `CLYPT_SIGNAL_LLM_THINKING_2=minimal`
 - `CLYPT_SIGNAL_LLM_MODEL_3=gemini-3.1-flash-lite`
-- `CLYPT_SIGNAL_LLM_THINKING_3=low`
 - `CLYPT_SIGNAL_LLM_MODEL_5=gemini-3-flash`
-- `CLYPT_SIGNAL_LLM_THINKING_5=minimal`
 - `CLYPT_SIGNAL_LLM_MODEL_9=gemini-3-flash`
-- `CLYPT_SIGNAL_LLM_THINKING_9=low`
 - `CLYPT_SIGNAL_LLM_MODEL_10=gemini-3-flash`
-- `CLYPT_SIGNAL_LLM_THINKING_10=minimal`
 - `CLYPT_SIGNAL_LLM_MODEL_11=gemini-3.1-flash-lite`
-- `CLYPT_SIGNAL_LLM_THINKING_11=low`
 - `CLYPT_PHASE1_INPUT_MODE=direct|test_bank` (default `test_bank` for this MVP path)
 - `CLYPT_PHASE1_TEST_BANK_PATH` (JSON/YAML mapping file)
 - `CLYPT_PHASE1_TEST_BANK_STRICT=1|0` (if `1`, unmapped links are rejected)

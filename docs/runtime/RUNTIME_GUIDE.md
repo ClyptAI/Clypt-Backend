@@ -1,65 +1,204 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-04-12
+**Last updated:** 2026-04-16
 
-This is the canonical runtime reference for implemented backend behavior (Phases 1-4) plus comments/trends augmentation in Phase 2-4.
+This is the runtime source of truth for current backend code behavior (Phases 1-4).
+
+For the full environment variable catalog, see `docs/runtime/ENV_REFERENCE.md`.
 
 ## 1) Current Runtime Topology
 
-- **Phase 1 host:** GPU droplet (`run_phase1`, API service, worker loop).
-- **ASR path:** `VibeVoiceVLLMProvider` against local `clypt-vllm-vibevoice.service`.
-- **Phase 2-4 execution path:** Cloud Tasks dispatch to Cloud Run worker (`us-east4`), defaulting to an L4 GPU-accelerated worker profile.
-- **Queue handoff timing:** Phase 2-4 enqueue is triggered when the audio chain completes, and can happen while RF-DETR is still finishing.
-- **Phase 2-4 region boundary:** only `us-east4` is the active production worker region; remove stale duplicate services in other regions.
-- **Generation backend:** Gemini Developer API only (`GENAI_GENERATION_BACKEND=developer`).
-- **Embedding backend:** Vertex (`VERTEX_EMBEDDING_BACKEND=vertex`).
+- **Phase 1 runtime:** local process (`python -m backend.runtime.run_phase1`) backed by `Phase1JobRunner`.
+- **Phase 1 runtime env:** `/opt/clypt-phase1/venvs/phase1` on the DO host.
+- **ASR backend:** configurable Phase 1 backend via `CLYPT_PHASE1_ASR_BACKEND`.
+  - `vllm` uses the local VibeVoice service (`VIBEVOICE_VLLM_BASE_URL`).
+  - `cloud_run_l4` uses the remote `/tasks/asr` Cloud Run service and rejects local VibeVoice fallback env.
+- **Qwen serving env:** dedicated SGLang env at `/opt/clypt-phase1/venvs/sglang`.
+- **Qwen serving tuning:** `deploy_sglang_qwen_service.sh` now sources `/etc/clypt-phase1/v3_1_phase1.env` and can drive SGLang launch with `SG_SCHEDULE_POLICY`, `SG_CHUNKED_PREFILL_SIZE`, `SG_MEM_FRACTION_STATIC`, `SG_CONTEXT_LENGTH`, and `SG_EXTRA_ARGS`.
+- **Phase 2-4 dispatch path:** local SQLite queue + local worker loop.
+  - Queue backend must be `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`.
+  - Phase 1 enqueues to local queue through `Phase24LocalDispatcherClient`.
+- **Phase 2-4 worker service:** `python -m backend.runtime.run_phase24_local_worker` from the Phase 1 env, with systemd dependency on `clypt-sglang-qwen.service`.
+- **Optional Cloud Run L4 combined service:** the host can offload both Phase 1 ASR and Phase 2 node-media prep to the same service.
+  - ASR route: `POST /tasks/asr`
+  - node-media route: `POST /tasks/node-media-prep`
+  - combined service runner: `python -m backend.runtime.run_l4_combined_service`
+  - container bootstrap launches `vllm_plugin/scripts/start_server.py`, waits for `/health`, then serves FastAPI
+- **Generation backend for Phase 2-4:** local OpenAI-compatible endpoint (`GENAI_GENERATION_BACKEND=local_openai` enforced by `build_default_phase24_worker_service()`).
+- **Embedding backend:** Vertex (`VERTEX_EMBEDDING_BACKEND=vertex` default).
+- **Storage and graph persistence:** GCS + Spanner remain active dependencies.
 
 ## 2) Phase 1 Execution Semantics
 
-Phase 1 runs visual extraction and ASR concurrently, then starts audio sidecars immediately after ASR completes:
+Phase 1 executes visual and audio branches concurrently.
 
 ```text
-visual(RFDETR+ByteTrack) -----------------------\
-                                                 +--> both done
-asr(vLLM HTTP) ---------------------------------/
+visual (RF-DETR + ByteTrack) ----------------------\
+                                                    +--> join
+asr (Phase 1 backend: local vLLM or Cloud Run L4) -/
    |
-   +--> forced-aligner -> emotion2vec+ -> YAMNet
+   +--> forced aligner -> emotion2vec+ -> YAMNet
 ```
 
-Critical rule: the audio chain starts from `asr_future.result()` and must not be delayed behind RF-DETR completion.
+Critical invariant in code: audio chain launches immediately after ASR completion and does not wait for visual completion.
 
-## 3) Comments + Trends Augment Integration (Phase 2-4)
+## 3) Phase 1 Input Contract
 
-When enabled:
+- `CLYPT_PHASE1_INPUT_MODE` must be `test_bank` (other values raise).
+- In strict mode (`CLYPT_PHASE1_TEST_BANK_STRICT=1`), `CLYPT_PHASE1_TEST_BANK_PATH` is required.
+- Test-bank mapping supports `video_gcs_uri` and `audio_gcs_uri` hydration/signing paths.
+- Known-good DO H200 runtime uses `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`.
+- That path requires both host `trtexec` (`libnvinfer-bin`) and Python TensorRT in the Phase 1 env; `deploy_vllm_service.sh` now provisions both automatically.
+- The current TensorRT fast path decodes directly to detector resolution on GPU (`scale_cuda`) before `hwdownload`, then performs tensor conversion, resize/shape reconciliation, and Imagenet normalization on CUDA with `torch`.
+- The runtime preserves original source frame dimensions alongside the resized decode output so TensorRT postprocess can still rescale detection boxes back to source-video coordinates correctly.
 
-- comments future starts after Phase24 preflight
-- trends future starts after Phase 2 summaries are available
-- both run in parallel with core work where applicable
-- **hard join** happens before Phase 4 prompt seeding
-- invalid/failed enabled signal pipeline is terminal (fail-fast)
+### 3.1 Phase 1 visual fast path
 
-When both signals are disabled, pipeline proceeds with general prompts only.
+For `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`, the intended high-throughput path is:
 
-## 4) Canonical Repro Checklist
+```text
+NVDEC -> scale_cuda to detector resolution -> hwdownload RGB -> CUDA tensor/normalize -> TensorRT -> ByteTrack
+```
 
-### 4.1 Load env
+Operationally, this means:
+
+- the host should not be doing full-resolution OpenCV resize work in the hot loop
+- CUDA preprocess is part of the intended runtime behavior, not an optional micro-optimization
+- box geometry must still be interpreted against the original source dimensions, not the resized decode surface
+
+On the 2026-04-15 H200 reference replay for `source_video.mp4` (Billy Carson test-bank asset), this path sustained about `240.1 fps` over `35705` frames with `batch_size=16`. The immediately previous host-side resize/normalize path on the same workload ran at about `51.5 fps`.
+
+## 4) Phase 2-4 Local Queue / Worker Contract
+
+### 4.1 Queue model
+
+- SQLite WAL queue at `CLYPT_PHASE24_LOCAL_QUEUE_PATH` (default `backend/outputs/phase24_local_queue.sqlite`).
+- `run_id` is unique; enqueue is idempotent by `run_id`.
+- `claim_next()` supports optional expired-lease reclaim.
+
+### 4.2 Default fail-fast lease behavior
+
+Current defaults loaded from config:
+
+- `CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`
+- `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`
+
+Meaning:
+
+- Worker does **not** auto-requeue stale `running` leases by default.
+- If stale running lease is detected, worker raises fail-fast stop and requires manual operator intervention.
+
+### 4.3 Crash classification
+
+`classify_phase24_exception()` maps key failures:
+
+- `connection refused`, `xgrammar`, `compile_json_schema`, `EngineCore` patterns => `FAIL_FAST`
+- transient HTTP (`429/500/502/503/504`) => retryable transient
+- schema/type/validation/json errors => non-transient
+
+### 4.4 Phase24 worker backend gate
+
+`build_default_phase24_worker_service()` hard-enforces:
+
+- only `GENAI_GENERATION_BACKEND=local_openai`
+- local model must be set (`CLYPT_LOCAL_LLM_MODEL` or `GENAI_FLASH_MODEL` fallback)
+- node media prep backend may be:
+  - `local` (default, extract/upload clips inside the current worker)
+  - `cloud_run_l4` (direct HTTP call to Cloud Run L4 media service)
+
+### 4.5 Node media prep offload contract
+
+When `CLYPT_PHASE24_MEDIA_PREP_BACKEND=cloud_run_l4`, the local worker:
+
+- sends ordered node windows (`node_id`, `start_ms`, `end_ms`) plus `source_video_gcs_uri`
+- expects ordered descriptors back (`node_id`, `file_uri`, `mime_type`)
+- fails fast if response order does not exactly match node order
+
+This preserves compatibility with `embed_semantic_nodes_live()`, which zips nodes and media descriptors positionally.
+
+## 5) Local OpenAI Qwen Call Behavior
+
+`LocalOpenAIQwenClient.generate_json()` behavior:
+
+- always sends OpenAI-compatible `/chat/completions`
+- always uses `response_format.type=json_schema` with `strict=true`
+- enforces `additionalProperties=false` recursively on object schemas
+- forces non-thinking payload (`extra_body.chat_template_kwargs.enable_thinking=false`)
+- forwards configured `max_output_tokens` as a real `max_tokens` request cap on structured-output calls
+- warns when the serving backend returns `finish_reason=length`, because that is the strongest signal that a structured JSON reply was token-capped
+- validates parsed response against required/type/enum subset
+
+## 6) Phase 2-4 Concurrency Guidance
+
+Current code-backed defaults:
+
+- `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; startup should fail if it is still set
+- use explicit per-stage envs instead:
+  - `CLYPT_PHASE2_MAX_CONCURRENT=8`
+  - `CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT=10`
+  - `CLYPT_SIGNAL_MAX_CONCURRENT=8`
+  - `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT=2`
+  - `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT=4`
+  - `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT=2`
+- recommended DO H200 working pins can be higher, and the current checked-in examples use:
+  - `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT=8`
+  - `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT=8`
+  - `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT=10`
+- keep Phase 3 long-range shortlist controls explicit:
+  - `CLYPT_PHASE3_LONG_RANGE_TOP_K=2`
+  - `CLYPT_PHASE3_LONG_RANGE_PAIRS_PER_SHARD=24`
+- full env inventory lives in `docs/runtime/ENV_REFERENCE.md`
+
+Reference measurements captured on `2026-04-15` against the live droplet service:
+
+- `phase4_subgraph` prompt (`~4.4k chars`): concurrency `1` took about `79.6s`; concurrency `2` took about `88.6s` wall-clock for `2` successful requests, improving aggregate throughput from `0.0126 req/s` to `0.0226 req/s`
+- `phase3_local` prompt (`~10.5k chars`): concurrency `1` took about `71.6s`; concurrency `2` took about `103.6s` wall-clock for `2` successful requests, improving aggregate throughput from `0.0140 req/s` to `0.0193 req/s`
+- a broader Phase 4 subgraph sweep over `1,2,4,6,8` was not operationally useful because the higher-concurrency lanes stalled long enough to require aborting the run
+
+Repeat the benchmark with:
+
+```bash
+python scripts/bench_phase24_llm_concurrency.py \
+  --scenario phase4_subgraph \
+  --concurrency-values 1,2 \
+  --rounds 1 \
+  --timeout-s 120
+```
+
+## 7) Canonical Local Runtime Commands
+
+### 7.1 Load environment
 
 ```bash
 cd /opt/clypt-phase1/repo
-source .venv/bin/activate
+source /opt/clypt-phase1/venvs/phase1/bin/activate
 set -a; source /etc/clypt-phase1/v3_1_phase1.env; set +a
 ```
 
-### 4.2 Verify services
+### 7.2 Verify core services
 
 ```bash
-sudo systemctl is-active clypt-vllm-vibevoice clypt-v31-phase1-api clypt-v31-phase1-worker
+systemctl is-active clypt-vllm-vibevoice clypt-sglang-qwen clypt-v31-phase1-api clypt-v31-phase1-worker clypt-v31-phase24-local-worker
 curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/v1/models | python3 -m json.tool
+curl -fsS http://127.0.0.1:8001/health
+curl -fsS http://127.0.0.1:8001/v1/models | python3 -m json.tool
+trtexec --help >/dev/null
+/opt/clypt-phase1/venvs/phase1/bin/python -c "import tensorrt as trt; print(trt.__version__)"
+/opt/clypt-phase1/venvs/sglang/bin/python -c "import sglang, torch; print(sglang.__version__, torch.__version__)"
+systemctl cat clypt-sglang-qwen | rg "ExecStart|schedule-policy|chunked-prefill-size|mem-fraction-static|context-length"
 ```
 
-### 4.3 Run pipeline
+### 7.2.1 Verify Cloud Run L4 combined service
+
+If media prep offload is enabled:
+
+```bash
+gcloud run services describe clypt-phase1-l4-combined --region us-east4 --format='value(status.url,status.latestReadyRevisionName)'
+curl -fsS https://<combined-service>/healthz
+```
+
+### 7.3 Run Phase 1 + queue-mode Phase 2-4
 
 ```bash
 python -m backend.runtime.run_phase1 \
@@ -68,221 +207,53 @@ python -m backend.runtime.run_phase1 \
   --run-phase14
 ```
 
-### 4.4 Observe logs
+### 7.4 Inspect local queue state
 
 ```bash
-tail -f /var/log/clypt/v3_1_phase1/<job_log>.log
-gcloud run services logs read clypt-phase24-worker --region=us-east4 --project=clypt-v3 --follow
+python - <<'PY'
+import sqlite3
+db = "backend/outputs/phase24_local_queue.sqlite"
+conn = sqlite3.connect(db)
+for row in conn.execute("SELECT run_id,status,attempt_count,locked_at,last_error FROM phase24_jobs ORDER BY updated_at DESC LIMIT 20"):
+    print(row)
+PY
 ```
 
-### 4.5 Sync Spanner schema (required before replay/deploy benchmarks)
+## 8) Required Environment Variables (Code-Enforced)
 
-Run this once after pulling backend changes that touch comments/trends or Phase 4 provenance persistence:
-
-```bash
-python3 scripts/spanner/ensure_phase24_signal_schema.py \
-  --project clypt-v3 \
-  --instance clypt-spanner-v3 \
-  --database clypt-graph-db-v3
-```
-
-### 4.6 Verify run in Spanner
-
-```bash
-gcloud spanner databases execute-sql clypt-graph-db-v3 \
-  --instance=clypt-spanner-v3 --project=clypt-v3 \
-  --sql="SELECT run_id,status,updated_at FROM runs WHERE run_id='<run_id>'"
-
-gcloud spanner databases execute-sql clypt-graph-db-v3 \
-  --instance=clypt-spanner-v3 --project=clypt-v3 \
-  --sql="SELECT phase_name,status,duration_ms,started_at,ended_at FROM phase_metrics WHERE run_id='<run_id>' ORDER BY started_at ASC"
-```
-
-## 5) Key Env Contract
-
-Required regardless of run type:
+Always required:
 
 - `GOOGLE_CLOUD_PROJECT`
 - `GCS_BUCKET`
 - `VIBEVOICE_BACKEND=vllm`
+- `GENAI_GENERATION_BACKEND=local_openai` for the local Phase 2-4 worker
+- `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite` for the local queue runtime
+
+Required when `CLYPT_PHASE1_ASR_BACKEND=vllm`:
+
 - `VIBEVOICE_VLLM_BASE_URL`
 - `VIBEVOICE_VLLM_MODEL=vibevoice`
-- `CLYPT_PHASE1_INPUT_MODE=test_bank`
-- `CLYPT_PHASE1_TEST_BANK_PATH`
 
-Important defaults:
+Required when `CLYPT_PHASE1_ASR_BACKEND=cloud_run_l4`:
 
-- `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1`
-- YAMNet device defaults to CPU when `CLYPT_PHASE1_YAMNET_DEVICE` is unset.
-- Phase 1 visual defaults: `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`, `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`, `CLYPT_PHASE1_VISUAL_DECODE=gpu`.
-- VibeVoice transport default: `VIBEVOICE_VLLM_AUDIO_MODE=url` (signed canonical `audio_gcs_uri` URL payload, fail-fast if missing/un-signable).
-- VibeVoice decoding defaults: `VIBEVOICE_DO_SAMPLE=0.0`, `VIBEVOICE_TOP_P=1.0`, `VIBEVOICE_NUM_BEAMS=1.0`, `VIBEVOICE_REPETITION_PENALTY=0.97`.
-- vLLM launch defaults (in `clypt-vllm-vibevoice.service`): `--max-num-seqs 8`, `--gpu-memory-utilization 0.8`.
-- `CLYPT_GEMINI_MAX_CONCURRENT=8`
-- `CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY=8`
-- `CLYPT_PHASE3_TARGET_BATCH_COUNT=3`
-- `CLYPT_PHASE3_MAX_NODES_PER_BATCH=24`
+- `CLYPT_PHASE1_ASR_SERVICE_URL`
+- `VIBEVOICE_VLLM_BASE_URL` must be unset on the caller
 
-Phase 1 source URL semantics:
+Required for local OpenAI generation:
 
-- Test-bank mapping entries now support canonical GCS asset URIs (`video_gcs_uri`, `audio_gcs_uri`) alongside local cache paths.
-- When a mapped local cache file is missing, runtime hydrates from canonical GCS URI before Phase 1 media prep.
-- Comments/trends still use the original posted YouTube `source_url`; canonical GCS assets are only for media hydration and ASR audio URL transport.
-- ASR URL mode requires mapped canonical `audio_gcs_uri` and signs it directly; there is no local upload fallback.
+- `CLYPT_LOCAL_LLM_BASE_URL`
+- `CLYPT_LOCAL_LLM_MODEL` or a compatible fallback such as `GENAI_FLASH_MODEL`
 
-### 5.1 Phase 2-4 worker defaults (future runs)
+For the full env catalog, see `docs/runtime/ENV_REFERENCE.md`.
 
-The default Phase 2-4 Cloud Run worker profile for production runs is `us-east4` L4 GPU-accelerated with the following env baseline:
+## 9) Known High-Signal Failure Modes
 
-```bash
-CLYPT_PHASE24_FFMPEG_DEVICE=gpu
-CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY=8
-CLYPT_GEMINI_MAX_CONCURRENT=8
-CLYPT_PHASE3_TARGET_BATCH_COUNT=3
-CLYPT_PHASE3_MAX_NODES_PER_BATCH=24
+1. **GPU runtime/container startup failure:** missing host NVIDIA libs (`libnvidia-ml.so.1`) causes vLLM container startup loop failure.
+2. **Qwen endpoint crash / refusal:** local worker marks failed and fail-fast stops on `connection refused` signatures.
+3. **Stale queue lease:** with default fail-fast settings, worker exits until operator manually resolves stale running row.
+4. **Structured output mismatch:** schema/type violations are terminal non-transient failures.
+5. **Shared-env drift:** if SGLang and Phase 1 share a venv, SGLang can overwrite Phase 1 runtime packages; the current deploy path avoids this by using separate envs.
+6. **H200 local NVENC mismatch:** H200 has NVDEC but no NVENC, so local `h264_nvenc` node-media extraction will fail with `unsupported device (2)` unless media prep is offloaded to an NVENC-capable worker such as Cloud Run L4.
+7. **Visual throughput unexpectedly low on TensorRT path:** if a visual-only H200 replay drops back toward `~50 fps` instead of `~240 fps`, the most likely causes are stale code on-host, loss of `scale_cuda` decode-to-resolution behavior, or a fallback to host-side preprocessing before TensorRT.
 
-CLYPT_PHASE2_MERGE_THINKING_LEVEL=low
-CLYPT_PHASE2_BOUNDARY_THINKING_LEVEL=minimal
-CLYPT_PHASE3_LOCAL_THINKING_LEVEL=minimal
-CLYPT_PHASE3_LONG_RANGE_THINKING_LEVEL=low
-CLYPT_PHASE4_META_THINKING_LEVEL=low
-CLYPT_PHASE4_SUBGRAPH_THINKING_LEVEL=medium
-CLYPT_PHASE4_POOL_THINKING_LEVEL=medium
-```
-
-CPU encoder execution is a fallback/degraded path, not the default.
-
-### 5.2 Comments/Trends signal defaults (future runs)
-
-#### Signal LLM routing defaults
-
-Use this mapping for the implemented signal pipeline. Purpose is listed first, then model + thinking.
-
-1. Purpose: comment/trend cluster -> clip-seeking retrieval prompt generation  
-   Model: `gemini-3-flash`  
-   Thinking: `low`
-2. Purpose: trend relevance adjudication against video context  
-   Model: `gemini-3-flash`  
-   Thinking: `minimal`
-3. Purpose: comment/reply quality classification (`useful` vs `noise`)  
-   Model: `gemini-3.1-flash-lite`  
-   Thinking: `low`
-4. Purpose: cluster-to-node moment span resolution  
-   Model: `gemini-3-flash`  
-   Thinking: `minimal`
-5. Purpose: trend query synthesis from video context  
-   Model: `gemini-3-flash`  
-   Thinking: `low`
-6. Purpose: top-level + full-reply thread consolidation  
-   Model: `gemini-3-flash`  
-   Thinking: `minimal`
-7. Purpose: candidate attribution explanation text for UI/debug  
-   Model: `gemini-3.1-flash-lite`  
-   Thinking: `low`
-
-Equivalent env contract:
-
-```bash
-CLYPT_SIGNAL_LLM_FAIL_FAST=1
-CLYPT_SIGNAL_LLM_MODEL_1=gemini-3-flash
-CLYPT_SIGNAL_LLM_THINKING_1=low
-CLYPT_SIGNAL_LLM_MODEL_2=gemini-3-flash
-CLYPT_SIGNAL_LLM_THINKING_2=minimal
-CLYPT_SIGNAL_LLM_MODEL_3=gemini-3.1-flash-lite
-CLYPT_SIGNAL_LLM_THINKING_3=low
-CLYPT_SIGNAL_LLM_MODEL_5=gemini-3-flash
-CLYPT_SIGNAL_LLM_THINKING_5=minimal
-CLYPT_SIGNAL_LLM_MODEL_9=gemini-3-flash
-CLYPT_SIGNAL_LLM_THINKING_9=low
-CLYPT_SIGNAL_LLM_MODEL_10=gemini-3-flash
-CLYPT_SIGNAL_LLM_THINKING_10=minimal
-CLYPT_SIGNAL_LLM_MODEL_11=gemini-3.1-flash-lite
-CLYPT_SIGNAL_LLM_THINKING_11=low
-```
-
-#### Signal pipeline env defaults
-
-```bash
-CLYPT_ENABLE_COMMENT_SIGNALS=1
-CLYPT_ENABLE_TREND_SIGNALS=1
-CLYPT_SIGNAL_MODE=augment
-CLYPT_SIGNAL_FAIL_FAST=1
-CLYPT_SIGNAL_MAX_HOPS=2
-CLYPT_SIGNAL_TIME_WINDOW_MS=30000
-CLYPT_COMMENT_ORDER=relevance
-CLYPT_COMMENT_TOP_THREADS_MIN=15
-CLYPT_COMMENT_TOP_THREADS_MAX=40
-CLYPT_SIGNAL_EPSILON=1e-6
-CLYPT_SIGNAL_ENGAGEMENT_TOP_LIKE_WEIGHT=0.65
-CLYPT_SIGNAL_ENGAGEMENT_TOP_REPLY_WEIGHT=0.35
-CLYPT_SIGNAL_ENGAGEMENT_REPLY_LIKE_WEIGHT=0.85
-CLYPT_SIGNAL_ENGAGEMENT_REPLY_PARENT_WEIGHT=0.15
-CLYPT_SIGNAL_CLUSTER_MEAN_WEIGHT=0.45
-CLYPT_SIGNAL_CLUSTER_MAX_WEIGHT=0.25
-CLYPT_SIGNAL_CLUSTER_FREQ_WEIGHT=0.30
-CLYPT_SIGNAL_CLUSTER_FREQ_REF=30
-CLYPT_SIGNAL_HOP_DECAY_1=0.75
-CLYPT_SIGNAL_HOP_DECAY_2=0.55
-CLYPT_SIGNAL_COVERAGE_WEIGHT=0.30
-CLYPT_SIGNAL_DIRECT_RATIO_WEIGHT=0.15
-CLYPT_SIGNAL_CLUSTER_CAP=0.12
-CLYPT_SIGNAL_TOTAL_CAP=0.20
-CLYPT_SIGNAL_AGREEMENT_CAP=0.10
-CLYPT_SIGNAL_MEANINGFUL_MIN_SOURCE_COVERAGE=0.15
-CLYPT_SIGNAL_AGREEMENT_BONUS_TIER1=0.04
-CLYPT_SIGNAL_AGREEMENT_BONUS_TIER2=0.07
-```
-
-Set explicitly per deployment (no single locked numeric default in runtime docs):
-
-- `CLYPT_COMMENT_MAX_REPLIES_PER_THREAD`
-- `CLYPT_COMMENT_CLUSTER_SIM_THRESHOLD`
-- `CLYPT_TREND_MAX_ITEMS`
-- `CLYPT_TREND_RELEVANCE_THRESHOLD`
-- `CLYPT_SIGNAL_MEANINGFUL_MIN_CLUSTER_CONTRIB`
-
-## 6) Timing/Health Markers
-
-Expect these log gates in successful Phase 2-4 runs:
-
-- `[phase14] Phase 2 done in ...`
-- `[phase14] Phase 3 done in ...`
-- `[phase14] Phase 4 done in ...`
-- `[phase14] Phases 2-4 done in ...`
-- `[phase2] merge+boundary done in ...`
-- `[phase3] local semantic edges done in ...`
-- `[phase4] pooled review done in ...`
-
-## 7) Known Operational Failure Modes
-
-1. `RESOURCE_EXHAUSTED` on larger runs (especially Phase 3 local-edge batches).
-2. `GPU ffmpeg unavailable ... falling back to CPU encoder` on queue worker (major Phase 2 slowdown).
-3. `Gemini returned an edge for a non-shortlisted candidate long-range pair` strict validation failure.
-4. `Budget 0 is invalid...` if thinking budget is misconfigured for affected models.
-
-### 7.1 Detailed Phase 2-4 worker caveats
-
-1. `embed_content` input shape caveat (`gemini-embedding-2-preview`):
-   - a list of texts is treated as one document (returns one embedding, not N).
-   - at most one video/media part is accepted per call.
-   - batching must be done by looping per item in application code.
-2. Vertex Priority PayGo caveat:
-   - generation is locked to Developer API, so Vertex generation Priority PayGo is not part of the active runtime path.
-   - embedding endpoint remains `us-central1`; keep embedding traffic on Vertex as configured.
-3. Quota pressure on longer runs:
-   - Phase 3 local-edge concurrency can exhaust RPM/TPM (`RESOURCE_EXHAUSTED`).
-   - retries can recover transient cases; sustained pressure may still fail the run.
-4. Strict long-range validation:
-   - non-shortlisted long-range edge proposals are hard failures by design.
-   - queue retries may recover; repeated failures usually require rerun.
-5. Cloud Run GPU availability / quota pressure:
-   - task dispatch can return `429 no available instance` before worker code starts.
-   - this is typically quota/capacity pressure on `run.googleapis.com/nvidia_l4_gpu_allocation_no_zonal_redundancy` (per-project, per-region).
-   - keep Cloud Tasks serial (`maxConcurrentDispatches=1`) when running a single-GPU worker profile.
-
-See [ERROR_LOG.md](../ERROR_LOG.md) for incident history and recoveries.
-
-## 8) Implemented vs Planned Boundary
-
-- Implemented: Phase 1-4 + comments/trends augmentation + Spanner persistence.
-- Planned: Phase 5 participation grounding and Phase 6 render/9:16 path (documented in specs + architecture).
+For incident history and recovery notes, see `docs/ERROR_LOG.md`.

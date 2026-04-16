@@ -33,6 +33,8 @@ def main() -> None:
         lease_timeout_s=settings.phase24_local_queue.lease_timeout_s,
         max_requests_per_worker=settings.phase24_local_queue.max_requests_per_worker,
         max_inflight=settings.phase24_local_queue.max_inflight,
+        reclaim_expired_leases=settings.phase24_local_queue.reclaim_expired_leases,
+        fail_fast_on_stale_running=settings.phase24_local_queue.fail_fast_on_stale_running,
         fail_fast_preemption_threshold=settings.phase24_worker.fail_fast_preemption_threshold,
         admission_metrics_path=settings.phase24_worker.admission_metrics_path,
         block_on_phase1_active=settings.phase24_worker.block_on_phase1_active,

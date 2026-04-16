@@ -1,0 +1,17 @@
+[Unit]
+Description=Clypt local Qwen SGLang service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase1/repo
+Environment=HF_HOME=/opt/clypt-phase1/hf-cache
+Environment=TOKENIZERS_PARALLELISM=false
+Restart=always
+RestartSec=5
+TimeoutStartSec=3600
+ExecStart=/opt/clypt-phase1/venvs/sglang/bin/python -m sglang.launch_server --model-path Qwen/Qwen3.5-27B --host 127.0.0.1 --port 8001 --reasoning-parser qwen3 --grammar-backend xgrammar --schedule-policy lpm --chunked-prefill-size 8192 --mem-fraction-static 0.55 --context-length 131072
+
+[Install]
+WantedBy=multi-user.target

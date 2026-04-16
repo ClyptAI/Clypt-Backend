@@ -26,6 +26,7 @@ _TRANSIENT_ERROR_TOKENS = (
 )
 
 logger = logging.getLogger(__name__)
+_THINKING_DISABLED_LEVELS = {"", "0", "false", "none", "off", "disabled"}
 
 
 def _coerce_parsed_json(response: Any) -> dict[str, Any] | None:
@@ -38,7 +39,7 @@ def _coerce_parsed_json(response: Any) -> dict[str, Any] | None:
         dumped = parsed.model_dump(mode="json")
         if isinstance(dumped, dict):
             return dumped
-    raise ValueError(f"Vertex Gemini parsed payload must be an object, got {type(parsed).__name__}")
+    raise ValueError(f"Vertex generation parsed payload must be an object, got {type(parsed).__name__}")
 
 
 def _extract_finish_reason(response: Any) -> str | None:
@@ -148,7 +149,7 @@ def _build_default_sdk_client(*, settings: VertexSettings, location: str, header
     if location == "__developer__":
         if not settings.gemini_api_key:
             raise ValueError(
-                "GEMINI_API_KEY (or GOOGLE_API_KEY) is required when using Gemini Developer API."
+                "GEMINI_API_KEY (or GOOGLE_API_KEY) is required when using the Developer API backend."
             )
         kwargs = dict(api_key=settings.gemini_api_key)
     else:
@@ -158,7 +159,7 @@ def _build_default_sdk_client(*, settings: VertexSettings, location: str, header
     return genai.Client(**kwargs)
 
 
-class VertexGeminiClient:
+class VertexGenerationClient:
     def __init__(self, *, settings: VertexSettings, sdk_client: Any | None = None) -> None:
         self.settings = settings
         self._api_max_retries = max(0, int(settings.generation_api_max_retries))
@@ -168,7 +169,7 @@ class VertexGeminiClient:
         self._api_jitter_ratio = max(0.0, float(settings.generation_api_jitter_ratio))
         if not settings.gemini_api_key:
             raise ValueError(
-                "GEMINI_API_KEY (or GOOGLE_API_KEY) is required for Gemini Developer API generation."
+                "GEMINI_API_KEY (or GOOGLE_API_KEY) is required for Developer API generation."
             )
         self._backend = "developer"
         self._sdk = sdk_client or _build_default_sdk_client(
@@ -228,7 +229,8 @@ class VertexGeminiClient:
                 temperature=temperature,
                 response_mime_type="application/json",
             )
-            if thinking_level:
+            normalized_thinking_level = str(thinking_level or "").strip().lower()
+            if normalized_thinking_level not in _THINKING_DISABLED_LEVELS:
                 requested_level = str(thinking_level).strip().upper()
                 try:
                     resolved_level = types.ThinkingLevel(requested_level)
@@ -248,7 +250,8 @@ class VertexGeminiClient:
             _config = types.GenerateContentConfig(**config_kwargs)
         else:
             _config = {"temperature": temperature, "response_mime_type": "application/json"}
-            if thinking_level:
+            normalized_thinking_level = str(thinking_level or "").strip().lower()
+            if normalized_thinking_level not in _THINKING_DISABLED_LEVELS:
                 _config["thinking_config"] = {"thinking_level": str(thinking_level).strip().upper()}
         response = self._call_with_retry(
             operation="generate_content",
@@ -266,13 +269,13 @@ class VertexGeminiClient:
             finish_reason = _extract_finish_reason(response)
             usage_summary = _extract_usage_summary(response)
             raise ValueError(
-                "Vertex Gemini did not return SDK-parsed JSON object; failing fast "
+                "Vertex generation did not return SDK-parsed JSON object; failing fast "
                 f"(model={resolved_model}, finish_reason={finish_reason}, usage={usage_summary}, "
                 f"has_text={bool(text)}, text_snippet={snippet!r})."
             )
         if not isinstance(parsed_payload, dict):
             raise ValueError(
-                f"Vertex Gemini parsed payload must be an object, got {type(parsed_payload).__name__} "
+                f"Vertex generation parsed payload must be an object, got {type(parsed_payload).__name__} "
                 f"(model={resolved_model})."
             )
         return parsed_payload
@@ -426,5 +429,5 @@ class VertexEmbeddingClient:
 
 __all__ = [
     "VertexEmbeddingClient",
-    "VertexGeminiClient",
+    "VertexGenerationClient",
 ]

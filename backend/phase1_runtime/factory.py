@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from backend.providers import (
+    CloudRunVibeVoiceProvider,
     ForcedAlignmentProvider,
     VibeVoiceVLLMProvider,
     build_gcs_uri_url_resolver,
@@ -31,7 +32,9 @@ def _build_phase24_local_dispatcher(*, settings) -> Phase24LocalDispatcherClient
 
 def _build_phase14_repository(*, settings) -> SpannerPhase14Repository | None:
     try:
-        return SpannerPhase14Repository.from_settings(settings=settings.spanner)
+        repository = SpannerPhase14Repository.from_settings(settings=settings.spanner)
+        repository.bootstrap_schema()
+        return repository
     except Exception as exc:  # pragma: no cover - depends on optional credentials/deps
         logger.warning("failed to initialize Spanner Phase14 repository: %s", exc)
         return None
@@ -44,24 +47,36 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
             "Phase1 local runtime requires CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite for Phase 2–4 "
             f"(got {settings.phase24_local_queue.queue_backend!r})."
         )
-    vv = settings.vllm_vibevoice
     storage_client = GCSStorageClient(settings=settings.storage)
-    vibevoice_provider = VibeVoiceVLLMProvider(
-        base_url=vv.base_url,
-        model=vv.model,
-        timeout_s=vv.timeout_s,
-        healthcheck_path=vv.healthcheck_path,
-        max_retries=vv.max_retries,
-        audio_mode=vv.audio_mode,
-        audio_gcs_url_resolver=build_gcs_uri_url_resolver(storage_client=storage_client),
-        hotwords_context=settings.vibevoice.hotwords_context,
-        max_new_tokens=settings.vibevoice.max_new_tokens,
-        do_sample=settings.vibevoice.do_sample,
-        temperature=settings.vibevoice.temperature,
-        top_p=settings.vibevoice.top_p,
-        repetition_penalty=settings.vibevoice.repetition_penalty,
-        num_beams=settings.vibevoice.num_beams,
-    )
+    if settings.phase1_asr.backend == "cloud_run_l4":
+        vibevoice_provider = CloudRunVibeVoiceProvider(
+            settings=settings.phase1_asr,
+            hotwords_context=settings.vibevoice.hotwords_context,
+            max_new_tokens=settings.vibevoice.max_new_tokens,
+            do_sample=settings.vibevoice.do_sample,
+            temperature=settings.vibevoice.temperature,
+            top_p=settings.vibevoice.top_p,
+            repetition_penalty=settings.vibevoice.repetition_penalty,
+            num_beams=settings.vibevoice.num_beams,
+        )
+    else:
+        vv = settings.vllm_vibevoice
+        vibevoice_provider = VibeVoiceVLLMProvider(
+            base_url=vv.base_url,
+            model=vv.model,
+            timeout_s=vv.timeout_s,
+            healthcheck_path=vv.healthcheck_path,
+            max_retries=vv.max_retries,
+            audio_mode=vv.audio_mode,
+            audio_gcs_url_resolver=build_gcs_uri_url_resolver(storage_client=storage_client),
+            hotwords_context=settings.vibevoice.hotwords_context,
+            max_new_tokens=settings.vibevoice.max_new_tokens,
+            do_sample=settings.vibevoice.do_sample,
+            temperature=settings.vibevoice.temperature,
+            top_p=settings.vibevoice.top_p,
+            repetition_penalty=settings.vibevoice.repetition_penalty,
+            num_beams=settings.vibevoice.num_beams,
+        )
 
     forced_aligner = ForcedAlignmentProvider()
     phase14_repository = _build_phase14_repository(settings=settings)

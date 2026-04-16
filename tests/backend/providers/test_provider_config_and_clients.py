@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import subprocess
 from pathlib import Path
@@ -38,7 +39,7 @@ def test_load_provider_settings_uses_env_and_gcloud_fallback(
     assert settings.vibevoice.do_sample is False
     assert settings.vibevoice.top_p == 1.0
     assert settings.vibevoice.num_beams == 1
-    assert settings.vibevoice.repetition_penalty == 0.97
+    assert settings.vibevoice.repetition_penalty == 1.03
     assert settings.vertex.project == "clypt-v3"
     assert settings.vertex.generation_location == "global"
     assert settings.vertex.embedding_location == "us-central1"
@@ -67,7 +68,49 @@ def test_load_provider_settings_vllm_defaults(tmp_path: Path, monkeypatch: pytes
     assert settings.vibevoice.do_sample is False
     assert settings.vibevoice.top_p == 1.0
     assert settings.vibevoice.num_beams == 1
-    assert settings.vibevoice.repetition_penalty == 0.97
+    assert settings.vibevoice.repetition_penalty == 1.03
+
+
+def test_load_provider_settings_reads_phase1_cloud_run_asr_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("CLYPT_PHASE1_ASR_BACKEND", "cloud_run_l4")
+    monkeypatch.setenv("CLYPT_PHASE1_ASR_SERVICE_URL", "https://phase1-asr.example.com")
+    monkeypatch.setenv("CLYPT_PHASE1_ASR_AUTH_MODE", "id_token")
+    monkeypatch.setenv("CLYPT_PHASE1_ASR_AUDIENCE", "https://phase1-asr.example.com")
+    monkeypatch.setenv("CLYPT_PHASE1_ASR_TIMEOUT_S", "901")
+    monkeypatch.delenv("VIBEVOICE_VLLM_BASE_URL", raising=False)
+
+    settings = load_provider_settings()
+
+    assert settings.phase1_asr.backend == "cloud_run_l4"
+    assert settings.phase1_asr.service_url == "https://phase1-asr.example.com"
+    assert settings.phase1_asr.auth_mode == "id_token"
+    assert settings.phase1_asr.audience == "https://phase1-asr.example.com"
+    assert settings.phase1_asr.timeout_s == 901.0
+
+
+def test_load_provider_settings_rejects_legacy_vllm_url_when_phase1_asr_is_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("CLYPT_PHASE1_ASR_BACKEND", "cloud_run_l4")
+    monkeypatch.setenv("CLYPT_PHASE1_ASR_SERVICE_URL", "https://phase1-asr.example.com")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+
+    with pytest.raises(ValueError, match="VIBEVOICE_VLLM_BASE_URL"):
+        load_provider_settings()
 
 
 def test_load_provider_settings_raises_without_gcs_bucket(
@@ -108,7 +151,7 @@ def test_load_provider_settings_reads_untracked_env_local(
                 "VIBEVOICE_DO_SAMPLE=1.0",
                 "VIBEVOICE_TOP_P=0.91",
                 "VIBEVOICE_NUM_BEAMS=4.0",
-                "VIBEVOICE_REPETITION_PENALTY=0.97",
+                "VIBEVOICE_REPETITION_PENALTY=1.03",
                 "GOOGLE_CLOUD_PROJECT=clypt-v3",
                 "GENAI_GENERATION_LOCATION=global",
                 "VERTEX_EMBEDDING_LOCATION=us-central1",
@@ -126,7 +169,7 @@ def test_load_provider_settings_reads_untracked_env_local(
     assert settings.vibevoice.do_sample is True
     assert settings.vibevoice.top_p == 0.91
     assert settings.vibevoice.num_beams == 4
-    assert settings.vibevoice.repetition_penalty == 0.97
+    assert settings.vibevoice.repetition_penalty == 1.03
     assert settings.vertex.project == "clypt-v3"
     assert settings.vertex.generation_location == "global"
     assert settings.vertex.embedding_location == "us-central1"
@@ -198,7 +241,12 @@ def test_load_provider_settings_defaults_local_openai_and_loads_local_generation
     monkeypatch.setenv("CLYPT_LOCAL_LLM_MAX_BACKOFF_S", "10")
     monkeypatch.setenv("CLYPT_LOCAL_LLM_BACKOFF_MULTIPLIER", "1.5")
     monkeypatch.setenv("CLYPT_LOCAL_LLM_JITTER_RATIO", "0.1")
-    monkeypatch.setenv("CLYPT_LOCAL_LLM_ENABLE_THINKING", "1")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_TEMPERATURE", "0.9")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_TOP_P", "0.85")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_TOP_K", "30")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_MIN_P", "0.05")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_PRESENCE_PENALTY", "1.8")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_REPETITION_PENALTY", "1.02")
 
     settings = load_provider_settings()
 
@@ -211,32 +259,70 @@ def test_load_provider_settings_defaults_local_openai_and_loads_local_generation
     assert settings.local_generation.max_backoff_s == 10.0
     assert settings.local_generation.backoff_multiplier == 1.5
     assert settings.local_generation.jitter_ratio == 0.1
-    assert settings.local_generation.enable_thinking is True
+    assert not hasattr(settings.local_generation, "enable_thinking")
+    assert settings.local_generation.temperature == 0.9
+    assert settings.local_generation.top_p == 0.85
+    assert settings.local_generation.top_k == 30
+    assert settings.local_generation.min_p == 0.05
+    assert settings.local_generation.presence_penalty == 1.8
+    assert settings.local_generation.repetition_penalty == 1.02
+
+
+def test_load_provider_settings_rejects_removed_local_llm_thinking_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("CLYPT_LOCAL_LLM_ENABLE_THINKING", "1")
+
+    with pytest.raises(ValueError, match="CLYPT_LOCAL_LLM_ENABLE_THINKING"):
+        load_provider_settings()
 
 
 def test_local_openai_qwen_client_parses_json_and_validates_schema(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from unittest.mock import MagicMock
+    import urllib.request
 
     from backend.providers.config import LocalGenerationSettings
     from backend.providers.openai_local import LocalOpenAIQwenClient
 
     settings = LocalGenerationSettings(model="qwen", max_retries=0)
+    captured_payloads: list[dict[str, Any]] = []
 
-    def _install_response(content: str) -> None:
+    monkeypatch.chdir(tmp_path)
+    failure_dir = tmp_path / "local-openai-failures"
+    monkeypatch.setenv("CLYPT_LOCAL_OPENAI_FAILURE_DIR", str(failure_dir))
+
+    def _install_payload(payload: dict[str, Any]) -> None:
         mock_resp = MagicMock()
         mock_resp.__enter__.return_value.read.return_value = json.dumps(
-            {"choices": [{"message": {"content": content}}]}
+            payload
         ).encode("utf-8")
         mock_resp.__exit__.return_value = None
-        monkeypatch.setattr(
-            "backend.providers.openai_local.urllib.request.urlopen",
-            MagicMock(return_value=mock_resp),
-        )
+
+        def _fake_urlopen(req: urllib.request.Request, timeout: float):
+            _ = timeout
+            captured_payloads.append(json.loads(req.data.decode("utf-8")))
+            return mock_resp
+
+        monkeypatch.setattr("backend.providers.openai_local.urllib.request.urlopen", _fake_urlopen)
+
+    def _install_response(content: str, *, finish_reason: str | None = None) -> None:
+        payload = {"choices": [{"message": {"content": content}}]}
+        if finish_reason is not None:
+            payload["choices"][0]["finish_reason"] = finish_reason
+        _install_payload(payload)
 
     _install_response('{"thread_summary": "x", "moment_hints": []}')
     client = LocalOpenAIQwenClient(settings=settings)
+    assert "thinking_level" not in inspect.signature(client.generate_json).parameters
     schema = {
         "type": "object",
         "properties": {
@@ -248,16 +334,116 @@ def test_local_openai_qwen_client_parses_json_and_validates_schema(
     out = client.generate_json(
         prompt="p",
         response_schema=schema,
+        max_output_tokens=123,
     )
     assert out["thread_summary"] == "x"
+    assert captured_payloads[0]["max_tokens"] == 123
+    assert captured_payloads[0]["response_format"]["type"] == "json_schema"
+    assert captured_payloads[0]["response_format"]["json_schema"]["strict"] is True
+    assert (
+        captured_payloads[0]["response_format"]["json_schema"]["schema"]["additionalProperties"]
+        is False
+    )
+    assert captured_payloads[0]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert "JSON" in captured_payloads[0]["messages"][0]["content"]
 
     _install_response("not-json")
     with pytest.raises(ValueError, match="valid JSON"):
+        client.generate_json(prompt="p", response_schema=schema)
+
+    with pytest.raises(ValueError, match="response_schema is required"):
         client.generate_json(prompt="p")
 
     _install_response("{}")
     with pytest.raises(ValueError, match="missing required"):
         client.generate_json(prompt="p", response_schema=schema)
+
+    _install_response("not-json", finish_reason="length")
+    with pytest.raises(ValueError, match="finish_reason=length"):
+        client.generate_json(prompt="p", response_schema=schema, max_output_tokens=7)
+
+    _install_payload(
+        {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": None,
+                        "reasoning_content": '{"thread_summary":"x","moment_hints":[]}',
+                    },
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="missing message.content"):
+        client.generate_json(prompt="p", response_schema=schema)
+    artifacts = sorted(failure_dir.glob("*.response.json"))
+    assert artifacts
+    assert '"reasoning_content"' in artifacts[-1].read_text(encoding="utf-8")
+
+
+def test_v31_config_reads_phase3_and_phase4_output_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.pipeline.config import V31Config
+
+    monkeypatch.setenv("CLYPT_PHASE3_LOCAL_MAX_OUTPUT_TOKENS", "1536")
+    monkeypatch.setenv("CLYPT_PHASE3_LONG_RANGE_MAX_OUTPUT_TOKENS", "1792")
+    monkeypatch.setenv("CLYPT_PHASE3_LONG_RANGE_TOP_K", "2")
+    monkeypatch.setenv("CLYPT_PHASE3_LONG_RANGE_PAIRS_PER_SHARD", "18")
+    monkeypatch.setenv("CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT", "3")
+    monkeypatch.setenv("CLYPT_PHASE3_LOCAL_MAX_CONCURRENT", "8")
+    monkeypatch.setenv("CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS", "1024")
+    monkeypatch.setenv("CLYPT_PHASE4_SUBGRAPH_MAX_OUTPUT_TOKENS", "2048")
+    monkeypatch.setenv("CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT", "10")
+    monkeypatch.setenv("CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS", "768")
+
+    config = V31Config()
+
+    assert config.phase3_local_max_output_tokens == 1536
+    assert config.phase3_long_range_max_output_tokens == 1792
+    assert config.phase3_long_range_top_k == 2
+    assert config.phase3_long_range_pairs_per_shard == 18
+    assert config.phase3_long_range_max_concurrent == 3
+    assert config.phase3_local_max_concurrent == 8
+    assert config.phase4_meta_max_output_tokens == 1024
+    assert config.phase4_subgraph_max_output_tokens == 2048
+    assert config.phase4_subgraph_max_concurrent == 10
+    assert config.phase4_pool_max_output_tokens == 768
+
+
+def test_v31_config_reads_phase2_and_signal_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.pipeline.config import V31Config
+
+    monkeypatch.setenv("CLYPT_PHASE2_MAX_CONCURRENT", "8")
+    monkeypatch.setenv("CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT", "10")
+    monkeypatch.setenv("CLYPT_SIGNAL_MAX_CONCURRENT", "6")
+
+    config = V31Config()
+
+    assert config.phase2_max_concurrent == 8
+    assert config.phase2_boundary_max_concurrent == 10
+    assert config.signals.max_concurrent == 6
+
+
+def test_v31_config_rejects_removed_global_concurrency_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.pipeline.config import V31Config
+
+    monkeypatch.setenv("CLYPT_GEMINI_MAX_CONCURRENT", "2")
+
+    with pytest.raises(ValueError, match="CLYPT_GEMINI_MAX_CONCURRENT"):
+        V31Config()
+
+
+def test_v31_config_rejects_removed_thinking_envs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.pipeline.config import V31Config
+
+    monkeypatch.setenv("CLYPT_PHASE3_LOCAL_THINKING_LEVEL", "minimal")
+
+    with pytest.raises(ValueError, match="CLYPT_PHASE3_LOCAL_THINKING_LEVEL"):
+        V31Config()
 
 
 def test_build_default_phase24_worker_service_enforces_local_openai_backend(
@@ -265,6 +451,7 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
 ) -> None:
     from backend.providers.config import (
         LocalGenerationSettings,
+        Phase24MediaPrepSettings,
         ProviderSettings,
         StorageSettings,
         VertexSettings,
@@ -284,19 +471,24 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
     captured: dict[str, Any] = {}
 
     class _FakeRepo:
+        def bootstrap_schema(self) -> None:
+            return None
+
         @classmethod
         def from_settings(cls, **kwargs):
-            return object()
+            return cls()
 
     class _FakeRunner:
         @classmethod
         def from_env(cls, **kwargs):
             captured["llm_client"] = kwargs["llm_client"]
+            captured["node_media_preparer"] = kwargs.get("node_media_preparer")
             return object()
 
     monkeypatch.setattr(phase24_worker_app, "SpannerPhase14Repository", _FakeRepo)
     monkeypatch.setattr(phase24_worker_app, "V31LivePhase14Runner", _FakeRunner)
     monkeypatch.setattr(phase24_worker_app, "GCSStorageClient", lambda **kwargs: object())
+    monkeypatch.setattr(phase24_worker_app, "VertexEmbeddingClient", lambda **kwargs: object())
 
     settings_local = ProviderSettings(
         **base,
@@ -306,6 +498,20 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
     phase24_worker_app.build_default_phase24_worker_service()
     assert isinstance(captured["llm_client"], LocalOpenAIQwenClient)
     assert captured["llm_client"].settings.model == "local-qwen"
+    assert captured["node_media_preparer"] is None
+
+    settings_remote = ProviderSettings(
+        **base,
+        vertex=VertexSettings(project="clypt-v3", generation_backend="local_openai"),
+        phase24_media_prep=Phase24MediaPrepSettings(
+            backend="cloud_run_l4",
+            service_url="https://media-prep.example.com",
+            auth_mode="none",
+        ),
+    )
+    monkeypatch.setattr(phase24_worker_app, "load_provider_settings", lambda: settings_remote)
+    phase24_worker_app.build_default_phase24_worker_service()
+    assert callable(captured["node_media_preparer"])
 
     settings_dev = ProviderSettings(
         **base,
@@ -317,6 +523,15 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
     )
     monkeypatch.setattr(phase24_worker_app, "load_provider_settings", lambda: settings_dev)
     with pytest.raises(ValueError, match="only GENAI_GENERATION_BACKEND=local_openai"):
+        phase24_worker_app.build_default_phase24_worker_service()
+
+    settings_invalid_media = ProviderSettings(
+        **base,
+        vertex=VertexSettings(project="clypt-v3", generation_backend="local_openai"),
+        phase24_media_prep=Phase24MediaPrepSettings(backend="mystery"),
+    )
+    monkeypatch.setattr(phase24_worker_app, "load_provider_settings", lambda: settings_invalid_media)
+    with pytest.raises(ValueError, match="backend=local or cloud_run_l4"):
         phase24_worker_app.build_default_phase24_worker_service()
 
 
@@ -348,6 +563,11 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     monkeypatch.setenv("CLYPT_PHASE24_BLOCK_ON_PHASE1_ACTIVE", "1")
     monkeypatch.setenv("CLYPT_PHASE24_MAX_VLLM_QUEUE_DEPTH", "15")
     monkeypatch.setenv("CLYPT_PHASE24_MAX_VLLM_DECODE_BACKLOG", "33")
+    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_BACKEND", "cloud_run_l4")
+    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_SERVICE_URL", "https://phase24-media-prep.example.com")
+    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_AUTH_MODE", "id_token")
+    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_AUDIENCE", "https://phase24-media-prep.example.com")
+    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_TIMEOUT_S", "901")
     monkeypatch.setenv("CLYPT_PHASE24_QUEUE_BACKEND", "local_sqlite")
     monkeypatch.setenv("CLYPT_PHASE24_LOCAL_QUEUE_PATH", "backend/outputs/phase24.sqlite")
     monkeypatch.setenv("CLYPT_PHASE24_LOCAL_POLL_INTERVAL_MS", "700")
@@ -359,6 +579,7 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     monkeypatch.setenv("CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS", "16384")
     monkeypatch.setenv("CLYPT_VLLM_GPU_MEMORY_UTILIZATION", "0.86")
     monkeypatch.setenv("CLYPT_VLLM_MAX_MODEL_LEN", "131072")
+    monkeypatch.setenv("CLYPT_VLLM_LANGUAGE_MODEL_ONLY", "1")
     monkeypatch.setenv("CLYPT_VLLM_SPECULATIVE_MODE", "off")
 
     settings = load_provider_settings()
@@ -384,6 +605,11 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     assert settings.phase24_worker.block_on_phase1_active is True
     assert settings.phase24_worker.max_vllm_queue_depth == 15
     assert settings.phase24_worker.max_vllm_decode_backlog == 33
+    assert settings.phase24_media_prep.backend == "cloud_run_l4"
+    assert settings.phase24_media_prep.service_url == "https://phase24-media-prep.example.com"
+    assert settings.phase24_media_prep.auth_mode == "id_token"
+    assert settings.phase24_media_prep.audience == "https://phase24-media-prep.example.com"
+    assert settings.phase24_media_prep.timeout_s == 901.0
     assert settings.phase24_local_queue.queue_backend == "local_sqlite"
     assert str(settings.phase24_local_queue.path).endswith("backend/outputs/phase24.sqlite")
     assert settings.phase24_local_queue.poll_interval_ms == 700
@@ -395,6 +621,7 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     assert settings.vllm_runtime.max_num_batched_tokens == 16384
     assert settings.vllm_runtime.gpu_memory_utilization == 0.86
     assert settings.vllm_runtime.max_model_len == 131072
+    assert settings.vllm_runtime.language_model_only is True
     assert settings.vllm_runtime.speculative_mode == "off"
 
 

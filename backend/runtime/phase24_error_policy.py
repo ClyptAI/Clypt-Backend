@@ -40,6 +40,14 @@ _NON_TRANSIENT_HINTS = (
     "validation",
 )
 
+_FAIL_FAST_HINTS = (
+    "connection refused",
+    "enginecore",
+    "xgrammar",
+    "compile_json_schema",
+    "structured output backend",
+)
+
 
 def classify_phase24_exception(exc: BaseException) -> Phase24FailureClass:
     if isinstance(exc, Phase24FailFastError):
@@ -50,13 +58,23 @@ def classify_phase24_exception(exc: BaseException) -> Phase24FailureClass:
             if int(exc.code) in {429, 500, 502, 503, 504}
             else Phase24FailureClass.NON_TRANSIENT
         )
-    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)):
+    if isinstance(exc, urllib.error.URLError):
+        message = str(exc).lower()
+        if any(token in message for token in _FAIL_FAST_HINTS):
+            return Phase24FailureClass.FAIL_FAST
+        return Phase24FailureClass.TRANSIENT
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        message = str(exc).lower()
+        if any(token in message for token in _FAIL_FAST_HINTS):
+            return Phase24FailureClass.FAIL_FAST
         return Phase24FailureClass.TRANSIENT
     if isinstance(exc, (json.JSONDecodeError, ValueError, TypeError)):
         return Phase24FailureClass.NON_TRANSIENT
     if PydanticValidationError and isinstance(exc, PydanticValidationError):
         return Phase24FailureClass.NON_TRANSIENT
     message = str(exc).lower()
+    if any(token in message for token in _FAIL_FAST_HINTS):
+        return Phase24FailureClass.FAIL_FAST
     if any(token in message for token in _NON_TRANSIENT_HINTS):
         return Phase24FailureClass.NON_TRANSIENT
     if any(token in message for token in _TRANSIENT_TOKENS):

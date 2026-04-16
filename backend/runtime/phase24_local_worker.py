@@ -29,6 +29,8 @@ class Phase24LocalWorkerLoop:
         lease_timeout_s: int = 1800,
         max_requests_per_worker: int = 0,
         max_inflight: int = 1,
+        reclaim_expired_leases: bool = False,
+        fail_fast_on_stale_running: bool = True,
         fail_fast_preemption_threshold: int = 0,
         admission_metrics_path: str | None = None,
         block_on_phase1_active: bool = False,
@@ -42,6 +44,8 @@ class Phase24LocalWorkerLoop:
         self._lease_timeout_s = max(1, int(lease_timeout_s))
         self._max_requests_per_worker = max(0, int(max_requests_per_worker))
         self._max_inflight = max(1, int(max_inflight))
+        self._reclaim_expired_leases = bool(reclaim_expired_leases)
+        self._fail_fast_on_stale_running = bool(fail_fast_on_stale_running)
         self._fail_fast_preemption_threshold = max(0, int(fail_fast_preemption_threshold))
         self._admission_metrics_path = Path(admission_metrics_path) if admission_metrics_path else None
         self._block_on_phase1_active = bool(block_on_phase1_active)
@@ -95,10 +99,19 @@ class Phase24LocalWorkerLoop:
         self._assert_admission_health(metrics)
         if not self._admission_allows_dequeue(metrics):
             return False
+        if self._fail_fast_on_stale_running:
+            stale_count = self._queue.count_expired_running(self._lease_timeout_s)
+            if stale_count > 0:
+                raise Phase24FailFastError(
+                    "stale running lease detected: "
+                    f"count={stale_count} lease_timeout_s={self._lease_timeout_s} "
+                    "(auto-reclaim disabled)"
+                )
         row = self._queue.claim_next(
             self._worker_id,
             self._lease_timeout_s,
             max_inflight=self._max_inflight,
+            reclaim_expired_leases=self._reclaim_expired_leases,
         )
         if row is None:
             return False
@@ -142,6 +155,10 @@ class Phase24LocalWorkerLoop:
                 retry_delay_s=0.0,
             )
             self._processed_count += 1
+            if failure_class == Phase24FailureClass.FAIL_FAST:
+                raise Phase24FailFastError(
+                    f"phase24 local worker fail-fast crash job_id={job_id} attempt={attempt}: {err_text}"
+                ) from exc
             return True
         terminal = isinstance(result, dict) and result.get("status") == "max_attempts_exceeded"
         if terminal:

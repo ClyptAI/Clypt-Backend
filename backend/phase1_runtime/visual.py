@@ -161,12 +161,18 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
         frame_stream = decode_video_frames(
             video_path=video_path,
             decode_backend=config.frame_decode_backend,
+            target_width=config.detector_resolution if config.use_tensorrt else None,
+            target_height=config.detector_resolution if config.use_tensorrt else None,
         )
         for frame_batch in batch_frames(frame_stream, batch_size=config.detector_batch_size):
             rgb_arrays = [f.rgb for f in frame_batch]
             frame_indices = [f.frame_idx for f in frame_batch]
+            orig_sizes = [(f.source_height, f.source_width) for f in frame_batch]
 
-            detections_list = detector.detect_batch(rgb_arrays)
+            if config.use_tensorrt:
+                detections_list = detector.detect_batch(rgb_arrays, orig_sizes=orig_sizes)
+            else:
+                detections_list = detector.detect_batch(rgb_arrays)
 
             for frame_idx, detections in zip(frame_indices, detections_list, strict=True):
                 track_rows = tracker.update(frame_idx=frame_idx, detections=detections)

@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.phase1_runtime.models import Phase1SidecarOutputs
 from backend.providers import (
+    CloudRunMediaPrepClient,
     LocalOpenAIQwenClient,
     VertexEmbeddingClient,
     load_provider_settings,
@@ -40,7 +41,7 @@ class Phase24TaskPayload(BaseModel):
     source_video_gcs_uri: str | None = None
     phase1_outputs: dict[str, Any] | None = None
     phase1_outputs_gcs_uri: str | None = None
-    phase3_long_range_top_k: int = 3
+    phase3_long_range_top_k: int | None = None
     phase4_extra_prompt_texts: list[str] = Field(default_factory=list)
     query_version: str | None = None
 
@@ -532,6 +533,7 @@ class Phase24WorkerService:
 def build_default_phase24_worker_service() -> Phase24WorkerService:
     settings = load_provider_settings()
     repository = SpannerPhase14Repository.from_settings(settings=settings.spanner)
+    repository.bootstrap_schema()
     generation_backend = (settings.vertex.generation_backend or "").strip().lower()
     if generation_backend != "local_openai":
         raise ValueError(
@@ -539,11 +541,32 @@ def build_default_phase24_worker_service() -> Phase24WorkerService:
             f"(got {generation_backend!r})."
         )
     llm_client = LocalOpenAIQwenClient(settings=settings.local_generation)
+    # In local_openai mode, all phase2-4 LLM calls must target the locally served model.
+    local_flash_model = (
+        (settings.local_generation.model or "").strip()
+        or (settings.vertex.flash_model or "").strip()
+    )
+    if not local_flash_model:
+        raise ValueError(
+            "Local OpenAI generation requires CLYPT_LOCAL_LLM_MODEL (or GENAI_FLASH_MODEL as fallback)."
+        )
+    node_media_preparer = None
+    media_prep_backend = (settings.phase24_media_prep.backend or "local").strip().lower()
+    if media_prep_backend == "cloud_run_l4":
+        node_media_preparer = CloudRunMediaPrepClient(
+            settings=settings.phase24_media_prep
+        ).prepare_node_media
+    elif media_prep_backend != "local":
+        raise ValueError(
+            "Phase24 media prep supports only backend=local or cloud_run_l4 "
+            f"(got {media_prep_backend!r})."
+        )
     runner = V31LivePhase14Runner.from_env(
         llm_client=llm_client,
         embedding_client=VertexEmbeddingClient(settings=settings.vertex),
-        flash_model=settings.vertex.flash_model,
+        flash_model=local_flash_model,
         storage_client=GCSStorageClient(settings=settings.storage),
+        node_media_preparer=node_media_preparer,
         repository=repository,
         query_version=settings.phase24_worker.query_version,
         debug_snapshots=settings.phase24_worker.debug_snapshots,

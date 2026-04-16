@@ -15,6 +15,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   git \
   gnupg \
   lsb-release \
+  ninja-build \
   python3 \
   unzip \
   python3-venv \
@@ -22,6 +23,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
 
 install -d /opt/clypt-phase1
 install -d /opt/clypt-phase1/hf-cache
+install -d /opt/clypt-phase1/venvs
 install -d /opt/clypt-phase1/videos
 install -d /opt/clypt-phase1/.cache/torch/kernels
 install -d /opt/clypt-phase1/.cache/huggingface
@@ -37,4 +39,4 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "WARNING: nvidia-smi not found. This host may not be a GPU base image." >&2
 fi
 
-echo "Bootstrap complete. Next step: sync repo to /opt/clypt-phase1/repo, create /etc/clypt-phase1/v3_1_phase1.env, then run deploy_vllm_service.sh"
+echo "Bootstrap complete. Next step: sync repo to /opt/clypt-phase1/repo, create /etc/clypt-phase1/v3_1_phase1.env, run deploy_vllm_service.sh (Phase 1 env + VibeVoice), then run deploy_sglang_qwen_service.sh (separate SGLang env for Qwen)."

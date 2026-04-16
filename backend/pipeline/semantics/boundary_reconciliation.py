@@ -1,12 +1,94 @@
 from __future__ import annotations
 
+import re
+
 from ..contracts import SemanticGraphNode, SemanticNodeEvidence
 
 
-def reconcile_boundary_nodes(*, left_batch_nodes: list[SemanticGraphNode], right_batch_nodes: list[SemanticGraphNode], gemini_response: dict | None = None) -> list[SemanticGraphNode]:
+def _tokenize_text(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(token) >= 3
+    }
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left and not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
+def _turn_ordinals(turn_ids: list[str]) -> list[int]:
+    ordinals: list[int] = []
+    for turn_id in turn_ids:
+        match = re.search(r"(\d+)$", str(turn_id))
+        if match is None:
+            continue
+        ordinals.append(int(match.group(1)))
+    return ordinals
+
+
+def should_skip_boundary_reconciliation(
+    *,
+    left_node: SemanticGraphNode,
+    right_node: SemanticGraphNode,
+) -> dict[str, object]:
+    overlap_turns = sorted(set(left_node.source_turn_ids) & set(right_node.source_turn_ids))
+    shared_flags = sorted(set(left_node.node_flags) & set(right_node.node_flags))
+    summary_similarity = _jaccard(_tokenize_text(left_node.summary), _tokenize_text(right_node.summary))
+    transcript_similarity = _jaccard(
+        _tokenize_text(left_node.transcript_text),
+        _tokenize_text(right_node.transcript_text),
+    )
+    time_gap_ms = max(0, int(right_node.start_ms) - int(left_node.end_ms))
+    left_ordinals = _turn_ordinals(list(left_node.source_turn_ids))
+    right_ordinals = _turn_ordinals(list(right_node.source_turn_ids))
+    turn_gap: int | None = None
+    if left_ordinals and right_ordinals:
+        turn_gap = max(0, min(right_ordinals) - max(left_ordinals) - 1)
+
+    reason = "ambiguous_default"
+    skip_llm = False
+    if overlap_turns:
+        reason = "overlapping_turns"
+    elif time_gap_ms >= 5000:
+        skip_llm = True
+        reason = "large_time_gap"
+    elif turn_gap is not None and turn_gap >= 2:
+        skip_llm = True
+        reason = "non_adjacent_turn_gap"
+    elif (
+        time_gap_ms >= 1200
+        and summary_similarity < 0.12
+        and transcript_similarity < 0.12
+        and not shared_flags
+        and left_node.node_type != right_node.node_type
+    ):
+        skip_llm = True
+        reason = "clear_semantic_split"
+
+    return {
+        "skip_llm": skip_llm,
+        "reason": reason,
+        "time_gap_ms": time_gap_ms,
+        "turn_gap": turn_gap,
+        "summary_similarity": summary_similarity,
+        "transcript_similarity": transcript_similarity,
+        "shared_flag_count": len(shared_flags),
+        "shared_flags": shared_flags,
+        "overlap_turn_count": len(overlap_turns),
+        "same_node_type": left_node.node_type == right_node.node_type,
+    }
+
+
+def reconcile_boundary_nodes(*, left_batch_nodes: list[SemanticGraphNode], right_batch_nodes: list[SemanticGraphNode], llm_response: dict | None = None) -> list[SemanticGraphNode]:
     """Resolve overlapping edge-node proposals between adjacent semantic batches."""
-    if gemini_response is None:
-        raise ValueError("gemini_response is required")
+    if llm_response is None:
+        raise ValueError("llm_response is required")
 
     known_nodes = {
         node.node_id: node
@@ -22,10 +104,10 @@ def reconcile_boundary_nodes(*, left_batch_nodes: list[SemanticGraphNode], right
                 node.transcript_text,
             )
 
-    resolution = gemini_response.get("resolution")
+    resolution = llm_response.get("resolution")
     if resolution == "keep_both":
         output_nodes: list[SemanticGraphNode] = []
-        for item in gemini_response.get("nodes") or []:
+        for item in llm_response.get("nodes") or []:
             existing_node = known_nodes[item["existing_node_id"]]
             output_nodes.append(
                 SemanticGraphNode(
@@ -46,7 +128,7 @@ def reconcile_boundary_nodes(*, left_batch_nodes: list[SemanticGraphNode], right
         return output_nodes
 
     if resolution == "merge":
-        merged_node = gemini_response.get("merged_node") or {}
+        merged_node = llm_response.get("merged_node") or {}
         source_turn_ids = list(merged_node.get("source_turn_ids") or [])
         if not source_turn_ids:
             raise ValueError("merged boundary node must include source_turn_ids")
@@ -92,3 +174,6 @@ def reconcile_boundary_nodes(*, left_batch_nodes: list[SemanticGraphNode], right
         ]
 
     raise ValueError(f"unsupported reconciliation resolution: {resolution!r}")
+
+
+__all__ = ["reconcile_boundary_nodes", "should_skip_boundary_reconciliation"]

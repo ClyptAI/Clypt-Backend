@@ -84,6 +84,21 @@ def test_phase24_local_queue_reclaims_expired_lease(tmp_path: Path) -> None:
     assert r2["attempt_count"] == 2
 
 
+def test_phase24_local_queue_can_disable_expired_lease_reclaim(tmp_path: Path) -> None:
+    from backend.runtime.phase24_local_queue import Phase24LocalQueue
+
+    queue = Phase24LocalQueue(tmp_path / "q.sqlite")
+    job_id = queue.enqueue("run-disable-reclaim", _minimal_payload("run-disable-reclaim"))
+    r1 = queue.claim_next("w1", lease_timeout_s=1)
+    assert r1 is not None
+    time.sleep(1.25)
+    r2 = queue.claim_next("w2", lease_timeout_s=1, reclaim_expired_leases=False)
+    assert r2 is None
+    row = queue.get_job(job_id)
+    assert row is not None
+    assert row["status"] == "running"
+
+
 def test_phase24_local_queue_enforces_global_max_inflight(tmp_path: Path) -> None:
     from backend.runtime.phase24_local_queue import Phase24LocalQueue
 
@@ -114,3 +129,5 @@ def test_load_provider_settings_includes_phase24_local_queue_defaults(
     assert settings.phase24_local_queue.queue_backend == "local_sqlite"
     assert settings.phase24_local_queue.poll_interval_ms == 500
     assert "phase24_local_queue.sqlite" in str(settings.phase24_local_queue.path)
+    assert settings.phase24_local_queue.reclaim_expired_leases is False
+    assert settings.phase24_local_queue.fail_fast_on_stale_running is True

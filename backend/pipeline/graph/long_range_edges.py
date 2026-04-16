@@ -46,24 +46,24 @@ def shortlist_long_range_pairs(*, nodes: list[SemanticGraphNode], top_k: int) ->
     return shortlisted
 
 
-def build_long_range_edges(*, candidate_pairs: list[dict], gemini_response: dict | None = None) -> list[SemanticGraphEdge]:
-    """Build callback/topic recurrence edges from Gemini-adjudicated pairs."""
-    if gemini_response is None:
-        raise ValueError("gemini_response is required")
+def build_long_range_edges(*, candidate_pairs: list[dict], llm_response: dict | None = None) -> list[SemanticGraphEdge]:
+    """Build callback/topic recurrence edges from LLM-adjudicated pairs."""
+    if llm_response is None:
+        raise ValueError("llm_response is required")
 
     pair_set = {
         (str(pair.get("later_node_id") or ""), str(pair.get("earlier_node_id") or ""))
         for pair in candidate_pairs
     }
     edges: list[SemanticGraphEdge] = []
-    for raw_edge in list(gemini_response.get("edges") or []):
+    for raw_edge in list(llm_response.get("edges") or []):
         source_node_id = str(raw_edge.get("source_node_id") or "")
         target_node_id = str(raw_edge.get("target_node_id") or "")
         edge_type = str(raw_edge.get("edge_type") or "")
         if edge_type not in {"callback_to", "topic_recurrence"}:
             raise ValueError(f"invalid long-range edge type: {edge_type}")
         if (source_node_id, target_node_id) not in pair_set:
-            raise ValueError("Gemini returned an edge for a non-shortlisted candidate long-range pair")
+            raise ValueError("Qwen returned an edge for a non-shortlisted candidate long-range pair")
 
         edges.append(
             SemanticGraphEdge(

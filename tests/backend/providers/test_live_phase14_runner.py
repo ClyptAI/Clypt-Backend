@@ -12,6 +12,7 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
         ClipCandidateRecord,
         Phase24JobRecord,
         PhaseMetricRecord,
+        PhaseSubstepRecord,
         RunRecord,
         SemanticEdgeRecord,
         SemanticNodeRecord,
@@ -26,6 +27,7 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
             self.edges: list[SemanticEdgeRecord] = []
             self.candidates: list[ClipCandidateRecord] = []
             self.phase_metrics: list[PhaseMetricRecord] = []
+            self.phase_substeps: list[PhaseSubstepRecord] = []
             self.subgraph_provenance = []
             self.external_signals = []
             self.external_signal_clusters = []
@@ -69,6 +71,14 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
 
         def list_phase_metrics(self, *, run_id: str) -> list[PhaseMetricRecord]:
             return list(self.phase_metrics)
+
+        def write_phase_substeps(self, *, run_id: str, substeps: list[PhaseSubstepRecord]) -> None:
+            self.phase_substeps.extend(substeps)
+
+        def list_phase_substeps(self, *, run_id: str, phase_name: str | None = None) -> list[PhaseSubstepRecord]:
+            if phase_name is None:
+                return list(self.phase_substeps)
+            return [item for item in self.phase_substeps if item.phase_name == phase_name]
 
         def upsert_phase24_job(self, record: Phase24JobRecord) -> Phase24JobRecord:
             return record
@@ -299,4 +309,123 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
     assert repository.candidates[0].rationale == "Best clip."
     assert [metric.phase_name for metric in repository.phase_metrics] == ["phase2", "phase3", "phase4", "phase24"]
     assert all(metric.query_version == "graph-v2" for metric in repository.phase_metrics)
+    assert any(item.step_name == "merge_batch" for item in repository.phase_substeps)
+    assert any(item.step_name == "local_edge_batch" for item in repository.phase_substeps)
+    assert any(item.step_name == "pooled_review" for item in repository.phase_substeps)
     assert any(event["event"] == "candidate_summary" for event in log_events)
+
+
+def test_live_phase14_runner_phase4_budget_helpers_cap_prompts_subgraphs_and_pool_scope() -> None:
+    from backend.pipeline.config import Phase4BudgetConfig, V31Config
+    from backend.pipeline.contracts import (
+        ClipCandidate,
+        LocalSubgraph,
+        LocalSubgraphNode,
+    )
+    from backend.pipeline.signals.contracts import SignalPromptSpec
+    from backend.runtime.phase14_live import V31LivePhase14Runner
+
+    runner = V31LivePhase14Runner(
+        config=V31Config(
+            phase4_budget=Phase4BudgetConfig(
+                max_total_prompts=2,
+                max_subgraphs_per_run=1,
+                max_final_review_calls=1,
+            )
+        ),
+        llm_client=object(),
+        embedding_client=object(),
+    )
+
+    prompt_specs, prompt_debug = runner._apply_phase4_prompt_budget(
+        general_prompt_specs=[
+            SignalPromptSpec(prompt_id="general_1", text="core prompt 1", prompt_source_type="general"),
+            SignalPromptSpec(prompt_id="general_2", text="core prompt 2", prompt_source_type="general"),
+        ],
+        augmentation_prompt_specs=[
+            SignalPromptSpec(prompt_id="comment_1", text="comment prompt", prompt_source_type="comment"),
+            SignalPromptSpec(prompt_id="trend_1", text="trend prompt", prompt_source_type="trend"),
+        ],
+    )
+    assert [item.prompt_id for item in prompt_specs] == ["general_1", "general_2"]
+    assert prompt_debug["dropped_prompt_count"] == 2
+
+    subgraphs, subgraph_debug = runner._apply_phase4_subgraph_budget(
+        subgraphs=[
+            LocalSubgraph(
+                subgraph_id="sg_low",
+                seed_node_id="node_low",
+                source_prompt_ids=["general_1"],
+                start_ms=0,
+                end_ms=1000,
+                nodes=[
+                    LocalSubgraphNode(
+                        node_id="node_low",
+                        start_ms=0,
+                        end_ms=1000,
+                        duration_ms=1000,
+                        node_type="claim",
+                        node_flags=[],
+                        summary="low score",
+                        transcript_excerpt="low score",
+                        word_count=2,
+                        emotion_labels=[],
+                        audio_events=[],
+                        inbound_edges=[],
+                        outbound_edges=[],
+                    )
+                ],
+            ),
+            LocalSubgraph(
+                subgraph_id="sg_high",
+                seed_node_id="node_high",
+                source_prompt_ids=["general_1", "general_2"],
+                start_ms=2000,
+                end_ms=3200,
+                nodes=[
+                    LocalSubgraphNode(
+                        node_id="node_high",
+                        start_ms=2000,
+                        end_ms=3200,
+                        duration_ms=1200,
+                        node_type="claim",
+                        node_flags=[],
+                        summary="high score",
+                        transcript_excerpt="high score",
+                        word_count=2,
+                        emotion_labels=[],
+                        audio_events=[],
+                        inbound_edges=[],
+                        outbound_edges=[],
+                    )
+                ],
+            ),
+        ],
+        seeds=[
+            {"node_id": "node_low", "retrieval_score": 0.20},
+            {"node_id": "node_high", "retrieval_score": 0.95},
+        ],
+    )
+    assert [item.subgraph_id for item in subgraphs] == ["sg_high"]
+    assert subgraph_debug["dropped_subgraph_ids"] == ["sg_low"]
+
+    pool_candidates, pool_debug = runner._apply_phase4_pool_candidate_budget(
+        candidates=[
+            ClipCandidate(
+                clip_id=f"cand_{idx:02d}",
+                node_ids=[f"node_{idx:02d}"],
+                start_ms=idx * 1000,
+                end_ms=(idx * 1000) + 800,
+                score=float(100 - idx),
+                rationale="candidate",
+                source_prompt_ids=["general_1"],
+                seed_node_id=f"node_{idx:02d}",
+                subgraph_id="sg_high",
+                query_aligned=True,
+            )
+            for idx in range(14)
+        ]
+    )
+    assert len(pool_candidates) == 12
+    assert pool_debug["budget_dropped_candidate_count"] == 2
+    assert pool_debug["budget_selected_candidate_ids"][0] == "cand_00"

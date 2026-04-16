@@ -14,6 +14,7 @@ from .models import (
     ExternalSignalRecord,
     Phase24JobRecord,
     PhaseMetricRecord,
+    PhaseSubstepRecord,
     PromptSourceLinkRecord,
     RunRecord,
     SemanticEdgeRecord,
@@ -41,7 +42,7 @@ except ImportError:  # pragma: no cover
     spanner_param_types = None
 
 UTC = timezone.utc
-_MAX_DDL_OPERATION_MESSAGES = ("already exists", "already defined")
+_MAX_DDL_OPERATION_MESSAGES = ("already exists", "already defined", "duplicate name in schema")
 _STRING_PARAM_TYPE = spanner_param_types.STRING if spanner_param_types is not None else "STRING"
 
 
@@ -299,6 +300,21 @@ def build_phase14_bootstrap_ddl() -> list[str]:
             query_version STRING(128),
             metadata_json STRING(MAX)
         ) PRIMARY KEY (run_id, phase_name)
+        """,
+        """
+        CREATE TABLE phase_substeps (
+            run_id STRING(128) NOT NULL,
+            phase_name STRING(128) NOT NULL,
+            step_name STRING(128) NOT NULL,
+            step_key STRING(256) NOT NULL,
+            status STRING(64) NOT NULL,
+            started_at TIMESTAMP NOT NULL,
+            ended_at TIMESTAMP,
+            duration_ms FLOAT64,
+            error_json STRING(MAX),
+            query_version STRING(128),
+            metadata_json STRING(MAX)
+        ) PRIMARY KEY (run_id, phase_name, step_name, step_key)
         """,
         """
         CREATE TABLE phase24_jobs (
@@ -1331,6 +1347,101 @@ class SpannerPhase14Repository(Phase14Repository):
             for row in rows
         ]
 
+    def write_phase_substeps(self, *, run_id: str, substeps: Sequence[PhaseSubstepRecord]) -> None:
+        for record in substeps:
+            _ensure_run_id_match("phase_substeps", run_id, record.run_id)
+        normalized_substeps = sorted(
+            substeps,
+            key=lambda record: (record.phase_name, record.step_name, record.step_key),
+        )
+        rows = [
+            [
+                run_id,
+                record.phase_name,
+                record.step_name,
+                record.step_key,
+                record.status,
+                record.started_at,
+                record.ended_at,
+                record.duration_ms,
+                _json_dumps(record.error_payload),
+                record.query_version,
+                _json_dumps(record.metadata),
+            ]
+            for record in normalized_substeps
+        ]
+        self._batch_upsert(
+            "phase_substeps",
+            [
+                "run_id",
+                "phase_name",
+                "step_name",
+                "step_key",
+                "status",
+                "started_at",
+                "ended_at",
+                "duration_ms",
+                "error_json",
+                "query_version",
+                "metadata_json",
+            ],
+            rows,
+        )
+
+    def list_phase_substeps(
+        self,
+        *,
+        run_id: str,
+        phase_name: str | None = None,
+    ) -> list[PhaseSubstepRecord]:
+        where_clause = "WHERE run_id = @run_id"
+        params: dict[str, Any] = {"run_id": run_id}
+        param_types: dict[str, Any] = {"run_id": _STRING_PARAM_TYPE}
+        if phase_name is not None:
+            where_clause += " AND phase_name = @phase_name"
+            params["phase_name"] = phase_name
+            param_types["phase_name"] = _STRING_PARAM_TYPE
+        rows = self._query(
+            f"""
+            SELECT run_id, phase_name, step_name, step_key, status, started_at, ended_at,
+                   duration_ms, error_json, query_version, metadata_json
+            FROM phase_substeps
+            {where_clause}
+            ORDER BY started_at ASC, phase_name ASC, step_name ASC, step_key ASC
+            """,
+            params,
+            param_types=param_types,
+            columns=(
+                "run_id",
+                "phase_name",
+                "step_name",
+                "step_key",
+                "status",
+                "started_at",
+                "ended_at",
+                "duration_ms",
+                "error_json",
+                "query_version",
+                "metadata_json",
+            ),
+        )
+        return [
+            PhaseSubstepRecord(
+                run_id=row["run_id"],
+                phase_name=row["phase_name"],
+                step_name=row["step_name"],
+                step_key=row["step_key"],
+                status=row["status"],
+                started_at=_coerce_datetime(row["started_at"]) or datetime.now(UTC),
+                ended_at=_coerce_datetime(row["ended_at"]),
+                duration_ms=float(row["duration_ms"]) if row["duration_ms"] is not None else None,
+                error_payload=_json_loads(row["error_json"]),
+                query_version=row["query_version"],
+                metadata=_json_loads(row["metadata_json"]) or {},
+            )
+            for row in rows
+        ]
+
     def upsert_phase24_job(self, record: Phase24JobRecord) -> Phase24JobRecord:
         self._batch_upsert(
             "phase24_jobs",
@@ -1606,6 +1717,7 @@ class SpannerPhase14Repository(Phase14Repository):
             "semantic_edges",
             "semantic_nodes",
             "timeline_turns",
+            "phase_substeps",
             "phase_metrics",
             "phase24_jobs",
             "runs",

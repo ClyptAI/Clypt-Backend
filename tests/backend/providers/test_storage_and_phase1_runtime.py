@@ -50,6 +50,7 @@ def test_run_phase1_sidecars_runs_vllm_and_audio_chain(tmp_path: Path):
     from backend.phase1_runtime.models import Phase1Workspace
 
     call_order: list[str] = []
+    stage_events: list[dict[str, object]] = []
 
     class _FakeVibeVoice:
         supports_concurrent_visual = True
@@ -108,6 +109,7 @@ def test_run_phase1_sidecars_runs_vllm_and_audio_chain(tmp_path: Path):
         visual_extractor=_FakeVisualExtractor(),
         emotion_provider=_FakeEmotionProvider(),
         yamnet_provider=_FakeYamnetProvider(),
+        stage_event_logger=lambda **event: stage_events.append(event),
     )
 
     assert outputs.phase1_audio["source_audio"] == "https://youtube.com/watch?v=demo"
@@ -129,6 +131,101 @@ def test_run_phase1_sidecars_runs_vllm_and_audio_chain(tmp_path: Path):
     i_em = call_order.index("emotion:source_audio.wav:1")
     i_yn = call_order.index("yamnet:source_audio.wav")
     assert i_vv < i_fa < i_em < i_yn
+    assert {event["stage_name"] for event in stage_events} == {
+        "vibevoice_asr",
+        "forced_alignment",
+        "emotion2vec",
+        "yamnet",
+        "visual_extraction",
+    }
+    assert all(event["status"] == "succeeded" for event in stage_events)
+
+
+def test_build_default_phase1_job_runner_uses_cloud_run_asr_provider(monkeypatch, tmp_path: Path) -> None:
+    from backend.phase1_runtime import factory as phase1_factory
+
+    fake_remote_provider = object()
+
+    settings = type(
+        "Settings",
+        (),
+        {
+            "phase24_local_queue": type("Queue", (), {"queue_backend": "local_sqlite", "path": tmp_path / "queue.sqlite"})(),
+            "phase1_runtime": type(
+                "Phase1Runtime",
+                (),
+                {
+                    "working_root": tmp_path / "work",
+                    "input_mode": "test_bank",
+                    "test_bank_path": str(tmp_path / "test_bank.json"),
+                    "test_bank_strict": False,
+                    "run_yamnet_on_gpu": False,
+                },
+            )(),
+            "phase24_worker": type("Worker", (), {"query_version": "v1"})(),
+            "cloud_tasks": type("CloudTasks", (), {"worker_url": None})(),
+            "storage": type("Storage", (), {"gcs_bucket": "bucket-a"})(),
+            "spanner": object(),
+            "vibevoice": type(
+                "VibeVoice",
+                (),
+                {
+                    "hotwords_context": "hotwords",
+                    "max_new_tokens": 32768,
+                    "do_sample": False,
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "repetition_penalty": 1.03,
+                    "num_beams": 1,
+                },
+            )(),
+            "phase1_asr": type(
+                "Phase1Asr",
+                (),
+                {
+                    "backend": "cloud_run_l4",
+                    "service_url": "https://phase1-asr.example.com",
+                    "auth_mode": "id_token",
+                    "audience": "https://phase1-asr.example.com",
+                    "timeout_s": 901.0,
+                },
+            )(),
+            "vllm_vibevoice": type(
+                "VLLM",
+                (),
+                {
+                    "base_url": "http://127.0.0.1:8000",
+                    "model": "vibevoice",
+                    "timeout_s": 7200.0,
+                    "healthcheck_path": "/health",
+                    "max_retries": 1,
+                    "audio_mode": "url",
+                },
+            )(),
+        },
+    )()
+
+    monkeypatch.setattr(phase1_factory, "load_provider_settings", lambda: settings)
+    monkeypatch.setattr(phase1_factory, "GCSStorageClient", lambda settings: object())
+    monkeypatch.setattr(phase1_factory, "build_gcs_uri_url_resolver", lambda storage_client: object())
+    monkeypatch.setattr(phase1_factory, "CloudRunVibeVoiceProvider", lambda **kwargs: fake_remote_provider, raising=False)
+    monkeypatch.setattr(
+        phase1_factory,
+        "VibeVoiceVLLMProvider",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("local VibeVoice provider should not be used")),
+    )
+    monkeypatch.setattr(phase1_factory, "ForcedAlignmentProvider", lambda: object())
+    monkeypatch.setattr(phase1_factory, "Emotion2VecPlusProvider", lambda: object())
+    monkeypatch.setattr(phase1_factory, "YAMNetProvider", lambda **kwargs: object())
+    monkeypatch.setattr(phase1_factory, "SimpleVisualExtractor", lambda **kwargs: object())
+    monkeypatch.setattr(phase1_factory, "VisualPipelineConfig", type("VisualCfg", (), {"from_env": staticmethod(lambda: object())}))
+    monkeypatch.setattr(phase1_factory, "_build_phase14_repository", lambda **kwargs: None)
+    monkeypatch.setattr(phase1_factory, "_build_phase24_local_dispatcher", lambda **kwargs: object())
+    monkeypatch.setattr(phase1_factory, "Phase1InputResolver", type("Resolver", (), {"from_mapping_file": staticmethod(lambda path: object())}))
+
+    runner = phase1_factory.build_default_phase1_job_runner()
+
+    assert runner.vibevoice_provider is fake_remote_provider
 
 
 def test_run_phase1_sidecars_fails_when_forced_alignment_returns_zero_words(

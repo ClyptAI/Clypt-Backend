@@ -17,6 +17,10 @@ _DEFAULT_HOTWORDS = (
     "indeed, finally, first, second, third"
 )
 
+_REMOVED_LOCAL_GENERATION_ENVS = (
+    "CLYPT_LOCAL_LLM_ENABLE_THINKING",
+)
+
 
 def _read_env(*names: str) -> str | None:
     for name in names:
@@ -85,6 +89,15 @@ def _load_local_env_files() -> None:
             load_dotenv(env_path, override=False)
 
 
+def _raise_if_removed_local_generation_env_present() -> None:
+    for name in _REMOVED_LOCAL_GENERATION_ENVS:
+        if os.getenv(name) is not None:
+            raise ValueError(
+                f"{name} has been removed because the local OpenAI-compatible Qwen path "
+                "always runs with thinking disabled."
+            )
+
+
 @dataclass(slots=True)
 class VibeVoiceSettings:
     """Shared generation controls for the vLLM VibeVoice ASR path."""
@@ -94,7 +107,7 @@ class VibeVoiceSettings:
     do_sample: bool = False
     temperature: float = 0.0
     top_p: float = 1.0
-    repetition_penalty: float = 0.97
+    repetition_penalty: float = 1.03
     num_beams: int = 1
 
 
@@ -122,7 +135,12 @@ class LocalGenerationSettings:
     max_backoff_s: float = 30.0
     backoff_multiplier: float = 2.0
     jitter_ratio: float = 0.2
-    enable_thinking: bool = False
+    temperature: float = 0.7
+    top_p: float = 0.8
+    top_k: int = 20
+    min_p: float = 0.0
+    presence_penalty: float = 1.5
+    repetition_penalty: float = 1.0
 
 
 @dataclass(slots=True)
@@ -133,9 +151,9 @@ class VertexSettings:
     gemini_api_key: str | None = None
     generation_location: str = "global"
     embedding_location: str = "us-central1"
-    generation_model: str = "gemini-3-flash-preview"
+    generation_model: str = "Qwen/Qwen3.5-27B"
     embedding_model: str = "gemini-embedding-2-preview"
-    flash_model: str = "gemini-3-flash-preview"
+    flash_model: str = "Qwen/Qwen3.5-27B"
     generation_api_max_retries: int = 6
     generation_api_initial_backoff_s: float = 1.0
     generation_api_max_backoff_s: float = 30.0
@@ -187,6 +205,15 @@ class Phase24WorkerSettings:
 
 
 @dataclass(slots=True)
+class Phase24MediaPrepSettings:
+    backend: str = "local"
+    service_url: str | None = None
+    auth_mode: str = "id_token"
+    audience: str | None = None
+    timeout_s: float = 600.0
+
+
+@dataclass(slots=True)
 class Phase24LocalQueueSettings:
     """SQLite-backed queue for Phase 2–4 when running Phase 1 locally (run_phase14)."""
 
@@ -200,6 +227,8 @@ class Phase24LocalQueueSettings:
     max_inflight: int = 1
     max_requests_per_worker: int = 0
     queue_backend: str = "local_sqlite"
+    reclaim_expired_leases: bool = False
+    fail_fast_on_stale_running: bool = True
 
 
 @dataclass(slots=True)
@@ -211,6 +240,7 @@ class VLLMRuntimeSettings:
     max_num_batched_tokens: int | None = None
     gpu_memory_utilization: float | None = None
     max_model_len: int | None = None
+    language_model_only: bool = False
     speculative_mode: str = "off"
     speculative_num_tokens: int | None = None
 
@@ -230,15 +260,26 @@ class Phase1RuntimeSettings:
 
 
 @dataclass(slots=True)
+class Phase1ASRSettings:
+    backend: str = "vllm"
+    service_url: str | None = None
+    auth_mode: str = "id_token"
+    audience: str | None = None
+    timeout_s: float = 7200.0
+
+
+@dataclass(slots=True)
 class ProviderSettings:
     vibevoice: VibeVoiceSettings
     vllm_vibevoice: VibeVoiceVLLMSettings
     vertex: VertexSettings
     local_generation: LocalGenerationSettings
     storage: StorageSettings
+    phase1_asr: Phase1ASRSettings = field(default_factory=Phase1ASRSettings)
     cloud_tasks: CloudTasksSettings = field(default_factory=CloudTasksSettings)
     spanner: SpannerSettings = field(default_factory=SpannerSettings)
     phase24_worker: Phase24WorkerSettings = field(default_factory=Phase24WorkerSettings)
+    phase24_media_prep: Phase24MediaPrepSettings = field(default_factory=Phase24MediaPrepSettings)
     phase24_local_queue: Phase24LocalQueueSettings = field(default_factory=Phase24LocalQueueSettings)
     vllm_runtime: VLLMRuntimeSettings = field(default_factory=VLLMRuntimeSettings)
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
@@ -246,6 +287,7 @@ class ProviderSettings:
 
 def load_provider_settings() -> ProviderSettings:
     _load_local_env_files()
+    _raise_if_removed_local_generation_env_present()
 
     vertex_project = _read_env("GOOGLE_CLOUD_PROJECT") or _discover_gcloud_project()
     if not vertex_project:
@@ -263,12 +305,33 @@ def load_provider_settings() -> ProviderSettings:
         raise ValueError(
             f"Unsupported VIBEVOICE_BACKEND={backend!r}; only 'vllm' is supported on main."
         )
+    phase1_asr = Phase1ASRSettings(
+        backend=((_read_env("CLYPT_PHASE1_ASR_BACKEND") or "vllm").strip().lower()),
+        service_url=_read_env("CLYPT_PHASE1_ASR_SERVICE_URL"),
+        auth_mode=((_read_env("CLYPT_PHASE1_ASR_AUTH_MODE") or "id_token").strip().lower()),
+        audience=_read_env("CLYPT_PHASE1_ASR_AUDIENCE"),
+        timeout_s=float(_read_env("CLYPT_PHASE1_ASR_TIMEOUT_S") or "7200"),
+    )
+    if phase1_asr.backend not in {"vllm", "cloud_run_l4"}:
+        raise ValueError(
+            "Unsupported CLYPT_PHASE1_ASR_BACKEND="
+            f"{phase1_asr.backend!r}; expected 'vllm' or 'cloud_run_l4'."
+        )
 
     vllm_base_url = _read_env("VIBEVOICE_VLLM_BASE_URL")
-    if not vllm_base_url:
+    if phase1_asr.backend == "cloud_run_l4":
+        if vllm_base_url:
+            raise ValueError(
+                "VIBEVOICE_VLLM_BASE_URL must be unset when CLYPT_PHASE1_ASR_BACKEND=cloud_run_l4."
+            )
+        if not phase1_asr.service_url:
+            raise ValueError(
+                "CLYPT_PHASE1_ASR_SERVICE_URL is required when CLYPT_PHASE1_ASR_BACKEND=cloud_run_l4."
+            )
+    elif not vllm_base_url:
         raise ValueError("VIBEVOICE_VLLM_BASE_URL is required.")
     vllm_settings = VibeVoiceVLLMSettings(
-        base_url=vllm_base_url,
+        base_url=vllm_base_url or "",
         model=_read_env("VIBEVOICE_VLLM_MODEL") or "vibevoice",
         timeout_s=float(_read_env("VIBEVOICE_VLLM_TIMEOUT_S") or "7200"),
         healthcheck_path=_read_env("VIBEVOICE_VLLM_HEALTHCHECK_PATH") or "/health",
@@ -310,7 +373,12 @@ def load_provider_settings() -> ProviderSettings:
             0.0,
             float(_read_env("CLYPT_LOCAL_LLM_JITTER_RATIO") or "0.2"),
         ),
-        enable_thinking=_read_bool_env("CLYPT_LOCAL_LLM_ENABLE_THINKING", default=False),
+        temperature=float(_read_env("CLYPT_LOCAL_LLM_TEMPERATURE") or "0.7"),
+        top_p=float(_read_env("CLYPT_LOCAL_LLM_TOP_P") or "0.8"),
+        top_k=max(1, int(_read_env("CLYPT_LOCAL_LLM_TOP_K") or "20")),
+        min_p=max(0.0, float(_read_env("CLYPT_LOCAL_LLM_MIN_P") or "0.0")),
+        presence_penalty=float(_read_env("CLYPT_LOCAL_LLM_PRESENCE_PENALTY") or "1.5"),
+        repetition_penalty=float(_read_env("CLYPT_LOCAL_LLM_REPETITION_PENALTY") or "1.0"),
     )
 
     return ProviderSettings(
@@ -320,9 +388,10 @@ def load_provider_settings() -> ProviderSettings:
             do_sample=_read_bool_env("VIBEVOICE_DO_SAMPLE", default=False),
             temperature=float(_read_env("VIBEVOICE_TEMPERATURE") or "0"),
             top_p=float(_read_env("VIBEVOICE_TOP_P") or "1.0"),
-            repetition_penalty=float(_read_env("VIBEVOICE_REPETITION_PENALTY") or "0.97"),
+            repetition_penalty=float(_read_env("VIBEVOICE_REPETITION_PENALTY") or "1.03"),
             num_beams=_read_int_env("VIBEVOICE_NUM_BEAMS", default=1),
         ),
+        phase1_asr=phase1_asr,
         vllm_vibevoice=vllm_settings,
         local_generation=local_generation,
         vertex=VertexSettings(
@@ -334,9 +403,9 @@ def load_provider_settings() -> ProviderSettings:
             or _read_env("GOOGLE_CLOUD_LOCATION")
             or "global",
             embedding_location=_read_env("VERTEX_EMBEDDING_LOCATION") or "us-central1",
-            generation_model=_read_env("GENAI_GENERATION_MODEL") or "gemini-3-flash-preview",
+            generation_model=_read_env("GENAI_GENERATION_MODEL") or "Qwen/Qwen3.5-27B",
             embedding_model=_read_env("VERTEX_EMBEDDING_MODEL") or "gemini-embedding-2-preview",
-            flash_model=_read_env("GENAI_FLASH_MODEL") or "gemini-3-flash-preview",
+            flash_model=_read_env("GENAI_FLASH_MODEL") or "Qwen/Qwen3.5-27B",
             generation_api_max_retries=max(
                 0,
                 int(
@@ -469,6 +538,13 @@ def load_provider_settings() -> ProviderSettings:
                 _read_env("CLYPT_PHASE24_MAX_VLLM_DECODE_BACKLOG") or "0"
             ),
         ),
+        phase24_media_prep=Phase24MediaPrepSettings(
+            backend=((_read_env("CLYPT_PHASE24_MEDIA_PREP_BACKEND") or "local").strip().lower()),
+            service_url=_read_env("CLYPT_PHASE24_MEDIA_PREP_SERVICE_URL"),
+            auth_mode=((_read_env("CLYPT_PHASE24_MEDIA_PREP_AUTH_MODE") or "id_token").strip().lower()),
+            audience=_read_env("CLYPT_PHASE24_MEDIA_PREP_AUDIENCE"),
+            timeout_s=float(_read_env("CLYPT_PHASE24_MEDIA_PREP_TIMEOUT_S") or "600"),
+        ),
         phase24_local_queue=Phase24LocalQueueSettings(
             path=Path(
                 _read_env("CLYPT_PHASE24_LOCAL_QUEUE_PATH")
@@ -481,6 +557,12 @@ def load_provider_settings() -> ProviderSettings:
                 "CLYPT_PHASE24_LOCAL_MAX_REQUESTS_PER_WORKER", default=0
             ),
             queue_backend=((_read_env("CLYPT_PHASE24_QUEUE_BACKEND") or "local_sqlite").strip().lower()),
+            reclaim_expired_leases=_read_bool_env(
+                "CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES", default=False
+            ),
+            fail_fast_on_stale_running=_read_bool_env(
+                "CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING", default=True
+            ),
         ),
         vllm_runtime=VLLMRuntimeSettings(
             profile=((_read_env("CLYPT_VLLM_PROFILE") or "conservative").strip().lower()),
@@ -503,6 +585,9 @@ def load_provider_settings() -> ProviderSettings:
                 int(_read_env("CLYPT_VLLM_MAX_MODEL_LEN"))
                 if _read_env("CLYPT_VLLM_MAX_MODEL_LEN") is not None
                 else None
+            ),
+            language_model_only=_read_bool_env(
+                "CLYPT_VLLM_LANGUAGE_MODEL_ONLY", default=False
             ),
             speculative_mode=((_read_env("CLYPT_VLLM_SPECULATIVE_MODE") or "off").strip().lower()),
             speculative_num_tokens=(
@@ -528,8 +613,10 @@ def load_provider_settings() -> ProviderSettings:
 __all__ = [
     "LocalGenerationSettings",
     "Phase24LocalQueueSettings",
+    "Phase24MediaPrepSettings",
     "VLLMRuntimeSettings",
     "Phase1RuntimeSettings",
+    "Phase1ASRSettings",
     "ProviderSettings",
     "StorageSettings",
     "CloudTasksSettings",

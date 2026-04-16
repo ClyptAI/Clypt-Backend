@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from .boundary_reconciliation import reconcile_boundary_nodes
+from .boundary_reconciliation import reconcile_boundary_nodes, should_skip_boundary_reconciliation
 from .media_embeddings import prepare_node_media_embeddings
 from .merge_and_classify import merge_and_classify_neighborhood
 from .node_embeddings import build_semantic_embedding_payload
@@ -60,7 +61,7 @@ def run_merge_and_classify_batches(
         )
         merged_nodes = merge_and_classify_neighborhood(
             neighborhood_payload=neighborhood,
-            gemini_response=response,
+            llm_response=response,
             turn_word_ids_by_turn_id=turn_word_ids_by_turn_id,
         )
         nodes.extend(merged_nodes)
@@ -86,8 +87,7 @@ def run_merge_classify_and_reconcile(
     boundary_max_output_tokens: int = 32768,
     model: str | None = None,
     max_concurrent: int = 5,
-    merge_thinking_level: str | None = None,
-    boundary_thinking_level: str | None = None,
+    boundary_max_concurrent: int = 10,
 ) -> tuple[list[SemanticGraphNode], list[dict[str, Any]], list[dict[str, Any]]]:
     """Full Phase 2A + 2B: merge/classify per neighborhood batch, then boundary
     reconciliation between every adjacent batch pair.  Calls are dispatched in
@@ -118,6 +118,7 @@ def run_merge_classify_and_reconcile(
     }
 
     def _call_merge(neighborhood):
+        started = time.perf_counter()
         prompt = build_merge_and_classify_prompt(neighborhood_payload=neighborhood)
         response = llm_client.generate_json(
             prompt=prompt,
@@ -125,13 +126,30 @@ def run_merge_classify_and_reconcile(
             temperature=0.0,
             response_schema=MERGE_AND_CLASSIFY_SCHEMA,
             max_output_tokens=merge_max_output_tokens,
-            thinking_level=merge_thinking_level,
         )
-        return merge_and_classify_neighborhood(
+        merged_nodes = merge_and_classify_neighborhood(
             neighborhood_payload=neighborhood,
-            gemini_response=response,
+            llm_response=response,
             turn_word_ids_by_turn_id=turn_word_ids_by_turn_id,
-        ), {"batch_id": neighborhood["batch_id"], "prompt": prompt, "response": response}
+        )
+        payload_chars = len(json.dumps(neighborhood, ensure_ascii=True, separators=(",", ":")))
+        response_chars = len(json.dumps(response, ensure_ascii=True, separators=(",", ":")))
+        prompt_chars = len(prompt)
+        return merged_nodes, {
+            "batch_id": neighborhood["batch_id"],
+            "prompt": prompt,
+            "response": response,
+            "diagnostics": {
+                "latency_ms": (time.perf_counter() - started) * 1000.0,
+                "target_turn_count": len(neighborhood.get("target_turn_ids") or []),
+                "context_turn_count": len(neighborhood.get("turns") or []),
+                "merged_node_count": len(merged_nodes),
+                "prompt_chars": prompt_chars,
+                "prompt_token_estimate": max(1, round(prompt_chars / 4.0)),
+                "payload_chars": payload_chars,
+                "response_chars": response_chars,
+            },
+        }
 
     merge_started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
@@ -139,10 +157,9 @@ def run_merge_classify_and_reconcile(
         batch_results = [f.result() for f in merge_futures]  # preserves order
     merge_duration_s = time.perf_counter() - merge_started
     logger.info(
-        "[phase2] merge/classify batches done in %.1f s (batches=%d, thinking=%s)",
+        "[phase2] merge/classify batches done in %.1f s (batches=%d)",
         merge_duration_s,
         len(neighborhoods),
-        merge_thinking_level or "default",
     )
 
     batch_nodes = [r[0] for r in batch_results]
@@ -155,35 +172,75 @@ def run_merge_classify_and_reconcile(
     def _call_boundary(idx):
         left = [batch_nodes[idx - 1][-1]]
         right = [batch_nodes[idx][0]]
+        heuristic = should_skip_boundary_reconciliation(left_node=left[0], right_node=right[0])
+        if bool(heuristic.get("skip_llm")):
+            return idx, [left[0], right[0]], {
+                "left_batch_id": neighborhoods[idx - 1]["batch_id"],
+                "right_batch_id": neighborhoods[idx]["batch_id"],
+                "heuristic_skip": True,
+                "heuristic_reason": str(heuristic.get("reason") or "heuristic_skip"),
+                "prompt": None,
+                "response": None,
+                "diagnostics": {
+                    "latency_ms": 0.0,
+                    "left_node_count": len(left),
+                    "right_node_count": len(right),
+                    "reconciled_node_count": 2,
+                    "prompt_chars": 0,
+                    "prompt_token_estimate": 0,
+                    "payload_chars": 0,
+                    "response_chars": 0,
+                    "heuristic_skip": True,
+                    "heuristic_sent_to_llm": False,
+                    **heuristic,
+                },
+            }
         reconciled, debug = run_boundary_reconciliation(
             left_batch_nodes=left,
             right_batch_nodes=right,
             llm_client=llm_client,
             model=model,
             max_output_tokens=boundary_max_output_tokens,
-            thinking_level=boundary_thinking_level,
         )
         return idx, reconciled, {
             "left_batch_id": neighborhoods[idx - 1]["batch_id"],
             "right_batch_id": neighborhoods[idx]["batch_id"],
+            "heuristic_skip": False,
+            "heuristic_reason": str(heuristic.get("reason") or "llm_review"),
             **debug,
+            "diagnostics": {
+                **dict(debug.get("diagnostics") or {}),
+                "heuristic_skip": False,
+                "heuristic_sent_to_llm": True,
+                **heuristic,
+            },
         }
 
     seam_indices = range(1, len(batch_nodes))
     seam_results: dict[int, tuple] = {}
     if seam_indices:
         boundary_started = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+        with ThreadPoolExecutor(max_workers=boundary_max_concurrent) as pool:
             seam_futures = {pool.submit(_call_boundary, i): i for i in seam_indices}
             for f in as_completed(seam_futures):
                 idx, reconciled, debug = f.result()
                 seam_results[idx] = (reconciled, debug)
         boundary_duration_s = time.perf_counter() - boundary_started
         logger.info(
-            "[phase2] boundary reconciliation done in %.1f s (seams=%d, thinking=%s)",
+            "[phase2] boundary reconciliation done in %.1f s (seams=%d)",
             boundary_duration_s,
             len(batch_nodes) - 1,
-            boundary_thinking_level or "default",
+        )
+        seams_skipped = sum(
+            1
+            for _, (_, debug) in seam_results.items()
+            if bool((debug.get("diagnostics") or {}).get("heuristic_skip"))
+        )
+        logger.info(
+            "[phase2] boundary seam gate: seams_total=%d seams_skipped_by_heuristic=%d seams_sent_to_llm=%d",
+            len(batch_nodes) - 1,
+            seams_skipped,
+            max(0, (len(batch_nodes) - 1) - seams_skipped),
         )
 
     # Stitch in order
@@ -208,12 +265,12 @@ def run_boundary_reconciliation(
     llm_client: Any,
     max_output_tokens: int = 32768,
     model: str | None = None,
-    thinking_level: str | None = None,
 ) -> tuple[list[SemanticGraphNode], dict[str, Any]]:
     overlap_payload = {
         "left_batch_nodes": [node.model_dump(mode="json") for node in left_batch_nodes],
         "right_batch_nodes": [node.model_dump(mode="json") for node in right_batch_nodes],
     }
+    started = time.perf_counter()
     prompt = build_boundary_reconciliation_prompt(overlap_payload=overlap_payload)
     response = llm_client.generate_json(
         prompt=prompt,
@@ -221,66 +278,77 @@ def run_boundary_reconciliation(
         temperature=0.0,
         response_schema=BOUNDARY_RECONCILIATION_SCHEMA,
         max_output_tokens=max_output_tokens,
-        thinking_level=thinking_level,
     )
     reconciled = reconcile_boundary_nodes(
         left_batch_nodes=left_batch_nodes,
         right_batch_nodes=right_batch_nodes,
-        gemini_response=response,
+        llm_response=response,
     )
     return reconciled, {
         "prompt": prompt,
         "response": response,
+        "diagnostics": {
+            "latency_ms": (time.perf_counter() - started) * 1000.0,
+            "left_node_count": len(left_batch_nodes),
+            "right_node_count": len(right_batch_nodes),
+            "reconciled_node_count": len(reconciled),
+            "prompt_chars": len(prompt),
+            "prompt_token_estimate": max(1, round(len(prompt) / 4.0)),
+            "payload_chars": len(json.dumps(overlap_payload, ensure_ascii=True, separators=(",", ":"))),
+            "response_chars": len(json.dumps(response, ensure_ascii=True, separators=(",", ":"))),
+        },
     }
 
 
-def embed_semantic_nodes_live(
+def embed_text_semantic_nodes_live(
     *,
     nodes: list[SemanticGraphNode],
     embedding_client: Any,
-    multimodal_media: list[dict[str, str]],
-) -> list[SemanticGraphNode]:
-    if len(multimodal_media) != len(nodes):
-        raise ValueError("multimodal_media must align one-to-one with nodes")
+) -> tuple[list[list[float]], dict[str, Any]]:
     texts = [build_semantic_embedding_payload(node=node) for node in nodes]
-    
-    def _embed_semantic() -> tuple[list[list[float]], float]:
-        started = time.perf_counter()
-        embeddings = embedding_client.embed_texts(
-            texts,
-            task_type="RETRIEVAL_DOCUMENT",
-        )
-        return embeddings, time.perf_counter() - started
-
-    def _embed_multimodal() -> tuple[list[list[float]], float]:
-        started = time.perf_counter()
-        embeddings = embedding_client.embed_media_uris(multimodal_media)
-        return embeddings, time.perf_counter() - started
-
-    futures: dict[Any, str] = {}
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures[pool.submit(_embed_semantic)] = "semantic"
-        futures[pool.submit(_embed_multimodal)] = "multimodal"
-        results: dict[str, tuple[list[list[float]], float]] = {}
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                results[name] = future.result()
-            except Exception as exc:  # pragma: no cover - passthrough
-                raise RuntimeError(f"Phase 2 {name} embedding request failed.") from exc
-
-    semantic_embeddings, semantic_duration_s = results["semantic"]
-    multimodal_embeddings, multimodal_duration_s = results["multimodal"]
+    started = time.perf_counter()
+    embeddings = embedding_client.embed_texts(
+        texts,
+        task_type="RETRIEVAL_DOCUMENT",
+    )
+    duration_s = time.perf_counter() - started
     logger.info(
         "[phase2] semantic embeddings done in %.1f s (nodes=%d)",
-        semantic_duration_s,
+        duration_s,
         len(nodes),
     )
+    return embeddings, {
+        "node_count": len(nodes),
+        "semantic_payload_chars": sum(len(text) for text in texts),
+        "semantic_duration_ms": duration_s * 1000.0,
+    }
+
+
+def embed_multimodal_media_live(
+    *,
+    multimodal_media: list[dict[str, str]],
+    embedding_client: Any,
+) -> tuple[list[list[float]], dict[str, Any]]:
+    started = time.perf_counter()
+    embeddings = embedding_client.embed_media_uris(multimodal_media)
+    duration_s = time.perf_counter() - started
     logger.info(
         "[phase2] multimodal embeddings done in %.1f s (nodes=%d)",
-        multimodal_duration_s,
-        len(nodes),
+        duration_s,
+        len(multimodal_media),
     )
+    return embeddings, {
+        "multimodal_item_count": len(multimodal_media),
+        "multimodal_duration_ms": duration_s * 1000.0,
+    }
+
+
+def apply_node_embeddings(
+    *,
+    nodes: list[SemanticGraphNode],
+    semantic_embeddings: list[list[float]],
+    multimodal_embeddings: list[list[float]],
+) -> list[SemanticGraphNode]:
     embedded_nodes: list[SemanticGraphNode] = []
     for node, semantic_embedding, multimodal_embedding in zip(
         nodes,
@@ -299,8 +367,49 @@ def embed_semantic_nodes_live(
     return embedded_nodes
 
 
+def embed_semantic_nodes_live(
+    *,
+    nodes: list[SemanticGraphNode],
+    embedding_client: Any,
+    multimodal_media: list[dict[str, str]],
+    return_diagnostics: bool = False,
+) -> list[SemanticGraphNode] | tuple[list[SemanticGraphNode], dict[str, Any]]:
+    if len(multimodal_media) != len(nodes):
+        raise ValueError("multimodal_media must align one-to-one with nodes")
+    futures: dict[Any, str] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures[pool.submit(embed_text_semantic_nodes_live, nodes=nodes, embedding_client=embedding_client)] = "semantic"
+        futures[pool.submit(embed_multimodal_media_live, multimodal_media=multimodal_media, embedding_client=embedding_client)] = "multimodal"
+        results: dict[str, tuple[list[list[float]], dict[str, Any]]] = {}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                results[name] = future.result()
+            except Exception as exc:  # pragma: no cover - passthrough
+                raise RuntimeError(f"Phase 2 {name} embedding request failed.") from exc
+
+    semantic_embeddings, semantic_diagnostics = results["semantic"]
+    multimodal_embeddings, multimodal_diagnostics = results["multimodal"]
+    embedded_nodes = apply_node_embeddings(
+        nodes=nodes,
+        semantic_embeddings=semantic_embeddings,
+        multimodal_embeddings=multimodal_embeddings,
+    )
+    diagnostics = {
+        "node_count": len(nodes),
+        **semantic_diagnostics,
+        **multimodal_diagnostics,
+    }
+    if return_diagnostics:
+        return embedded_nodes, diagnostics
+    return embedded_nodes
+
+
 __all__ = [
+    "apply_node_embeddings",
+    "embed_multimodal_media_live",
     "embed_semantic_nodes_live",
+    "embed_text_semantic_nodes_live",
     "prepare_node_media_embeddings",
     "run_boundary_reconciliation",
     "run_merge_and_classify_batches",

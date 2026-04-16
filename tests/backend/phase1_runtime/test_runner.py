@@ -9,7 +9,7 @@ import pytest
 
 def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Path):
     from backend.phase1_runtime.runner import Phase1JobRunner
-    from backend.repository.models import Phase24JobRecord, RunRecord
+    from backend.repository.models import Phase24JobRecord, PhaseMetricRecord, RunRecord
 
     calls: list[str] = []
     captured: dict[str, object] = {}
@@ -67,6 +67,7 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
         def __init__(self) -> None:
             self.run_record: RunRecord | None = None
             self.job_record: Phase24JobRecord | None = None
+            self.phase_metrics: list[PhaseMetricRecord] = []
 
         def upsert_run(self, record: RunRecord) -> RunRecord:
             self.run_record = record
@@ -74,6 +75,10 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
 
         def upsert_phase24_job(self, record: Phase24JobRecord) -> Phase24JobRecord:
             self.job_record = record
+            return record
+
+        def write_phase_metric(self, record: PhaseMetricRecord) -> PhaseMetricRecord:
+            self.phase_metrics.append(record)
             return record
 
     repository = _FakeRepository()
@@ -124,6 +129,15 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
     assert repository.job_record.status == "queued"
     assert repository.job_record.task_name == "local-sqlite:00000000-0000-0000-0000-000000000001"
     assert repository.job_record.metadata["query_version"] == "graph-v2"
+    phase_names = [record.phase_name for record in repository.phase_metrics]
+    assert phase_names == [
+        "phase1_vibevoice_asr",
+        "phase1_forced_alignment",
+        "phase1_emotion2vec",
+        "phase1_yamnet",
+        "phase1_visual_extraction",
+    ]
+    assert all(record.status == "succeeded" for record in repository.phase_metrics)
     assert calls == [
         "audio:source_video.mp4",
         "upload:phase1/job_001/source_video.mp4",

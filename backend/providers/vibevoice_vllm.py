@@ -43,6 +43,9 @@ _SYSTEM_PROMPT = (
     "You are a helpful assistant that transcribes audio input into text output in JSON format."
 )
 
+_FAILURE_DIR_ENV = "CLYPT_VIBEVOICE_FAILURE_DIR"
+_DEFAULT_FAILURE_DIR = "backend/outputs/vibevoice_failures"
+
 
 class VibeVoiceVLLMProvider:
     """
@@ -77,7 +80,7 @@ class VibeVoiceVLLMProvider:
         do_sample: bool = False,
         temperature: float = 0.0,
         top_p: float = 1.0,
-        repetition_penalty: float = 0.97,
+        repetition_penalty: float = 1.03,
         num_beams: int = 1,
     ) -> None:
         if not base_url:
@@ -248,6 +251,11 @@ class VibeVoiceVLLMProvider:
         )
         try:
             content_parts: list[str] = []
+            finish_reason: str | None = None
+            completion_tokens: int | None = None
+            chunk_count = 0
+            ignored_chunks = 0
+            saw_done = False
             with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                 for raw_line in resp:
                     line = raw_line.decode("utf-8").rstrip("\r\n")
@@ -255,14 +263,25 @@ class VibeVoiceVLLMProvider:
                         continue
                     json_str = line[6:]
                     if json_str.strip() == "[DONE]":
+                        saw_done = True
                         break
                     try:
                         chunk = json.loads(json_str)
-                        delta_content = chunk["choices"][0]["delta"].get("content", "")
+                        chunk_count += 1
+                        choice = chunk["choices"][0]
+                        delta_content = choice.get("delta", {}).get("content", "")
                         if delta_content:
                             content_parts.append(delta_content)
+                        chunk_finish_reason = choice.get("finish_reason")
+                        if chunk_finish_reason:
+                            finish_reason = str(chunk_finish_reason)
+                        usage = chunk.get("usage")
+                        if isinstance(usage, dict):
+                            raw_completion_tokens = usage.get("completion_tokens")
+                            if isinstance(raw_completion_tokens, int):
+                                completion_tokens = raw_completion_tokens
                     except (json.JSONDecodeError, KeyError, IndexError):
-                        pass
+                        ignored_chunks += 1
         except urllib.error.HTTPError as exc:
             body_snippet = ""
             try:
@@ -277,7 +296,30 @@ class VibeVoiceVLLMProvider:
                 f"[vibevoice-vllm] request to {url} failed: {exc}"
             ) from exc
 
-        return self._parse_content("".join(content_parts))
+        content = "".join(content_parts)
+        generated_chars = len(content)
+        approx_generated_tokens = generated_chars // 4 if generated_chars else 0
+        logger.info(
+            "[vibevoice-vllm] stream finished: finish_reason=%s generated_chars=%d "
+            "completion_tokens=%s approx_generated_tokens=%d chunks=%d ignored_chunks=%d saw_done=%s",
+            finish_reason or "unknown",
+            generated_chars,
+            completion_tokens if completion_tokens is not None else "unknown",
+            approx_generated_tokens,
+            chunk_count,
+            ignored_chunks,
+            saw_done,
+        )
+
+        return self._parse_content(
+            content,
+            finish_reason=finish_reason,
+            generated_chars=generated_chars,
+            generated_tokens=completion_tokens,
+            approx_generated_tokens=approx_generated_tokens,
+            chunk_count=chunk_count,
+            saw_done=saw_done,
+        )
 
     def _build_payload(
         self, audio_path: Path, context: str, duration_s: float, *, audio_url: str | None = None
@@ -360,18 +402,70 @@ class VibeVoiceVLLMProvider:
             )
         return resolved
 
-    def _parse_content(self, content: str) -> list[dict[str, Any]]:
+    def _parse_content(
+        self,
+        content: str,
+        *,
+        finish_reason: str | None = None,
+        generated_chars: int | None = None,
+        generated_tokens: int | None = None,
+        approx_generated_tokens: int | None = None,
+        chunk_count: int | None = None,
+        saw_done: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        generated_chars = generated_chars if generated_chars is not None else len(content)
+        approx_generated_tokens = (
+            approx_generated_tokens
+            if approx_generated_tokens is not None
+            else (generated_chars // 4 if generated_chars else 0)
+        )
         try:
             raw_turns = json.loads(content)
         except json.JSONDecodeError as exc:
+            artifact_path = self._persist_failed_content(
+                content=content,
+                finish_reason=finish_reason,
+                generated_chars=generated_chars,
+                generated_tokens=generated_tokens,
+                approx_generated_tokens=approx_generated_tokens,
+                chunk_count=chunk_count,
+                saw_done=saw_done,
+            )
             raise RuntimeError(
-                f"[vibevoice-vllm] content is not parseable as turns: {exc}\n"
-                f"{content[:2000]}"
+                f"[vibevoice-vllm] content is not parseable as turns: {exc}; "
+                f"finish_reason={finish_reason or 'unknown'} "
+                f"generated_chars={generated_chars} "
+                f"completion_tokens={generated_tokens if generated_tokens is not None else 'unknown'} "
+                f"approx_generated_tokens={approx_generated_tokens} "
+                f"chunks={chunk_count if chunk_count is not None else 'unknown'} "
+                f"saw_done={saw_done if saw_done is not None else 'unknown'} "
+                f"artifact={artifact_path}"
             ) from exc
 
         if not isinstance(raw_turns, list):
             raise RuntimeError(
                 f"[vibevoice-vllm] expected list of turns, got {type(raw_turns).__name__}"
+            )
+
+        if finish_reason not in (None, "", "stop"):
+            artifact_path = self._persist_failed_content(
+                content=content,
+                finish_reason=finish_reason,
+                generated_chars=generated_chars,
+                generated_tokens=generated_tokens,
+                approx_generated_tokens=approx_generated_tokens,
+                chunk_count=chunk_count,
+                saw_done=saw_done,
+            )
+            raise RuntimeError(
+                f"[vibevoice-vllm] stream ended with finish_reason={finish_reason}; "
+                f"refusing possibly truncated ASR output. "
+                f"generated_chars={generated_chars} "
+                f"completion_tokens={generated_tokens if generated_tokens is not None else 'unknown'} "
+                f"approx_generated_tokens={approx_generated_tokens} "
+                f"chunks={chunk_count if chunk_count is not None else 'unknown'} "
+                f"saw_done={saw_done if saw_done is not None else 'unknown'} "
+                f"artifact={artifact_path}"
             )
 
         turns = self._normalize_turns(raw_turns)
@@ -381,6 +475,48 @@ class VibeVoiceVLLMProvider:
                 "the audio may be silent or the model output is malformed."
             )
         return turns
+
+    def _persist_failed_content(
+        self,
+        *,
+        content: str,
+        finish_reason: str | None,
+        generated_chars: int,
+        generated_tokens: int | None,
+        approx_generated_tokens: int,
+        chunk_count: int | None,
+        saw_done: bool | None,
+    ) -> str:
+        base_dir = Path(os.getenv(_FAILURE_DIR_ENV, _DEFAULT_FAILURE_DIR))
+        base_dir.mkdir(parents=True, exist_ok=True)
+        timestamp_ms = int(time.time() * 1000)
+        stem = f"vibevoice_{timestamp_ms}_{os.getpid()}"
+        content_path = base_dir / f"{stem}.txt"
+        metadata_path = base_dir / f"{stem}.meta.json"
+        content_path.write_text(content, encoding="utf-8")
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "base_url": self.base_url,
+                    "model": self.model,
+                    "finish_reason": finish_reason,
+                    "generated_chars": generated_chars,
+                    "completion_tokens": generated_tokens,
+                    "approx_generated_tokens": approx_generated_tokens,
+                    "chunk_count": chunk_count,
+                    "saw_done": saw_done,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        logger.error(
+            "[vibevoice-vllm] persisted failed raw content to %s (metadata=%s)",
+            content_path,
+            metadata_path,
+        )
+        return str(content_path)
 
     def _normalize_turns(self, raw_turns: list[Any]) -> list[dict[str, Any]]:
         normalized = []

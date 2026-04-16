@@ -154,6 +154,75 @@ def test_phase14_runner_starts_comments_before_phase1_and_trends_after_phase2(tm
     assert events.index("phase4") > events.index("trends_result")
 
 
+def test_phase14_runner_starts_phase3_local_lane_before_phase2_finishes(tmp_path: Path, monkeypatch):
+    from backend.runtime import phase14_live
+
+    runner = _build_runner(
+        tmp_path,
+        _FakeRepository(),
+        enable_comment_signals=True,
+        enable_trend_signals=True,
+    )
+    events: list[str] = []
+
+    def fake_start_comments_future(*, executor, cfg, llm_client, embedding_client, source_url, signal_event_logger=None):
+        events.append("comments_submit")
+        return _FakeFuture(SignalPipelineOutput(), events, "comments")
+
+    def fake_start_trends_future(*, executor, cfg, llm_client, embedding_client, nodes, source_url, signal_event_logger=None):
+        events.append("trends_submit")
+        return _FakeFuture(SignalPipelineOutput(), events, "trends")
+
+    def fake_run_phase_1(self, **kwargs):
+        events.append("phase1")
+        return {
+            "canonical_timeline": SimpleNamespace(turns=[SimpleNamespace(end_ms=1000)]),
+            "speech_emotion_timeline": SimpleNamespace(),
+            "audio_event_timeline": SimpleNamespace(),
+        }
+
+    def fake_run_phase_2(self, **kwargs):
+        events.append("phase2")
+        raw_nodes_ready_callback = kwargs["raw_nodes_ready_callback"]
+        raw_nodes_ready_callback([SimpleNamespace(node_id="node_1", start_ms=0, end_ms=1000)])
+        return {"nodes": [SimpleNamespace(node_id="node_1")]}
+
+    def fake_phase3_local_lane(self, **kwargs):
+        events.append("phase3_local_prefetch")
+        return [], [], 0.0
+
+    def fake_run_phase_3(self, **kwargs):
+        events.append("phase3")
+        return {"edges": []}
+
+    def fake_run_phase_4(self, **kwargs):
+        events.append("phase4")
+        return {
+            "final_candidate_count": 0,
+            "seed_count": 0,
+            "subgraph_count": 0,
+            "raw_candidate_count": 0,
+            "deduped_candidate_count": 0,
+        }
+
+    monkeypatch.setattr(phase14_live, "start_comments_future", fake_start_comments_future)
+    monkeypatch.setattr(phase14_live, "start_trends_future", fake_start_trends_future)
+    monkeypatch.setattr(type(runner), "run_phase_1", fake_run_phase_1)
+    monkeypatch.setattr(type(runner), "run_phase_2", fake_run_phase_2)
+    monkeypatch.setattr(type(runner), "_run_phase_3_local_lane", fake_phase3_local_lane, raising=False)
+    monkeypatch.setattr(type(runner), "run_phase_3", fake_run_phase_3)
+    monkeypatch.setattr(type(runner), "run_phase_4", fake_run_phase_4)
+
+    runner.run(
+        run_id="run_overlap_001",
+        source_url="https://www.youtube.com/watch?v=abc123",
+        phase1_outputs=_phase1_outputs(),
+    )
+
+    assert events.index("phase3_local_prefetch") < events.index("trends_submit")
+    assert events.index("phase3_local_prefetch") < events.index("phase3")
+
+
 def test_phase14_runner_uses_general_prompts_only_when_augmentation_is_empty(tmp_path: Path, monkeypatch):
     from backend.runtime import phase14_live
 

@@ -80,28 +80,30 @@ class Phase24LocalQueue:
         lease_timeout_s: int,
         *,
         max_inflight: int | None = None,
+        reclaim_expired_leases: bool = True,
     ) -> dict[str, Any] | None:
         """
-        Reclaim expired leases, then atomically claim the next queued job.
+        Optionally reclaim expired leases, then atomically claim the next queued job.
         Returns a row dict including payload (parsed) and attempt_count after increment.
         """
         now = time.time()
         lease_timeout_s = max(1, int(lease_timeout_s))
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """
-                UPDATE phase24_jobs
-                SET status = 'queued',
-                    locked_at = NULL,
-                    worker_id = NULL,
-                    updated_at = ?
-                WHERE status = 'running'
-                  AND locked_at IS NOT NULL
-                  AND (? - locked_at) > ?
-                """,
-                (now, now, float(lease_timeout_s)),
-            )
+            if reclaim_expired_leases:
+                conn.execute(
+                    """
+                    UPDATE phase24_jobs
+                    SET status = 'queued',
+                        locked_at = NULL,
+                        worker_id = NULL,
+                        updated_at = ?
+                    WHERE status = 'running'
+                      AND locked_at IS NOT NULL
+                      AND (? - locked_at) > ?
+                    """,
+                    (now, now, float(lease_timeout_s)),
+                )
             if max_inflight is not None and int(max_inflight) > 0:
                 running_count = conn.execute(
                     "SELECT COUNT(1) AS c FROM phase24_jobs WHERE status = 'running'"
@@ -153,6 +155,23 @@ class Phase24LocalQueue:
             out = dict(row)
             out["payload"] = json.loads(out.pop("payload_json"))
             return out
+
+    def count_expired_running(self, lease_timeout_s: int) -> int:
+        """Count running jobs with expired leases without reclaiming them."""
+        now = time.time()
+        timeout_s = max(1, int(lease_timeout_s))
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(1) AS c
+                FROM phase24_jobs
+                WHERE status = 'running'
+                  AND locked_at IS NOT NULL
+                  AND (? - locked_at) > ?
+                """,
+                (now, float(timeout_s)),
+            ).fetchone()
+            return int(row["c"]) if row is not None else 0
 
     def mark_succeeded(self, job_id: str) -> None:
         now = time.time()

@@ -11,6 +11,7 @@ from backend.repository.models import (
     ExternalSignalRecord,
     Phase24JobRecord,
     PhaseMetricRecord,
+    PhaseSubstepRecord,
     PromptSourceLinkRecord,
     RunRecord,
     SemanticEdgeRecord,
@@ -108,6 +109,7 @@ class _FakeDatabase:
         "prompt_source_links": ("run_id", "prompt_id"),
         "subgraph_provenance": ("run_id", "subgraph_id"),
         "phase_metrics": ("run_id", "phase_name"),
+        "phase_substeps": ("run_id", "phase_name", "step_name", "step_key"),
         "phase24_jobs": ("run_id",),
     }
 
@@ -163,6 +165,7 @@ def test_build_phase14_bootstrap_ddl_includes_core_tables_and_graph() -> None:
     assert any("CREATE TABLE candidate_signal_links" in statement for statement in ddl)
     assert any("CREATE TABLE prompt_source_links" in statement for statement in ddl)
     assert any("CREATE TABLE subgraph_provenance" in statement for statement in ddl)
+    assert any("CREATE TABLE phase_substeps" in statement for statement in ddl)
     assert any("external_signal_score" in statement for statement in ddl)
     assert any("agreement_bonus" in statement for statement in ddl)
     assert any("external_attribution_json" in statement for statement in ddl)
@@ -182,7 +185,7 @@ def test_apply_ddl_statements_cleans_and_dedupes_inputs() -> None:
     assert database.ddl_calls == [
         {
             "statements": ["CREATE TABLE foo (id INT64) PRIMARY KEY (id)"],
-            "operation_id": "phase14-bootstrap-test-01",
+            "operation_id": "phase14_bootstrap_test_01",
         }
     ]
     assert database.ddl_calls[0]["statements"] == ["CREATE TABLE foo (id INT64) PRIMARY KEY (id)"]
@@ -236,6 +239,25 @@ def test_apply_ddl_statements_continues_past_expected_bootstrap_errors() -> None
     assert [call["statements"][0] for call in database.ddl_calls] == [
         "CREATE TABLE foo (id INT64) PRIMARY KEY (id)",
         "CREATE TABLE bar (id INT64) PRIMARY KEY (id)",
+    ]
+
+
+def test_apply_ddl_statements_ignores_duplicate_name_in_schema_errors() -> None:
+    class _DuplicateNameOperation:
+        def result(self, timeout: float | None = None):
+            raise RuntimeError("Duplicate name in schema: runs")
+
+    class _DuplicateNameDatabase(_FakeDatabase):
+        def update_ddl(self, statements: list[str], operation_id: str | None = None):
+            self.ddl_calls.append({"statements": statements, "operation_id": operation_id})
+            return _DuplicateNameOperation()
+
+    database = _DuplicateNameDatabase()
+
+    apply_ddl_statements(database, ["CREATE TABLE runs (run_id INT64 NOT NULL) PRIMARY KEY (run_id)"])
+
+    assert [call["statements"][0] for call in database.ddl_calls] == [
+        "CREATE TABLE runs (run_id INT64 NOT NULL) PRIMARY KEY (run_id)"
     ]
 
 
@@ -540,6 +562,35 @@ def test_spanner_phase14_repository_round_trips_core_records() -> None:
         metadata={"rows_written": 2},
     )
     repository.write_phase_metric(metric)
+    phase_substeps = [
+        PhaseSubstepRecord(
+            run_id="run_001",
+            phase_name="phase2",
+            step_name="merge_batch",
+            step_key="semantic_batch_0001",
+            status="succeeded",
+            started_at=datetime(2026, 4, 8, 18, 0, tzinfo=UTC),
+            ended_at=datetime(2026, 4, 8, 18, 0, 5, tzinfo=UTC),
+            duration_ms=5000.0,
+            error_payload=None,
+            query_version="graph-v1",
+            metadata={"prompt_chars": 1234, "response_chars": 321},
+        ),
+        PhaseSubstepRecord(
+            run_id="run_001",
+            phase_name="phase4",
+            step_name="pooled_review",
+            step_key="pooled_review",
+            status="skipped",
+            started_at=datetime(2026, 4, 8, 18, 2, tzinfo=UTC),
+            ended_at=datetime(2026, 4, 8, 18, 2, tzinfo=UTC),
+            duration_ms=0.0,
+            error_payload=None,
+            query_version="graph-v1",
+            metadata={"candidate_count": 0},
+        ),
+    ]
+    repository.write_phase_substeps(run_id="run_001", substeps=phase_substeps)
 
     job = Phase24JobRecord(
         run_id="run_001",
@@ -586,6 +637,7 @@ def test_spanner_phase14_repository_round_trips_core_records() -> None:
         subgraph_provenance[0],
     ]
     assert repository.list_phase_metrics(run_id="run_001") == [metric]
+    assert repository.list_phase_substeps(run_id="run_001") == phase_substeps
     assert repository.get_phase24_job("run_001") == job
 
     stored_clip_row = database.storage["clip_candidates"][0]
@@ -763,7 +815,7 @@ def test_spanner_phase14_repository_bootstrap_schema_uses_configured_timeout() -
 
     repository.bootstrap_schema()
 
-    assert database.ddl_calls[0]["operation_id"].startswith("phase14-bootstrap-")
+    assert database.ddl_calls[0]["operation_id"].startswith("phase14_bootstrap_")
     assert database.ddl_calls[0]["statements"]
     assert database.ddl_calls and database.ddl_calls[0]
     assert database.last_operation is not None
@@ -1098,6 +1150,22 @@ def test_spanner_phase14_repository_delete_run_cascades_all_run_scoped_tables() 
             metadata={},
         )
     )
+    repository.write_phase_substeps(
+        run_id="run_del_001",
+        substeps=[
+            PhaseSubstepRecord(
+                run_id="run_del_001",
+                phase_name="phase4",
+                step_name="pooled_review",
+                step_key="pooled_review",
+                status="succeeded",
+                started_at=now,
+                ended_at=now,
+                duration_ms=1.0,
+                metadata={},
+            )
+        ],
+    )
     repository.upsert_phase24_job(
         Phase24JobRecord(
             run_id="run_del_001",
@@ -1127,4 +1195,5 @@ def test_spanner_phase14_repository_delete_run_cascades_all_run_scoped_tables() 
     assert repository.list_candidate_signal_links(run_id="run_del_001") == []
     assert repository.list_subgraph_provenance(run_id="run_del_001") == []
     assert repository.list_phase_metrics(run_id="run_del_001") == []
+    assert repository.list_phase_substeps(run_id="run_del_001") == []
     assert repository.get_phase24_job("run_del_001") is None

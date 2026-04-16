@@ -1,9 +1,9 @@
-# Clypt V3.1 Spec: Single-H200 Local Phase 2-4 with Qwen3.5-122B-A10B-GPTQ-Int4
+# Clypt V3.1 Spec: Single-H200 Local Phase 2-4 with Qwen3.5-122B-A10B-GPTQ-Int4 (Historical)
 
-**Status:** Draft v1  
+**Status:** Superseded (historical reference)  
 **Date:** 2026-04-14  
 **Owner:** Backend runtime / inference  
-**Scope:** Replace Gemini generation calls in Phase 2-4 and signal LLM paths with self-hosted Qwen on a single H200 while preserving existing typed JSON contracts, validators, Vertex embeddings, GCS storage, and Spanner graph persistence.
+**Scope:** Historical vLLM-Qwen migration plan retained for context only. Active source of truth is `2026-04-15_qwen_sglang_full_cutover_spec.md`.
 
 ---
 
@@ -45,7 +45,7 @@
 
 - Phase 1 runs on DO GPU host (VibeVoice + RF-DETR pipeline).
 - Phase 2-4 run through remote worker entrypoint (`Cloud Tasks -> phase24_worker_app` path).
-- Generation calls route through `VertexGeminiClient`.
+- Generation calls route through `VertexGenerationClient`.
 - Embeddings route through Vertex.
 
 ### 3.2 Target (Single-H200 Full Hosting)
@@ -212,7 +212,6 @@ Add new environment variables (names final after implementation review):
 - `CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.5-122B-A10B-GPTQ-Int4`
 - `CLYPT_LOCAL_LLM_TIMEOUT_S`
 - `CLYPT_LOCAL_LLM_MAX_RETRIES`
-- `CLYPT_LOCAL_LLM_ENABLE_THINKING=0|1`
 - `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
 - `CLYPT_PHASE24_LOCAL_QUEUE_PATH`
 - `CLYPT_PHASE24_LOCAL_MAX_INFLIGHT`

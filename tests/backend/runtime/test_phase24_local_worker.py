@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import time
+import urllib.error
 from pathlib import Path
 
+import pytest
+
+from backend.runtime.phase24_error_policy import Phase24FailFastError
 from backend.runtime.phase24_local_queue import Phase24LocalQueue
 from backend.runtime.phase24_local_worker import Phase24LocalWorkerLoop
 from backend.runtime.phase24_worker_app import Phase24TaskPayload
@@ -182,3 +187,45 @@ def test_phase24_local_worker_blocks_dequeue_when_phase1_active(tmp_path: Path) 
     assert loop.run_once() is False
     assert queue.get_job(job_id)["status"] == "queued"
     assert service.calls == 0
+
+
+class _ConnectionRefusedService:
+    max_attempts = 3
+
+    def handle_task(self, payload: Phase24TaskPayload, *, job_id: str, attempt: int) -> dict:
+        raise urllib.error.URLError("[Errno 111] Connection refused")
+
+
+def test_phase24_local_worker_fail_fast_on_connection_refused(tmp_path: Path) -> None:
+    queue = Phase24LocalQueue(tmp_path / "connrefused.sqlite")
+    job_id = queue.enqueue("run-connrefused", _payload_dict("run-connrefused"))
+    loop = Phase24LocalWorkerLoop(
+        queue=queue,
+        service=_ConnectionRefusedService(),
+        worker_id="unit-test",
+        poll_interval_s=0.01,
+        lease_timeout_s=60,
+    )
+    with pytest.raises(Phase24FailFastError, match="fail-fast crash"):
+        loop.run_once()
+    row = queue.get_job(job_id)
+    assert row is not None
+    assert row["status"] == "failed"
+
+
+def test_phase24_local_worker_fail_fast_on_stale_running_lease(tmp_path: Path) -> None:
+    queue = Phase24LocalQueue(tmp_path / "stale.sqlite")
+    queue.enqueue("run-stale", _payload_dict("run-stale"))
+    claimed = queue.claim_next("worker-a", lease_timeout_s=1, reclaim_expired_leases=False)
+    assert claimed is not None
+    time.sleep(1.25)
+
+    loop = Phase24LocalWorkerLoop(
+        queue=queue,
+        service=_NoopService(),
+        worker_id="unit-test",
+        poll_interval_s=0.01,
+        lease_timeout_s=1,
+    )
+    with pytest.raises(Phase24FailFastError, match="stale running lease"):
+        loop.run_once()

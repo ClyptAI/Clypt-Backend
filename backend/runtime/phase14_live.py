@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from pathlib import Path
@@ -29,7 +29,9 @@ from backend.pipeline.graph.runtime import (
 )
 from backend.pipeline.graph.structural_edges import build_structural_edges
 from backend.pipeline.semantics.runtime import (
-    embed_semantic_nodes_live,
+    apply_node_embeddings,
+    embed_multimodal_media_live,
+    embed_text_semantic_nodes_live,
     prepare_node_media_embeddings,
     run_merge_classify_and_reconcile,
 )
@@ -50,6 +52,7 @@ from backend.repository import (
     ExternalSignalRecord,
     Phase14Repository,
     PhaseMetricRecord,
+    PhaseSubstepRecord,
     NodeSignalLinkRecord,
     PromptSourceLinkRecord,
     SemanticEdgeRecord,
@@ -60,6 +63,12 @@ from backend.repository import (
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
+_PHASE4_PROMPT_SOURCE_PRIORITY = {
+    "general": 0,
+    "comment": 1,
+    "trend": 2,
+}
+_PHASE4_POOL_CANDIDATES_PER_CALL = 12
 
 
 @dataclass(slots=True)
@@ -67,13 +76,16 @@ class V31LivePhase14Runner:
     config: V31Config
     llm_client: Any
     embedding_client: Any
-    flash_model: str = "gemini-3-flash-preview"
+    flash_model: str = "Qwen/Qwen3.5-27B"
     storage_client: Any | None = None
     node_media_preparer: Any | None = None
     repository: Phase14Repository | None = None
     query_version: str | None = None
     debug_snapshots: bool = False
     log_event: Callable[..., None] | None = None
+    _prefetched_phase3_local_future: Any | None = field(default=None, init=False, repr=False)
+    _prefetched_phase3_local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _prefetched_phase3_local_node_ids: tuple[str, ...] | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def from_env(
@@ -81,8 +93,9 @@ class V31LivePhase14Runner:
         *,
         llm_client: Any,
         embedding_client: Any,
-        flash_model: str = "gemini-3-flash-preview",
+        flash_model: str = "Qwen/Qwen3.5-27B",
         storage_client: Any | None = None,
+        node_media_preparer: Any | None = None,
         repository: Phase14Repository | None = None,
         query_version: str | None = None,
         debug_snapshots: bool = False,
@@ -94,6 +107,7 @@ class V31LivePhase14Runner:
             embedding_client=embedding_client,
             flash_model=flash_model,
             storage_client=storage_client,
+            node_media_preparer=node_media_preparer,
             repository=repository,
             query_version=query_version,
             debug_snapshots=debug_snapshots,
@@ -103,18 +117,157 @@ class V31LivePhase14Runner:
     def build_run_paths(self, *, run_id: str) -> V31RunPaths:
         return build_run_paths(output_root=self.config.output_root, run_id=run_id)
 
+    def _apply_phase4_prompt_budget(
+        self,
+        *,
+        general_prompt_specs: list[SignalPromptSpec],
+        augmentation_prompt_specs: list[SignalPromptSpec],
+    ) -> tuple[list[SignalPromptSpec], dict[str, Any]]:
+        all_prompt_specs = [*general_prompt_specs, *augmentation_prompt_specs]
+        max_total_prompts = max(1, int(self.config.phase4_budget.max_total_prompts))
+        selected_prompt_specs = list(all_prompt_specs)
+        if len(all_prompt_specs) > max_total_prompts:
+            ranked = sorted(
+                enumerate(all_prompt_specs),
+                key=lambda item: (
+                    _PHASE4_PROMPT_SOURCE_PRIORITY.get(item[1].prompt_source_type, 99),
+                    item[0],
+                ),
+            )
+            kept_indices = {idx for idx, _ in ranked[:max_total_prompts]}
+            selected_prompt_specs = [
+                prompt_spec
+                for idx, prompt_spec in enumerate(all_prompt_specs)
+                if idx in kept_indices
+            ]
+
+        dropped_prompt_specs = [
+            prompt_spec
+            for prompt_spec in all_prompt_specs
+            if prompt_spec.prompt_id not in {item.prompt_id for item in selected_prompt_specs}
+        ]
+        return selected_prompt_specs, {
+            "max_total_prompts": max_total_prompts,
+            "input_prompt_count": len(all_prompt_specs),
+            "selected_prompt_count": len(selected_prompt_specs),
+            "dropped_prompt_count": len(dropped_prompt_specs),
+            "selected_prompt_ids": [item.prompt_id for item in selected_prompt_specs],
+            "dropped_prompt_ids": [item.prompt_id for item in dropped_prompt_specs],
+            "general_prompt_count": len(general_prompt_specs),
+            "augmentation_prompt_count": len(augmentation_prompt_specs),
+            "selected_prompt_source_counts": {
+                "general": sum(1 for item in selected_prompt_specs if item.prompt_source_type == "general"),
+                "comment": sum(1 for item in selected_prompt_specs if item.prompt_source_type == "comment"),
+                "trend": sum(1 for item in selected_prompt_specs if item.prompt_source_type == "trend"),
+            },
+        }
+
+    def _apply_phase4_subgraph_budget(
+        self,
+        *,
+        subgraphs: list[Any],
+        seeds: list[dict[str, Any]],
+    ) -> tuple[list[Any], dict[str, Any]]:
+        max_subgraphs = max(1, int(self.config.phase4_budget.max_subgraphs_per_run))
+        selected_subgraphs = list(subgraphs)
+        seed_by_node_id = {
+            str(seed.get("node_id")): dict(seed)
+            for seed in seeds
+            if seed.get("node_id") is not None
+        }
+        if len(subgraphs) > max_subgraphs:
+            ranked = sorted(
+                subgraphs,
+                key=lambda subgraph: (
+                    -float(seed_by_node_id.get(subgraph.seed_node_id, {}).get("retrieval_score") or 0.0),
+                    -len(list(subgraph.source_prompt_ids or [])),
+                    -len(list(subgraph.nodes or [])),
+                    int(subgraph.start_ms),
+                    str(subgraph.subgraph_id),
+                ),
+            )
+            selected_subgraphs = ranked[:max_subgraphs]
+
+        dropped_subgraphs = [
+            subgraph
+            for subgraph in subgraphs
+            if subgraph.subgraph_id not in {item.subgraph_id for item in selected_subgraphs}
+        ]
+        return selected_subgraphs, {
+            "max_subgraphs_per_run": max_subgraphs,
+            "input_subgraph_count": len(subgraphs),
+            "selected_subgraph_count": len(selected_subgraphs),
+            "dropped_subgraph_count": len(dropped_subgraphs),
+            "selected_subgraph_ids": [item.subgraph_id for item in selected_subgraphs],
+            "dropped_subgraph_ids": [item.subgraph_id for item in dropped_subgraphs],
+        }
+
+    def _apply_phase4_pool_candidate_budget(
+        self,
+        *,
+        candidates: list[ClipCandidate],
+    ) -> tuple[list[ClipCandidate], dict[str, Any]]:
+        max_review_calls = max(0, int(self.config.phase4_budget.max_final_review_calls))
+        max_pool_candidates = max_review_calls * _PHASE4_POOL_CANDIDATES_PER_CALL
+        if max_pool_candidates <= 0:
+            return [], {
+                "max_final_review_calls": max_review_calls,
+                "max_pool_candidates": 0,
+                "input_candidate_count": len(candidates),
+                "budget_selected_candidate_count": 0,
+                "budget_dropped_candidate_count": len(candidates),
+                "budget_selected_candidate_ids": [],
+                "budget_dropped_candidate_ids": [
+                    candidate.clip_id or f"cand_tmp_{idx:03d}"
+                    for idx, candidate in enumerate(candidates, start=1)
+                ],
+            }
+
+        ranked = sorted(
+            candidates,
+            key=lambda candidate: (
+                -float(candidate.score),
+                -(1 if bool(candidate.query_aligned) else 0),
+                -len(list(candidate.source_prompt_ids or [])),
+                int(candidate.start_ms),
+                str(candidate.clip_id or ""),
+            ),
+        )
+        selected_candidates = ranked[:max_pool_candidates]
+        dropped_candidates = ranked[max_pool_candidates:]
+        return selected_candidates, {
+            "max_final_review_calls": max_review_calls,
+            "max_pool_candidates": max_pool_candidates,
+            "input_candidate_count": len(candidates),
+            "budget_selected_candidate_count": len(selected_candidates),
+            "budget_dropped_candidate_count": len(dropped_candidates),
+            "budget_selected_candidate_ids": [
+                candidate.clip_id or f"cand_tmp_{idx:03d}"
+                for idx, candidate in enumerate(selected_candidates, start=1)
+            ],
+            "budget_dropped_candidate_ids": [
+                candidate.clip_id or f"cand_tmp_{idx:03d}"
+                for idx, candidate in enumerate(dropped_candidates, start=1)
+            ],
+        }
+
     def run(
         self,
         *,
         run_id: str,
         source_url: str,
         phase1_outputs: Phase1SidecarOutputs,
-        phase3_long_range_top_k: int = 3,
+        phase3_long_range_top_k: int | None = None,
         phase4_extra_prompt_texts: list[str] | None = None,
         job_id: str | None = None,
         attempt: int = 1,
     ) -> Phase14RunSummary:
         paths = self.build_run_paths(run_id=run_id)
+        effective_phase3_long_range_top_k = (
+            phase3_long_range_top_k
+            if phase3_long_range_top_k is not None
+            else self.config.phase3_long_range_top_k
+        )
 
         resume_phase = self._get_resume_phase(run_id=run_id)
         if resume_phase == "phase4":
@@ -205,10 +358,12 @@ class V31LivePhase14Runner:
                             canonical_timeline=phase1["canonical_timeline"],
                             speech_emotion_timeline=phase1["speech_emotion_timeline"],
                             audio_event_timeline=phase1["audio_event_timeline"],
+                            raw_nodes_ready_callback=self._start_prefetched_phase3_local_lane,
                         ),
                         metric_metadata_builder=lambda payload: {"node_count": len(payload["nodes"])},
                     )
                 except Exception:
+                    self._discard_prefetched_phase3_local_lane()
                     self._cancel_signal_future(
                         run_id=run_id,
                         job_id=job_id,
@@ -267,11 +422,12 @@ class V31LivePhase14Runner:
                         operation=lambda: self.run_phase_3(
                             paths=paths,
                             nodes=phase2_nodes,
-                            long_range_top_k=phase3_long_range_top_k,
+                            long_range_top_k=effective_phase3_long_range_top_k,
                         ),
                         metric_metadata_builder=lambda payload: {"edge_count": len(payload["edges"])},
                     )
                 except Exception:
+                    self._discard_prefetched_phase3_local_lane()
                     self._cancel_signal_future(
                         run_id=run_id,
                         job_id=job_id,
@@ -366,6 +522,7 @@ class V31LivePhase14Runner:
             )
             raise
         finally:
+            self._discard_prefetched_phase3_local_lane()
             signal_executor.shutdown(wait=False, cancel_futures=True)
 
         return self._finish_phase24_success(
@@ -433,7 +590,10 @@ class V31LivePhase14Runner:
         canonical_timeline,
         speech_emotion_timeline,
         audio_event_timeline,
+        raw_nodes_ready_callback: Callable[[list[SemanticGraphNode]], None] | None = None,
     ) -> dict[str, Any]:
+        phase2_substeps: list[PhaseSubstepRecord] = []
+        merge_boundary_started_at = datetime.now(UTC)
         merge_boundary_started = time.perf_counter()
         nodes, merge_debug, boundary_debug = run_merge_classify_and_reconcile(
             canonical_timeline=canonical_timeline,
@@ -445,14 +605,70 @@ class V31LivePhase14Runner:
             merge_max_output_tokens=self.config.phase2_merge_max_output_tokens,
             boundary_max_output_tokens=self.config.phase2_boundary_max_output_tokens,
             model=self.flash_model,
-            max_concurrent=self.config.gemini_max_concurrent,
-            merge_thinking_level=self.config.phase2_merge_thinking_level,
-            boundary_thinking_level=self.config.phase2_boundary_thinking_level,
+            max_concurrent=self.config.phase2_max_concurrent,
+            boundary_max_concurrent=self.config.phase2_boundary_max_concurrent,
         )
-        logger.info("[phase2] merge+boundary total done in %.1f s", time.perf_counter() - merge_boundary_started)
-        if self.node_media_preparer is not None:
-            multimodal_media = self.node_media_preparer(nodes=nodes, paths=paths, phase1_outputs=phase1_outputs)
-        else:
+        merge_boundary_duration_ms = (time.perf_counter() - merge_boundary_started) * 1000.0
+        merge_boundary_ended_at = datetime.now(UTC)
+        logger.info("[phase2] merge+boundary total done in %.1f s", merge_boundary_duration_ms / 1000.0)
+        phase2_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase2",
+                step_name="merge_boundary_total",
+                step_key="merge_boundary_total",
+                status="succeeded",
+                started_at=merge_boundary_started_at,
+                ended_at=merge_boundary_ended_at,
+                duration_ms=merge_boundary_duration_ms,
+                metadata={
+                    "merge_batch_count": len(merge_debug),
+                    "boundary_seam_count": len(boundary_debug),
+                    "node_count": len(nodes),
+                },
+            )
+        )
+        for item in merge_debug:
+            diagnostics = dict(item.get("diagnostics") or {})
+            phase2_substeps.append(
+                self._make_phase_substep_record(
+                    run_id=paths.run_id,
+                    phase_name="phase2",
+                    step_name="merge_batch",
+                    step_key=str(item.get("batch_id") or f"merge_batch_{len(phase2_substeps):04d}"),
+                    status="succeeded",
+                    duration_ms=float(diagnostics.get("latency_ms") or 0.0),
+                    metadata=diagnostics,
+                )
+            )
+        for item in boundary_debug:
+            diagnostics = dict(item.get("diagnostics") or {})
+            seam_key = f"{item.get('left_batch_id', 'left')}__{item.get('right_batch_id', 'right')}"
+            phase2_substeps.append(
+                self._make_phase_substep_record(
+                    run_id=paths.run_id,
+                    phase_name="phase2",
+                    step_name="boundary_seam",
+                    step_key=seam_key,
+                    status="succeeded",
+                    duration_ms=float(diagnostics.get("latency_ms") or 0.0),
+                    metadata={
+                        **diagnostics,
+                        "left_batch_id": item.get("left_batch_id"),
+                        "right_batch_id": item.get("right_batch_id"),
+                    },
+                )
+            )
+        if raw_nodes_ready_callback is not None:
+            raw_nodes_ready_callback(nodes)
+        media_started_at = datetime.now(UTC)
+        media_started = time.perf_counter()
+        semantic_started_at = datetime.now(UTC)
+        semantic_started = time.perf_counter()
+
+        def _prepare_multimodal_media() -> list[dict[str, str]]:
+            if self.node_media_preparer is not None:
+                return self.node_media_preparer(nodes=nodes, paths=paths, phase1_outputs=phase1_outputs)
             local_video_path = (phase1_outputs.phase1_audio or {}).get("local_video_path")
             if not local_video_path:
                 raise ValueError(
@@ -460,25 +676,87 @@ class V31LivePhase14Runner:
                 )
             if self.storage_client is None:
                 raise ValueError("storage_client is required for live multimodal node embeddings.")
-            media_started = time.perf_counter()
-            multimodal_media = prepare_node_media_embeddings(
+            return prepare_node_media_embeddings(
                 nodes=nodes,
                 source_video_path=Path(local_video_path),
                 clips_dir=paths.semantics_dir / "node_media_clips",
                 storage_client=self.storage_client,
                 object_prefix=f"phase14/{paths.run_id}/node_media",
             )
-            logger.info(
-                "[phase2] node clip extraction+upload done in %.1f s (nodes=%d)",
-                time.perf_counter() - media_started,
-                len(nodes),
+
+        with ThreadPoolExecutor(max_workers=2) as phase2_pool:
+            semantic_future = phase2_pool.submit(
+                embed_text_semantic_nodes_live,
+                nodes=nodes,
+                embedding_client=self.embedding_client,
             )
-        embedded_nodes = embed_semantic_nodes_live(
-            nodes=nodes,
-            embedding_client=self.embedding_client,
+            media_future = phase2_pool.submit(_prepare_multimodal_media)
+            multimodal_media = media_future.result()
+            semantic_embeddings, semantic_diagnostics = semantic_future.result()
+
+        logger.info(
+            "[phase2] node clip extraction+upload done in %.1f s (nodes=%d)",
+            time.perf_counter() - media_started,
+            len(nodes),
+        )
+        media_duration_ms = (time.perf_counter() - media_started) * 1000.0
+        media_ended_at = datetime.now(UTC)
+        phase2_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase2",
+                step_name="media_prep",
+                step_key="node_media",
+                status="succeeded",
+                started_at=media_started_at,
+                ended_at=media_ended_at,
+                duration_ms=media_duration_ms,
+                metadata={
+                    "node_count": len(nodes),
+                    "prepared_media_count": len(multimodal_media),
+                    "media_backend": "custom_preparer" if self.node_media_preparer is not None else "local_storage_upload",
+                },
+            )
+        )
+        phase2_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase2",
+                step_name="semantic_embedding",
+                step_key="semantic_embedding",
+                status="succeeded",
+                started_at=semantic_started_at,
+                ended_at=datetime.now(UTC),
+                duration_ms=float(semantic_diagnostics.get("semantic_duration_ms") or 0.0),
+                metadata=semantic_diagnostics,
+            )
+        )
+        multimodal_started_at = datetime.now(UTC)
+        multimodal_embeddings, multimodal_diagnostics = embed_multimodal_media_live(
             multimodal_media=multimodal_media,
+            embedding_client=self.embedding_client,
+        )
+        phase2_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase2",
+                step_name="multimodal_embedding",
+                step_key="multimodal_embedding",
+                status="succeeded",
+                started_at=multimodal_started_at,
+                ended_at=datetime.now(UTC),
+                duration_ms=float(multimodal_diagnostics.get("multimodal_duration_ms") or 0.0),
+                metadata=multimodal_diagnostics,
+            )
+        )
+        embedded_nodes = apply_node_embeddings(
+            nodes=nodes,
+            semantic_embeddings=semantic_embeddings,
+            multimodal_embeddings=multimodal_embeddings,
         )
         if self.repository is not None:
+            persist_started_at = datetime.now(UTC)
+            persist_started = time.perf_counter()
             self.repository.write_nodes(
                 run_id=paths.run_id,
                 nodes=[
@@ -500,6 +778,20 @@ class V31LivePhase14Runner:
                     for node in embedded_nodes
                 ],
             )
+            phase2_substeps.append(
+                self._make_phase_substep_record(
+                    run_id=paths.run_id,
+                    phase_name="phase2",
+                    step_name="persist_nodes",
+                    step_key="semantic_nodes",
+                    status="succeeded",
+                    started_at=persist_started_at,
+                    ended_at=datetime.now(UTC),
+                    duration_ms=(time.perf_counter() - persist_started) * 1000.0,
+                    metadata={"node_count": len(embedded_nodes)},
+                )
+            )
+        self._write_phase_substeps(run_id=paths.run_id, substeps=phase2_substeps)
         self._save_debug_json(paths.semantic_graph_nodes, [node.model_dump(mode="json") for node in embedded_nodes])
         self._save_debug_json(paths.merge_debug, merge_debug)
         self._save_debug_json(paths.classification_debug, [node.model_dump(mode="json") for node in embedded_nodes])
@@ -514,27 +806,95 @@ class V31LivePhase14Runner:
         nodes: list[SemanticGraphNode],
         long_range_top_k: int,
     ) -> dict[str, Any]:
+        phase3_substeps: list[PhaseSubstepRecord] = []
         structural_edges = build_structural_edges(nodes=nodes)
-        local_started = time.perf_counter()
-        local_edges, local_debug = run_local_semantic_edge_batches(
-            nodes=nodes,
-            llm_client=self.llm_client,
-            target_batch_count=self.config.phase3_target_batch_count,
-            max_nodes_per_batch=self.config.phase3_max_nodes_per_batch,
-            model=self.flash_model,
-            max_concurrent=self.config.gemini_max_concurrent,
-            thinking_level=self.config.phase3_local_thinking_level,
+        long_range_started_at = datetime.now(UTC)
+        prefetched_local = self._consume_prefetched_phase3_local_lane(nodes=nodes)
+        local_started_at = datetime.now(UTC)
+
+        try:
+            with ThreadPoolExecutor(max_workers=1 if prefetched_local is not None else 2) as phase3_pool:
+                if prefetched_local is None:
+                    local_future = phase3_pool.submit(self._run_phase_3_local_lane, nodes=nodes)
+                else:
+                    local_future = prefetched_local
+                long_range_future = phase3_pool.submit(
+                    self._run_phase_3_long_range_lane,
+                    nodes=nodes,
+                    long_range_top_k=long_range_top_k,
+                )
+                local_edges, local_debug, local_duration_ms = local_future.result()
+                long_range_edges, long_range_debug, long_range_duration_ms = long_range_future.result()
+        finally:
+            if self._prefetched_phase3_local_executor is not None:
+                self._prefetched_phase3_local_executor.shutdown(wait=False, cancel_futures=True)
+                self._prefetched_phase3_local_executor = None
+
+        logger.info("[phase3] local semantic edges done in %.1f s", local_duration_ms / 1000.0)
+        phase3_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase3",
+                step_name="local_edges_total",
+                step_key="local_edges_total",
+                status="succeeded",
+                started_at=local_started_at,
+                ended_at=datetime.now(UTC),
+                duration_ms=local_duration_ms,
+                metadata={
+                    "batch_count": len(local_debug),
+                    "edge_count": len(local_edges),
+                },
+            )
         )
-        logger.info("[phase3] local semantic edges done in %.1f s", time.perf_counter() - local_started)
-        long_range_started = time.perf_counter()
-        long_range_edges, long_range_debug = run_long_range_edge_adjudication(
-            nodes=nodes,
-            llm_client=self.llm_client,
-            top_k=long_range_top_k,
-            model=self.flash_model,
-            thinking_level=self.config.phase3_long_range_thinking_level,
+        for item in local_debug:
+            diagnostics = dict(item.get("diagnostics") or {})
+            phase3_substeps.append(
+                self._make_phase_substep_record(
+                    run_id=paths.run_id,
+                    phase_name="phase3",
+                    step_name="local_edge_batch",
+                    step_key=str(item.get("batch_id") or f"local_edge_batch_{len(phase3_substeps):04d}"),
+                    status="succeeded",
+                    duration_ms=float(diagnostics.get("latency_ms") or 0.0),
+                    metadata={
+                        **diagnostics,
+                        "sanitized_edge_count": int(item.get("sanitized_edge_count") or 0),
+                        "dropped_edge_count": int(item.get("dropped_edge_count") or 0),
+                    },
+                )
+            )
+
+        logger.info("[phase3] long-range adjudication done in %.1f s", long_range_duration_ms / 1000.0)
+        phase3_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase3",
+                step_name="long_range_adjudication",
+                step_key="long_range_adjudication",
+                status="succeeded",
+                started_at=long_range_started_at,
+                ended_at=datetime.now(UTC),
+                duration_ms=long_range_duration_ms,
+                metadata={
+                    **dict(long_range_debug.get("diagnostics") or {}),
+                    "shard_count": len(list(long_range_debug.get("shards") or [])),
+                },
+            )
         )
-        logger.info("[phase3] long-range adjudication done in %.1f s", time.perf_counter() - long_range_started)
+        for shard_debug in list(long_range_debug.get("shards") or []):
+            diagnostics = dict(shard_debug.get("diagnostics") or {})
+            phase3_substeps.append(
+                self._make_phase_substep_record(
+                    run_id=paths.run_id,
+                    phase_name="phase3",
+                    step_name="long_range_shard",
+                    step_key=str(shard_debug.get("shard_id") or f"long_range_shard_{len(phase3_substeps):04d}"),
+                    status="succeeded",
+                    duration_ms=float(diagnostics.get("latency_ms") or 0.0),
+                    metadata=diagnostics,
+                )
+            )
         reconciled_semantic_edges = reconcile_semantic_edges(edges=[*local_edges, *long_range_edges])
         final_edges: list[SemanticGraphEdge] = [*structural_edges, *reconciled_semantic_edges]
         if self.repository is not None:
@@ -555,11 +915,91 @@ class V31LivePhase14Runner:
                     for edge in final_edges
                 ],
             )
-            logger.info("[phase3] edge persistence done in %.1f s", time.perf_counter() - persist_started)
+            persist_duration_ms = (time.perf_counter() - persist_started) * 1000.0
+            logger.info("[phase3] edge persistence done in %.1f s", persist_duration_ms / 1000.0)
+            phase3_substeps.append(
+                self._make_phase_substep_record(
+                    run_id=paths.run_id,
+                    phase_name="phase3",
+                    step_name="persist_edges",
+                    step_key="semantic_edges",
+                    status="succeeded",
+                    duration_ms=persist_duration_ms,
+                    metadata={"edge_count": len(final_edges)},
+                )
+            )
+        self._write_phase_substeps(run_id=paths.run_id, substeps=phase3_substeps)
         self._save_debug_json(paths.semantic_graph_edges, [edge.model_dump(mode="json") for edge in final_edges])
         self._save_debug_json(paths.graph_dir / "local_semantic_edges_debug.json", local_debug)
         self._save_debug_json(paths.graph_dir / "long_range_edges_debug.json", long_range_debug)
         return {"edges": final_edges}
+
+    def _run_phase_3_local_lane(
+        self,
+        *,
+        nodes: list[SemanticGraphNode],
+    ) -> tuple[list[SemanticGraphEdge], list[dict[str, Any]], float]:
+        started = time.perf_counter()
+        local_edges, local_debug = run_local_semantic_edge_batches(
+            nodes=nodes,
+            llm_client=self.llm_client,
+            target_batch_count=self.config.phase3_target_batch_count,
+            max_nodes_per_batch=self.config.phase3_max_nodes_per_batch,
+            model=self.flash_model,
+            max_concurrent=self.config.phase3_local_max_concurrent,
+            max_output_tokens=self.config.phase3_local_max_output_tokens,
+        )
+        return local_edges, local_debug, (time.perf_counter() - started) * 1000.0
+
+    def _run_phase_3_long_range_lane(
+        self,
+        *,
+        nodes: list[SemanticGraphNode],
+        long_range_top_k: int,
+    ) -> tuple[list[SemanticGraphEdge], dict[str, Any], float]:
+        started = time.perf_counter()
+        long_range_edges, long_range_debug = run_long_range_edge_adjudication(
+            nodes=nodes,
+            llm_client=self.llm_client,
+            top_k=long_range_top_k,
+            model=self.flash_model,
+            max_output_tokens=self.config.phase3_long_range_max_output_tokens,
+            pairs_per_shard=self.config.phase3_long_range_pairs_per_shard,
+            max_concurrent=self.config.phase3_long_range_max_concurrent,
+        )
+        return long_range_edges, long_range_debug, (time.perf_counter() - started) * 1000.0
+
+    def _start_prefetched_phase3_local_lane(self, nodes: list[SemanticGraphNode]) -> None:
+        if self._prefetched_phase3_local_future is not None:
+            return
+        node_ids = tuple(node.node_id for node in nodes)
+        executor = ThreadPoolExecutor(max_workers=1)
+        self._prefetched_phase3_local_executor = executor
+        self._prefetched_phase3_local_node_ids = node_ids
+        self._prefetched_phase3_local_future = executor.submit(self._run_phase_3_local_lane, nodes=nodes)
+
+    def _consume_prefetched_phase3_local_lane(self, *, nodes: list[SemanticGraphNode]) -> Any | None:
+        if self._prefetched_phase3_local_future is None:
+            return None
+        node_ids = tuple(node.node_id for node in nodes)
+        if self._prefetched_phase3_local_node_ids != node_ids:
+            self._discard_prefetched_phase3_local_lane()
+            return None
+        future = self._prefetched_phase3_local_future
+        self._prefetched_phase3_local_future = None
+        self._prefetched_phase3_local_node_ids = None
+        return future
+
+    def _discard_prefetched_phase3_local_lane(self) -> None:
+        future = self._prefetched_phase3_local_future
+        executor = self._prefetched_phase3_local_executor
+        self._prefetched_phase3_local_future = None
+        self._prefetched_phase3_local_executor = None
+        self._prefetched_phase3_local_node_ids = None
+        if future is not None and hasattr(future, "cancel"):
+            future.cancel()
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def run_phase_4(
         self,
@@ -575,18 +1015,35 @@ class V31LivePhase14Runner:
         extra_prompt_texts: list[str],
         signal_output: SignalPipelineOutput | None = None,
     ) -> dict[str, Any]:
+        phase4_substeps: list[PhaseSubstepRecord] = []
         duration_s = 0.0
         if canonical_timeline.turns:
             duration_s = canonical_timeline.turns[-1].end_ms / 1000.0
+        meta_started_at = datetime.now(UTC)
         meta_started = time.perf_counter()
-        dynamic_prompts = generate_meta_prompts_live(
+        dynamic_prompts, meta_debug = generate_meta_prompts_live(
             nodes=nodes,
             llm_client=self.llm_client,
             model=self.flash_model,
             duration_s=duration_s,
-            thinking_level=self.config.phase4_meta_thinking_level,
+            max_output_tokens=self.config.phase4_meta_max_output_tokens,
+            return_debug=True,
         )
-        logger.info("[phase4] meta prompt generation done in %.1f s", time.perf_counter() - meta_started)
+        meta_duration_ms = (time.perf_counter() - meta_started) * 1000.0
+        logger.info("[phase4] meta prompt generation done in %.1f s", meta_duration_ms / 1000.0)
+        phase4_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase4",
+                step_name="meta_prompt_generation",
+                step_key="meta_prompt_generation",
+                status="succeeded",
+                started_at=meta_started_at,
+                ended_at=datetime.now(UTC),
+                duration_ms=meta_duration_ms,
+                metadata=meta_debug,
+            )
+        )
         signal_output = signal_output or SignalPipelineOutput()
         general_prompt_specs = [
             SignalPromptSpec(
@@ -597,24 +1054,88 @@ class V31LivePhase14Runner:
             for idx, text in enumerate([*dynamic_prompts, *extra_prompt_texts], start=1)
         ]
         augmentation_prompt_specs = list(signal_output.prompt_specs)
-        all_prompt_specs = [*general_prompt_specs, *augmentation_prompt_specs]
+        all_prompt_specs, prompt_budget_debug = self._apply_phase4_prompt_budget(
+            general_prompt_specs=general_prompt_specs,
+            augmentation_prompt_specs=augmentation_prompt_specs,
+        )
 
         prompt_source_links = self._build_prompt_source_links(run_id=paths.run_id, prompt_specs=all_prompt_specs)
 
-        embedded_prompts = embed_prompt_texts_live(
+        prompt_embedding_started_at = datetime.now(UTC)
+        embedded_prompts, prompt_embedding_debug = embed_prompt_texts_live(
             prompts=all_prompt_specs,
             embedding_client=self.embedding_client,
+            return_debug=True,
         )
+        phase4_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase4",
+                step_name="prompt_embedding",
+                step_key="prompt_embedding",
+                status="succeeded",
+                started_at=prompt_embedding_started_at,
+                ended_at=datetime.now(UTC),
+                duration_ms=float(prompt_embedding_debug.get("latency_ms") or 0.0),
+                metadata={**prompt_embedding_debug, **prompt_budget_debug},
+            )
+        )
+        seed_started_at = datetime.now(UTC)
+        seed_started = time.perf_counter()
         seeds = retrieve_seed_nodes(
             prompts=embedded_prompts,
             nodes=nodes,
             top_k_per_prompt=self.config.phase4_subgraphs.seed_top_k_per_prompt,
         )
+        seed_duration_ms = (time.perf_counter() - seed_started) * 1000.0
+        phase4_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase4",
+                step_name="seed_retrieval",
+                step_key="seed_retrieval",
+                status="succeeded",
+                started_at=seed_started_at,
+                ended_at=datetime.now(UTC),
+                duration_ms=seed_duration_ms,
+                metadata={
+                    "prompt_count": len(embedded_prompts),
+                    "node_count": len(nodes),
+                    "seed_count": len(seeds),
+                    "top_k_per_prompt": self.config.phase4_subgraphs.seed_top_k_per_prompt,
+                },
+            )
+        )
+        subgraph_build_started_at = datetime.now(UTC)
+        subgraph_build_started = time.perf_counter()
         subgraphs = build_local_subgraphs(
             seeds=seeds,
             nodes=nodes,
             edges=edges,
             config=self.config.phase4_subgraphs,
+        )
+        subgraphs, subgraph_budget_debug = self._apply_phase4_subgraph_budget(
+            subgraphs=subgraphs,
+            seeds=seeds,
+        )
+        subgraph_build_duration_ms = (time.perf_counter() - subgraph_build_started) * 1000.0
+        phase4_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase4",
+                step_name="subgraph_build",
+                step_key="subgraph_build",
+                status="succeeded",
+                started_at=subgraph_build_started_at,
+                ended_at=datetime.now(UTC),
+                duration_ms=subgraph_build_duration_ms,
+                metadata={
+                    **subgraph_budget_debug,
+                    "seed_count": len(seeds),
+                    "subgraph_count": len(subgraphs),
+                    "edge_count": len(edges),
+                },
+            )
         )
         subgraph_provenance = self._build_subgraph_provenance(
             run_id=paths.run_id,
@@ -626,23 +1147,71 @@ class V31LivePhase14Runner:
             for record in subgraph_provenance
         }
         if self.repository is not None and subgraph_provenance:
+            provenance_started_at = datetime.now(UTC)
+            provenance_started = time.perf_counter()
             self.repository.write_subgraph_provenance(run_id=paths.run_id, provenance=subgraph_provenance)
+            phase4_substeps.append(
+                self._make_phase_substep_record(
+                    run_id=paths.run_id,
+                    phase_name="phase4",
+                    step_name="persist_subgraph_provenance",
+                    step_key="subgraph_provenance",
+                    status="succeeded",
+                    started_at=provenance_started_at,
+                    ended_at=datetime.now(UTC),
+                    duration_ms=(time.perf_counter() - provenance_started) * 1000.0,
+                    metadata={"subgraph_count": len(subgraph_provenance)},
+                )
+            )
 
+        subgraph_review_started_at = datetime.now(UTC)
         subgraph_review_started = time.perf_counter()
         reviews, subgraph_debug = run_subgraph_reviews(
             subgraphs=subgraphs,
             llm_client=self.llm_client,
             model=self.flash_model,
-            max_concurrent=self.config.gemini_max_concurrent,
-            thinking_level=self.config.phase4_subgraph_thinking_level,
+            max_concurrent=self.config.phase4_subgraph_max_concurrent,
             subgraph_provenance_by_id=subgraph_provenance_by_id,
+            max_output_tokens=self.config.phase4_subgraph_max_output_tokens,
         )
-        logger.info("[phase4] subgraph reviews done in %.1f s", time.perf_counter() - subgraph_review_started)
+        subgraph_review_duration_ms = (time.perf_counter() - subgraph_review_started) * 1000.0
+        logger.info("[phase4] subgraph reviews done in %.1f s", subgraph_review_duration_ms / 1000.0)
         subgraph_review_diagnostics = [
             dict(item.get("diagnostics") or {})
             for item in subgraph_debug
             if isinstance(item, dict)
         ]
+        phase4_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase4",
+                step_name="subgraph_review_total",
+                step_key="subgraph_review_total",
+                status="succeeded",
+                started_at=subgraph_review_started_at,
+                ended_at=datetime.now(UTC),
+                duration_ms=subgraph_review_duration_ms,
+                metadata={"subgraph_count": len(subgraph_debug)},
+            )
+        )
+        for item in subgraph_debug:
+            if not isinstance(item, dict):
+                continue
+            diagnostics = dict(item.get("diagnostics") or {})
+            phase4_substeps.append(
+                self._make_phase_substep_record(
+                    run_id=paths.run_id,
+                    phase_name="phase4",
+                    step_name="subgraph_review",
+                    step_key=str(item.get("subgraph_id") or f"subgraph_review_{len(phase4_substeps):04d}"),
+                    status="succeeded",
+                    duration_ms=float(diagnostics.get("latency_ms") or 0.0),
+                    metadata={
+                        **diagnostics,
+                        "seed_node_id": item.get("seed_node_id"),
+                    },
+                )
+            )
 
         def _diag_mean(key: str) -> float:
             values = [float(diag.get(key) or 0.0) for diag in subgraph_review_diagnostics]
@@ -695,6 +1264,9 @@ class V31LivePhase14Runner:
         for review in reviews:
             raw_candidates.extend(review.candidates)
         deduped_candidates = dedupe_clip_candidates(candidates=raw_candidates)
+        pool_review_candidates, pool_budget_debug = self._apply_phase4_pool_candidate_budget(
+            candidates=deduped_candidates,
+        )
         pool_review_started = time.perf_counter()
         pool_review_debug: dict[str, Any] = {
             "candidate_count": len(deduped_candidates),
@@ -708,14 +1280,14 @@ class V31LivePhase14Runner:
             "response_chars": 0,
         }
         pooled = None
-        if deduped_candidates:
+        if pool_review_candidates:
             pooled, pool_review_debug = run_candidate_pool_review_with_debug(
-                candidates=deduped_candidates,
+                candidates=pool_review_candidates,
                 llm_client=self.llm_client,
                 model=self.flash_model,
-                thinking_level=self.config.phase4_pool_thinking_level,
+                max_output_tokens=self.config.phase4_pool_max_output_tokens,
             )
-        if deduped_candidates:
+        if pool_review_candidates:
             logger.info("[phase4] pooled candidate review done in %.1f s", time.perf_counter() - pool_review_started)
         self._emit_log(
             run_id=run_id,
@@ -723,15 +1295,27 @@ class V31LivePhase14Runner:
             phase="phase4",
             event="pooled_review_diagnostics",
             attempt=attempt,
-            status="success" if deduped_candidates else "skipped",
+            status="success" if pool_review_candidates else "skipped",
             **pool_review_debug,
+            **pool_budget_debug,
+        )
+        phase4_substeps.append(
+            self._make_phase_substep_record(
+                run_id=paths.run_id,
+                phase_name="phase4",
+                step_name="pooled_review",
+                step_key="pooled_review",
+                status="succeeded" if pool_review_candidates else "skipped",
+                duration_ms=float(pool_review_debug.get("latency_ms") or 0.0),
+                metadata={**pool_review_debug, **pool_budget_debug},
+            )
         )
 
         final_candidates: list[ClipCandidate] = []
         if pooled:
             candidate_by_id = {
                 (candidate.clip_id or f"cand_tmp_{idx:03d}"): candidate
-                for idx, candidate in enumerate(deduped_candidates, start=1)
+                for idx, candidate in enumerate(pool_review_candidates, start=1)
             }
             for decision in pooled.ranked_candidates:
                 candidate = candidate_by_id[decision.candidate_temp_id]
@@ -755,12 +1339,11 @@ class V31LivePhase14Runner:
             edges=edges,
             llm_client=self.llm_client,
             model=self.config.signals.llm.model_5,
-            thinking_level=self.config.signals.llm.thinking_5,
             max_hops=self.config.signals.max_hops,
             time_window_ms=self.config.signals.time_window_ms,
             fail_fast=self.config.signals.llm_fail_fast,
             signal_event_logger=self._build_signal_event_logger(run_id=run_id, job_id=job_id, attempt=attempt),
-            max_concurrent=self.config.gemini_max_concurrent,
+            max_concurrent=self.config.signals.max_concurrent,
         )
         self._emit_log(
             run_id=run_id,
@@ -795,6 +1378,7 @@ class V31LivePhase14Runner:
         for idx, candidate in enumerate(final_candidates):
             if not candidate.external_attribution_json:
                 continue
+            attribution_started_at = datetime.now(UTC)
             started = time.perf_counter()
             self._emit_log(
                 run_id=run_id,
@@ -805,13 +1389,11 @@ class V31LivePhase14Runner:
                 status="start",
                 callpoint_id="11",
                 model=self.config.signals.llm.model_11,
-                thinking_level=self.config.signals.llm.thinking_11,
             )
             try:
                 explanation = explain_candidate_attribution_with_llm(
                     llm_client=self.llm_client,
                     model=self.config.signals.llm.model_11,
-                    thinking_level=self.config.signals.llm.thinking_11,
                     evidence_payload=candidate.external_attribution_json,
                     fail_fast=self.config.signals.llm_fail_fast,
                 )
@@ -838,8 +1420,24 @@ class V31LivePhase14Runner:
                 status="success",
                 callpoint_id="11",
                 model=self.config.signals.llm.model_11,
-                thinking_level=self.config.signals.llm.thinking_11,
                 latency_ms=duration_ms,
+            )
+            phase4_substeps.append(
+                self._make_phase_substep_record(
+                    run_id=paths.run_id,
+                    phase_name="signals",
+                    step_name="candidate_attribution_explanation",
+                    step_key=str(candidate.clip_id or f"candidate_{idx:03d}"),
+                    status="succeeded",
+                    started_at=attribution_started_at,
+                    ended_at=datetime.now(UTC),
+                    duration_ms=duration_ms,
+                    metadata={
+                        "callpoint_id": "11",
+                        "candidate_index": idx,
+                        "clip_id": candidate.clip_id,
+                    },
+                )
             )
             enriched = dict(candidate.external_attribution_json)
             enriched["explanation"] = explanation
@@ -947,6 +1545,7 @@ class V31LivePhase14Runner:
                     for link in candidate_signal_links
                 ],
             )
+        self._write_phase_substeps(run_id=paths.run_id, substeps=phase4_substeps)
 
         self._save_debug_json(
             paths.candidates_dir / "meta_prompts_debug.json",
@@ -1726,6 +2325,54 @@ class V31LivePhase14Runner:
                 metadata=metadata or {},
             )
         )
+
+    def _make_phase_substep_record(
+        self,
+        *,
+        run_id: str,
+        phase_name: str,
+        step_name: str,
+        step_key: str,
+        status: str,
+        duration_ms: float | None = None,
+        started_at: datetime | None = None,
+        ended_at: datetime | None = None,
+        error_payload: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> PhaseSubstepRecord:
+        record_started_at = started_at or datetime.now(UTC)
+        if ended_at is not None:
+            record_ended_at = ended_at
+        elif duration_ms is not None:
+            record_ended_at = record_started_at + timedelta(milliseconds=max(0.0, duration_ms))
+        else:
+            record_ended_at = record_started_at
+        return PhaseSubstepRecord(
+            run_id=run_id,
+            phase_name=phase_name,
+            step_name=step_name,
+            step_key=str(step_key)[:256],
+            status=status,
+            started_at=record_started_at,
+            ended_at=record_ended_at,
+            duration_ms=duration_ms,
+            error_payload=error_payload,
+            query_version=self.query_version,
+            metadata=metadata or {},
+        )
+
+    def _write_phase_substeps(
+        self,
+        *,
+        run_id: str,
+        substeps: list[PhaseSubstepRecord],
+    ) -> None:
+        if not substeps or self.repository is None:
+            return
+        write_phase_substeps = getattr(self.repository, "write_phase_substeps", None)
+        if not callable(write_phase_substeps):
+            return
+        write_phase_substeps(run_id=run_id, substeps=substeps)
 
     def _emit_log(
         self,

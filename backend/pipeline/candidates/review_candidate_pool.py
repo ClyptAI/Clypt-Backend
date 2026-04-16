@@ -13,14 +13,14 @@ def _candidate_temp_id_map(candidates: list[ClipCandidate]) -> dict[str, ClipCan
     return mapping
 
 
-def review_candidate_pool(*, candidates: list[ClipCandidate], gemini_response: dict | None = None) -> PooledCandidateReviewResponse:
-    """Validate or adapt the final pooled Gemini candidate-review response."""
-    if gemini_response is None:
-        raise ValueError("pooled review call failed: gemini_response is required")
+def review_candidate_pool(*, candidates: list[ClipCandidate], llm_response: dict | None = None) -> PooledCandidateReviewResponse:
+    """Validate or adapt the final pooled Qwen candidate-review response."""
+    if llm_response is None:
+        raise ValueError("pooled review call failed: llm_response is required")
 
     candidate_map = _candidate_temp_id_map(candidates)
     candidate_ids = set(candidate_map)
-    parsed = PooledCandidateReviewResponse.model_validate(gemini_response)
+    parsed = PooledCandidateReviewResponse.model_validate(llm_response)
 
     kept_ids: list[str] = []
     ranked: list[RankedCandidateDecision] = []

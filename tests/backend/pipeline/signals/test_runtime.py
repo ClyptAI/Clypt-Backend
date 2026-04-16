@@ -215,11 +215,8 @@ def test_build_comments_output_uses_callpoint10_consolidated_text_for_downstream
         comment_cluster_sim_threshold=0.82,
         llm=SimpleNamespace(
             model_10="gemini-3-flash",
-            thinking_10="minimal",
             model_3="gemini-3.1-flash-lite",
-            thinking_3="low",
             model_1="gemini-3-flash",
-            thinking_1="low",
         ),
     )
 

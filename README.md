@@ -4,13 +4,13 @@ Clypt V3.1 is a long-form video understanding and clip-candidate system.
 
 - Implemented today: **Phases 1-4**
 - Planned next: **Phases 5-6** (speaker participation grounding + final 9:16 render)
-- Current ASR path: **vLLM VibeVoice only**
+- Current Phase 1 ASR modes: **local vLLM VibeVoice** or **remote Cloud Run L4 combined service**
 
 ## Current Pipeline State
 
 1. **Phase 1 — Timeline Foundation**
    - RF-DETR + ByteTrack visual extraction
-   - VibeVoice ASR via local vLLM sidecar
+   - VibeVoice ASR via `CLYPT_PHASE1_ASR_BACKEND` (`vllm` or `cloud_run_l4`)
    - NeMo forced alignment
    - emotion2vec+ and YAMNet sidecars
 2. **Phase 2 — Semantic Node Construction**
@@ -33,12 +33,16 @@ See [2026-04-09_comments_trends_augment_spec.md](docs/specs/2026-04-09_comments_
 
 - Phase 1 visual and ASR execute concurrently.
 - Audio chain starts immediately after ASR (`asr_future.result()` path), not after RF-DETR.
-- Default Phase 2-4 route is Cloud Tasks -> Cloud Run worker on `us-east4` L4 GPU-accelerated profile.
-- Generation backend is Developer API; embeddings remain Vertex.
+- Default local Phase 2-4 route is SQLite queue -> local worker loop.
+- Local worker generation is hard-gated to `GENAI_GENERATION_BACKEND=local_openai`.
+- Embeddings remain Vertex-backed by default.
+- Optional Cloud Run L4 offload can handle both Phase 1 ASR and Phase 2 node-media prep.
+- Per-stage concurrency is explicit. `CLYPT_GEMINI_MAX_CONCURRENT` has been removed.
 
 ## Canonical Docs
 
 - Runtime execution and env contract: [RUNTIME_GUIDE.md](docs/runtime/RUNTIME_GUIDE.md)
+- Full environment catalog: [ENV_REFERENCE.md](docs/runtime/ENV_REFERENCE.md)
 - Baseline runs and reference outputs: [RUN_REFERENCE.md](docs/runtime/RUN_REFERENCE.md)
 - Deployment runbook: [P1_DEPLOY.md](docs/deployment/P1_DEPLOY.md)
 - Architecture (implemented + planned): [ARCHITECTURE.md](docs/ARCHITECTURE.md)
@@ -76,10 +80,11 @@ python -m pip install -r requirements-do-phase1.txt
 
 ```text
 backend/pipeline/          Phase 1-4 contracts, transforms, orchestrator
-backend/providers/         VibeVoice vLLM, Vertex AI, GCS, emotion2vec+, YAMNet
+backend/providers/         ASR, local OpenAI, Vertex, GCS, emotion2vec+, YAMNet
 backend/phase1_runtime/    Phase 1 sidecar orchestration, visual pipeline, job store
-backend/runtime/           Live Phase 1-4 runner and entrypoints
-docker/vibevoice-vllm/     vLLM sidecar image
+backend/runtime/           Live Phase 1-4 runner, local worker, combined L4 service entrypoints
+docker/vibevoice-vllm/     Local VibeVoice vLLM image
+docker/phase24-media-prep/ Combined Cloud Run L4 ASR + node-media-prep image
 scripts/do_phase1/         Deployment scripts and systemd units
 docs/                      Runtime, deployment, architecture, specs, outputs
 ```

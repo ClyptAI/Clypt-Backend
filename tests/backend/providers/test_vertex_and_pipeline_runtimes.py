@@ -92,7 +92,7 @@ class _FakeGenAIClient:
 
 def test_vertex_clients_generate_json_and_embed_texts():
     from backend.providers.config import VertexSettings
-    from backend.providers.vertex import VertexEmbeddingClient, VertexGeminiClient
+    from backend.providers.vertex import VertexEmbeddingClient, VertexGenerationClient
 
     sdk_client = _FakeGenAIClient()
     settings = VertexSettings(
@@ -102,8 +102,8 @@ def test_vertex_clients_generate_json_and_embed_texts():
         gemini_api_key="test-key",
     )
 
-    gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
-    response = gemini_client.generate_json(prompt="hello world")
+    generation_client = VertexGenerationClient(settings=settings, sdk_client=sdk_client)
+    response = generation_client.generate_json(prompt="hello world")
 
     assert response["ok"] is True
     assert sdk_client.models.generate_calls[0]["model"] == settings.generation_model
@@ -131,9 +131,9 @@ def test_vertex_clients_generate_json_and_embed_texts():
     assert all(call["model"] == settings.embedding_model for call in sdk_client.models.embed_calls)
 
 
-def test_vertex_gemini_client_prefers_sdk_parsed_json():
+def test_vertex_generation_client_prefers_sdk_parsed_json():
     from backend.providers.config import VertexSettings
-    from backend.providers.vertex import VertexGeminiClient
+    from backend.providers.vertex import VertexGenerationClient
 
     sdk_client = _FakeGenAIClient()
     sdk_client.models.generate_next_response = _FakeResponse(
@@ -141,25 +141,25 @@ def test_vertex_gemini_client_prefers_sdk_parsed_json():
         parsed={"ok": True, "from": "parsed"},
     )
     settings = VertexSettings(project="clypt-v3", gemini_api_key="test-key")
-    gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
+    generation_client = VertexGenerationClient(settings=settings, sdk_client=sdk_client)
 
-    response = gemini_client.generate_json(prompt="use parsed")
+    response = generation_client.generate_json(prompt="use parsed")
 
     assert response == {"ok": True, "from": "parsed"}
 
 
-def test_vertex_gemini_client_uses_no_default_thinking_config():
+def test_vertex_generation_client_uses_no_default_thinking_config():
     from backend.providers.config import VertexSettings
-    from backend.providers.vertex import VertexGeminiClient
+    from backend.providers.vertex import VertexGenerationClient
 
     sdk_client = _FakeGenAIClient()
     settings = VertexSettings(
         project="clypt-v3",
         gemini_api_key="test-key",
     )
-    gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
+    generation_client = VertexGenerationClient(settings=settings, sdk_client=sdk_client)
 
-    gemini_client.generate_json(prompt="flash call", model="gemini-3-flash-preview")
+    generation_client.generate_json(prompt="flash call", model="gemini-3-flash-preview")
     flash_config = sdk_client.models.generate_calls[-1]["config"]
     flash_thinking_cfg = (
         getattr(flash_config, "thinking_config", None)
@@ -169,9 +169,31 @@ def test_vertex_gemini_client_uses_no_default_thinking_config():
     assert flash_thinking_cfg is None
 
 
+def test_vertex_generation_client_treats_off_thinking_as_disabled():
+    from backend.providers.config import VertexSettings
+    from backend.providers.vertex import VertexGenerationClient
+
+    sdk_client = _FakeGenAIClient()
+    settings = VertexSettings(
+        project="clypt-v3",
+        gemini_api_key="test-key",
+    )
+    generation_client = VertexGenerationClient(settings=settings, sdk_client=sdk_client)
+
+    generation_client.generate_json(prompt="flash call", thinking_level="off")
+    config = sdk_client.models.generate_calls[-1]["config"]
+    thinking_cfg = (
+        getattr(config, "thinking_config", None)
+        if not isinstance(config, dict)
+        else config.get("thinking_config")
+    )
+
+    assert thinking_cfg is None
+
+
 def test_vertex_clients_retry_transient_generate_and_embed_errors(monkeypatch: pytest.MonkeyPatch):
     from backend.providers.config import VertexSettings
-    from backend.providers.vertex import VertexEmbeddingClient, VertexGeminiClient
+    from backend.providers.vertex import VertexEmbeddingClient, VertexGenerationClient
 
     sdk_client = _FakeGenAIClient()
     sdk_client.models.generate_failures_remaining = 2
@@ -197,8 +219,8 @@ def test_vertex_clients_retry_transient_generate_and_embed_errors(monkeypatch: p
     sleeps: list[float] = []
     monkeypatch.setattr("backend.providers.vertex.time.sleep", lambda seconds: sleeps.append(seconds))
 
-    gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
-    response = gemini_client.generate_json(prompt="retry me")
+    generation_client = VertexGenerationClient(settings=settings, sdk_client=sdk_client)
+    response = generation_client.generate_json(prompt="retry me")
     assert response["ok"] is True
     assert len(sdk_client.models.generate_calls) == 1
 
@@ -209,17 +231,17 @@ def test_vertex_clients_retry_transient_generate_and_embed_errors(monkeypatch: p
     assert len(sleeps) == 4
 
 
-def test_vertex_gemini_client_fails_hard_when_parsed_payload_missing():
+def test_vertex_generation_client_fails_hard_when_parsed_payload_missing():
     from backend.providers.config import VertexSettings
-    from backend.providers.vertex import VertexGeminiClient
+    from backend.providers.vertex import VertexGenerationClient
 
     sdk_client = _FakeGenAIClient()
     sdk_client.models.generate_next_response = _FakeResponse('{"broken": "unterminated}')
     settings = VertexSettings(project="clypt-v3", gemini_api_key="test-key")
-    gemini_client = VertexGeminiClient(settings=settings, sdk_client=sdk_client)
+    generation_client = VertexGenerationClient(settings=settings, sdk_client=sdk_client)
 
     with pytest.raises(ValueError, match="did not return SDK-parsed JSON object"):
-        gemini_client.generate_json(prompt="bad json")
+        generation_client.generate_json(prompt="bad json")
 
 
 def test_semantics_runtime_calls_live_client_and_returns_nodes():

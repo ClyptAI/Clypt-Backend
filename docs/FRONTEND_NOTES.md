@@ -1,5 +1,7 @@
 # FRONTEND INTEGRATION NOTES
 
+**Last updated:** 2026-04-15
+
 Integration notes for backend contract alignment with the current frontend repo:
 
 - Frontend repo path: `/Users/rithvik/Clypt-Frontend`
@@ -10,6 +12,7 @@ Integration notes for backend contract alignment with the current frontend repo:
 - Candidate outputs and ranks (`clip_candidates` + attribution/provenance fields).
 - Phase 1 timeline artifacts (transcript turns/words, tracklets, emotion/audio timelines).
 - External signal overlays and links (comments/trends attribution tables).
+- Local queue telemetry exists in SQLite (`phase24_jobs`) for operator/debug workflows; this is not currently a frontend API contract.
 
 ## Integration Priorities (Near-Term)
 
@@ -28,3 +31,4 @@ Integration notes for backend contract alignment with the current frontend repo:
 
 - This file is intentionally high-level for now.
 - Deep frontend contract shaping should happen alongside Phase 5-6 implementation.
+- Current code path for Phase 2-4 generation is local OpenAI-compatible backend, but persisted output contracts consumed by frontend remain Spanner-based and unchanged.

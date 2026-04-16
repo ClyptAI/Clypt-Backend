@@ -5,6 +5,42 @@ from pathlib import Path
 import os
 
 
+_REMOVED_GLOBAL_CONCURRENCY_ENV = "CLYPT_GEMINI_MAX_CONCURRENT"
+_REMOVED_THINKING_ENVS = (
+    "CLYPT_PHASE2_MERGE_THINKING_LEVEL",
+    "CLYPT_PHASE2_BOUNDARY_THINKING_LEVEL",
+    "CLYPT_PHASE3_LOCAL_THINKING_LEVEL",
+    "CLYPT_PHASE3_LONG_RANGE_THINKING_LEVEL",
+    "CLYPT_PHASE4_META_THINKING_LEVEL",
+    "CLYPT_PHASE4_SUBGRAPH_THINKING_LEVEL",
+    "CLYPT_PHASE4_POOL_THINKING_LEVEL",
+    "CLYPT_SIGNAL_LLM_THINKING_1",
+    "CLYPT_SIGNAL_LLM_THINKING_2",
+    "CLYPT_SIGNAL_LLM_THINKING_3",
+    "CLYPT_SIGNAL_LLM_THINKING_5",
+    "CLYPT_SIGNAL_LLM_THINKING_9",
+    "CLYPT_SIGNAL_LLM_THINKING_10",
+    "CLYPT_SIGNAL_LLM_THINKING_11",
+)
+
+
+def _raise_if_removed_global_concurrency_env_present() -> None:
+    if os.getenv(_REMOVED_GLOBAL_CONCURRENCY_ENV):
+        raise ValueError(
+            f"{_REMOVED_GLOBAL_CONCURRENCY_ENV} has been removed; "
+            "set explicit per-phase concurrency env vars instead."
+        )
+
+
+def _raise_if_removed_thinking_env_present() -> None:
+    for name in _REMOVED_THINKING_ENVS:
+        if os.getenv(name) is not None:
+            raise ValueError(
+                f"{name} has been removed because the Phase 2-4 local Qwen path "
+                "always runs with thinking disabled."
+            )
+
+
 @dataclass(slots=True)
 class Phase4BudgetConfig:
     max_total_prompts: int = 12
@@ -29,20 +65,13 @@ class Phase4SubgraphConfig:
 
 @dataclass(slots=True)
 class SignalLLMCallConfig:
-    model_1: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_1") or "gemini-3-flash")
-    thinking_1: str = field(default_factory=lambda: (os.getenv("CLYPT_SIGNAL_LLM_THINKING_1") or "low").strip().lower())
-    model_2: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_2") or "gemini-3-flash")
-    thinking_2: str = field(default_factory=lambda: (os.getenv("CLYPT_SIGNAL_LLM_THINKING_2") or "minimal").strip().lower())
-    model_3: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_3") or "gemini-3.1-flash-lite")
-    thinking_3: str = field(default_factory=lambda: (os.getenv("CLYPT_SIGNAL_LLM_THINKING_3") or "low").strip().lower())
-    model_5: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_5") or "gemini-3-flash")
-    thinking_5: str = field(default_factory=lambda: (os.getenv("CLYPT_SIGNAL_LLM_THINKING_5") or "minimal").strip().lower())
-    model_9: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_9") or "gemini-3-flash")
-    thinking_9: str = field(default_factory=lambda: (os.getenv("CLYPT_SIGNAL_LLM_THINKING_9") or "low").strip().lower())
-    model_10: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_10") or "gemini-3-flash")
-    thinking_10: str = field(default_factory=lambda: (os.getenv("CLYPT_SIGNAL_LLM_THINKING_10") or "minimal").strip().lower())
-    model_11: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_11") or "gemini-3.1-flash-lite")
-    thinking_11: str = field(default_factory=lambda: (os.getenv("CLYPT_SIGNAL_LLM_THINKING_11") or "low").strip().lower())
+    model_1: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_1") or "Qwen/Qwen3.5-27B")
+    model_2: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_2") or "Qwen/Qwen3.5-27B")
+    model_3: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_3") or "Qwen/Qwen3.5-27B")
+    model_5: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_5") or "Qwen/Qwen3.5-27B")
+    model_9: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_9") or "Qwen/Qwen3.5-27B")
+    model_10: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_10") or "Qwen/Qwen3.5-27B")
+    model_11: str = field(default_factory=lambda: os.getenv("CLYPT_SIGNAL_LLM_MODEL_11") or "Qwen/Qwen3.5-27B")
 
 
 @dataclass(slots=True)
@@ -85,15 +114,13 @@ class SignalConfig:
     coverage_weight: float = field(default_factory=lambda: float(os.getenv("CLYPT_SIGNAL_COVERAGE_WEIGHT") or "0.30"))
     direct_ratio_weight: float = field(default_factory=lambda: float(os.getenv("CLYPT_SIGNAL_DIRECT_RATIO_WEIGHT") or "0.15"))
     max_concurrent: int = field(
-        default_factory=lambda: int(
-            os.getenv("CLYPT_SIGNAL_MAX_CONCURRENT")
-            or os.getenv("CLYPT_GEMINI_MAX_CONCURRENT")
-            or "8"
-        )
+        default_factory=lambda: int(os.getenv("CLYPT_SIGNAL_MAX_CONCURRENT") or "8")
     )
     llm: SignalLLMCallConfig = field(default_factory=SignalLLMCallConfig)
 
     def __post_init__(self) -> None:
+        _raise_if_removed_global_concurrency_env_present()
+        _raise_if_removed_thinking_env_present()
         if self.comment_order != "relevance":
             raise ValueError("CLYPT_COMMENT_ORDER currently supports only 'relevance'")
 
@@ -113,6 +140,12 @@ class V31Config:
     phase2_max_turns_per_batch: int = field(
         default_factory=lambda: int(os.getenv("CLYPT_PHASE2_MAX_TURNS_PER_BATCH") or "25")
     )
+    phase2_max_concurrent: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE2_MAX_CONCURRENT") or "8")
+    )
+    phase2_boundary_max_concurrent: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT") or "10")
+    )
     phase2_merge_max_output_tokens: int = field(
         default_factory=lambda: int(
             os.getenv("CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS") or "32768"
@@ -129,31 +162,51 @@ class V31Config:
     phase3_max_nodes_per_batch: int = field(
         default_factory=lambda: int(os.getenv("CLYPT_PHASE3_MAX_NODES_PER_BATCH") or "24")
     )
-    gemini_max_concurrent: int = field(
-        default_factory=lambda: int(os.getenv("CLYPT_GEMINI_MAX_CONCURRENT") or "8")
+    phase3_local_max_output_tokens: int = field(
+        default_factory=lambda: int(
+            os.getenv("CLYPT_PHASE3_LOCAL_MAX_OUTPUT_TOKENS") or "4096"
+        )
     )
-    phase2_merge_thinking_level: str = field(
-        default_factory=lambda: (os.getenv("CLYPT_PHASE2_MERGE_THINKING_LEVEL") or "low").strip().lower()
+    phase3_long_range_max_output_tokens: int = field(
+        default_factory=lambda: int(
+            os.getenv("CLYPT_PHASE3_LONG_RANGE_MAX_OUTPUT_TOKENS") or "4096"
+        )
     )
-    phase2_boundary_thinking_level: str = field(
-        default_factory=lambda: (os.getenv("CLYPT_PHASE2_BOUNDARY_THINKING_LEVEL") or "minimal").strip().lower()
+    phase3_long_range_top_k: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_LONG_RANGE_TOP_K") or "2")
     )
-    phase3_local_thinking_level: str = field(
-        default_factory=lambda: (os.getenv("CLYPT_PHASE3_LOCAL_THINKING_LEVEL") or "minimal").strip().lower()
+    phase3_long_range_pairs_per_shard: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_LONG_RANGE_PAIRS_PER_SHARD") or "24")
     )
-    phase3_long_range_thinking_level: str = field(
-        default_factory=lambda: (os.getenv("CLYPT_PHASE3_LONG_RANGE_THINKING_LEVEL") or "low").strip().lower()
+    phase3_long_range_max_concurrent: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT") or "4")
     )
-    phase4_meta_thinking_level: str = field(
-        default_factory=lambda: (os.getenv("CLYPT_PHASE4_META_THINKING_LEVEL") or "low").strip().lower()
+    phase3_local_max_concurrent: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE3_LOCAL_MAX_CONCURRENT") or "2")
     )
-    phase4_subgraph_thinking_level: str = field(
-        default_factory=lambda: (os.getenv("CLYPT_PHASE4_SUBGRAPH_THINKING_LEVEL") or "medium").strip().lower()
+    phase4_meta_max_output_tokens: int = field(
+        default_factory=lambda: int(
+            os.getenv("CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS") or "2048"
+        )
     )
-    phase4_pool_thinking_level: str = field(
-        default_factory=lambda: (os.getenv("CLYPT_PHASE4_POOL_THINKING_LEVEL") or "medium").strip().lower()
+    phase4_subgraph_max_output_tokens: int = field(
+        default_factory=lambda: int(
+            os.getenv("CLYPT_PHASE4_SUBGRAPH_MAX_OUTPUT_TOKENS") or "4096"
+        )
+    )
+    phase4_pool_max_output_tokens: int = field(
+        default_factory=lambda: int(
+            os.getenv("CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS") or "2048"
+        )
+    )
+    phase4_subgraph_max_concurrent: int = field(
+        default_factory=lambda: int(os.getenv("CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT") or "2")
     )
     signals: SignalConfig = field(default_factory=SignalConfig)
+
+    def __post_init__(self) -> None:
+        _raise_if_removed_global_concurrency_env_present()
+        _raise_if_removed_thinking_env_present()
 
 
 def get_v31_config() -> V31Config:

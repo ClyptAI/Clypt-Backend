@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from backend.pipeline.contracts import SemanticGraphEdge, SemanticGraphNode, SemanticNodeEvidence
-from backend.pipeline.graph.runtime import _build_node_batches
+from backend.pipeline.graph.runtime import (
+    _build_node_batches,
+    run_local_semantic_edge_batches,
+    run_long_range_edge_adjudication,
+)
 from backend.pipeline.graph.local_semantic_edges import build_local_semantic_edges
 from backend.pipeline.graph.long_range_edges import build_long_range_edges, shortlist_long_range_pairs
 from backend.pipeline.graph.reconcile_edges import reconcile_semantic_edges
@@ -56,7 +62,7 @@ def test_build_local_semantic_edges_validates_target_block_and_allowed_types():
 
     edges = build_local_semantic_edges(
         nodes=nodes,
-        gemini_responses=[
+        llm_responses=[
             {
                 "batch_id": "batch_01",
                 "target_node_ids": ["node_2", "node_3"],
@@ -98,7 +104,7 @@ def test_build_local_semantic_edges_rejects_invalid_source_or_edge_type():
     with pytest.raises(ValueError, match="target block"):
         build_local_semantic_edges(
             nodes=nodes,
-            gemini_responses=[
+            llm_responses=[
                 {
                     "batch_id": "batch_01",
                     "target_node_ids": ["node_2"],
@@ -119,7 +125,7 @@ def test_build_local_semantic_edges_rejects_invalid_source_or_edge_type():
     with pytest.raises(ValueError, match="local semantic edge type"):
         build_local_semantic_edges(
             nodes=nodes,
-            gemini_responses=[
+            llm_responses=[
                 {
                     "batch_id": "batch_02",
                     "target_node_ids": ["node_2"],
@@ -214,6 +220,97 @@ def test_phase3_batch_payload_uses_slim_nodes_for_llm():
     assert "multimodal_embedding" not in first
 
 
+def test_run_local_semantic_edge_batches_drops_invalid_edges_from_llm():
+    nodes = [
+        _node("node_1", 0, 5000),
+        _node("node_2", 6000, 10000),
+        _node("node_3", 11000, 15000),
+    ]
+
+    class _FakeLLMClient:
+        def generate_json(self, **kwargs):
+            _ = kwargs
+            return {
+                "edges": [
+                    {
+                            "source_node_id": "node_2",
+                        "target_node_id": "node_2",
+                            "edge_type": "callback_to",  # invalid for local edges
+                            "rationale": "invalid edge type",
+                        "confidence": 0.5,
+                    },
+                    {
+                        "source_node_id": "node_2",
+                        "target_node_id": "node_3",
+                        "edge_type": "supports",
+                        "rationale": "valid local edge",
+                        "confidence": 0.9,
+                    },
+                ]
+            }
+
+    edges, debug = run_local_semantic_edge_batches(
+        nodes=nodes,
+        llm_client=_FakeLLMClient(),
+        target_batch_count=1,
+        max_nodes_per_batch=15,
+        max_concurrent=1,
+    )
+
+    assert {(edge.source_node_id, edge.target_node_id, edge.edge_type) for edge in edges} == {
+        ("node_2", "node_3", "supports")
+    }
+    assert len(debug) == 1
+    assert debug[0]["sanitized_edge_count"] == 1
+    assert debug[0]["dropped_edge_count"] == 1
+
+
+def test_run_long_range_edge_adjudication_shards_candidate_pairs() -> None:
+    nodes = [
+        _node("node_1", 0, 5000, semantic_embedding=[1.0, 0.0], multimodal_embedding=[1.0, 0.0]),
+        _node("node_2", 6000, 10000, semantic_embedding=[0.0, 1.0], multimodal_embedding=[0.0, 1.0]),
+        _node("node_3", 11000, 15000, semantic_embedding=[0.9, 0.1], multimodal_embedding=[0.9, 0.1]),
+        _node("node_4", 16000, 20000, semantic_embedding=[0.85, 0.15], multimodal_embedding=[0.85, 0.15]),
+    ]
+
+    class _FakeLLMClient:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def generate_json(self, *, prompt, **kwargs):
+            _ = kwargs
+            self.call_count += 1
+            payload = prompt.split("Pair payload:\n", 1)[1]
+            candidate_pairs = list(json.loads(payload)["candidate_pairs"])
+            return {
+                "edges": [
+                    {
+                        "source_node_id": pair["later_node_id"],
+                        "target_node_id": pair["earlier_node_id"],
+                        "edge_type": "callback_to",
+                        "rationale": "Valid long-range callback.",
+                        "confidence": 0.82,
+                    }
+                    for pair in candidate_pairs
+                ]
+            }
+
+    llm_client = _FakeLLMClient()
+    edges, debug = run_long_range_edge_adjudication(
+        nodes=nodes,
+        llm_client=llm_client,
+        top_k=1,
+        pairs_per_shard=2,
+        max_concurrent=2,
+    )
+
+    assert llm_client.call_count == 2
+    assert len(edges) == 3
+    assert debug["diagnostics"]["shard_count"] == 2
+    assert len(debug["shards"]) == 2
+    assert debug["diagnostics"]["candidate_pair_count"] == 3
+
+
 def test_build_long_range_edges_validates_pairs_and_preserves_later_to_earlier_direction():
     candidate_pairs = [
         {
@@ -230,7 +327,7 @@ def test_build_long_range_edges_validates_pairs_and_preserves_later_to_earlier_d
 
     edges = build_long_range_edges(
         candidate_pairs=candidate_pairs,
-        gemini_response={
+        llm_response={
             "edges": [
                 {
                     "source_node_id": "node_4",
@@ -258,7 +355,7 @@ def test_build_long_range_edges_validates_pairs_and_preserves_later_to_earlier_d
     with pytest.raises(ValueError, match="candidate long-range pair"):
         build_long_range_edges(
             candidate_pairs=candidate_pairs,
-            gemini_response={
+            llm_response={
                 "edges": [
                     {
                         "source_node_id": "node_1",
