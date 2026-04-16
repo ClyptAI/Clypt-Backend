@@ -58,6 +58,10 @@ DEPLOY_CMD=(
   --timeout "${TIMEOUT}"
   --no-gpu-zonal-redundancy
   --no-allow-unauthenticated
+  # Combined service spawns a local VibeVoice vLLM subprocess and blocks on its /health
+  # before binding port 8080 for FastAPI. Cold-start on L4 is ~5-10 min, so we extend
+  # Cloud Run's default startup probe well past the 240s default.
+  --startup-probe "tcpSocket.port=8080,initialDelaySeconds=240,periodSeconds=30,timeoutSeconds=10,failureThreshold=30"
   --quiet
 )
 

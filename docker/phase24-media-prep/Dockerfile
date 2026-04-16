@@ -27,4 +27,7 @@ COPY backend /app/backend
 
 EXPOSE 8080
 
+# The vllm/vllm-openai base image sets ENTRYPOINT=["vllm"], which would prepend
+# "vllm" to our CMD and break CLI parsing. Clear it so CMD runs unmodified.
+ENTRYPOINT []
 CMD ["python", "-m", "backend.runtime.run_l4_combined_service", "--host", "0.0.0.0", "--port", "8080"]
