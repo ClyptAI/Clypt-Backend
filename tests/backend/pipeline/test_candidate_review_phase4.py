@@ -68,7 +68,7 @@ def test_review_local_subgraph_validates_and_attaches_candidate_metadata():
 
     response = review_local_subgraph(
         subgraph=subgraph,
-        gemini_response={
+        llm_response={
             "subgraph_id": "sg_0001",
             "seed_node_id": "node_1",
             "reject_all": False,
@@ -112,7 +112,7 @@ def test_review_local_subgraph_treats_invalid_output_as_reject_all():
 
     response = review_local_subgraph(
         subgraph=subgraph,
-        gemini_response={
+        llm_response={
             "subgraph_id": "sg_0002",
             "seed_node_id": "node_1",
             "reject_all": False,
@@ -167,7 +167,7 @@ def test_review_candidate_pool_validates_ranked_response_and_generates_temp_ids(
 
     response = review_candidate_pool(
         candidates=candidates,
-        gemini_response={
+        llm_response={
             "ranked_candidates": [
                 {
                     "candidate_temp_id": "cand_tmp_001",
@@ -197,7 +197,7 @@ def test_review_candidate_pool_fails_hard_on_invalid_output():
     with pytest.raises(ValueError, match="pool_rank"):
         review_candidate_pool(
             candidates=candidates,
-            gemini_response={
+            llm_response={
                 "ranked_candidates": [
                     {
                         "candidate_temp_id": "cand_tmp_001",

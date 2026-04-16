@@ -143,7 +143,7 @@ def test_merge_and_classify_neighborhood_builds_nodes_from_gemini_partition():
         halo_turn_count=1,
     )[0]
 
-    gemini_response = {
+    llm_response = {
         "merged_nodes": [
             {
                 "source_turn_ids": ["t_000001", "t_000002"],
@@ -156,7 +156,7 @@ def test_merge_and_classify_neighborhood_builds_nodes_from_gemini_partition():
 
     nodes = merge_and_classify_neighborhood(
         neighborhood_payload=neighborhood,
-        gemini_response=gemini_response,
+        llm_response=llm_response,
         turn_word_ids_by_turn_id={
             turn.turn_id: list(turn.word_ids)
             for turn in _canonical_timeline().turns
@@ -186,7 +186,7 @@ def test_merge_and_classify_neighborhood_rejects_incomplete_target_partition():
     with pytest.raises(ValueError, match="partition"):
         merge_and_classify_neighborhood(
             neighborhood_payload=neighborhood,
-            gemini_response={
+            llm_response={
                 "merged_nodes": [
                     {
                         "source_turn_ids": ["t_000001"],
