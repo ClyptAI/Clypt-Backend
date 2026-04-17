@@ -422,7 +422,10 @@ class VertexEmbeddingClient:
                 raise ValueError("Vertex embeddings response is missing embeddings")
             return _extract_embedding_values(raw[0])
 
-        with ThreadPoolExecutor(max_workers=min(len(items), 10)) as pool:
+        # Up to 32 concurrent Gemini embedding calls — each call is I/O bound
+        # and the API handles the concurrency. For 17 nodes at 10 workers we'd
+        # need 2 rounds; at 32 all fit in one round, halving the latency.
+        with ThreadPoolExecutor(max_workers=min(len(items), 32)) as pool:
             futures = [pool.submit(_embed_one, item) for item in items]
             return [f.result() for f in futures]
 

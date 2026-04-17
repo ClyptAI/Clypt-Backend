@@ -158,12 +158,12 @@ class V31Config:
     )
     phase2_merge_max_output_tokens: int = field(
         default_factory=lambda: int(
-            os.getenv("CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS") or "32768"
+            os.getenv("CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS") or "8192"
         )
     )
     phase2_boundary_max_output_tokens: int = field(
         default_factory=lambda: int(
-            os.getenv("CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS") or "32768"
+            os.getenv("CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS") or "8192"
         )
     )
     phase3_target_batch_count: int = field(

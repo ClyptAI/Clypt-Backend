@@ -86,6 +86,9 @@ class V31LivePhase14Runner:
     _prefetched_phase3_local_future: Any | None = field(default=None, init=False, repr=False)
     _prefetched_phase3_local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
     _prefetched_phase3_local_node_ids: tuple[str, ...] | None = field(default=None, init=False, repr=False)
+    _prefetched_phase3_long_range_future: Any | None = field(default=None, init=False, repr=False)
+    _prefetched_phase3_long_range_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _prefetched_phase3_long_range_node_ids: tuple[str, ...] | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def from_env(
@@ -364,6 +367,7 @@ class V31LivePhase14Runner:
                     )
                 except Exception:
                     self._discard_prefetched_phase3_local_lane()
+                    self._discard_prefetched_phase3_long_range_lane()
                     self._cancel_signal_future(
                         run_id=run_id,
                         job_id=job_id,
@@ -661,8 +665,10 @@ class V31LivePhase14Runner:
             )
         if raw_nodes_ready_callback is not None:
             raw_nodes_ready_callback(nodes)
-        media_started_at = datetime.now(UTC)
-        media_started = time.perf_counter()
+        # Prefetch Phase 3 long-range adjudication in the background so it runs
+        # concurrently with the upcoming media_prep + multimodal_embedding window.
+        self._start_prefetched_phase3_long_range_lane(nodes=nodes)
+
         semantic_started_at = datetime.now(UTC)
         semantic_started = time.perf_counter()
 
@@ -684,23 +690,49 @@ class V31LivePhase14Runner:
                 object_prefix=f"phase14/{paths.run_id}/node_media",
             )
 
+        def _media_prep_then_embed() -> tuple[list, datetime, datetime, float, datetime, dict]:
+            """Chain media_prep → multimodal_embedding as one task.
+
+            Runs concurrently with semantic_embedding (and the Phase 3
+            long-range prefetch already started above), so the multimodal
+            embedding begins as soon as media_prep is done with no
+            inter-pool scheduling gap.
+            """
+            prep_started_at_ = datetime.now(UTC)
+            prep_started_ = time.perf_counter()
+            media = _prepare_multimodal_media()
+            prep_ended_at_ = datetime.now(UTC)
+            prep_duration_ms_ = (time.perf_counter() - prep_started_) * 1000.0
+            logger.info(
+                "[phase2] node clip extraction+upload done in %.1f s (nodes=%d)",
+                prep_duration_ms_ / 1000.0,
+                len(nodes),
+            )
+            embed_started_at_ = datetime.now(UTC)
+            embs, diags = embed_multimodal_media_live(
+                multimodal_media=media,
+                embedding_client=self.embedding_client,
+            )
+            return media, prep_started_at_, prep_ended_at_, prep_duration_ms_, embed_started_at_, diags, embs
+
         with ThreadPoolExecutor(max_workers=2) as phase2_pool:
             semantic_future = phase2_pool.submit(
                 embed_text_semantic_nodes_live,
                 nodes=nodes,
                 embedding_client=self.embedding_client,
             )
-            media_future = phase2_pool.submit(_prepare_multimodal_media)
-            multimodal_media = media_future.result()
+            combined_future = phase2_pool.submit(_media_prep_then_embed)
             semantic_embeddings, semantic_diagnostics = semantic_future.result()
+            (
+                multimodal_media,
+                media_started_at,
+                media_ended_at,
+                media_duration_ms,
+                multimodal_started_at,
+                multimodal_diagnostics,
+                multimodal_embeddings,
+            ) = combined_future.result()
 
-        logger.info(
-            "[phase2] node clip extraction+upload done in %.1f s (nodes=%d)",
-            time.perf_counter() - media_started,
-            len(nodes),
-        )
-        media_duration_ms = (time.perf_counter() - media_started) * 1000.0
-        media_ended_at = datetime.now(UTC)
         phase2_substeps.append(
             self._make_phase_substep_record(
                 run_id=paths.run_id,
@@ -730,11 +762,6 @@ class V31LivePhase14Runner:
                 duration_ms=float(semantic_diagnostics.get("semantic_duration_ms") or 0.0),
                 metadata=semantic_diagnostics,
             )
-        )
-        multimodal_started_at = datetime.now(UTC)
-        multimodal_embeddings, multimodal_diagnostics = embed_multimodal_media_live(
-            multimodal_media=multimodal_media,
-            embedding_client=self.embedding_client,
         )
         phase2_substeps.append(
             self._make_phase_substep_record(
@@ -810,25 +837,41 @@ class V31LivePhase14Runner:
         structural_edges = build_structural_edges(nodes=nodes)
         long_range_started_at = datetime.now(UTC)
         prefetched_local = self._consume_prefetched_phase3_local_lane(nodes=nodes)
+        prefetched_long_range = self._consume_prefetched_phase3_long_range_lane(nodes=nodes)
         local_started_at = datetime.now(UTC)
 
         try:
-            with ThreadPoolExecutor(max_workers=1 if prefetched_local is not None else 2) as phase3_pool:
-                if prefetched_local is None:
+            need_local = prefetched_local is None
+            need_long_range = prefetched_long_range is None
+            pool_workers = (1 if need_local else 0) + (1 if need_long_range else 0)
+            if pool_workers > 0:
+                _pool_ctx: Any = ThreadPoolExecutor(max_workers=pool_workers)
+            else:
+                # Both lanes already prefetched — no pool needed.
+                import contextlib
+                _pool_ctx = contextlib.nullcontext(None)
+            with _pool_ctx as phase3_pool:
+                if need_local:
                     local_future = phase3_pool.submit(self._run_phase_3_local_lane, nodes=nodes)
                 else:
                     local_future = prefetched_local
-                long_range_future = phase3_pool.submit(
-                    self._run_phase_3_long_range_lane,
-                    nodes=nodes,
-                    long_range_top_k=long_range_top_k,
-                )
+                if need_long_range:
+                    long_range_future = phase3_pool.submit(
+                        self._run_phase_3_long_range_lane,
+                        nodes=nodes,
+                        long_range_top_k=long_range_top_k,
+                    )
+                else:
+                    long_range_future = prefetched_long_range
                 local_edges, local_debug, local_duration_ms = local_future.result()
                 long_range_edges, long_range_debug, long_range_duration_ms = long_range_future.result()
         finally:
             if self._prefetched_phase3_local_executor is not None:
                 self._prefetched_phase3_local_executor.shutdown(wait=False, cancel_futures=True)
                 self._prefetched_phase3_local_executor = None
+            if self._prefetched_phase3_long_range_executor is not None:
+                self._prefetched_phase3_long_range_executor.shutdown(wait=False, cancel_futures=True)
+                self._prefetched_phase3_long_range_executor = None
 
         logger.info("[phase3] local semantic edges done in %.1f s", local_duration_ms / 1000.0)
         phase3_substeps.append(
@@ -996,6 +1039,48 @@ class V31LivePhase14Runner:
         self._prefetched_phase3_local_future = None
         self._prefetched_phase3_local_executor = None
         self._prefetched_phase3_local_node_ids = None
+        if future is not None and hasattr(future, "cancel"):
+            future.cancel()
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _start_prefetched_phase3_long_range_lane(self, nodes: list[SemanticGraphNode]) -> None:
+        """Start Phase 3 long-range adjudication in the background.
+
+        Called at the end of Phase 2 merge/boundary so long-range runs
+        concurrently with the media_prep + multimodal_embedding window
+        (typically 30–100 s), making its 2–6 s contribution free.
+        """
+        if self._prefetched_phase3_long_range_future is not None:
+            return
+        node_ids = tuple(node.node_id for node in nodes)
+        executor = ThreadPoolExecutor(max_workers=1)
+        self._prefetched_phase3_long_range_executor = executor
+        self._prefetched_phase3_long_range_node_ids = node_ids
+        self._prefetched_phase3_long_range_future = executor.submit(
+            self._run_phase_3_long_range_lane,
+            nodes=nodes,
+            long_range_top_k=self.config.phase3_long_range_top_k,
+        )
+
+    def _consume_prefetched_phase3_long_range_lane(self, *, nodes: list[SemanticGraphNode]) -> Any | None:
+        if self._prefetched_phase3_long_range_future is None:
+            return None
+        node_ids = tuple(node.node_id for node in nodes)
+        if self._prefetched_phase3_long_range_node_ids != node_ids:
+            self._discard_prefetched_phase3_long_range_lane()
+            return None
+        future = self._prefetched_phase3_long_range_future
+        self._prefetched_phase3_long_range_future = None
+        self._prefetched_phase3_long_range_node_ids = None
+        return future
+
+    def _discard_prefetched_phase3_long_range_lane(self) -> None:
+        future = self._prefetched_phase3_long_range_future
+        executor = self._prefetched_phase3_long_range_executor
+        self._prefetched_phase3_long_range_future = None
+        self._prefetched_phase3_long_range_executor = None
+        self._prefetched_phase3_long_range_node_ids = None
         if future is not None and hasattr(future, "cancel"):
             future.cancel()
         if executor is not None:
