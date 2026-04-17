@@ -5,6 +5,11 @@
 # native dtype. We reuse the existing docker/vibevoice-vllm/ image definition
 # and mount the VibeVoice repo for the entrypoint script.
 #
+# GPU memory: VibeVoice weights take ~18.2 GiB in bfloat16. We set
+# --gpu-memory-utilization=0.85 (~40.8 GiB budget on a 48 GiB RTX 6000 Ada)
+# to leave ~22 GiB for KV cache + activations. Values below ~0.55 trip
+# `No available memory for the cache blocks` on this model.
+#
 # Usage (on the RTX host, as root):
 #   REPO_DIR=/opt/clypt-audio-host/repo bash scripts/do_phase1_audio/deploy_vllm_service.sh
 set -euo pipefail

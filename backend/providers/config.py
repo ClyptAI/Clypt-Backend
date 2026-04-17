@@ -297,6 +297,25 @@ class ProviderSettings:
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
 
 
+@dataclass(slots=True)
+class AudioHostProcessSettings:
+    """Settings consumed by the RTX 6000 Ada audio host process itself.
+
+    Distinct from ``AudioHostSettings``, which are the *caller-side* bearer
+    token + URL the H200 uses to reach this service. This dataclass holds
+    only what the audio host needs to run: the co-located VibeVoice vLLM
+    sidecar, VibeVoice generation controls, GCS bucket for URL resolution,
+    and Phase 1 runtime knobs (e.g. YAMNet device placement). It intentionally
+    does not require ``CLYPT_PHASE1_AUDIO_HOST_URL`` or ``..._TOKEN`` so the
+    audio host does not need to be configured as its own remote client.
+    """
+
+    vibevoice: VibeVoiceSettings
+    vllm_vibevoice: VibeVoiceVLLMSettings
+    storage: StorageSettings
+    phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
+
+
 def load_provider_settings() -> ProviderSettings:
     _load_local_env_files()
     _raise_if_removed_local_generation_env_present()
@@ -603,7 +622,79 @@ def load_provider_settings() -> ProviderSettings:
     )
 
 
+def load_audio_host_settings() -> AudioHostProcessSettings:
+    """Load the subset of provider settings that the RTX audio host process needs.
+
+    Unlike ``load_provider_settings``, this does NOT require the H200-caller
+    envs (``CLYPT_PHASE1_AUDIO_HOST_URL``, ``CLYPT_PHASE24_NODE_MEDIA_PREP_URL``,
+    their tokens, Vertex/Spanner/Phase 2-4 worker settings, etc.) because the
+    audio host is the endpoint being called — it does not need to configure
+    itself as its own remote client.
+    """
+    _load_local_env_files()
+    _raise_if_removed_local_generation_env_present()
+
+    gcs_bucket = _read_env("GCS_BUCKET", "CLYPT_GCS_BUCKET")
+    if not gcs_bucket:
+        raise ValueError(
+            "GCS_BUCKET or CLYPT_GCS_BUCKET is required on the audio host "
+            "for Phase 1 asset URL resolution."
+        )
+
+    hotwords_context = _read_env("VIBEVOICE_HOTWORDS_CONTEXT") or _DEFAULT_HOTWORDS
+    backend = (_read_env("VIBEVOICE_BACKEND") or "vllm").lower()
+    if backend != "vllm":
+        raise ValueError(
+            f"Unsupported VIBEVOICE_BACKEND={backend!r}; only 'vllm' is supported."
+        )
+
+    vllm_base_url = _read_env("VIBEVOICE_VLLM_BASE_URL")
+    if not vllm_base_url:
+        raise ValueError(
+            "VIBEVOICE_VLLM_BASE_URL is required on the audio host "
+            "(co-located vLLM sidecar, typically http://127.0.0.1:8000)."
+        )
+    vllm_settings = VibeVoiceVLLMSettings(
+        base_url=vllm_base_url,
+        model=_read_env("VIBEVOICE_VLLM_MODEL") or "vibevoice",
+        timeout_s=float(_read_env("VIBEVOICE_VLLM_TIMEOUT_S") or "7200"),
+        healthcheck_path=_read_env("VIBEVOICE_VLLM_HEALTHCHECK_PATH") or "/health",
+        max_retries=int(_read_env("VIBEVOICE_VLLM_MAX_RETRIES") or "1"),
+        audio_mode=_read_env("VIBEVOICE_VLLM_AUDIO_MODE") or "url",
+    )
+
+    vibevoice_settings = VibeVoiceSettings(
+        hotwords_context=hotwords_context,
+        max_new_tokens=int(_read_env("VIBEVOICE_MAX_NEW_TOKENS") or "32768"),
+        do_sample=_read_bool_env("VIBEVOICE_DO_SAMPLE", default=False),
+        temperature=float(_read_env("VIBEVOICE_TEMPERATURE") or "0"),
+        top_p=float(_read_env("VIBEVOICE_TOP_P") or "1.0"),
+        repetition_penalty=float(_read_env("VIBEVOICE_REPETITION_PENALTY") or "1.03"),
+        num_beams=_read_int_env("VIBEVOICE_NUM_BEAMS", default=1),
+    )
+
+    phase1_runtime = Phase1RuntimeSettings(
+        working_root=Path(
+            _read_env("CLYPT_PHASE1_WORK_ROOT") or "backend/outputs/v3_1_phase1_work"
+        ),
+        run_yamnet_on_gpu=(_read_env("CLYPT_PHASE1_YAMNET_DEVICE") or "cpu").lower()
+        == "gpu",
+        keep_workdir=(_read_env("CLYPT_PHASE1_KEEP_WORKDIR") or "0") == "1",
+        input_mode=(_read_env("CLYPT_PHASE1_INPUT_MODE") or "test_bank").strip().lower(),
+        test_bank_path=_read_env("CLYPT_PHASE1_TEST_BANK_PATH"),
+        test_bank_strict=(_read_env("CLYPT_PHASE1_TEST_BANK_STRICT") or "1") == "1",
+    )
+
+    return AudioHostProcessSettings(
+        vibevoice=vibevoice_settings,
+        vllm_vibevoice=vllm_settings,
+        storage=StorageSettings(gcs_bucket=gcs_bucket),
+        phase1_runtime=phase1_runtime,
+    )
+
+
 __all__ = [
+    "AudioHostProcessSettings",
     "AudioHostSettings",
     "LocalGenerationSettings",
     "NodeMediaPrepSettings",
@@ -617,5 +708,6 @@ __all__ = [
     "VertexSettings",
     "VibeVoiceSettings",
     "VibeVoiceVLLMSettings",
+    "load_audio_host_settings",
     "load_provider_settings",
 ]

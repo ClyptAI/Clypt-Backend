@@ -46,8 +46,13 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 # Smoke-test NVENC. This is the whole reason we chose RTX 6000 Ada over H200.
+# NVENC requires frame dimensions >= 80x80, so use a synthetic 256x256 color
+# source as the input. If this fails, h264_nvenc cannot init on this host and
+# node-media prep will fail.
 if command -v ffmpeg >/dev/null 2>&1; then
-  if ffmpeg -hide_banner -loglevel error -init_hw_device cuda=cu -c:v h264_nvenc -f null - </dev/null 2>/dev/null; then
+  if ffmpeg -hide_banner -loglevel error \
+      -f lavfi -i color=black:s=256x256:d=1 \
+      -c:v h264_nvenc -f null - </dev/null 2>/dev/null; then
     echo "[bootstrap-rtx6000ada] NVENC (h264_nvenc) smoke test OK."
   else
     echo "[bootstrap-rtx6000ada] WARNING: h264_nvenc init failed — node-media prep will fail." >&2

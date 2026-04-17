@@ -1,4 +1,5 @@
 from .config import (
+    AudioHostProcessSettings,
     AudioHostSettings,
     LocalGenerationSettings,
     NodeMediaPrepSettings,
@@ -11,6 +12,7 @@ from .config import (
     VertexSettings,
     VibeVoiceSettings,
     VibeVoiceVLLMSettings,
+    load_audio_host_settings,
     load_provider_settings,
 )
 from .audio_host_client import (
@@ -31,6 +33,7 @@ from .vibevoice_vllm import (
 from .vertex import VertexEmbeddingClient, VertexGenerationClient
 
 __all__ = [
+    "AudioHostProcessSettings",
     "AudioHostSettings",
     "ForcedAlignmentProvider",
     "LocalGenerationSettings",
@@ -54,5 +57,6 @@ __all__ = [
     "VibeVoiceVLLMProvider",
     "build_gcs_uri_url_resolver",
     "VibeVoiceVLLMSettings",
+    "load_audio_host_settings",
     "load_provider_settings",
 ]

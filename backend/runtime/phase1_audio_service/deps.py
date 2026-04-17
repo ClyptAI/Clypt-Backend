@@ -23,7 +23,7 @@ from backend.providers import (
     ForcedAlignmentProvider,
     VibeVoiceVLLMProvider,
     build_gcs_uri_url_resolver,
-    load_provider_settings,
+    load_audio_host_settings,
 )
 from backend.providers.emotion2vec import Emotion2VecPlusProvider
 from backend.providers.storage import GCSStorageClient
@@ -67,7 +67,7 @@ def _resolve_expected_auth_token() -> str:
 @lru_cache(maxsize=1)
 def get_app_deps() -> AppDeps:
     """Build and cache the RTX-side audio providers."""
-    settings = load_provider_settings()
+    settings = load_audio_host_settings()
     storage_client = GCSStorageClient(settings=settings.storage)
 
     vv = settings.vllm_vibevoice
