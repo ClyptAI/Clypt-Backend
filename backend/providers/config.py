@@ -200,6 +200,18 @@ class SpannerSettings:
     database: str = "clypt_phase14"
     ddl_operation_timeout_s: float = 600.0
 
+    @property
+    def is_configured(self) -> bool:
+        """True iff Spanner is fully addressable (project/instance/database all set).
+
+        Used as the durable-persistence opt-out gate: when False, Phase 1
+        runs without Spanner (in-memory only). When True, any failure to
+        construct the repository must propagate so GPU work is not
+        silently decoupled from durable storage (rotated credentials,
+        DDL drift, etc.).
+        """
+        return bool(self.project) and bool(self.instance) and bool(self.database)
+
 
 @dataclass(slots=True)
 class Phase24WorkerSettings:

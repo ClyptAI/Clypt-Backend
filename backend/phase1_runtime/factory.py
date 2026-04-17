@@ -29,13 +29,20 @@ def _build_phase24_local_dispatcher(*, settings) -> Phase24LocalDispatcherClient
 
 
 def _build_phase14_repository(*, settings) -> SpannerPhase14Repository | None:
-    try:
-        repository = SpannerPhase14Repository.from_settings(settings=settings.spanner)
-        repository.bootstrap_schema()
-        return repository
-    except Exception as exc:  # pragma: no cover - depends on optional credentials/deps
-        logger.warning("failed to initialize Spanner Phase14 repository: %s", exc)
+    # Opt-out path: if Spanner is not fully configured, Phase 1 runs without
+    # durable persistence (in-memory only). Once configured, we deliberately
+    # do NOT catch init exceptions: rotated credentials, DDL drift, or missing
+    # IAM must fail fast instead of silently disabling persistence while GPUs
+    # keep burning. See docs/ERROR_LOG.md 2026-04-16 (F0.3).
+    if not settings.spanner.is_configured:
+        logger.info(
+            "Spanner Phase14 repository disabled (spanner settings not fully "
+            "configured); Phase 1 will run without durable persistence."
+        )
         return None
+    repository = SpannerPhase14Repository.from_settings(settings=settings.spanner)
+    repository.bootstrap_schema()
+    return repository
 
 
 def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -> Phase1JobRunner:
