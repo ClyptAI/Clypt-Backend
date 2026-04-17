@@ -49,15 +49,17 @@ def extract_node_clip(
             f"Unsupported CLYPT_PHASE24_FFMPEG_DEVICE={ffmpeg_device!r}; expected auto|gpu|cpu."
         )
 
-    # CPU decode + NVENC encode. We intentionally omit -hwaccel cuda / NVDEC
-    # because vLLM occupies ~95% of VRAM on the RTX 6000 Ada, leaving
-    # insufficient headroom for a CUDA context (cuCtxCreate OOM). NVENC is a
-    # fixed-function hardware block that does not require a CUDA context, so
-    # the encoder runs on-GPU regardless. H.264 decode is fast on the host
-    # CPU and is not the bottleneck; NVENC encode throughput is what matters.
+    # -hwaccel cuda enables NVDEC for decoding; omitting -hwaccel_output_format
+    # cuda avoids "No decoder surfaces left" / filter reinit errors that occur
+    # when combining cuda surface pinning with -ss seek on ffmpeg 4.4.
+    # NVENC still handles encoding via the fixed-function hardware block.
+    # vLLM is capped at --gpu-memory-utilization 0.77 on the RTX 6000 Ada to
+    # leave enough VRAM headroom for cuCtxCreate (NVDEC context init).
     gpu_cmd = [
         "ffmpeg",
         "-y",
+        "-hwaccel",
+        "cuda",
         "-i",
         str(source_video_path),
         "-ss",

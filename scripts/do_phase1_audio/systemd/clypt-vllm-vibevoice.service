@@ -19,10 +19,11 @@ ExecStartPre=-/usr/bin/docker rm   clypt-vllm-vibevoice
 # tokenizer assets alongside the snapshot. Both are idempotent and cheap
 # once the cache is warm.
 #
-# vLLM flags rationale: vLLM is sole-tenant on the RTX card now (NFA /
-# emotion2vec+ / YAMNet moved back to H200 — see docs/ERROR_LOG.md
-# 2026-04-17), so we use upstream defaults. No --enforce-eager, no
-# --max-num-seqs pin, and --gpu-memory-utilization defaults to 0.90.
+# vLLM flags rationale: --gpu-memory-utilization 0.77 (~37.8 GiB on the
+    # RTX 6000 Ada 49 GiB card) leaves ~11 GiB free for the host OS and for
+    # NVDEC CUDA context creation by concurrent ffmpeg node-media-prep jobs.
+    # The default 0.90 (~44 GiB) causes cuCtxCreate OOM, forcing NVDEC to
+    # fail and every ffmpeg clip to fall back to CPU decode.
 ExecStart=/usr/bin/docker run \
     --name clypt-vllm-vibevoice \
     --gpus all \
@@ -44,6 +45,7 @@ ExecStart=/usr/bin/docker run \
             --served-model-name vibevoice \
             --trust-remote-code \
             --dtype bfloat16 \
+            --gpu-memory-utilization 0.77 \
             --port 8000 \
             --host 0.0.0.0"
 ExecStop=/usr/bin/docker stop clypt-vllm-vibevoice
