@@ -463,6 +463,12 @@ def test_build_default_phase24_worker_service_uses_local_model_for_flash(monkeyp
             model="Qwen/Qwen3.6-35B-A3B",
         ),
         storage=SimpleNamespace(),
+        node_media_prep=SimpleNamespace(
+            service_url="http://10.0.0.5:9100",
+            auth_token="prep-token",
+            timeout_s=3600.0,
+            max_concurrency=8,
+        ),
         phase24_worker=SimpleNamespace(
             query_version="v1",
             debug_snapshots=False,

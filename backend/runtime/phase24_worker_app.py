@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from backend.phase1_runtime.models import Phase1SidecarOutputs
 from backend.providers import (
     LocalOpenAIQwenClient,
+    RemoteNodeMediaPrepClient,
     VertexEmbeddingClient,
     load_provider_settings,
 )
@@ -404,35 +405,22 @@ class Phase24WorkerService:
                 temp_dir.cleanup()
                 raise
 
+        # Node-media prep runs on the remote RTX host, so the H200 does not
+        # need to have the source video on local disk. We only require that
+        # video_gcs_uri is present (the remote NVENC endpoint downloads from
+        # GCS itself).
         phase1_audio = dict(phase1_outputs_payload.get("phase1_audio") or {})
-        local_video_path = phase1_audio.get("local_video_path")
-        requires_local_video = (
-            getattr(self.runner, "node_media_preparer", None) is None
-            and getattr(self.runner, "storage_client", None) is not None
+        video_gcs_uri = (
+            payload.source_video_gcs_uri or phase1_audio.get("video_gcs_uri")
         )
-        if requires_local_video and (not local_video_path or not Path(str(local_video_path)).exists()):
-            video_gcs_uri = payload.source_video_gcs_uri or phase1_audio.get("video_gcs_uri")
-            if not video_gcs_uri:
-                raise ValueError(
-                    "phase1_outputs.phase1_audio.video_gcs_uri or source_video_gcs_uri is required"
-                )
-            if temp_dir is None:
-                temp_dir = tempfile.TemporaryDirectory(prefix=f"phase24-{payload.run_id}-")
-            local_path = Path(temp_dir.name) / "source_video.mp4"
-            try:
-                self.runner.storage_client.download_file(
-                    gcs_uri=video_gcs_uri,
-                    local_path=local_path,
-                )
-            except Exception:
-                temp_dir.cleanup()
-                raise
-            phase1_audio["local_video_path"] = str(local_path)
-            phase1_outputs_payload["phase1_audio"] = phase1_audio
-            return phase1_outputs_payload, temp_dir
-        if phase1_audio:
-            phase1_outputs_payload["phase1_audio"] = phase1_audio
-        return phase1_outputs_payload, None
+        if not video_gcs_uri:
+            raise ValueError(
+                "phase1_outputs.phase1_audio.video_gcs_uri or source_video_gcs_uri is required "
+                "(remote NVENC node-media prep fetches from GCS)."
+            )
+        phase1_audio["video_gcs_uri"] = video_gcs_uri
+        phase1_outputs_payload["phase1_audio"] = phase1_audio
+        return phase1_outputs_payload, temp_dir
 
     @staticmethod
     def _extract_p95_latency_ms(summary_payload: dict[str, Any]) -> float | None:
@@ -548,12 +536,15 @@ def build_default_phase24_worker_service() -> Phase24WorkerService:
         raise ValueError(
             "Local OpenAI generation requires CLYPT_LOCAL_LLM_MODEL (or GENAI_FLASH_MODEL as fallback)."
         )
+    # Node-media prep runs exclusively on the RTX 6000 Ada NVENC host; there
+    # is no in-process fallback. Always wire the remote client.
+    node_media_preparer = RemoteNodeMediaPrepClient(settings=settings.node_media_prep)
     runner = V31LivePhase14Runner.from_env(
         llm_client=llm_client,
         embedding_client=VertexEmbeddingClient(settings=settings.vertex),
         flash_model=local_flash_model,
         storage_client=GCSStorageClient(settings=settings.storage),
-        node_media_preparer=None,
+        node_media_preparer=node_media_preparer,
         repository=repository,
         query_version=settings.phase24_worker.query_version,
         debug_snapshots=settings.phase24_worker.debug_snapshots,

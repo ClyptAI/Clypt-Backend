@@ -1,0 +1,25 @@
+[Unit]
+Description=Clypt Phase 1 Audio Host (RTX 6000 Ada)
+After=network-online.target clypt-vllm-vibevoice.service
+Wants=network-online.target
+Requires=clypt-vllm-vibevoice.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-audio-host/repo
+EnvironmentFile=/etc/clypt-audio-host/audio_host.env
+Environment=HOME=/opt/clypt-audio-host
+Environment=CLYPT_PHASE1_CACHE_HOME=/opt/clypt-audio-host/.cache
+Environment=XDG_CACHE_HOME=/opt/clypt-audio-host/.cache
+Environment=TORCH_HOME=/opt/clypt-audio-host/.cache/torch
+Environment=HF_HOME=/opt/clypt-audio-host/.cache/huggingface
+Environment=CLYPT_PHASE1_AUDIO_HOST_SCRATCH_ROOT=/opt/clypt-audio-host/scratch
+ExecStart=/opt/clypt-audio-host/venvs/audio/bin/python -m uvicorn backend.runtime.phase1_audio_service.app:create_app --factory --host ${CLYPT_PHASE1_AUDIO_HOST_BIND} --port ${CLYPT_PHASE1_AUDIO_HOST_PORT} --workers 1 --timeout-keep-alive 120
+Restart=always
+RestartSec=5
+LimitNOFILE=524288
+CPUAccounting=yes
+MemoryAccounting=yes
+
+[Install]
+WantedBy=multi-user.target

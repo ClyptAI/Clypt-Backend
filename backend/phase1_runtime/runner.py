@@ -42,25 +42,24 @@ class Phase1JobRunner:
         working_root: Path,
         audio_extractor=None,
         storage_client: Any,
-        vibevoice_provider: Any,
-        forced_aligner: Any,
+        audio_host_client: Any,
         visual_extractor: Any,
-        emotion_provider: Any,
-        yamnet_provider: Any,
         phase24_task_queue_client: Any | None = None,
         phase14_repository: Any | None = None,
         phase24_query_version: str | None = None,
         input_resolver: Phase1InputResolver | None = None,
         input_resolver_strict: bool = True,
     ) -> None:
+        if audio_host_client is None:
+            raise ValueError(
+                "Phase1JobRunner requires audio_host_client; the Phase 1 audio chain "
+                "has no in-process fallback on the H200."
+            )
         self.working_root = Path(working_root)
         self.audio_extractor = audio_extractor
         self.storage_client = storage_client
-        self.vibevoice_provider = vibevoice_provider
-        self.forced_aligner = forced_aligner
+        self.audio_host_client = audio_host_client
         self.visual_extractor = visual_extractor
-        self.emotion_provider = emotion_provider
-        self.yamnet_provider = yamnet_provider
         self.phase24_task_queue_client = phase24_task_queue_client
         self.phase14_repository = phase14_repository
         self.phase24_query_version = phase24_query_version
@@ -415,11 +414,8 @@ class Phase1JobRunner:
                 video_gcs_uri=video_gcs_uri,
                 audio_gcs_uri=resolved_audio_gcs_uri,
                 workspace=workspace,
-                vibevoice_provider=self.vibevoice_provider,
-                forced_aligner=self.forced_aligner,
+                audio_host_client=self.audio_host_client,
                 visual_extractor=self.visual_extractor,
-                emotion_provider=self.emotion_provider,
-                yamnet_provider=self.yamnet_provider,
                 on_audio_chain_complete=_on_audio_done,
                 stage_event_logger=_on_stage_event,
             )
@@ -457,11 +453,8 @@ class Phase1JobRunner:
                 video_gcs_uri=video_gcs_uri,
                 audio_gcs_uri=resolved_audio_gcs_uri,
                 workspace=workspace,
-                vibevoice_provider=self.vibevoice_provider,
-                forced_aligner=self.forced_aligner,
+                audio_host_client=self.audio_host_client,
                 visual_extractor=self.visual_extractor,
-                emotion_provider=self.emotion_provider,
-                yamnet_provider=self.yamnet_provider,
                 stage_event_logger=_on_stage_event,
             )
             result["phase1"] = _jsonable(phase1_outputs)

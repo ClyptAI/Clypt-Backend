@@ -1,5 +1,5 @@
 [Unit]
-Description=Clypt vLLM VibeVoice ASR Service
+Description=Clypt vLLM VibeVoice ASR Service (RTX 6000 Ada audio host)
 Documentation=https://github.com/microsoft/VibeVoice
 After=docker.service network-online.target
 Requires=docker.service
@@ -8,7 +8,7 @@ Requires=docker.service
 Type=simple
 ExecStartPre=-/usr/bin/docker stop clypt-vllm-vibevoice
 ExecStartPre=-/usr/bin/docker rm   clypt-vllm-vibevoice
-ExecStartPre=/usr/bin/test -f /opt/clypt-phase1/vibevoice-repo/vllm_plugin/scripts/start_server.py
+ExecStartPre=/usr/bin/test -f /opt/clypt-audio-host/vibevoice-repo/vllm_plugin/scripts/start_server.py
 ExecStart=/usr/bin/docker run \
     --name clypt-vllm-vibevoice \
     --gpus all \
@@ -16,12 +16,12 @@ ExecStart=/usr/bin/docker run \
     -p 127.0.0.1:8000:8000 \
     -e VIBEVOICE_FFMPEG_MAX_CONCURRENCY=64 \
     -e PYTORCH_ALLOC_CONF=expandable_segments:True \
-    -v /opt/clypt-phase1/vibevoice-repo:/app \
-    -v /opt/clypt-phase1/hf-cache:/root/.cache/huggingface \
+    -v /opt/clypt-audio-host/vibevoice-repo:/app \
+    -v /opt/clypt-audio-host/hf-cache:/root/.cache/huggingface \
     -w /app \
     --entrypoint bash \
     clypt-vllm-vibevoice:latest \
-    -c "python3 /app/vllm_plugin/scripts/start_server.py --max-num-seqs 2 --gpu-memory-utilization 0.25"
+    -c "python3 /app/vllm_plugin/scripts/start_server.py --max-num-seqs 2 --gpu-memory-utilization 0.45"
 ExecStop=/usr/bin/docker stop clypt-vllm-vibevoice
 Restart=always
 RestartSec=10

@@ -84,7 +84,7 @@ python -m pip install "$SG_PACKAGE_SPEC"
 
 echo "[deploy-sglang-qwen] installing systemd unit ..."
 install -D -m 0644 \
-  scripts/do_phase1/systemd/clypt-sglang-qwen.service \
+  scripts/do_phase1_visual/systemd/clypt-sglang-qwen.service \
   "/etc/systemd/system/${SG_SYSTEMD_UNIT}"
 
 echo "[deploy-sglang-qwen] updating unit with configured runtime values ..."

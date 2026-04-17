@@ -4,14 +4,10 @@ import logging
 from pathlib import Path
 
 from backend.providers import (
-    ForcedAlignmentProvider,
-    VibeVoiceVLLMProvider,
-    build_gcs_uri_url_resolver,
+    RemoteAudioChainClient,
     load_provider_settings,
 )
-from backend.providers.emotion2vec import Emotion2VecPlusProvider
 from backend.providers.storage import GCSStorageClient
-from backend.providers.yamnet import YAMNetProvider
 from backend.repository import SpannerPhase14Repository
 from backend.runtime.phase24_local_dispatcher import Phase24LocalDispatcherClient
 from backend.runtime.phase24_local_queue import Phase24LocalQueue
@@ -47,25 +43,11 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
             f"(got {settings.phase24_local_queue.queue_backend!r})."
         )
     storage_client = GCSStorageClient(settings=settings.storage)
-    vv = settings.vllm_vibevoice
-    vibevoice_provider = VibeVoiceVLLMProvider(
-        base_url=vv.base_url,
-        model=vv.model,
-        timeout_s=vv.timeout_s,
-        healthcheck_path=vv.healthcheck_path,
-        max_retries=vv.max_retries,
-        audio_mode=vv.audio_mode,
-        audio_gcs_url_resolver=build_gcs_uri_url_resolver(storage_client=storage_client),
-        hotwords_context=settings.vibevoice.hotwords_context,
-        max_new_tokens=settings.vibevoice.max_new_tokens,
-        do_sample=settings.vibevoice.do_sample,
-        temperature=settings.vibevoice.temperature,
-        top_p=settings.vibevoice.top_p,
-        repetition_penalty=settings.vibevoice.repetition_penalty,
-        num_beams=settings.vibevoice.num_beams,
-    )
 
-    forced_aligner = ForcedAlignmentProvider()
+    # The Phase 1 audio chain runs exclusively on the RTX 6000 Ada audio host.
+    # There is no in-process VibeVoice/NFA/emotion/YAMNet provider on the H200.
+    audio_host_client = RemoteAudioChainClient(settings=settings.audio_host)
+
     phase14_repository = _build_phase14_repository(settings=settings)
     phase24_task_queue_client = _build_phase24_local_dispatcher(settings=settings)
     visual_config = VisualPipelineConfig.from_env()
@@ -89,13 +71,8 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
     return Phase1JobRunner(
         working_root=Path(working_root or settings.phase1_runtime.working_root),
         storage_client=storage_client,
-        vibevoice_provider=vibevoice_provider,
-        forced_aligner=forced_aligner,
+        audio_host_client=audio_host_client,
         visual_extractor=SimpleVisualExtractor(visual_config=visual_config),
-        emotion_provider=Emotion2VecPlusProvider(),
-        yamnet_provider=YAMNetProvider(
-            device="gpu" if settings.phase1_runtime.run_yamnet_on_gpu else "cpu"
-        ),
         phase24_task_queue_client=phase24_task_queue_client,
         phase14_repository=phase14_repository,
         phase24_query_version=settings.phase24_worker.query_version,

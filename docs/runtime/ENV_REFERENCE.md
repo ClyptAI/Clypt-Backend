@@ -9,32 +9,57 @@ Use this file for the full env surface. Use `.env.example` for a starter file, a
 
 ## 1) Required Core Inputs
 
-These are validated by `load_provider_settings()` for normal runtime startup:
+### 1.1 H200 host (orchestrator + visual + worker)
+
+Validated by `load_provider_settings()` at startup — config load fails
+fast if any are missing:
 
 - `GOOGLE_CLOUD_PROJECT`
 - `GCS_BUCKET`
+- `CLYPT_PHASE1_AUDIO_HOST_URL`
+- `CLYPT_PHASE1_AUDIO_HOST_TOKEN`
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN`
+- `GENAI_GENERATION_BACKEND=local_openai`
+- `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
+- `CLYPT_LOCAL_LLM_BASE_URL`
+- `CLYPT_LOCAL_LLM_MODEL` (or a compatible fallback such as `GENAI_FLASH_MODEL`)
+
+`VIBEVOICE_BACKEND` / `VIBEVOICE_VLLM_*` must **not** be set on the H200.
+
+### 1.2 RTX 6000 Ada audio host
+
+Required on the audio host (loaded by the FastAPI service and by its
+embedded VibeVoice client):
+
+- `CLYPT_PHASE1_AUDIO_HOST_BIND`
+- `CLYPT_PHASE1_AUDIO_HOST_PORT`
+- `CLYPT_PHASE1_AUDIO_HOST_TOKEN`
 - `VIBEVOICE_BACKEND=vllm`
+- `VIBEVOICE_VLLM_BASE_URL`
+- `VIBEVOICE_VLLM_MODEL=vibevoice`
+- `GOOGLE_CLOUD_PROJECT`
+- `GCS_BUCKET`
+- `GOOGLE_APPLICATION_CREDENTIALS`
 
 ## 2) Recommended Working Profile
 
-The profiles below describe what mainline code accepts today. The
-planned dual-host RTX 6000 Ada refactor adds new audio-host / media-host
-env knobs; those are tracked in
-[`docs/deployment/REFACTOR_RTX6000ADA.md`](../deployment/REFACTOR_RTX6000ADA.md)
-and will be added to this doc once they land.
+The profile below describes the deployed two-host reality. There is no
+local-fallback audio or node-media-prep mode; `run_phase1_sidecars` and
+`build_default_phase24_worker_service` both require the remote clients.
 
-### 2.1 Single-host Phase 1 + Phase 2-4 (current)
-
-Phase 1 audio chain (VibeVoice vLLM ASR + NFA + emotion2vec+ + YAMNet)
-and visual chain (RF-DETR + ByteTrack) both run on the same host in the
-same process. Phase 2-4 runs its local worker on that host with
-in-process node-media prep:
+### 2.1 H200 profile
 
 ```bash
-CLYPT_PHASE1_ASR_BACKEND=vllm
-VIBEVOICE_BACKEND=vllm
-VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
-VIBEVOICE_VLLM_MODEL=vibevoice
+CLYPT_PHASE1_AUDIO_HOST_URL=http://<rtx-host>:9100
+CLYPT_PHASE1_AUDIO_HOST_TOKEN=<shared-bearer>
+CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S=7200
+CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH=/health
+
+CLYPT_PHASE24_NODE_MEDIA_PREP_URL=http://<rtx-host>:9100
+CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
+CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=600
+CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=8
 
 GENAI_GENERATION_BACKEND=local_openai
 CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1
@@ -44,10 +69,24 @@ VERTEX_EMBEDDING_BACKEND=vertex
 CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite
 ```
 
+### 2.2 RTX 6000 Ada profile
+
+```bash
+CLYPT_PHASE1_AUDIO_HOST_BIND=0.0.0.0
+CLYPT_PHASE1_AUDIO_HOST_PORT=9100
+CLYPT_PHASE1_AUDIO_HOST_TOKEN=<shared-bearer>
+CLYPT_PHASE1_AUDIO_HOST_SCRATCH_ROOT=/opt/clypt-audio-host/scratch
+
+VIBEVOICE_BACKEND=vllm
+VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
+VIBEVOICE_VLLM_MODEL=vibevoice
+```
+
 Fail-fast guardrails in current code:
 
-- `CLYPT_PHASE1_ASR_BACKEND` only accepts `vllm` today; any other value raises at startup
+- `CLYPT_PHASE1_ASR_BACKEND` (if set on the H200) only accepts `vllm`; any other value raises
 - `CLYPT_GEMINI_MAX_CONCURRENT` has been removed and now raises at startup
+- Omitting any of the four remote-host vars in §1.1 raises at startup
 
 ## 3) Provider and Runtime Env Surface
 
@@ -69,16 +108,32 @@ Fail-fast guardrails in current code:
 |---|---|---|
 | `CLYPT_PHASE1_ASR_BACKEND` | `vllm` | Only `vllm` is supported today. |
 
-### 3.3 VibeVoice local vLLM settings
+### 3.3 Remote audio host (H200 → RTX 6000 Ada)
+
+`RemoteAudioChainClient` settings loaded on the H200. All four of the
+first entries are required; startup fails fast if either `URL` or
+`TOKEN` is missing.
 
 | Env | Default | Notes |
 |---|---|---|
-| `VIBEVOICE_BACKEND` | `vllm` | Must stay `vllm` on mainline. |
-| `VIBEVOICE_VLLM_BASE_URL` | required | Local VibeVoice vLLM base URL. |
-| `VIBEVOICE_VLLM_MODEL` | `vibevoice` | Must stay `vibevoice`. |
-| `VIBEVOICE_VLLM_TIMEOUT_S` | `7200` | Local ASR timeout. |
+| `CLYPT_PHASE1_AUDIO_HOST_URL` | required | Base URL of the RTX 6000 Ada FastAPI service. |
+| `CLYPT_PHASE1_AUDIO_HOST_TOKEN` | required | Shared bearer for the RTX service. |
+| `CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S` | `7200` | Request timeout for `/tasks/phase1-audio`. |
+| `CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH` | `/health` | Used by deploy probe and diagnostics. |
+
+### 3.4 VibeVoice local vLLM settings (RTX 6000 Ada only)
+
+These live on the RTX audio host, not the H200. The FastAPI service
+loads them when building its in-process VibeVoice vLLM client.
+
+| Env | Default | Notes |
+|---|---|---|
+| `VIBEVOICE_BACKEND` | `vllm` | Must be `vllm`. |
+| `VIBEVOICE_VLLM_BASE_URL` | required | Local vLLM URL on the RTX host. |
+| `VIBEVOICE_VLLM_MODEL` | `vibevoice` | Must be `vibevoice`. |
+| `VIBEVOICE_VLLM_TIMEOUT_S` | `7200` | ASR timeout. |
 | `VIBEVOICE_VLLM_HEALTHCHECK_PATH` | `/health` | Local service health route. |
-| `VIBEVOICE_VLLM_MAX_RETRIES` | `1` | Local ASR retry budget. |
+| `VIBEVOICE_VLLM_MAX_RETRIES` | `1` | ASR retry budget. |
 | `VIBEVOICE_VLLM_AUDIO_MODE` | `url` | Current default path. |
 | `VIBEVOICE_HOTWORDS_CONTEXT` | built-in pronoun/connective list | Comma-separated context string. |
 | `VIBEVOICE_MAX_NEW_TOKENS` | `32768` | Passed through to ASR generation config. |
@@ -88,7 +143,7 @@ Fail-fast guardrails in current code:
 | `VIBEVOICE_REPETITION_PENALTY` | `1.03` | Current default. |
 | `VIBEVOICE_NUM_BEAMS` | `1` | Beam count. |
 
-### 3.4 Local OpenAI generation settings
+### 3.5 Local OpenAI generation settings
 
 | Env | Default | Notes |
 |---|---|---|
@@ -111,7 +166,7 @@ Fail-fast guardrails in current code:
 The local OpenAI-compatible Qwen path always sends `chat_template_kwargs.enable_thinking=false`.
 `CLYPT_LOCAL_LLM_ENABLE_THINKING` has been removed and now fails fast if set.
 
-### 3.5 Vertex / Gemini / storage / persistence
+### 3.6 Vertex / Gemini / storage / persistence
 
 | Env | Default | Notes |
 |---|---|---|
@@ -169,20 +224,26 @@ The local OpenAI-compatible Qwen path always sends `chat_template_kwargs.enable_
 > `ValueError` at config load. There is no metrics producer under SGLang, so the
 > admission guards were dead code.
 
-### 4.2 Node-media prep
+### 4.2 Node-media prep (remote RTX 6000 Ada)
 
-Node-media prep runs in-process on the worker host; there is no remote
-offload today. The planned RTX 6000 Ada refactor moves ffmpeg-based
-clip extraction to the dedicated audio/media host (H200 NVENC is not
-usable for `h264_nvenc`), and will introduce
-`CLYPT_PHASE24_NODE_MEDIA_PREP_BACKEND=remote_http` plus companion
-endpoint/token envs — see
-[`docs/deployment/REFACTOR_RTX6000ADA.md`](../deployment/REFACTOR_RTX6000ADA.md).
+Node-media prep is always delegated to the RTX audio host via
+`RemoteNodeMediaPrepClient`. There is no in-process ffmpeg path on the
+H200 worker anymore; startup fails fast if `URL` or `TOKEN` is missing.
 
 | Env | Default | Notes |
 |---|---|---|
-| `CLYPT_PHASE24_FFMPEG_DEVICE` | `auto` | `auto`, `gpu`, or `cpu`. |
-| `CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT` | `8` | Clip extraction worker pool size. Renamed from `CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY`; the old name now raises at config load. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` | required | Base URL of the RTX service. Typically the same as `CLYPT_PHASE1_AUDIO_HOST_URL`. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` | required | Shared bearer for the RTX service. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S` | `600` | Per-request timeout. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` | `8` | Caller-side concurrency ceiling for `/tasks/node-media-prep`. |
+
+The RTX-side ffmpeg hardware-device selection is still controlled by
+`CLYPT_PHASE24_FFMPEG_DEVICE` (`auto`/`gpu`/`cpu`), but that variable
+now belongs to the **RTX host** environment, not the H200.
+
+> Removed: `CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT` (replaced by the
+> remote client's `_MAX_CONCURRENCY`). Setting the old name raises at
+> config load.
 
 ## 5) Phase 2-4 Pipeline Tuning Env Surface
 
@@ -293,8 +354,9 @@ These are currently code defaults only, not env-driven:
 ## 7) SGLang Runtime Tuning Surface (Qwen3.6)
 
 SGLang startup flags for the Qwen3.6 service are driven by `SG_*` knobs in
-`scripts/do_phase1/deploy_sglang_qwen_service.sh` and the
-`clypt-sglang-qwen.service` systemd unit, not via Python-level envs.
+`scripts/do_phase1_visual/deploy_sglang_qwen_service.sh` and the
+`clypt-sglang-qwen.service` systemd unit on the H200, not via
+Python-level envs.
 
 > Removed (2026-04-16 Qwen3.6 + SGLang cutover): `CLYPT_VLLM_PROFILE`,
 > `CLYPT_VLLM_MAX_NUM_SEQS`, `CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS`,
@@ -308,9 +370,9 @@ SGLang startup flags for the Qwen3.6 service are driven by `SG_*` knobs in
 
 These are not read by `load_provider_settings()` or `get_v31_config()`. They are used by deploy/bootstrap scripts.
 
-### 8.1 SGLang deploy knobs
+### 8.1 SGLang deploy knobs (H200)
 
-Used by `scripts/do_phase1/deploy_sglang_qwen_service.sh`:
+Used by `scripts/do_phase1_visual/deploy_sglang_qwen_service.sh`:
 
 - `SG_PACKAGE_SPEC`
 - `SG_BASE_URL`
@@ -325,9 +387,9 @@ Used by `scripts/do_phase1/deploy_sglang_qwen_service.sh`:
 - `SG_READY_TIMEOUT_S`
 - `SG_SYSTEMD_UNIT`
 
-### 8.2 VibeVoice deploy knobs
+### 8.2 VibeVoice deploy knobs (RTX 6000 Ada)
 
-Used by `scripts/do_phase1/deploy_vllm_service.sh`:
+Used by `scripts/do_phase1_audio/deploy_vllm_service.sh`:
 
 - `VIBEVOICE_REPO_DIR`
 - `VIBEVOICE_REPO_URL`

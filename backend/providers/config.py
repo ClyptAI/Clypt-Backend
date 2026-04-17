@@ -254,12 +254,42 @@ class Phase1ASRSettings:
 
 
 @dataclass(slots=True)
+class AudioHostSettings:
+    """Required settings for the remote Phase 1 audio host (RTX 6000 Ada).
+
+    The H200 has no in-process audio chain; the audio host is the only path.
+    Fail-fast at load if URL or token are missing.
+    """
+
+    service_url: str
+    auth_token: str
+    timeout_s: float = 7200.0
+    healthcheck_path: str = "/health"
+
+
+@dataclass(slots=True)
+class NodeMediaPrepSettings:
+    """Required settings for remote node-media-prep (RTX 6000 Ada, NVENC).
+
+    The Phase 2-4 worker has no local fallback; the remote service is the only path.
+    Fail-fast at load if URL or token are missing.
+    """
+
+    service_url: str
+    auth_token: str
+    timeout_s: float = 3600.0
+    max_concurrency: int = 8
+
+
+@dataclass(slots=True)
 class ProviderSettings:
     vibevoice: VibeVoiceSettings
     vllm_vibevoice: VibeVoiceVLLMSettings
     vertex: VertexSettings
     local_generation: LocalGenerationSettings
     storage: StorageSettings
+    audio_host: AudioHostSettings
+    node_media_prep: NodeMediaPrepSettings
     phase1_asr: Phase1ASRSettings = field(default_factory=Phase1ASRSettings)
     spanner: SpannerSettings = field(default_factory=SpannerSettings)
     phase24_worker: Phase24WorkerSettings = field(default_factory=Phase24WorkerSettings)
@@ -321,6 +351,49 @@ def load_provider_settings() -> ProviderSettings:
             "Unsupported VERTEX_EMBEDDING_BACKEND="
             f"{embedding_backend!r}; expected 'developer' or 'vertex'."
         )
+
+    audio_host_url = _read_env("CLYPT_PHASE1_AUDIO_HOST_URL")
+    if not audio_host_url:
+        raise ValueError(
+            "CLYPT_PHASE1_AUDIO_HOST_URL is required. The Phase 1 audio chain runs "
+            "exclusively on the RTX 6000 Ada audio host; there is no in-process fallback. "
+            "Point this at the audio host's private VPC URL (e.g. http://10.0.0.5:9100)."
+        )
+    audio_host_token = _read_env("CLYPT_PHASE1_AUDIO_HOST_TOKEN")
+    if not audio_host_token:
+        raise ValueError(
+            "CLYPT_PHASE1_AUDIO_HOST_TOKEN is required (shared bearer token with the "
+            "RTX 6000 Ada audio host)."
+        )
+    audio_host = AudioHostSettings(
+        service_url=audio_host_url.rstrip("/"),
+        auth_token=audio_host_token,
+        timeout_s=float(_read_env("CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S") or "7200"),
+        healthcheck_path=_read_env("CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH") or "/health",
+    )
+
+    node_media_prep_url = _read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_URL")
+    if not node_media_prep_url:
+        raise ValueError(
+            "CLYPT_PHASE24_NODE_MEDIA_PREP_URL is required. Phase 2 node-media prep runs "
+            "exclusively on the RTX 6000 Ada NVENC host; the H200 has no local fallback."
+        )
+    node_media_prep_token = _read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN")
+    if not node_media_prep_token:
+        raise ValueError(
+            "CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN is required (shared bearer token with the "
+            "RTX 6000 Ada node-media-prep endpoint; may equal CLYPT_PHASE1_AUDIO_HOST_TOKEN "
+            "when both endpoints live on the same host)."
+        )
+    node_media_prep = NodeMediaPrepSettings(
+        service_url=node_media_prep_url.rstrip("/"),
+        auth_token=node_media_prep_token,
+        timeout_s=float(_read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S") or "3600"),
+        max_concurrency=max(
+            1,
+            _read_int_env("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY", default=8),
+        ),
+    )
 
     local_generation = LocalGenerationSettings(
         base_url=_read_env("CLYPT_LOCAL_LLM_BASE_URL") or "http://127.0.0.1:8001/v1",
@@ -468,6 +541,8 @@ def load_provider_settings() -> ProviderSettings:
             ),
         ),
         storage=StorageSettings(gcs_bucket=gcs_bucket),
+        audio_host=audio_host,
+        node_media_prep=node_media_prep,
         spanner=SpannerSettings(
             project=_read_env("CLYPT_SPANNER_PROJECT") or vertex_project,
             instance=_read_env("CLYPT_SPANNER_INSTANCE") or "clypt-phase14",
@@ -529,7 +604,9 @@ def load_provider_settings() -> ProviderSettings:
 
 
 __all__ = [
+    "AudioHostSettings",
     "LocalGenerationSettings",
+    "NodeMediaPrepSettings",
     "Phase24LocalQueueSettings",
     "Phase1RuntimeSettings",
     "Phase1ASRSettings",

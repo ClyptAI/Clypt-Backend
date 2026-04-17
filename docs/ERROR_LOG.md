@@ -7,7 +7,20 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > describe infrastructure that has since been torn down. The code paths,
 > deploy scripts, and Docker images referenced by those incidents no longer
 > exist in this repository; the entries are retained for historical context
-> only. Current Phase 1 ASR and node-media prep are both single-host.
+> only. Phase 1 ASR and node-media prep now live on a dedicated RTX 6000
+> Ada audio host that the H200 calls over HTTP — see the 2026-04-17 entry
+> on the H200/RTX split for the final resolution of the NVENC issue.
+
+## 2026-04-17 - H200 NVENC gap finally resolved via dedicated RTX 6000 Ada audio host
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** Phase 1 audio chain + Phase 2 node-media prep topology
+- **Environment:** DO H200 droplet (Phase 1 orchestrator + visual + worker) calling a new DO RTX 6000 Ada droplet (Phase 1 audio + NVENC node-media prep) over HTTP
+- **Symptom / Error signature:** Historical `h264_nvenc: unsupported device (2)` on H200 (see 2026-04-15 entry) and the failed Cloud Run / GCE L4 follow-ups.
+- **Root cause:** H200 has no NVENC encoder block, so any co-located ffmpeg clip-extraction path fails. Earlier workarounds (Cloud Run L4, GCE L4) were operationally fragile.
+- **Fix applied:** Split Phase 1 across two droplets. All VibeVoice vLLM + NFA + emotion2vec+ + YAMNet work and all ffmpeg NVENC clip extraction now live on an RTX 6000 Ada droplet serving `POST /tasks/phase1-audio` and `POST /tasks/node-media-prep`. The H200 always calls the RTX host through `RemoteAudioChainClient` / `RemoteNodeMediaPrepClient`; `backend/providers/config.py` fails fast at load if the URL or bearer token is missing, i.e. there is no local fallback. All prior L4/Cloud-Run-related envs, scripts, and Docker images are deleted.
+- **Verification evidence:** New unit tests (`tests/backend/providers/test_remote_audio_host_client.py`, `test_remote_node_media_prep_client.py`, `tests/backend/runtime/phase1_audio_service/test_app.py`, `test_node_media_prep.py`, `test_audio_chain.py`) and updated runner/worker tests pass. Deploy scripts under `scripts/do_phase1_audio/` provision an NVENC smoke test before starting services.
+- **Follow-up guardrails:** Do not reintroduce an in-process audio chain or ffmpeg path on the H200; config load must stay fail-fast on missing remote endpoints. Do not set `VIBEVOICE_*` envs on the H200.
 
 ## Entry Template
 

@@ -1,0 +1,32 @@
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+# Phase 1 VISUAL runtime deps for the H200 droplet.
+#
+# This venv runs on the H200 and hosts:
+#   * the Phase 1 visual chain (RF-DETR + ByteTrack, optional TensorRT FP16)
+#   * the Phase 1 orchestrator (which calls the RTX 6000 Ada audio host over HTTP)
+#   * the Phase 2–4 local worker (which also calls the RTX host for node media prep)
+#   * the SGLang Qwen service (installed in a separate venv via deploy_sglang_qwen_service.sh)
+#
+# It does NOT install VibeVoice / NFA / emotion2vec+ / YAMNet — those live on the
+# RTX 6000 Ada droplet (see requirements-do-phase1-audio.txt).
+
+pydantic>=2.11.0
+pytest>=8.4.0
+httpx>=0.28.0
+python-dotenv>=1.0.1
+google-genai>=1.17.0
+google-cloud-storage>=2.19.0
+google-cloud-spanner>=3.50.0
+google-cloud-tasks>=2.16.0
+fastapi>=0.116.0
+uvicorn>=0.35.0
+
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
+opencv-python-headless>=4.12.0
+rfdetr[onnx]>=1.3.0
+supervision>=0.25.0
+trackers>=2.1.0
+transformers>=5.3.0

@@ -102,6 +102,98 @@ def test_load_provider_settings_raises_without_gcs_bucket(
         load_provider_settings()
 
 
+def test_load_provider_settings_raises_without_audio_host_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The H200 has no in-process audio fallback, so the remote host URL is required."""
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.delenv("CLYPT_PHASE1_AUDIO_HOST_URL", raising=False)
+
+    with pytest.raises(ValueError, match="CLYPT_PHASE1_AUDIO_HOST_URL"):
+        load_provider_settings()
+
+
+def test_load_provider_settings_raises_without_audio_host_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.delenv("CLYPT_PHASE1_AUDIO_HOST_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="CLYPT_PHASE1_AUDIO_HOST_TOKEN"):
+        load_provider_settings()
+
+
+def test_load_provider_settings_raises_without_node_media_prep_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.delenv("CLYPT_PHASE24_NODE_MEDIA_PREP_URL", raising=False)
+
+    with pytest.raises(ValueError, match="CLYPT_PHASE24_NODE_MEDIA_PREP_URL"):
+        load_provider_settings()
+
+
+def test_load_provider_settings_raises_without_node_media_prep_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.delenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN"):
+        load_provider_settings()
+
+
+def test_load_provider_settings_populates_audio_host_and_node_media_prep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("CLYPT_PHASE1_AUDIO_HOST_URL", "http://10.0.0.5:9100/")
+    monkeypatch.setenv("CLYPT_PHASE1_AUDIO_HOST_TOKEN", "audio-token-xyz")
+    monkeypatch.setenv("CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S", "1800")
+    monkeypatch.setenv("CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH", "/healthz")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_URL", "http://10.0.0.5:9100")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN", "prep-token-abc")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S", "900")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY", "4")
+
+    settings = load_provider_settings()
+
+    # URL trailing slash normalised.
+    assert settings.audio_host.service_url == "http://10.0.0.5:9100"
+    assert settings.audio_host.auth_token == "audio-token-xyz"
+    assert settings.audio_host.timeout_s == 1800.0
+    assert settings.audio_host.healthcheck_path == "/healthz"
+    assert settings.node_media_prep.service_url == "http://10.0.0.5:9100"
+    assert settings.node_media_prep.auth_token == "prep-token-abc"
+    assert settings.node_media_prep.timeout_s == 900.0
+    assert settings.node_media_prep.max_concurrency == 4
+
+
 def test_load_provider_settings_reads_untracked_env_local(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -451,7 +543,9 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from backend.providers.config import (
+        AudioHostSettings,
         LocalGenerationSettings,
+        NodeMediaPrepSettings,
         ProviderSettings,
         StorageSettings,
         VertexSettings,
@@ -466,6 +560,14 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
         vllm_vibevoice=VibeVoiceVLLMSettings(base_url="http://127.0.0.1:8000"),
         local_generation=LocalGenerationSettings(model="local-qwen"),
         storage=StorageSettings(gcs_bucket="bucket-a"),
+        audio_host=AudioHostSettings(
+            service_url="http://10.0.0.5:9100",
+            auth_token="test-audio-token",
+        ),
+        node_media_prep=NodeMediaPrepSettings(
+            service_url="http://10.0.0.5:9100",
+            auth_token="test-prep-token",
+        ),
     )
 
     captured: dict[str, Any] = {}
@@ -496,9 +598,12 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
     )
     monkeypatch.setattr(phase24_worker_app, "load_provider_settings", lambda: settings_local)
     phase24_worker_app.build_default_phase24_worker_service()
+    from backend.providers.node_media_prep_client import RemoteNodeMediaPrepClient
+
     assert isinstance(captured["llm_client"], LocalOpenAIQwenClient)
     assert captured["llm_client"].settings.model == "local-qwen"
-    assert captured["node_media_preparer"] is None
+    assert isinstance(captured["node_media_preparer"], RemoteNodeMediaPrepClient)
+    assert captured["node_media_preparer"].settings.service_url == "http://10.0.0.5:9100"
 
     settings_dev = ProviderSettings(
         **base,

@@ -1,39 +1,38 @@
 # ARCHITECTURE
 
-**Status:** Active (implemented Phases 1-4, planned Phases 5-6)  
+**Status:** Active (implemented Phases 1-4, planned Phases 5-6)
 **Last updated:** 2026-04-17
 
 This document describes the code-backed architecture currently in this
-repository, plus the agreed target host topology that the RTX 6000 Ada
-refactor is moving us toward. See
-[`docs/deployment/REFACTOR_RTX6000ADA.md`](deployment/REFACTOR_RTX6000ADA.md)
-for the full refactor plan.
+repository. Phase 1 runs across two single-GPU droplets — a **RTX 6000
+Ada audio host** and the existing **H200** visual + orchestrator host —
+with no local fallback in either direction.
 
-## 1) End-to-End Flow (Current Code)
+## 1) End-to-End Flow
 
 ```mermaid
 flowchart TD
   source["Source URL or local path"]
-  p1["Phase 1 runner"]
-  asr["VibeVoice vLLM ASR"]
-  audio["NFA + emotion2vec+ + YAMNet"]
-  visual["RF-DETR + ByteTrack"]
-  mediaprep["Node-media prep (ffmpeg)"]
-  handoff["Phase24 local queue enqueue"]
+  p1["Phase 1 runner (H200)"]
+  visual["RF-DETR + ByteTrack (H200, in-process)"]
+  audiopost["POST /tasks/phase1-audio (RTX 6000 Ada)"]
+  audio["VibeVoice vLLM ASR -> NFA -> emotion2vec+ -> YAMNet"]
+  mediapost["POST /tasks/node-media-prep (RTX 6000 Ada)"]
+  mediaprep["ffmpeg NVENC clip extraction + GCS upload"]
+  handoff["Phase24 local queue enqueue (H200)"]
   q["SQLite queue (WAL)"]
-  w["Phase24 local worker"]
-  llm["Local OpenAI Qwen endpoint (:8001)"]
+  w["Phase24 local worker (H200)"]
+  llm["SGLang Qwen endpoint (H200, :8001)"]
   emb["Vertex embeddings"]
   sp["Spanner persistence"]
   out["Artifacts + run terminal state"]
 
   source --> p1
-  p1 --> asr
   p1 --> visual
-  asr --> audio
+  p1 --> audiopost --> audio
   audio --> handoff
   handoff --> q --> w
-  w --> mediaprep
+  w --> mediapost --> mediaprep
   w --> llm
   w --> emb
   w --> sp
@@ -43,52 +42,46 @@ flowchart TD
 
 ## 2) Host Topology
 
-### 2.1 Current code (single host)
-
-- `run_phase1_sidecars()` runs the visual chain and the audio chain in the
-  same process via `ThreadPoolExecutor`.
-- `Phase24WorkerService` runs `node_media_preparer=None`, falling back to
-  in-process ffmpeg + GCS upload on the Phase 2-4 worker host.
-- In the DO H200 deploy, that single host ends up doing VibeVoice vLLM +
-  RF-DETR + SGLang Qwen + Phase 2-4 worker + node-clip ffmpeg all on one
-  box.
-
-### 2.2 Target topology (RTX 6000 Ada refactor, in progress)
-
 Two single-GPU DigitalOcean droplets:
 
-| Host                                    | Runs                                                                                                                              |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| **Phase 1 audio host — RTX 6000 Ada**   | VibeVoice vLLM ASR, NeMo Forced Aligner, emotion2vec+, YAMNet (CPU), NVENC/NVDEC ffmpeg for node-media prep                        |
-| **Phase 1 visual + Phase 2-4 host — H200** | RF-DETR + ByteTrack (TensorRT FP16), SGLang Qwen3.6-35B-A3B (`:8001`), Phase 2-4 local SQLite queue + local worker, Spanner/GCS I/O |
+| Host | Runs |
+| --- | --- |
+| **Phase 1 audio host — RTX 6000 Ada (48 GB)** | VibeVoice vLLM ASR, NeMo Forced Aligner, emotion2vec+, YAMNet (CPU), ffmpeg NVENC/NVDEC for node-media prep, FastAPI service exposing `/tasks/phase1-audio` and `/tasks/node-media-prep`. |
+| **Phase 1 visual + Phase 2-4 host — H200** | RF-DETR + ByteTrack (TensorRT FP16), SGLang Qwen3.6-35B-A3B on `:8001`, Phase 1 orchestrator (`run_phase1`, Phase 1 API/worker), Phase 2-4 local SQLite queue + worker, Spanner/GCS I/O. |
 
 Design rationale:
 
-- RTX 6000 Ada has 48 GB VRAM, which lets VibeVoice run native dtype (no
-  bf16 audio-encoder patch).
-- H200 NVENC is not usable for our ffmpeg clip-extraction path; RTX 6000
-  Ada provides a working NVENC/NVDEC pipeline.
-- Moving VibeVoice + node-media prep off H200 frees headroom for RF-DETR,
-  SGLang, and Phase 2-4 LLM concurrency.
+- H200 NVENC is unusable for our ffmpeg clip-extraction path
+  (`h264_nvenc` returns `unsupported device (2)`). RTX 6000 Ada provides
+  a working NVENC/NVDEC pipeline.
+- RTX 6000 Ada's 48 GB VRAM lets VibeVoice run native dtype (no bf16
+  audio-encoder patch).
+- Moving VibeVoice + node-media prep off the H200 frees SM time and
+  VRAM for RF-DETR and SGLang.
 
-Refactor status and migration plan:
-[`docs/deployment/REFACTOR_RTX6000ADA.md`](deployment/REFACTOR_RTX6000ADA.md).
+No-fallback rule: `backend/providers/config.py` requires
+`CLYPT_PHASE1_AUDIO_HOST_URL`/`_TOKEN` and
+`CLYPT_PHASE24_NODE_MEDIA_PREP_URL`/`_TOKEN` on the H200. There is no
+in-process audio-chain or ffmpeg path on the orchestrator host.
 
-## 3) Phase 1 Architecture (Implemented)
+## 3) Phase 1 Architecture
 
 ### 3.1 Core behavior
 
-- `run_phase1` builds `Phase1JobRunner` through `build_default_phase1_job_runner()`.
+- `run_phase1` builds `Phase1JobRunner` through
+  `build_default_phase1_job_runner()`. The factory always constructs a
+  `RemoteAudioChainClient`; there is no H200-side VibeVoice/NFA/
+  emotion2vec/YAMNet instantiation.
 - Input mode is `test_bank` only (enforced).
-- Phase 1 ASR path uses local `VibeVoiceVLLMProvider`
-  (`CLYPT_PHASE1_ASR_BACKEND=vllm`; only supported option today).
-- `VIBEVOICE_BACKEND` is also `vllm` only on mainline.
-- Phase 1 has **two sub-chains that currently run in one process**:
-  - **Audio chain** (VibeVoice vLLM ASR → NeMo forced aligner → emotion2vec+ → YAMNet (CPU)).
-    In the target topology this whole chain moves to the RTX 6000 Ada host.
-  - **Visual chain** (RF-DETR + ByteTrack). This stays on the H200.
-- The audio chain begins immediately after ASR returns, not after RF-DETR
-  finishes.
+- Phase 1 has two sub-chains:
+  - **Audio chain (RTX 6000 Ada):** VibeVoice vLLM ASR → NeMo forced
+    aligner → emotion2vec+ → YAMNet (CPU). The H200 calls
+    `POST /tasks/phase1-audio` and receives the merged payload plus
+    re-emitted stage events in one round trip.
+  - **Visual chain (H200):** RF-DETR + ByteTrack (TensorRT FP16 fast
+    path), in-process.
+- The audio chain begins immediately when the HTTP call returns, not
+  when RF-DETR finishes.
 
 ### 3.2 Phase24 handoff
 
@@ -98,36 +91,39 @@ Refactor status and migration plan:
 - Handoff can start while visual work is still running (the audio-chain
   completion callback fires immediately; no RF-DETR dependency).
 
-## 4) Phase 2-4 Architecture (Implemented)
+## 4) Phase 2-4 Architecture
 
 ### 4.1 Worker runtime boundary
 
 - `run_phase24_local_worker` is the canonical local worker.
 - Queue backend must be `local_sqlite`.
-- Worker loads `Phase24WorkerService` from `phase24_worker_app`.
+- Worker loads `Phase24WorkerService` from `phase24_worker_app`. The
+  factory always wires `node_media_preparer=RemoteNodeMediaPrepClient(...)`
+  built from `CLYPT_PHASE24_NODE_MEDIA_PREP_*` settings.
 
 ### 4.2 LLM and embedding boundaries
 
 - Generation path in local worker is hard-gated to
   `GENAI_GENERATION_BACKEND=local_openai`.
-- LLM client is `LocalOpenAIQwenClient` (OpenAI-compatible chat completions).
+- LLM client is `LocalOpenAIQwenClient` (OpenAI-compatible chat
+  completions).
 - Embeddings remain Vertex-backed.
-- Node-media prep today runs in-process on the Phase 2-4 worker host
-  (ffmpeg + GCS upload). In the target topology it moves off-host to the
-  RTX 6000 Ada NVENC service — the `node_media_preparer` pluggable hook on
-  `Phase24WorkerService` is already in place for this swap.
+- Node-media prep always delegates to the RTX host via
+  `RemoteNodeMediaPrepClient`. The H200 never touches ffmpeg in the
+  hot path; the local file in returned descriptors is empty because
+  downstream multimodal embedding only consumes `file_uri`.
 
 ### 4.3 Execution overlap
 
 - Phase 2 merge/classify and boundary reconciliation use separate
   concurrency caps.
-- After raw nodes exist, semantic text embeddings and node-media prep are
-  launched in parallel.
+- After raw nodes exist, semantic text embeddings and node-media prep
+  are launched in parallel.
 - Multimodal embeddings begin as soon as media URIs arrive.
 - Phase 3 local-edge work can start from raw nodes before the rest of
   Phase 2 fully finishes.
-- Phase 3 local-edge and long-range lanes run concurrently, each with its
-  own concurrency cap.
+- Phase 3 local-edge and long-range lanes run concurrently, each with
+  its own concurrency cap.
 
 ### 4.4 Structured output policy
 
@@ -136,7 +132,7 @@ Refactor status and migration plan:
 - Client performs post-parse schema subset checks.
 - Non-thinking request mode is forced for structured output calls.
 
-## 5) Queue and Failure Semantics (Implemented)
+## 5) Queue and Failure Semantics
 
 ### 5.1 Lease management
 
@@ -152,7 +148,9 @@ Refactor status and migration plan:
   - `xgrammar`
   - `compile_json_schema`
   - `enginecore`
-- Transient class includes retryable HTTP transport errors.
+- Transient class includes retryable HTTP transport errors and 5xx from
+  the remote audio / node-media-prep hosts (with bounded retries in the
+  respective clients).
 - Validation/schema/type failures are non-transient.
 
 ### 5.3 Operational implication
@@ -160,42 +158,53 @@ Refactor status and migration plan:
 - Crash scenarios are intentionally surfaced quickly.
 - Manual intervention is expected for stale-running lease cleanup under
   fail-fast defaults.
+- A hard failure from the RTX audio host fails the Phase 1 run; there
+  is no local fallback path to recover on the H200.
 
 ## 6) Persistence Boundaries
 
-- **Local artifacts:** `backend/outputs/v3_1/<run_id>/...`
-- **Local queue:** `backend/outputs/phase24_local_queue.sqlite` (default)
-- **System of record:** Spanner for runs, phase metrics, graph/candidate entities
-- **Object storage:** GCS for source/handoff assets
+- **Local artifacts (H200):** `backend/outputs/v3_1/<run_id>/...`
+- **Local queue (H200):** `backend/outputs/phase24_local_queue.sqlite` (default)
+- **Scratch (RTX 6000 Ada):** `/opt/clypt-audio-host/scratch/<tmp-...>` (ephemeral per request)
+- **System of record:** Spanner for runs, phase metrics, graph/candidate entities (written from H200 worker)
+- **Object storage:** GCS for source/handoff assets and node clips (RTX uploads clips; H200 reads them back for multimodal embedding)
 
 ## 7) Implemented vs Planned
 
-- **Implemented:** Phase 1-4 pipeline execution and persistence, local
-  phase24 queue runtime, strict structured-output validation path.
-- **In progress:** Phase 1 audio-chain + node-media-prep split onto the
-  RTX 6000 Ada host (see `docs/deployment/REFACTOR_RTX6000ADA.md`).
-- **Planned:** Phase 5 participation grounding, Phase 6 render planning/output.
+- **Implemented:** Two-host Phase 1 with remote audio + remote
+  node-media prep; Phase 1-4 pipeline execution and persistence on the
+  H200; local phase24 queue runtime; strict structured-output validation
+  path.
+- **Planned:** Phase 5 participation grounding, Phase 6 render
+  planning/output.
 
 ## 8) Architectural Invariants
 
 1. Phase 1 output is mandatory upstream input for Phase 2-4.
 2. Phase 1 splits into two sub-chains by design: an **audio chain**
-   (VibeVoice vLLM → NFA → emotion2vec+ → YAMNet CPU) and a **visual
-   chain** (RF-DETR + ByteTrack). The audio chain does not block on the
-   visual chain.
-3. Phase 1 audio chain runs on a CUDA-capable host with working NVENC/NVDEC
-   (today: colocated with Phase 2-4 on H200; target: RTX 6000 Ada).
-4. Phase 1 visual chain runs on the H200 via the TensorRT FP16 fast path.
-5. Node-media prep requires working NVENC on whatever host runs it.
-6. Local phase24 worker requires local OpenAI generation backend.
-7. Queue backend for local runtime is SQLite only.
-8. Fail-fast behavior on stale leases/crash signatures is intentional and
-   currently default.
+   (VibeVoice vLLM → NFA → emotion2vec+ → YAMNet CPU) on the RTX 6000
+   Ada, and a **visual chain** (RF-DETR + ByteTrack) on the H200. The
+   audio chain does not block on the visual chain.
+3. The H200 never runs the audio chain or ffmpeg NVENC in-process;
+   config load fails fast if the remote endpoints are unset.
+4. The RTX 6000 Ada serves exactly two endpoints
+   (`/tasks/phase1-audio`, `/tasks/node-media-prep`) plus `/health`;
+   it does not write Spanner or touch the Phase 2-4 queue.
+5. Phase 1 visual chain runs on the H200 via the TensorRT FP16 fast
+   path.
+6. Node-media prep requires working NVENC, which currently exists only
+   on the RTX 6000 Ada host.
+7. Local phase24 worker requires local OpenAI generation backend.
+8. Queue backend for local runtime is SQLite only.
+9. Fail-fast behavior on stale leases/crash signatures is intentional
+   and currently default.
 
 ## 9) Related Docs
 
 - Runtime operations: `docs/runtime/RUNTIME_GUIDE.md`
-- Deployment runbook: `docs/deployment/P1_DEPLOY.md`
-- RTX 6000 Ada split refactor plan: `docs/deployment/REFACTOR_RTX6000ADA.md`
+- H200 deployment runbook: `docs/deployment/P1_DEPLOY.md`
+- RTX 6000 Ada audio host runbook: `docs/deployment/P1_AUDIO_HOST_DEPLOY.md`
+- H200 env template: `docs/runtime/known-good.env`
+- RTX env template: `docs/runtime/known-good-audio-host.env`
 - Active specs: `docs/specs/SPEC_INDEX.md`
 - Incident history: `docs/ERROR_LOG.md`

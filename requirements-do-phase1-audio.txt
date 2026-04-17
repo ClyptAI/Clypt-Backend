@@ -1,34 +1,33 @@
 --extra-index-url https://download.pytorch.org/whl/cu124
 
-# Shared baseline deps are duplicated intentionally so this file is fully
-# standalone for Phase 1 runtime installation on GPU hosts.
+# Phase 1 AUDIO runtime deps for the RTX 6000 Ada droplet.
+#
+# This venv runs on the RTX 6000 Ada host and powers:
+#   * the FastAPI service at backend.runtime.phase1_audio_service.app:create_app()
+#   * the in-process VibeVoice vLLM client, NFA, emotion2vec+, YAMNet (CPU)
+#   * the ffmpeg-NVENC node-clip extractor used by POST /tasks/node-media-prep
+#
+# It does NOT install RF-DETR / supervision / trackers — visual inference stays
+# on the H200 (see requirements-do-phase1-visual.txt).
+
 pydantic>=2.11.0
 pytest>=8.4.0
 httpx>=0.28.0
 python-dotenv>=1.0.1
-google-genai>=1.17.0
 google-cloud-storage>=2.19.0
-google-cloud-spanner>=3.50.0
-google-cloud-tasks>=2.16.0
 fastapi>=0.116.0
 uvicorn>=0.35.0
 
 torch==2.6.0+cu124
-torchvision==0.21.0+cu124
 torchaudio==2.6.0+cu124
 opencv-python-headless>=4.12.0
-rfdetr[onnx]>=1.3.0
-supervision>=0.25.0
-trackers>=2.1.0
 funasr>=1.2.6
 setuptools==69.5.1  # tensorflow-hub 0.16.x uses pkg_resources; setuptools>=70 removed it
 tensorflow>=2.16.0
 tensorflow-hub>=0.16.0
-# The worker uses vLLM over HTTP; do not pull optional local-inference stacks
-# (flash-attn / liger-kernel) into the main worker venv.
 transformers>=5.3.0
 # NeMo ASR currently resolves with conflicting transitive pins on fresh droplets;
-# keep this on a validated release and let deploy_vllm_service.sh apply a guarded
+# keep this on a validated release and let deploy scripts apply a guarded
 # legacy-resolver fallback when strict resolution fails.
 nemo-toolkit[asr]==1.23.0
 # NeMo's loose datasets extra can backtrack into 1.x, which forces pyarrow<4 and

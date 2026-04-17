@@ -1,20 +1,176 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from pathlib import Path
 import threading
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 
+# ---------------------------------------------------------------------------
+# Shared fake for the RTX audio host client.
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_audio_host_client(**overrides: Any):
+    """Return a fake RemoteAudioChainClient-shaped object.
+
+    The fake exposes a single ``.run(audio_gcs_uri, source_url, video_gcs_uri,
+    run_id, stage_event_logger)`` method returning a
+    :class:`backend.providers.audio_host_client.PhaseOneAudioResponse` with
+    sensible defaults (one turn, one aligned word "hello", empty emotion
+    segments, empty yamnet events). Before returning, it mirrors the real
+    client's contract by re-emitting the four audio stage events
+    (``vibevoice_asr`` → ``forced_alignment`` → ``emotion2vec`` → ``yamnet``,
+    all ``succeeded``) through ``stage_event_logger`` so downstream telemetry
+    looks identical to a real remote run.
+
+    Supported ``overrides``:
+
+    - ``turns``, ``diarization_payload``, ``emotion2vec_payload``,
+      ``yamnet_payload``, ``stage_events`` — replace the corresponding
+      response fields wholesale.
+    - ``raise_exc`` — if set, ``.run`` raises the given exception instead of
+      returning a response (useful for failure-path tests).
+    - ``on_run`` — optional callback invoked at the start of ``.run`` with the
+      full kwargs dict (e.g. to coordinate threading events).
+    - ``emit_audio_stage_events`` — default True; set False to suppress the
+      re-emission of audio stage events.
+    """
+    from backend.providers.audio_host_client import PhaseOneAudioResponse
+
+    raise_exc: Exception | None = overrides.pop("raise_exc", None)
+    on_run = overrides.pop("on_run", None)
+    emit_audio_stage_events: bool = overrides.pop("emit_audio_stage_events", True)
+
+    default_diarization = {
+        "turns": [
+            {
+                "turn_id": "t_000001",
+                "speaker_id": "SPEAKER_0",
+                "start_ms": 0,
+                "end_ms": 200,
+                "transcript_text": "hello",
+                "word_ids": ["w_000001"],
+            }
+        ],
+        "words": [
+            {
+                "word_id": "w_000001",
+                "text": "hello",
+                "start_ms": 0,
+                "end_ms": 200,
+                "speaker_id": "SPEAKER_0",
+            }
+        ],
+    }
+    default_response_kwargs = {
+        "turns": [{"Speaker": 0, "Start": 0.0, "End": 0.2, "Content": "hello"}],
+        "diarization_payload": default_diarization,
+        "emotion2vec_payload": {"segments": []},
+        "yamnet_payload": {"events": []},
+        "stage_events": [],
+    }
+    default_response_kwargs.update(overrides)
+
+    class _FakeAudioHostClient:
+        supports_concurrent_visual = True
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def run(
+            self,
+            *,
+            audio_gcs_uri: str,
+            source_url: str | None = None,
+            video_gcs_uri: str | None = None,
+            run_id: str | None = None,
+            stage_event_logger: Any = None,
+        ) -> PhaseOneAudioResponse:
+            call = {
+                "audio_gcs_uri": audio_gcs_uri,
+                "source_url": source_url,
+                "video_gcs_uri": video_gcs_uri,
+                "run_id": run_id,
+                "stage_event_logger": stage_event_logger,
+            }
+            self.calls.append(call)
+            if on_run is not None:
+                on_run(call)
+            if raise_exc is not None:
+                raise raise_exc
+
+            if emit_audio_stage_events and stage_event_logger is not None:
+                for stage_name in (
+                    "vibevoice_asr",
+                    "forced_alignment",
+                    "emotion2vec",
+                    "yamnet",
+                ):
+                    stage_event_logger(
+                        stage_name=stage_name,
+                        status="succeeded",
+                        duration_ms=1.0,
+                        metadata={},
+                        error_payload=None,
+                    )
+
+            return PhaseOneAudioResponse(**default_response_kwargs)
+
+    return _FakeAudioHostClient()
+
+
+def _write_test_bank_mapping(
+    tmp_path: Path,
+    *,
+    source_url: str,
+    video_gcs_uri: str,
+    audio_gcs_uri: str,
+) -> tuple[Path, Path]:
+    """Create a minimal test-bank mapping with video+audio GCS URIs."""
+    mapped_video = tmp_path / "fixtures" / "mapped-video.mp4"
+    mapped_video.parent.mkdir(parents=True, exist_ok=True)
+    mapped_video.write_text("mapped-video", encoding="utf-8")
+    mapped_audio = tmp_path / "fixtures" / "mapped-audio.wav"
+    mapped_audio.write_text("mapped-audio", encoding="utf-8")
+
+    mapping_path = tmp_path / "mapping.json"
+    mapping_path.write_text(
+        f"""
+{{
+  "{source_url}": {{
+    "local_video_path": "fixtures/mapped-video.mp4",
+    "local_audio_path": "fixtures/mapped-audio.wav",
+    "video_gcs_uri": "{video_gcs_uri}",
+    "audio_gcs_uri": "{audio_gcs_uri}"
+  }}
+}}
+""".strip(),
+        encoding="utf-8",
+    )
+    return mapping_path, mapped_video
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
 def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Path):
+    from backend.phase1_runtime.input_resolver import Phase1InputResolver
     from backend.phase1_runtime.runner import Phase1JobRunner
     from backend.repository.models import Phase24JobRecord, PhaseMetricRecord, RunRecord
 
     calls: list[str] = []
     captured: dict[str, object] = {}
-    source_video = tmp_path / "source.mp4"
-    source_video.write_text("video", encoding="utf-8")
+
+    mapping_path, _ = _write_test_bank_mapping(
+        tmp_path,
+        source_url="https://youtube.com/watch?v=queue",
+        video_gcs_uri="gs://bucket/canonical/queue.mp4",
+        audio_gcs_uri="gs://bucket/canonical/queue.wav",
+    )
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         calls.append(f"audio:{video_path.name}")
@@ -25,18 +181,6 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
             calls.append(f"upload:{object_name}")
             return f"gs://bucket/{object_name}"
 
-    class _FakeVibeVoice:
-        supports_concurrent_visual = True
-
-        def run(self, *, audio_path: Path, context_info=None):
-            calls.append(f"vibevoice:{audio_path.name}")
-            return [{"Start": 0.0, "End": 0.2, "Speaker": 0, "Content": "hello"}]
-
-    class _FakeForcedAligner:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            calls.append(f"forced_aligner:{len(turns)}")
-            return [{"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"}]
-
     class _FakeVisual:
         def extract(self, *, video_path: Path, workspace):
             calls.append(f"visual:{video_path.name}")
@@ -45,16 +189,6 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
                 "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
                 "tracks": [],
             }
-
-    class _FakeEmotion:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            calls.append(f"emotion:{len(turns)}")
-            return {"segments": []}
-
-    class _FakeYamnet:
-        def run(self, *, audio_path: Path):
-            calls.append("yamnet")
-            return {"events": []}
 
     class _FakeQueueClient:
         def enqueue_phase24(self, *, run_id: str, payload: dict, worker_url: str | None = None) -> str:
@@ -82,29 +216,30 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
             return record
 
     repository = _FakeRepository()
+    audio_host_client = _make_fake_audio_host_client()
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        vibevoice_provider=_FakeVibeVoice(),
-        forced_aligner=_FakeForcedAligner(),
+        audio_host_client=audio_host_client,
         visual_extractor=_FakeVisual(),
-        emotion_provider=_FakeEmotion(),
-        yamnet_provider=_FakeYamnet(),
         phase24_task_queue_client=_FakeQueueClient(),
         phase14_repository=repository,
         phase24_query_version="graph-v2",
+        input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
     )
 
     result = runner.run_job(
         job_id="job_001",
-        source_url=None,
-        source_path=str(source_video),
+        source_url="https://youtube.com/watch?v=queue",
+        source_path=None,
         runtime_controls={"run_phase14": True},
     )
 
-    assert result["phase1"]["phase1_audio"]["video_gcs_uri"] == "gs://bucket/phase1/job_001/source_video.mp4"
+    # The canonical GCS URIs come from the test-bank mapping, not a new upload.
+    assert result["phase1"]["phase1_audio"]["video_gcs_uri"] == "gs://bucket/canonical/queue.mp4"
+    assert result["phase1"]["phase1_audio"]["audio_gcs_uri"] == "gs://bucket/canonical/queue.wav"
     assert result["summary"] == {
         "run_id": "job_001",
         "status": "queued",
@@ -136,25 +271,32 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
         "phase1_visual_extraction",
     ]
     assert all(record.status == "succeeded" for record in repository.phase_metrics)
-    assert calls == [
-        "audio:source_video.mp4",
-        "upload:phase1/job_001/source_video.mp4",
-        "visual:source_video.mp4",
-        "vibevoice:source_audio.wav",
-        "forced_aligner:1",
-        "emotion:1",
-        "yamnet",
-        "upload:phase1/job_001/phase24_inputs/phase1_outputs.json",
-    ]
+
+    # The audio host client received the test-bank audio_gcs_uri.
+    assert len(audio_host_client.calls) == 1
+    assert audio_host_client.calls[0]["audio_gcs_uri"] == "gs://bucket/canonical/queue.wav"
+    assert audio_host_client.calls[0]["video_gcs_uri"] == "gs://bucket/canonical/queue.mp4"
+    assert audio_host_client.calls[0]["run_id"] == "job_001"
+    assert audio_host_client.calls[0]["source_url"] == "https://youtube.com/watch?v=queue"
+
+    # Visual extractor ran, and the phase24 handoff was uploaded.
+    assert "visual:source_video.mp4" in calls
+    assert "upload:phase1/job_001/phase24_inputs/phase1_outputs.json" in calls
 
 
 def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path: Path):
+    from backend.phase1_runtime.input_resolver import Phase1InputResolver
     from backend.phase1_runtime.runner import Phase1JobRunner
 
     calls: list[str] = []
     queue_called = threading.Event()
-    source_video = tmp_path / "source.mp4"
-    source_video.write_text("video", encoding="utf-8")
+
+    mapping_path, _ = _write_test_bank_mapping(
+        tmp_path,
+        source_url="https://youtube.com/watch?v=race",
+        video_gcs_uri="gs://bucket/canonical/race.mp4",
+        audio_gcs_uri="gs://bucket/canonical/race.wav",
+    )
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         calls.append(f"audio:{video_path.name}")
@@ -164,18 +306,6 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
         def upload_file(self, *, local_path: Path, object_name: str) -> str:
             calls.append(f"upload:{object_name}")
             return f"gs://bucket/{object_name}"
-
-    class _FakeVibeVoice:
-        supports_concurrent_visual = True
-
-        def run(self, *, audio_path: Path, context_info=None):
-            calls.append(f"vibevoice:{audio_path.name}")
-            return [{"Start": 0.0, "End": 0.2, "Speaker": 0, "Content": "hello"}]
-
-    class _FakeForcedAligner:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            calls.append(f"forced_aligner:{len(turns)}")
-            return [{"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"}]
 
     class _FakeVisual:
         def extract(self, *, video_path: Path, workspace):
@@ -189,16 +319,6 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
                 "tracks": [],
             }
 
-    class _FakeEmotion:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            calls.append(f"emotion:{len(turns)}")
-            return {"segments": []}
-
-    class _FakeYamnet:
-        def run(self, *, audio_path: Path):
-            calls.append("yamnet")
-            return {"events": []}
-
     class _FakeQueueClient:
         def enqueue_phase24(self, *, run_id: str, payload: dict, worker_url: str | None = None) -> str:
             calls.append(f"enqueue:{run_id}")
@@ -209,19 +329,17 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        vibevoice_provider=_FakeVibeVoice(),
-        forced_aligner=_FakeForcedAligner(),
+        audio_host_client=_make_fake_audio_host_client(),
         visual_extractor=_FakeVisual(),
-        emotion_provider=_FakeEmotion(),
-        yamnet_provider=_FakeYamnet(),
         phase24_task_queue_client=_FakeQueueClient(),
         phase24_query_version="graph-v2",
+        input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
     )
 
     result = runner.run_job(
         job_id="job_002",
-        source_url=None,
-        source_path=str(source_video),
+        source_url="https://youtube.com/watch?v=race",
+        source_path=None,
         runtime_controls={"run_phase14": True},
     )
 
@@ -232,11 +350,17 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
 
 
 def test_phase1_job_runner_enforces_queue_mode_for_run_phase14(tmp_path: Path):
+    from backend.phase1_runtime.input_resolver import Phase1InputResolver
     from backend.phase1_runtime.runner import Phase1JobRunner
 
     calls: list[str] = []
-    source_video = tmp_path / "source.mp4"
-    source_video.write_text("video", encoding="utf-8")
+
+    mapping_path, _ = _write_test_bank_mapping(
+        tmp_path,
+        source_url="https://youtube.com/watch?v=enforce",
+        video_gcs_uri="gs://bucket/canonical/enforce.mp4",
+        audio_gcs_uri="gs://bucket/canonical/enforce.wav",
+    )
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
         calls.append(f"audio:{video_path.name}")
@@ -247,18 +371,6 @@ def test_phase1_job_runner_enforces_queue_mode_for_run_phase14(tmp_path: Path):
             calls.append(f"upload:{object_name}")
             return f"gs://bucket/{object_name}"
 
-    class _FakeVibeVoice:
-        supports_concurrent_visual = True
-
-        def run(self, *, audio_path: Path, context_info=None):
-            calls.append(f"vibevoice:{audio_path.name}")
-            return [{"Start": 0.0, "End": 0.2, "Speaker": 0, "Content": "hello"}]
-
-    class _FakeForcedAligner:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            calls.append(f"forced_aligner:{len(turns)}")
-            return [{"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"}]
-
     class _FakeVisual:
         def extract(self, *, video_path: Path, workspace):
             calls.append(f"visual:{video_path.name}")
@@ -267,16 +379,6 @@ def test_phase1_job_runner_enforces_queue_mode_for_run_phase14(tmp_path: Path):
                 "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
                 "tracks": [],
             }
-
-    class _FakeEmotion:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            calls.append(f"emotion:{len(turns)}")
-            return {"segments": []}
-
-    class _FakeYamnet:
-        def run(self, *, audio_path: Path):
-            calls.append("yamnet")
-            return {"events": []}
 
     class _FakeQueueClient:
         def enqueue_phase24(self, *, run_id: str, payload: dict, worker_url: str | None = None) -> str:
@@ -287,18 +389,16 @@ def test_phase1_job_runner_enforces_queue_mode_for_run_phase14(tmp_path: Path):
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        vibevoice_provider=_FakeVibeVoice(),
-        forced_aligner=_FakeForcedAligner(),
+        audio_host_client=_make_fake_audio_host_client(),
         visual_extractor=_FakeVisual(),
-        emotion_provider=_FakeEmotion(),
-        yamnet_provider=_FakeYamnet(),
         phase24_task_queue_client=_FakeQueueClient(),
+        input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
     )
 
     result = runner.run_job(
         job_id="job_001",
-        source_url=None,
-        source_path=str(source_video),
+        source_url="https://youtube.com/watch?v=enforce",
+        source_path=None,
         runtime_controls={"run_phase14": True},
     )
     assert result["summary"]["status"] == "queued"
@@ -322,11 +422,8 @@ def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(t
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        vibevoice_provider=object(),
-        forced_aligner=object(),
+        audio_host_client=_make_fake_audio_host_client(),
         visual_extractor=object(),
-        emotion_provider=object(),
-        yamnet_provider=object(),
         phase24_task_queue_client=None,
     )
 
@@ -346,19 +443,11 @@ def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(
     calls: list[str] = []
     captured: dict[str, object] = {}
 
-    mapped_video = tmp_path / "fixtures" / "mapped-video.mp4"
-    mapped_video.parent.mkdir(parents=True)
-    mapped_video.write_text("mapped-video", encoding="utf-8")
-    mapping_path = tmp_path / "mapping.json"
-    mapping_path.write_text(
-        """
-{
-  "https://youtube.com/watch?v=test": {
-    "local_video_path": "fixtures/mapped-video.mp4"
-  }
-}
-""".strip(),
-        encoding="utf-8",
+    mapping_path, mapped_video = _write_test_bank_mapping(
+        tmp_path,
+        source_url="https://youtube.com/watch?v=test",
+        video_gcs_uri="gs://bucket/canonical/test.mp4",
+        audio_gcs_uri="gs://bucket/canonical/test.wav",
     )
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
@@ -370,15 +459,9 @@ def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(
             captured["uploaded_video"] = local_path.read_text(encoding="utf-8")
             return f"gs://bucket/{object_name}"
 
-    class _FakeVibeVoice:
-        supports_concurrent_visual = True
-
-        def run(self, *, audio_path: Path, context_info=None):
-            return [{"Start": 0.0, "End": 0.2, "Speaker": 0, "Content": "hello"}]
-
-    class _FakeForcedAligner:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            return [{"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"}]
+        def download_file(self, *, gcs_uri: str, local_path: Path) -> Path:
+            # The mapped local files already exist, so this shouldn't be called.
+            raise AssertionError(f"unexpected download_file call for {gcs_uri}")
 
     class _FakeVisual:
         def extract(self, *, video_path: Path, workspace):
@@ -389,23 +472,14 @@ def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(
                 "tracks": [],
             }
 
-    class _FakeEmotion:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            return {"segments": []}
-
-    class _FakeYamnet:
-        def run(self, *, audio_path: Path):
-            return {"events": []}
+    audio_host_client = _make_fake_audio_host_client()
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        vibevoice_provider=_FakeVibeVoice(),
-        forced_aligner=_FakeForcedAligner(),
+        audio_host_client=audio_host_client,
         visual_extractor=_FakeVisual(),
-        emotion_provider=_FakeEmotion(),
-        yamnet_provider=_FakeYamnet(),
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
     )
@@ -417,23 +491,42 @@ def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(
         runtime_controls={},
     )
 
-    assert captured["uploaded_video"] == "mapped-video"
+    # The mapping provides canonical GCS URIs, so no new video upload is made.
+    assert "uploaded_video" not in captured
     assert captured["visual_video_contents"] == "mapped-video"
     assert result["phase1"]["phase1_audio"]["source_audio"] == "https://youtube.com/watch?v=test"
-    assert calls == ["audio:mapped-video"]
+    assert result["phase1"]["phase1_audio"]["video_gcs_uri"] == "gs://bucket/canonical/test.mp4"
+    assert result["phase1"]["phase1_audio"]["audio_gcs_uri"] == "gs://bucket/canonical/test.wav"
+
+    # The audio-host client received the canonical audio URI from the mapping.
+    assert len(audio_host_client.calls) == 1
+    assert audio_host_client.calls[0]["audio_gcs_uri"] == "gs://bucket/canonical/test.wav"
+    # The mapping provides a local audio path, so the extractor should not run.
+    assert calls == []
 
 
 def test_phase1_job_runner_does_not_apply_input_resolver_to_source_path_inputs(tmp_path: Path):
+    """``source_path`` inputs must bypass the resolver entirely.
+
+    With the RTX audio-host refactor the runner requires an ``audio_gcs_uri``
+    (which normally comes from a test-bank mapping), so a pure ``source_path``
+    job now fails at the sidecars step. We still assert the input resolver was
+    never consulted, which is the contract this test locks in.
+    """
     from backend.phase1_runtime.runner import Phase1JobRunner
 
     source_path = tmp_path / "source.mp4"
     source_path.write_text("source-video", encoding="utf-8")
-    calls: list[str] = []
-    captured: dict[str, object] = {}
+
+    resolver_calls: list[str] = []
 
     class _RecordingResolver:
+        def resolve_source_asset(self, *, source_url: str):
+            resolver_calls.append(f"resolve:{source_url}")
+            raise AssertionError("source_path inputs should bypass the input resolver")
+
         def resolve_source_path(self, *, source_url: str) -> Path:
-            calls.append(f"resolve:{source_url}")
+            resolver_calls.append(f"resolve_path:{source_url}")
             raise AssertionError("source_path inputs should bypass the input resolver")
 
     def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
@@ -441,60 +534,37 @@ def test_phase1_job_runner_does_not_apply_input_resolver_to_source_path_inputs(t
 
     class _FakeStorage:
         def upload_file(self, *, local_path: Path, object_name: str) -> str:
-            calls.append(f"upload:{local_path.read_text(encoding='utf-8')}")
             return f"gs://bucket/{object_name}"
-
-    class _FakeVibeVoice:
-        supports_concurrent_visual = True
-
-        def run(self, *, audio_path: Path, context_info=None):
-            return [{"Start": 0.0, "End": 0.2, "Speaker": 0, "Content": "hello"}]
-
-    class _FakeForcedAligner:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            return [{"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"}]
 
     class _FakeVisual:
         def extract(self, *, video_path: Path, workspace):
-            captured["visual_video_contents"] = video_path.read_text(encoding="utf-8")
             return {
                 "video_metadata": {"fps": 30.0, "duration_ms": 1000},
-                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+                "shot_changes": [],
                 "tracks": [],
             }
-
-    class _FakeEmotion:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            return {"segments": []}
-
-    class _FakeYamnet:
-        def run(self, *, audio_path: Path):
-            return {"events": []}
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        vibevoice_provider=_FakeVibeVoice(),
-        forced_aligner=_FakeForcedAligner(),
+        audio_host_client=_make_fake_audio_host_client(),
         visual_extractor=_FakeVisual(),
-        emotion_provider=_FakeEmotion(),
-        yamnet_provider=_FakeYamnet(),
         phase24_task_queue_client=None,
         input_resolver=_RecordingResolver(),
     )
 
-    result = runner.run_job(
-        job_id="job_004",
-        source_url=None,
-        source_path=str(source_path),
-        runtime_controls={},
-    )
+    # In source_path mode there is no canonical audio_gcs_uri for the RTX host,
+    # so the sidecars step fails fast — but the resolver must never be called.
+    with pytest.raises(ValueError, match="audio_gcs_uri is required"):
+        runner.run_job(
+            job_id="job_004",
+            source_url=None,
+            source_path=str(source_path),
+            runtime_controls={},
+        )
 
-    assert calls == ["upload:source-video"]
-    assert "resolve:" not in "".join(calls)
-    assert captured["visual_video_contents"] == "source-video"
-    assert result["phase1"]["phase1_audio"]["source_audio"] == str(source_path)
+    assert resolver_calls == []
 
 
 def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_strict(tmp_path: Path):
@@ -520,11 +590,8 @@ def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_strict(tmp_
         working_root=tmp_path,
         audio_extractor=object(),
         storage_client=object(),
-        vibevoice_provider=object(),
-        forced_aligner=object(),
+        audio_host_client=_make_fake_audio_host_client(),
         visual_extractor=object(),
-        emotion_provider=object(),
-        yamnet_provider=object(),
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
         input_resolver_strict=True,
@@ -562,11 +629,8 @@ def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_non_strict(
         working_root=tmp_path,
         audio_extractor=object(),
         storage_client=object(),
-        vibevoice_provider=object(),
-        forced_aligner=object(),
+        audio_host_client=_make_fake_audio_host_client(),
         visual_extractor=object(),
-        emotion_provider=object(),
-        yamnet_provider=object(),
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
         input_resolver_strict=False,
@@ -617,18 +681,6 @@ def test_phase1_job_runner_hydrates_canonical_assets_and_uses_mapped_gcs_uris(tm
             self.uploaded.append((local_path, object_name))
             return f"gs://bucket/{object_name}"
 
-    class _FakeVibeVoice:
-        supports_concurrent_visual = True
-
-        def run(self, *, audio_path: Path, context_info=None, audio_gcs_uri=None):
-            captured["asr_audio_file"] = audio_path.read_text(encoding="utf-8")
-            captured["asr_audio_gcs_uri"] = audio_gcs_uri
-            return [{"Start": 0.0, "End": 0.2, "Speaker": 0, "Content": "hello"}]
-
-    class _FakeForcedAligner:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            return [{"word_id": "w_000001", "text": "hello", "start_ms": 0, "end_ms": 200, "speaker_id": "SPEAKER_0"}]
-
     class _FakeVisual:
         def extract(self, *, video_path: Path, workspace):
             captured["visual_video_contents"] = video_path.read_text(encoding="utf-8")
@@ -638,24 +690,15 @@ def test_phase1_job_runner_hydrates_canonical_assets_and_uses_mapped_gcs_uris(tm
                 "tracks": [],
             }
 
-    class _FakeEmotion:
-        def run(self, *, audio_path: Path, turns: list[dict]):
-            return {"segments": []}
-
-    class _FakeYamnet:
-        def run(self, *, audio_path: Path):
-            return {"events": []}
-
     storage = _FakeStorage()
+    audio_host_client = _make_fake_audio_host_client()
+
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=object(),
         storage_client=storage,
-        vibevoice_provider=_FakeVibeVoice(),
-        forced_aligner=_FakeForcedAligner(),
+        audio_host_client=audio_host_client,
         visual_extractor=_FakeVisual(),
-        emotion_provider=_FakeEmotion(),
-        yamnet_provider=_FakeYamnet(),
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
     )
@@ -672,8 +715,13 @@ def test_phase1_job_runner_hydrates_canonical_assets_and_uses_mapped_gcs_uris(tm
     assert phase1_audio["video_gcs_uri"] == "gs://bucket/canonical/abc123.mp4"
     assert phase1_audio["audio_gcs_uri"] == "gs://bucket/canonical/abc123.wav"
     assert captured["visual_video_contents"] == "video-cache"
-    assert captured["asr_audio_file"] == "audio-cache"
-    assert captured["asr_audio_gcs_uri"] == "gs://bucket/canonical/abc123.wav"
+
+    # The audio-chain path is now driven by GCS, so we verify the client saw
+    # the canonical audio URI rather than inspecting any local audio file.
+    assert len(audio_host_client.calls) == 1
+    assert audio_host_client.calls[0]["audio_gcs_uri"] == "gs://bucket/canonical/abc123.wav"
+    assert audio_host_client.calls[0]["video_gcs_uri"] == "gs://bucket/canonical/abc123.mp4"
+
     assert storage.downloaded == [
         ("gs://bucket/canonical/abc123.mp4", (tmp_path / "cache" / "abc123.mp4").resolve()),
         ("gs://bucket/canonical/abc123.wav", (tmp_path / "cache" / "abc123.wav").resolve()),

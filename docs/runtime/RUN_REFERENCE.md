@@ -35,9 +35,11 @@ This document records known baseline runs and recent migration test attempts.
   - Phase 1 visual chain: RF-DETR + ByteTrack (TensorRT FP16 fast path), in-process on the GPU host
   - node-media prep: in-process on the Phase 2-4 worker host
 - Compare new measurements against Sections 1, 2, and 5, then append the new baseline here.
-- Post-refactor targets (RTX 6000 Ada audio host + H200 visual/Phase 2-4 host)
-  will be captured separately once that topology is live; track the refactor
-  status in [`../deployment/REFACTOR_RTX6000ADA.md`](../deployment/REFACTOR_RTX6000ADA.md).
+- Two-host benchmarks (RTX 6000 Ada audio host + H200 visual/Phase 2-4
+  host) should record the RTX round-trip latency for
+  `/tasks/phase1-audio` alongside the existing single-host Phase 1 numbers.
+  See [`../deployment/P1_DEPLOY.md`](../deployment/P1_DEPLOY.md) and
+  [`../deployment/P1_AUDIO_HOST_DEPLOY.md`](../deployment/P1_AUDIO_HOST_DEPLOY.md).
 
 ## 4) Recorded Phase 2-4 Timing Snapshots
 

@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Bootstrap the H200 Phase 1 VISUAL + Phase 2-4 host.
+#
+# This droplet runs the visual chain (RF-DETR + ByteTrack), the Phase 1
+# orchestrator, the SGLang Qwen service, and the Phase 2-4 local worker.
+# The audio chain (VibeVoice, NFA, emotion2vec+, YAMNet) and node-media prep
+# live on the RTX 6000 Ada host — see scripts/do_phase1_audio/.
+#
+# Run as root on a fresh NVIDIA AI/ML base image droplet.
 set -euo pipefail
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -39,4 +47,8 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "WARNING: nvidia-smi not found. This host may not be a GPU base image." >&2
 fi
 
-echo "Bootstrap complete. Next step: sync repo to /opt/clypt-phase1/repo, create /etc/clypt-phase1/v3_1_phase1.env, run deploy_vllm_service.sh (Phase 1 env + VibeVoice), then run deploy_sglang_qwen_service.sh (separate SGLang env for Qwen)."
+echo "Bootstrap complete. Next steps:"
+echo "  1. rsync the repo to /opt/clypt-phase1/repo"
+echo "  2. create /etc/clypt-phase1/v3_1_phase1.env (see docs/runtime/known-good.env)"
+echo "  3. bash scripts/do_phase1_visual/deploy_visual_service.sh"
+echo "  4. bash scripts/do_phase1_visual/deploy_sglang_qwen_service.sh"

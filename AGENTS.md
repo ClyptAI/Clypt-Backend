@@ -7,23 +7,27 @@ Operational startup and maintenance guide for coding agents and maintainers.
 - Product: Clypt V3.1 backend
 - Implemented: Phases 1-4
 - Planned: Phases 5-6
-- Current Phase 1 ASR backend: local vLLM VibeVoice on the Phase 1 GPU host
+- Phase 1 topology: two-host, no local fallback.
+  - **RTX 6000 Ada**: audio chain (VibeVoice vLLM ASR + NFA + emotion2vec+
+    + YAMNet) + ffmpeg NVENC node-media prep, served as one FastAPI app
+    at `/tasks/phase1-audio` and `/tasks/node-media-prep`.
+  - **H200**: visual chain (RF-DETR + ByteTrack) + SGLang Qwen on `:8001`
+    + Phase 1 orchestrator + Phase 2-4 SQLite queue and local worker.
+  - H200 calls the RTX host over HTTP via `RemoteAudioChainClient` and
+    `RemoteNodeMediaPrepClient`. Config load fails fast if the audio/node
+    media prep URL or bearer token is unset.
 - Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint
-- **In progress**: split Phase 1 into an **audio chain** (VibeVoice vLLM + NFA
-  + emotion2vec+ + YAMNet) + node-media prep on a dedicated **RTX 6000 Ada**
-  droplet, with **visual chain** (RF-DETR + ByteTrack) + SGLang Qwen +
-  Phase 2-4 worker remaining on the **H200** droplet. Refactor plan:
-  [docs/deployment/REFACTOR_RTX6000ADA.md](docs/deployment/REFACTOR_RTX6000ADA.md)
 
 ## Read Order (Required - You MUST read these before reporting back to the user.)
 
 1. [README.md](README.md)
 2. [docs/runtime/RUNTIME_GUIDE.md](docs/runtime/RUNTIME_GUIDE.md)
 3. [docs/deployment/P1_DEPLOY.md](docs/deployment/P1_DEPLOY.md)
-4. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-5. [docs/specs/SPEC_INDEX.md](docs/specs/SPEC_INDEX.md)
-6. [docs/EVALS.md](docs/EVALS.md)
-7. [docs/ERROR_LOG.md](docs/ERROR_LOG.md)
+4. [docs/deployment/P1_AUDIO_HOST_DEPLOY.md](docs/deployment/P1_AUDIO_HOST_DEPLOY.md)
+5. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+6. [docs/specs/SPEC_INDEX.md](docs/specs/SPEC_INDEX.md)
+7. [docs/EVALS.md](docs/EVALS.md)
+8. [docs/ERROR_LOG.md](docs/ERROR_LOG.md)
 
 ## Documentation-First Rule (Required)
 
@@ -55,17 +59,28 @@ source .venv/bin/activate
 python -m pip install -r requirements-local.txt
 ```
 
-### Phase 1 runtime deps (DO GPU host only)
+### Phase 1 runtime deps
+
+H200 (visual + worker):
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-do-phase1.txt
+python -m pip install -r requirements-do-phase1-visual.txt
+```
+
+RTX 6000 Ada (audio + node-media prep):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-do-phase1-audio.txt
 ```
 
 Notes:
 - `requirements-local.txt` is the local/dev dependency set.
-- `requirements-do-phase1.txt` is the standalone GPU runtime set for Phase 1.
+- `requirements-do-phase1-visual.txt` is the standalone GPU runtime set for the H200.
+- `requirements-do-phase1-audio.txt` is the standalone GPU runtime set for the RTX 6000 Ada audio host.
 
 ### Pipeline tests (offline)
 
@@ -90,20 +105,22 @@ python -m backend.runtime.run_phase24_local_worker --worker-id local-worker-1
 
 ## Runtime Truths To Preserve
 
-- `VIBEVOICE_VLLM_MODEL` must be `vibevoice`.
-- `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required even for VibeVoice-only runs.
-- Phase 1 audio chain must launch immediately after ASR completion.
+- `VIBEVOICE_VLLM_MODEL` must be `vibevoice` **on the RTX 6000 Ada**. VibeVoice envs must not be set on the H200.
+- `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required on both hosts.
+- Phase 1 is split across two hosts:
+  - **H200**: visual chain (RF-DETR + ByteTrack), Phase 1 orchestrator, Phase 2-4 queue + worker, SGLang Qwen on `:8001`.
+  - **RTX 6000 Ada**: audio chain (VibeVoice vLLM → NFA → emotion2vec+ → YAMNet CPU) + ffmpeg NVENC node-media prep, served via one FastAPI app.
+- There is **no local fallback**. `backend/providers/config.py` requires `CLYPT_PHASE1_AUDIO_HOST_URL`, `CLYPT_PHASE1_AUDIO_HOST_TOKEN`, `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`, and `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` on the H200. Missing any of these fails fast at startup.
+- Phase 1 audio chain must launch immediately after the RTX audio HTTP call returns (before visual join).
 - Phase 1 local runtime requires `CLYPT_PHASE1_INPUT_MODE=test_bank`.
 - `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; use explicit per-stage concurrency envs instead.
 - Phase 2-4 local runtime requires `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`.
-- Phase 2-4 local worker currently enforces `GENAI_GENERATION_BACKEND=local_openai`.
+- Phase 2-4 local worker enforces `GENAI_GENERATION_BACKEND=local_openai`.
 - Default crash handling mode is fail-fast (`CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`, `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`).
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
-- Qwen serving target is the SGLang service on `127.0.0.1:8001`.
-- `CLYPT_PHASE1_ASR_BACKEND` only accepts `vllm`. `VIBEVOICE_VLLM_BASE_URL` is required.
-- Node-media prep for Phase 2 runs in-process on the Phase 2-4 worker host today; there is no remote media-prep offload yet.
-- Phase 1 is conceptually split into an **audio chain** (VibeVoice vLLM → NFA → emotion2vec+ → YAMNet) and a **visual chain** (RF-DETR + ByteTrack). Both currently run in the same process on one GPU host.
-- Target topology (refactor in progress, not yet shippable): audio chain + node-media prep on an RTX 6000 Ada droplet, visual chain + SGLang Qwen + Phase 2-4 worker on H200. H200 NVENC cannot run `h264_nvenc`, so node-media prep must not default to H200 post-refactor. See `docs/deployment/REFACTOR_RTX6000ADA.md`.
+- Qwen serving target is the SGLang service on H200 `127.0.0.1:8001`.
+- `CLYPT_PHASE1_ASR_BACKEND` (if set at all) only accepts `vllm`. The active ASR path is a remote HTTP call to the RTX audio host; the H200 has no in-process VibeVoice provider.
+- Node-media prep is always delegated to the RTX host. Do not re-introduce an in-process ffmpeg fallback on the H200 — H200 NVENC returns `unsupported device (2)`.
 
 ## Critical Maintenance Rule
 
