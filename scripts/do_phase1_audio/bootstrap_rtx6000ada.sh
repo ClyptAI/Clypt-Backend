@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Bootstrap script for the RTX 6000 Ada Phase 1 AUDIO host.
+# Bootstrap script for the RTX 6000 Ada Phase 1 VibeVoice ASR host.
 #
 # This droplet runs:
-#   * VibeVoice vLLM ASR (GPU, native dtype — 48 GB is plenty)
-#   * NeMo Forced Aligner + emotion2vec+ + YAMNet (GPU + CPU)
+#   * VibeVoice vLLM ASR (sole tenant on the card, native dtype — 48 GB is plenty)
 #   * ffmpeg NVENC/NVDEC node-clip extraction for Phase 2 node-media prep
 #   * The FastAPI host wired at backend.runtime.phase1_audio_service.app:create_app()
 #
-# It does NOT run RF-DETR, SGLang, or the Phase 2–4 worker — those live on the H200.
+# It does NOT run NFA / emotion2vec+ / YAMNet (those moved back to the H200 —
+# see docs/ERROR_LOG.md 2026-04-17) nor RF-DETR / SGLang / Phase 2–4 worker.
 #
 # Run as root on a fresh NVIDIA AI/ML base image droplet. Idempotent.
 set -euo pipefail

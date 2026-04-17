@@ -1,14 +1,19 @@
-"""RTX 6000 Ada–side Phase 1 audio host package.
+"""RTX 6000 Ada–side VibeVoice ASR + node-media-prep host package.
 
-This package is imported **only** on the RTX audio box. It houses:
+This package is imported **only** on the RTX box. It houses:
 
-* ``audio_chain`` — the pure-Python VibeVoice → NFA → emotion2vec+ → YAMNet
-  pipeline (previously ``_run_audio_chain`` in ``backend.phase1_runtime.extract``).
+* ``app`` — the FastAPI application exposing ``/tasks/vibevoice-asr`` and
+  ``/tasks/node-media-prep``.
+* ``deps`` — singleton VibeVoice vLLM provider, GCS client, scratch root,
+  and bearer-token plumbing.
 * ``node_media_prep`` — the ffmpeg/NVENC node-clip extractor (Phase 2).
-* ``app`` — the FastAPI application wiring the two endpoints together.
+
+NFA/emotion2vec+/YAMNet are not here; they run in-process on the H200.
+See docs/ERROR_LOG.md 2026-04-17.
 
 The H200 orchestrator does **not** import this package; it interacts with the
-box purely through the HTTP clients in ``backend.providers.audio_host_client``
+box purely through the HTTP clients in
+``backend.providers.audio_host_client`` (renamed to ``RemoteVibeVoiceAsrClient``)
 and ``backend.providers.node_media_prep_client``.
 """
 

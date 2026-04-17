@@ -28,17 +28,23 @@ This document records known baseline runs and recent migration test attempts.
 
 ## 3) Current Validation Focus
 
-- Current code paths to validate against these historical baselines (single-host H200 profile):
-  - local SQLite queue + local Phase 2-4 worker
-  - SGLang Qwen on `:8001`
-  - Phase 1 audio chain: VibeVoice vLLM ASR + NFA + emotion2vec+ + YAMNet, in-process on the GPU host
-  - Phase 1 visual chain: RF-DETR + ByteTrack (TensorRT FP16 fast path), in-process on the GPU host
-  - node-media prep: in-process on the Phase 2-4 worker host
+- Current code paths to validate against these historical baselines (two-host topology):
+  - local SQLite queue + local Phase 2-4 worker on the H200
+  - SGLang Qwen on H200 `:8001`
+  - Phase 1 audio chain:
+    - VibeVoice vLLM ASR on the RTX 6000 Ada (sole tenant), dispatched
+      via `POST /tasks/vibevoice-asr`
+    - NFA + emotion2vec+ + YAMNet running in-process on the H200 after
+      the ASR response returns
+  - Phase 1 visual chain: RF-DETR + ByteTrack (TensorRT FP16 fast path), in-process on the H200
+  - node-media prep: RTX 6000 Ada via `POST /tasks/node-media-prep`
 - Compare new measurements against Sections 1, 2, and 5, then append the new baseline here.
-- Two-host benchmarks (RTX 6000 Ada audio host + H200 visual/Phase 2-4
-  host) should record the RTX round-trip latency for
-  `/tasks/phase1-audio` alongside the existing single-host Phase 1 numbers.
-  See [`../deployment/P1_DEPLOY.md`](../deployment/P1_DEPLOY.md) and
+- Two-host benchmarks (RTX 6000 Ada VibeVoice ASR host + H200
+  visual/audio-post/Phase 2-4 host) should record the RTX round-trip
+  latency for `/tasks/vibevoice-asr` alongside the existing single-host
+  Phase 1 numbers, and the H200-side NFA + emotion2vec+ + YAMNet wall
+  time separately from that round-trip. See
+  [`../deployment/P1_DEPLOY.md`](../deployment/P1_DEPLOY.md) and
   [`../deployment/P1_AUDIO_HOST_DEPLOY.md`](../deployment/P1_AUDIO_HOST_DEPLOY.md).
 
 ## 4) Recorded Phase 2-4 Timing Snapshots

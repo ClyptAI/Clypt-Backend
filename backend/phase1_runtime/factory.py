@@ -4,7 +4,10 @@ import logging
 from pathlib import Path
 
 from backend.providers import (
-    RemoteAudioChainClient,
+    Emotion2VecPlusProvider,
+    ForcedAlignmentProvider,
+    RemoteVibeVoiceAsrClient,
+    YAMNetProvider,
     load_provider_settings,
 )
 from backend.providers.storage import GCSStorageClient
@@ -44,9 +47,19 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
         )
     storage_client = GCSStorageClient(settings=settings.storage)
 
-    # The Phase 1 audio chain runs exclusively on the RTX 6000 Ada audio host.
-    # There is no in-process VibeVoice/NFA/emotion/YAMNet provider on the H200.
-    audio_host_client = RemoteAudioChainClient(settings=settings.audio_host)
+    # VibeVoice ASR is the only audio stage that is remote: it runs on the
+    # RTX 6000 Ada host. NFA + emotion2vec+ + YAMNet live here on the H200
+    # in-process because the RTX's 48 GiB cannot support them alongside
+    # VibeVoice vLLM without NFA global-alignment OOMing. See
+    # docs/ERROR_LOG.md 2026-04-17.
+    vibevoice_asr_client = RemoteVibeVoiceAsrClient(
+        settings=settings.vibevoice_asr_service,
+    )
+    forced_aligner = ForcedAlignmentProvider()
+    emotion_provider = Emotion2VecPlusProvider()
+    yamnet_provider = YAMNetProvider(
+        device="gpu" if settings.phase1_runtime.run_yamnet_on_gpu else "cpu",
+    )
 
     phase14_repository = _build_phase14_repository(settings=settings)
     phase24_task_queue_client = _build_phase24_local_dispatcher(settings=settings)
@@ -71,8 +84,11 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
     return Phase1JobRunner(
         working_root=Path(working_root or settings.phase1_runtime.working_root),
         storage_client=storage_client,
-        audio_host_client=audio_host_client,
+        vibevoice_asr_client=vibevoice_asr_client,
+        forced_aligner=forced_aligner,
         visual_extractor=SimpleVisualExtractor(visual_config=visual_config),
+        emotion_provider=emotion_provider,
+        yamnet_provider=yamnet_provider,
         phase24_task_queue_client=phase24_task_queue_client,
         phase14_repository=phase14_repository,
         phase24_query_version=settings.phase24_worker.query_version,

@@ -2,13 +2,18 @@
 # Deploy VibeVoice vLLM on the RTX 6000 Ada audio host.
 #
 # VibeVoice on 48 GB VRAM does NOT need the L4-era bf16 encoder patch; we run
-# native dtype. We reuse the existing docker/vibevoice-vllm/ image definition
-# and mount the VibeVoice repo for the entrypoint script.
+# native dtype. We use the baked docker/vibevoice-vllm/ image — all heavy
+# setup (apt packages, `pip install -e vibevoice[vllm]`) happens at image
+# build time, NOT on every container restart. The systemd unit calls
+# `vllm serve` directly; it does NOT go through the upstream
+# start_server.py wrapper (which reruns installs on every boot and cost us
+# ~5 min per restart — see docs/ERROR_LOG.md 2026-04-17).
 #
-# GPU memory: VibeVoice weights take ~18.2 GiB in bfloat16. We set
-# --gpu-memory-utilization=0.85 (~40.8 GiB budget on a 48 GiB RTX 6000 Ada)
-# to leave ~22 GiB for KV cache + activations. Values below ~0.55 trip
-# `No available memory for the cache blocks` on this model.
+# GPU memory budget on the 48 GiB RTX 6000 Ada — sole-tenant. As of 2026-04-17
+# the NFA / emotion2vec+ / YAMNet stages moved back to the H200, so vLLM owns
+# the card: it can use the full default 0.90 gpu_memory_utilization and
+# default --max-num-seqs / --max-model-len (65536) again. See
+# docs/ERROR_LOG.md 2026-04-17 for why co-tenancy did not work.
 #
 # Usage (on the RTX host, as root):
 #   REPO_DIR=/opt/clypt-audio-host/repo bash scripts/do_phase1_audio/deploy_vllm_service.sh
@@ -19,9 +24,8 @@ ENV_FILE="${ENV_FILE:-/etc/clypt-audio-host/audio_host.env}"
 VLLM_IMAGE_TAG="${VLLM_IMAGE_TAG:-clypt-vllm-vibevoice:latest}"
 VLLM_HOST_PORT="${VLLM_HOST_PORT:-8000}"
 VLLM_HEALTH_URL="${VLLM_HEALTH_URL:-http://127.0.0.1:${VLLM_HOST_PORT}/health}"
-VLLM_READY_TIMEOUT_S="${VLLM_READY_TIMEOUT_S:-2400}"
+VLLM_READY_TIMEOUT_S="${VLLM_READY_TIMEOUT_S:-1200}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-/opt/clypt-audio-host/hf-cache}"
-VIBEVOICE_REPO_DIR="${VIBEVOICE_REPO_DIR:-/opt/clypt-audio-host/vibevoice-repo}"
 VIBEVOICE_REPO_URL="${VIBEVOICE_REPO_URL:-https://github.com/microsoft/VibeVoice.git}"
 VIBEVOICE_REPO_REF="${VIBEVOICE_REPO_REF:-main}"
 
@@ -58,16 +62,14 @@ fi
 nvidia-ctk runtime configure --runtime=docker
 systemctl restart docker
 
-# Sync VibeVoice repo for the container mount.
-if [[ -d "$VIBEVOICE_REPO_DIR/.git" ]]; then
-  git -C "$VIBEVOICE_REPO_DIR" fetch --depth 1 origin "$VIBEVOICE_REPO_REF"
-  git -C "$VIBEVOICE_REPO_DIR" checkout --force FETCH_HEAD
-else
-  git clone --depth 1 --branch "$VIBEVOICE_REPO_REF" "$VIBEVOICE_REPO_URL" "$VIBEVOICE_REPO_DIR"
-fi
-
-# Build the vLLM image (shared with H200 image def — entrypoint script is the same).
-docker build -t "$VLLM_IMAGE_TAG" docker/vibevoice-vllm/
+# Build the vLLM image. All vibevoice + system deps are baked in at build
+# time (see docker/vibevoice-vllm/Dockerfile), so container restarts are
+# fast and deterministic. We forward the VIBEVOICE_REF build arg so you can
+# pin to a known-good vibevoice SHA/tag without editing the Dockerfile.
+docker build \
+  --build-arg "VIBEVOICE_REPO_URL=${VIBEVOICE_REPO_URL}" \
+  --build-arg "VIBEVOICE_REF=${VIBEVOICE_REPO_REF}" \
+  -t "$VLLM_IMAGE_TAG" docker/vibevoice-vllm/
 
 install -d -m 0755 "$HF_CACHE_DIR"
 

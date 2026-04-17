@@ -8,24 +8,48 @@ Requires=docker.service
 Type=simple
 ExecStartPre=-/usr/bin/docker stop clypt-vllm-vibevoice
 ExecStartPre=-/usr/bin/docker rm   clypt-vllm-vibevoice
-ExecStartPre=/usr/bin/test -f /opt/clypt-audio-host/vibevoice-repo/vllm_plugin/scripts/start_server.py
+# Bypass the upstream start_server.py wrapper entirely. All the work that
+# wrapper does (install system deps, pip install vibevoice[vllm], generate
+# tokenizer files) is now baked into the Docker image, so we can call vllm
+# serve directly. This takes a container-restart from ~5 minutes down to
+# ~45 seconds. See docs/ERROR_LOG.md 2026-04-17.
+#
+# Pre-step: snapshot_download caches the model in /root/.cache/huggingface
+# (mount-persisted), then generate_tokenizer_files writes the vllm-specific
+# tokenizer assets alongside the snapshot. Both are idempotent and cheap
+# once the cache is warm.
+#
+# vLLM flags rationale: vLLM is sole-tenant on the RTX card now (NFA /
+# emotion2vec+ / YAMNet moved back to H200 — see docs/ERROR_LOG.md
+# 2026-04-17), so we use upstream defaults. No --enforce-eager, no
+# --max-num-seqs pin, and --gpu-memory-utilization defaults to 0.90.
 ExecStart=/usr/bin/docker run \
     --name clypt-vllm-vibevoice \
     --gpus all \
     --ipc=host \
     -p 127.0.0.1:8000:8000 \
     -e VIBEVOICE_FFMPEG_MAX_CONCURRENCY=64 \
-    -e PYTORCH_ALLOC_CONF=expandable_segments:True \
-    -v /opt/clypt-audio-host/vibevoice-repo:/app \
     -v /opt/clypt-audio-host/hf-cache:/root/.cache/huggingface \
-    -w /app \
+    -w /opt/vibevoice-baked \
     --entrypoint bash \
     clypt-vllm-vibevoice:latest \
-    -c "python3 /app/vllm_plugin/scripts/start_server.py --max-num-seqs 2 --gpu-memory-utilization 0.85"
+    -c "set -euo pipefail; \
+        echo '[vllm-entrypoint] ensuring model snapshot is cached'; \
+        MODEL_PATH=$(python3 -c 'from huggingface_hub import snapshot_download; print(snapshot_download(\"microsoft/VibeVoice-ASR\"))'); \
+        echo \"[vllm-entrypoint] model_path=$MODEL_PATH\"; \
+        echo '[vllm-entrypoint] generating tokenizer files (idempotent)'; \
+        python3 -m vllm_plugin.tools.generate_tokenizer_files --output \"$MODEL_PATH\" || true; \
+        echo '[vllm-entrypoint] launching vllm serve'; \
+        exec vllm serve \"$MODEL_PATH\" \
+            --served-model-name vibevoice \
+            --trust-remote-code \
+            --dtype bfloat16 \
+            --port 8000 \
+            --host 0.0.0.0"
 ExecStop=/usr/bin/docker stop clypt-vllm-vibevoice
 Restart=always
 RestartSec=10
-TimeoutStartSec=600
+TimeoutStartSec=900
 
 [Install]
 WantedBy=multi-user.target

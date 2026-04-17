@@ -1,13 +1,12 @@
-"""Per-process dependencies for the RTX 6000 Ada audio host FastAPI service.
+"""Per-process dependencies for the RTX 6000 Ada VibeVoice ASR host.
 
-This module constructs the heavy ML providers (VibeVoice vLLM client, NeMo
-Forced Aligner, emotion2vec+, YAMNet) and the GCS storage client once per
-worker process and caches them. The FastAPI routes import ``get_app_deps()``
-to reuse the singletons so each HTTP request stays hot on the GPU.
+This module constructs the VibeVoice vLLM client and the GCS storage client
+once per worker process and caches them. The FastAPI routes import
+``get_app_deps()`` to reuse the singletons so each HTTP request stays hot on
+the GPU.
 
-The audio chain itself is serial on the GPU; we accept a single in-flight
-request at a time (enforced in ``app.py`` with an asyncio semaphore) so the
-providers can be plain synchronous callables without thread-safety concerns.
+NFA/emotion2vec+/YAMNet no longer live here — they are back on the H200.
+See docs/ERROR_LOG.md 2026-04-17.
 """
 
 from __future__ import annotations
@@ -20,14 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.providers import (
-    ForcedAlignmentProvider,
     VibeVoiceVLLMProvider,
     build_gcs_uri_url_resolver,
     load_audio_host_settings,
 )
-from backend.providers.emotion2vec import Emotion2VecPlusProvider
 from backend.providers.storage import GCSStorageClient
-from backend.providers.yamnet import YAMNetProvider
 
 logger = logging.getLogger(__name__)
 
@@ -37,36 +33,45 @@ class AppDeps:
     """Singleton bundle of RTX-side providers and config."""
 
     vibevoice_provider: Any
-    forced_aligner: Any
-    emotion_provider: Any
-    yamnet_provider: Any
     storage_client: Any
     scratch_root: Path
     expected_auth_token: str
 
 
 def _resolve_scratch_root() -> Path:
-    root = os.getenv("CLYPT_PHASE1_AUDIO_SCRATCH_ROOT") or "/opt/clypt-phase1/scratch"
+    root = (
+        os.getenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_SCRATCH_ROOT")
+        or os.getenv("CLYPT_PHASE1_VIBEVOICE_ASR_SCRATCH_ROOT")
+        or os.getenv("CLYPT_PHASE1_AUDIO_HOST_SCRATCH_ROOT")
+        or os.getenv("CLYPT_PHASE1_AUDIO_SCRATCH_ROOT")
+        or "/opt/clypt-phase1/scratch"
+    )
     path = Path(root)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _resolve_expected_auth_token() -> str:
-    token = os.getenv("CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN") or os.getenv(
-        "CLYPT_PHASE1_AUDIO_HOST_TOKEN"
+    # Accept both the new name and the legacy aliases for one release.
+    token = (
+        os.getenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN")
+        or os.getenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TOKEN")
+        or os.getenv("CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN")
+        or os.getenv("CLYPT_PHASE1_AUDIO_HOST_TOKEN")
     )
     if not token:
         raise RuntimeError(
-            "CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN (preferred) or CLYPT_PHASE1_AUDIO_HOST_TOKEN "
-            "must be set on the audio host so incoming requests can be authenticated."
+            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN must be set on the RTX "
+            "VibeVoice ASR host so incoming requests can be authenticated. The legacy "
+            "CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN / CLYPT_PHASE1_AUDIO_HOST_TOKEN aliases "
+            "are still accepted for one release."
         )
     return token.strip()
 
 
 @lru_cache(maxsize=1)
 def get_app_deps() -> AppDeps:
-    """Build and cache the RTX-side audio providers."""
+    """Build and cache the RTX-side VibeVoice provider + GCS client."""
     settings = load_audio_host_settings()
     storage_client = GCSStorageClient(settings=settings.storage)
 
@@ -88,23 +93,15 @@ def get_app_deps() -> AppDeps:
         num_beams=settings.vibevoice.num_beams,
     )
 
-    forced_aligner = ForcedAlignmentProvider()
-    emotion_provider = Emotion2VecPlusProvider()
-    yamnet_provider = YAMNetProvider(
-        device="gpu" if settings.phase1_runtime.run_yamnet_on_gpu else "cpu"
-    )
-
     deps = AppDeps(
         vibevoice_provider=vibevoice_provider,
-        forced_aligner=forced_aligner,
-        emotion_provider=emotion_provider,
-        yamnet_provider=yamnet_provider,
         storage_client=storage_client,
         scratch_root=_resolve_scratch_root(),
         expected_auth_token=_resolve_expected_auth_token(),
     )
     logger.info(
-        "[phase1_audio_service.deps] initialized providers scratch_root=%s vibevoice_base=%s",
+        "[phase1_audio_service.deps] initialized VibeVoice ASR provider "
+        "scratch_root=%s vibevoice_base=%s",
         deps.scratch_root,
         vv.base_url,
     )

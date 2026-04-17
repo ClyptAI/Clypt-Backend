@@ -1,4 +1,9 @@
-"""Smoke tests for the RTX 6000 Ada Phase 1 audio host FastAPI app."""
+"""Smoke tests for the RTX 6000 Ada VibeVoice ASR + node-media-prep FastAPI app.
+
+NFA / emotion2vec+ / YAMNet moved back to the H200 on 2026-04-17, so this
+service's only audio responsibility is ``POST /tasks/vibevoice-asr``, which
+returns the VibeVoice ASR turns (plus stage-event trail) to the H200 caller.
+"""
 
 from __future__ import annotations
 
@@ -34,36 +39,10 @@ class _FakeVibeVoice:
         return [{"Start": 0.0, "End": 0.3, "Speaker": 0, "Content": "hello"}]
 
 
-class _FakeAligner:
-    def run(self, *, audio_path: str, turns: list[dict[str, Any]]):
-        return [
-            {
-                "word_id": "w_000001",
-                "text": "hello",
-                "start_ms": 0,
-                "end_ms": 300,
-                "speaker_id": "SPEAKER_0",
-            }
-        ]
-
-
-class _FakeEmotion:
-    def run(self, *, audio_path: str, turns: list[dict[str, Any]]):
-        return {"segments": []}
-
-
-class _FakeYamnet:
-    def run(self, *, audio_path: str):
-        return {"events": []}
-
-
 @pytest.fixture()
 def deps(tmp_path: Path) -> AppDeps:
     return AppDeps(
         vibevoice_provider=_FakeVibeVoice(),
-        forced_aligner=_FakeAligner(),
-        emotion_provider=_FakeEmotion(),
-        yamnet_provider=_FakeYamnet(),
         storage_client=_FakeStorage(tmp_path),
         scratch_root=tmp_path,
         expected_auth_token="test-token",
@@ -83,29 +62,30 @@ def test_health_ok(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["audio_chain_ready"] is True
 
 
-def test_phase1_audio_requires_bearer(client: TestClient) -> None:
+def test_vibevoice_asr_requires_bearer(client: TestClient) -> None:
     resp = client.post(
-        "/tasks/phase1-audio",
+        "/tasks/vibevoice-asr",
         json={"audio_gcs_uri": "gs://bucket/audio.wav"},
     )
     assert resp.status_code == 401
 
 
-def test_phase1_audio_rejects_wrong_bearer(client: TestClient) -> None:
+def test_vibevoice_asr_rejects_wrong_bearer(client: TestClient) -> None:
     resp = client.post(
-        "/tasks/phase1-audio",
+        "/tasks/vibevoice-asr",
         json={"audio_gcs_uri": "gs://bucket/audio.wav"},
         headers={"Authorization": "Bearer wrong"},
     )
     assert resp.status_code == 403
 
 
-def test_phase1_audio_returns_merged_payload(client: TestClient, deps: AppDeps) -> None:
+def test_vibevoice_asr_returns_turns_and_stage_events(
+    client: TestClient, deps: AppDeps
+) -> None:
     resp = client.post(
-        "/tasks/phase1-audio",
+        "/tasks/vibevoice-asr",
         json={
             "audio_gcs_uri": "gs://bucket/audio.wav",
             "run_id": "run_001",
@@ -117,18 +97,20 @@ def test_phase1_audio_returns_merged_payload(client: TestClient, deps: AppDeps) 
     body = resp.json()
     assert body["run_id"] == "run_001"
     assert body["turns"][0]["Content"] == "hello"
-    assert body["diarization_payload"]["words"][0]["text"] == "hello"
-    assert body["emotion2vec_payload"] == {"segments": []}
-    assert body["yamnet_payload"] == {"events": []}
+    # NFA/emotion/YAMNet no longer run here — no diarization/emotion/yamnet
+    # payloads in the response.
+    assert "diarization_payload" not in body
+    assert "emotion2vec_payload" not in body
+    assert "yamnet_payload" not in body
     stage_names = {ev["stage_name"] for ev in body["stage_events"]}
-    assert {"vibevoice_asr", "forced_alignment", "emotion2vec", "yamnet"} <= stage_names
+    assert "vibevoice_asr" in stage_names
     # Audio was downloaded from GCS exactly once.
     downloads = deps.storage_client.downloads  # type: ignore[attr-defined]
     assert len(downloads) == 1
     assert downloads[0][0] == "gs://bucket/audio.wav"
 
 
-def test_phase1_audio_rejects_non_200_on_download_failure(
+def test_vibevoice_asr_returns_502_on_download_failure(
     client: TestClient, deps: AppDeps
 ) -> None:
     def _boom(*, gcs_uri: str, local_path: Path) -> Path:
@@ -136,7 +118,7 @@ def test_phase1_audio_rejects_non_200_on_download_failure(
 
     deps.storage_client.download_file = _boom  # type: ignore[attr-defined]
     resp = client.post(
-        "/tasks/phase1-audio",
+        "/tasks/vibevoice-asr",
         json={"audio_gcs_uri": "gs://bucket/missing.wav"},
         headers={"Authorization": "Bearer test-token"},
     )

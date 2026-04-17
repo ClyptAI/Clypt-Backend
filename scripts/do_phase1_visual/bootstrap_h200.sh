@@ -2,9 +2,10 @@
 # Bootstrap the H200 Phase 1 VISUAL + Phase 2-4 host.
 #
 # This droplet runs the visual chain (RF-DETR + ByteTrack), the Phase 1
+# audio post-processing chain (NFA + emotion2vec+ + YAMNet), the Phase 1
 # orchestrator, the SGLang Qwen service, and the Phase 2-4 local worker.
-# The audio chain (VibeVoice, NFA, emotion2vec+, YAMNet) and node-media prep
-# live on the RTX 6000 Ada host — see scripts/do_phase1_audio/.
+# VibeVoice vLLM ASR and ffmpeg NVENC node-media prep live on the
+# RTX 6000 Ada host — see scripts/do_phase1_audio/.
 #
 # Run as root on a fresh NVIDIA AI/ML base image droplet.
 set -euo pipefail

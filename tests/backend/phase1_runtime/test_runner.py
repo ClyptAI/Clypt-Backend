@@ -8,72 +8,41 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Shared fake for the RTX audio host client.
+# Shared fakes for the Phase 1 H200 orchestrator.
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_audio_host_client(**overrides: Any):
-    """Return a fake RemoteAudioChainClient-shaped object.
+def _make_fake_vibevoice_asr_client(**overrides: Any):
+    """Return a fake ``RemoteVibeVoiceAsrClient``-shaped object.
 
     The fake exposes a single ``.run(audio_gcs_uri, source_url, video_gcs_uri,
     run_id, stage_event_logger)`` method returning a
-    :class:`backend.providers.audio_host_client.PhaseOneAudioResponse` with
-    sensible defaults (one turn, one aligned word "hello", empty emotion
-    segments, empty yamnet events). Before returning, it mirrors the real
-    client's contract by re-emitting the four audio stage events
-    (``vibevoice_asr`` → ``forced_alignment`` → ``emotion2vec`` → ``yamnet``,
-    all ``succeeded``) through ``stage_event_logger`` so downstream telemetry
-    looks identical to a real remote run.
+    :class:`backend.providers.audio_host_client.VibeVoiceAsrResponse` with
+    one turn by default. Before returning, it re-emits a ``vibevoice_asr``
+    ``succeeded`` stage event through ``stage_event_logger`` so downstream
+    telemetry matches the real remote client.
 
     Supported ``overrides``:
 
-    - ``turns``, ``diarization_payload``, ``emotion2vec_payload``,
-      ``yamnet_payload``, ``stage_events`` — replace the corresponding
-      response fields wholesale.
-    - ``raise_exc`` — if set, ``.run`` raises the given exception instead of
-      returning a response (useful for failure-path tests).
-    - ``on_run`` — optional callback invoked at the start of ``.run`` with the
-      full kwargs dict (e.g. to coordinate threading events).
-    - ``emit_audio_stage_events`` — default True; set False to suppress the
-      re-emission of audio stage events.
+    - ``turns`` / ``stage_events`` — replace the corresponding response fields.
+    - ``raise_exc`` — if set, ``.run`` raises the given exception.
+    - ``on_run`` — optional callback invoked at the start of ``.run``.
+    - ``emit_stage_event`` — default True; set False to suppress the
+      re-emission of the ``vibevoice_asr`` stage event.
     """
-    from backend.providers.audio_host_client import PhaseOneAudioResponse
+    from backend.providers.audio_host_client import VibeVoiceAsrResponse
 
     raise_exc: Exception | None = overrides.pop("raise_exc", None)
     on_run = overrides.pop("on_run", None)
-    emit_audio_stage_events: bool = overrides.pop("emit_audio_stage_events", True)
+    emit_stage_event: bool = overrides.pop("emit_stage_event", True)
 
-    default_diarization = {
-        "turns": [
-            {
-                "turn_id": "t_000001",
-                "speaker_id": "SPEAKER_0",
-                "start_ms": 0,
-                "end_ms": 200,
-                "transcript_text": "hello",
-                "word_ids": ["w_000001"],
-            }
-        ],
-        "words": [
-            {
-                "word_id": "w_000001",
-                "text": "hello",
-                "start_ms": 0,
-                "end_ms": 200,
-                "speaker_id": "SPEAKER_0",
-            }
-        ],
-    }
     default_response_kwargs = {
         "turns": [{"Speaker": 0, "Start": 0.0, "End": 0.2, "Content": "hello"}],
-        "diarization_payload": default_diarization,
-        "emotion2vec_payload": {"segments": []},
-        "yamnet_payload": {"events": []},
         "stage_events": [],
     }
     default_response_kwargs.update(overrides)
 
-    class _FakeAudioHostClient:
+    class _FakeVibeVoiceAsrClient:
         supports_concurrent_visual = True
 
         def __init__(self) -> None:
@@ -87,7 +56,7 @@ def _make_fake_audio_host_client(**overrides: Any):
             video_gcs_uri: str | None = None,
             run_id: str | None = None,
             stage_event_logger: Any = None,
-        ) -> PhaseOneAudioResponse:
+        ) -> VibeVoiceAsrResponse:
             call = {
                 "audio_gcs_uri": audio_gcs_uri,
                 "source_url": source_url,
@@ -101,24 +70,77 @@ def _make_fake_audio_host_client(**overrides: Any):
             if raise_exc is not None:
                 raise raise_exc
 
-            if emit_audio_stage_events and stage_event_logger is not None:
-                for stage_name in (
-                    "vibevoice_asr",
-                    "forced_alignment",
-                    "emotion2vec",
-                    "yamnet",
-                ):
-                    stage_event_logger(
-                        stage_name=stage_name,
-                        status="succeeded",
-                        duration_ms=1.0,
-                        metadata={},
-                        error_payload=None,
-                    )
+            if emit_stage_event and stage_event_logger is not None:
+                stage_event_logger(
+                    stage_name="vibevoice_asr",
+                    status="succeeded",
+                    duration_ms=1.0,
+                    metadata={},
+                    error_payload=None,
+                )
 
-            return PhaseOneAudioResponse(**default_response_kwargs)
+            return VibeVoiceAsrResponse(**default_response_kwargs)
 
-    return _FakeAudioHostClient()
+    return _FakeVibeVoiceAsrClient()
+
+
+def _make_local_audio_providers() -> dict[str, Any]:
+    """Return in-process NFA / emotion2vec+ / YAMNet provider fakes for the H200."""
+
+    class _FakeForcedAligner:
+        def run(self, *, audio_path: Path, turns: list[dict]) -> list[dict]:
+            return [
+                {
+                    "word_id": "w_000001",
+                    "text": "hello",
+                    "start_ms": 0,
+                    "end_ms": 200,
+                    "turn_id": turns[0]["turn_id"] if turns else "t_000001",
+                    "speaker_id": (
+                        turns[0]["speaker_id"] if turns else "SPEAKER_0"
+                    ),
+                }
+            ]
+
+    class _FakeEmotionProvider:
+        def run(self, *, audio_path: Path, turns: list[dict]) -> dict:
+            return {"segments": []}
+
+    class _FakeYamnetProvider:
+        def run(self, *, audio_path: Path) -> dict:
+            return {"events": []}
+
+    return {
+        "forced_aligner": _FakeForcedAligner(),
+        "emotion_provider": _FakeEmotionProvider(),
+        "yamnet_provider": _FakeYamnetProvider(),
+    }
+
+
+@pytest.fixture(autouse=True)
+def _patch_vibevoice_merge(monkeypatch: pytest.MonkeyPatch):
+    """Replace the real vibevoice_merge with a deterministic stub.
+
+    The runner tests only care about the audio-host wiring + stage-event
+    emission; they don't exercise merging edge cases. Keeping merge
+    deterministic avoids pulling heavy imports into this test module.
+    """
+    monkeypatch.setattr(
+        "backend.phase1_runtime.extract.merge_vibevoice_outputs",
+        lambda *, vibevoice_turns, word_alignments: {
+            "turns": [
+                {
+                    "turn_id": "t_000001",
+                    "speaker_id": "SPEAKER_0",
+                    "start_ms": 0,
+                    "end_ms": 200,
+                    "transcript_text": "hello",
+                    "word_ids": ["w_000001"],
+                }
+            ],
+            "words": list(word_alignments),
+        },
+    )
 
 
 def _write_test_bank_mapping(
@@ -216,18 +238,19 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
             return record
 
     repository = _FakeRepository()
-    audio_host_client = _make_fake_audio_host_client()
+    audio_host_client = _make_fake_vibevoice_asr_client()
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        audio_host_client=audio_host_client,
+        vibevoice_asr_client=audio_host_client,
         visual_extractor=_FakeVisual(),
         phase24_task_queue_client=_FakeQueueClient(),
         phase14_repository=repository,
         phase24_query_version="graph-v2",
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
+        **_make_local_audio_providers(),
     )
 
     result = runner.run_job(
@@ -329,11 +352,12 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        audio_host_client=_make_fake_audio_host_client(),
+        vibevoice_asr_client=_make_fake_vibevoice_asr_client(),
         visual_extractor=_FakeVisual(),
         phase24_task_queue_client=_FakeQueueClient(),
         phase24_query_version="graph-v2",
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
+        **_make_local_audio_providers(),
     )
 
     result = runner.run_job(
@@ -389,10 +413,11 @@ def test_phase1_job_runner_enforces_queue_mode_for_run_phase14(tmp_path: Path):
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        audio_host_client=_make_fake_audio_host_client(),
+        vibevoice_asr_client=_make_fake_vibevoice_asr_client(),
         visual_extractor=_FakeVisual(),
         phase24_task_queue_client=_FakeQueueClient(),
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
+        **_make_local_audio_providers(),
     )
 
     result = runner.run_job(
@@ -422,9 +447,10 @@ def test_phase1_job_runner_fails_fast_when_queue_mode_enabled_but_unconfigured(t
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        audio_host_client=_make_fake_audio_host_client(),
+        vibevoice_asr_client=_make_fake_vibevoice_asr_client(),
         visual_extractor=object(),
         phase24_task_queue_client=None,
+        **_make_local_audio_providers(),
     )
 
     with pytest.raises(RuntimeError, match="local queue client is unavailable"):
@@ -472,16 +498,17 @@ def test_phase1_job_runner_uses_test_bank_media_and_preserves_posted_source_url(
                 "tracks": [],
             }
 
-    audio_host_client = _make_fake_audio_host_client()
+    audio_host_client = _make_fake_vibevoice_asr_client()
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        audio_host_client=audio_host_client,
+        vibevoice_asr_client=audio_host_client,
         visual_extractor=_FakeVisual(),
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
+        **_make_local_audio_providers(),
     )
 
     result = runner.run_job(
@@ -548,10 +575,11 @@ def test_phase1_job_runner_does_not_apply_input_resolver_to_source_path_inputs(t
         working_root=tmp_path,
         audio_extractor=fake_audio_extractor,
         storage_client=_FakeStorage(),
-        audio_host_client=_make_fake_audio_host_client(),
+        vibevoice_asr_client=_make_fake_vibevoice_asr_client(),
         visual_extractor=_FakeVisual(),
         phase24_task_queue_client=None,
         input_resolver=_RecordingResolver(),
+        **_make_local_audio_providers(),
     )
 
     # In source_path mode there is no canonical audio_gcs_uri for the RTX host,
@@ -590,11 +618,12 @@ def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_strict(tmp_
         working_root=tmp_path,
         audio_extractor=object(),
         storage_client=object(),
-        audio_host_client=_make_fake_audio_host_client(),
+        vibevoice_asr_client=_make_fake_vibevoice_asr_client(),
         visual_extractor=object(),
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
         input_resolver_strict=True,
+        **_make_local_audio_providers(),
     )
 
     with pytest.raises(Phase1InputResolutionError, match="No test-bank mapping found"):
@@ -629,11 +658,12 @@ def test_phase1_job_runner_raises_for_unmapped_test_bank_source_when_non_strict(
         working_root=tmp_path,
         audio_extractor=object(),
         storage_client=object(),
-        audio_host_client=_make_fake_audio_host_client(),
+        vibevoice_asr_client=_make_fake_vibevoice_asr_client(),
         visual_extractor=object(),
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
         input_resolver_strict=False,
+        **_make_local_audio_providers(),
     )
 
     with pytest.raises(Phase1InputResolutionError, match="No test-bank mapping found"):
@@ -691,16 +721,17 @@ def test_phase1_job_runner_hydrates_canonical_assets_and_uses_mapped_gcs_uris(tm
             }
 
     storage = _FakeStorage()
-    audio_host_client = _make_fake_audio_host_client()
+    audio_host_client = _make_fake_vibevoice_asr_client()
 
     runner = Phase1JobRunner(
         working_root=tmp_path,
         audio_extractor=object(),
         storage_client=storage,
-        audio_host_client=audio_host_client,
+        vibevoice_asr_client=audio_host_client,
         visual_extractor=_FakeVisual(),
         phase24_task_queue_client=None,
         input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
+        **_make_local_audio_providers(),
     )
 
     result = runner.run_job(

@@ -1,6 +1,6 @@
 from .config import (
     AudioHostProcessSettings,
-    AudioHostSettings,
+    AudioHostSettings,  # deprecated alias of VibeVoiceAsrServiceSettings
     LocalGenerationSettings,
     NodeMediaPrepSettings,
     Phase1ASRSettings,
@@ -10,16 +10,21 @@ from .config import (
     SpannerSettings,
     StorageSettings,
     VertexSettings,
+    VibeVoiceAsrServiceSettings,
     VibeVoiceSettings,
     VibeVoiceVLLMSettings,
     load_audio_host_settings,
     load_provider_settings,
 )
 from .audio_host_client import (
-    PhaseOneAudioResponse,
-    RemoteAudioChainClient,
-    RemoteAudioChainError,
+    PhaseOneAudioResponse,  # deprecated alias of VibeVoiceAsrResponse
+    RemoteAudioChainClient,  # deprecated alias of RemoteVibeVoiceAsrClient
+    RemoteAudioChainError,  # deprecated alias of RemoteVibeVoiceAsrError
+    RemoteVibeVoiceAsrClient,
+    RemoteVibeVoiceAsrError,
+    VibeVoiceAsrResponse,
 )
+from .emotion2vec import Emotion2VecPlusProvider
 from .node_media_prep_client import (
     RemoteNodeMediaPrepClient,
     RemoteNodeMediaPrepError,
@@ -31,10 +36,12 @@ from .vibevoice_vllm import (
     build_gcs_uri_url_resolver,
 )
 from .vertex import VertexEmbeddingClient, VertexGenerationClient
+from .yamnet import YAMNetProvider
 
 __all__ = [
     "AudioHostProcessSettings",
-    "AudioHostSettings",
+    "AudioHostSettings",  # deprecated alias of VibeVoiceAsrServiceSettings
+    "Emotion2VecPlusProvider",
     "ForcedAlignmentProvider",
     "LocalGenerationSettings",
     "LocalOpenAIQwenClient",
@@ -42,21 +49,26 @@ __all__ = [
     "Phase1ASRSettings",
     "Phase1RuntimeSettings",
     "Phase24WorkerSettings",
-    "PhaseOneAudioResponse",
+    "PhaseOneAudioResponse",  # deprecated alias of VibeVoiceAsrResponse
     "ProviderSettings",
-    "RemoteAudioChainClient",
-    "RemoteAudioChainError",
+    "RemoteAudioChainClient",  # deprecated alias of RemoteVibeVoiceAsrClient
+    "RemoteAudioChainError",  # deprecated alias of RemoteVibeVoiceAsrError
     "RemoteNodeMediaPrepClient",
     "RemoteNodeMediaPrepError",
+    "RemoteVibeVoiceAsrClient",
+    "RemoteVibeVoiceAsrError",
     "SpannerSettings",
     "StorageSettings",
     "VertexEmbeddingClient",
     "VertexGenerationClient",
     "VertexSettings",
+    "VibeVoiceAsrResponse",
+    "VibeVoiceAsrServiceSettings",
     "VibeVoiceSettings",
     "VibeVoiceVLLMProvider",
-    "build_gcs_uri_url_resolver",
     "VibeVoiceVLLMSettings",
+    "YAMNetProvider",
+    "build_gcs_uri_url_resolver",
     "load_audio_host_settings",
     "load_provider_settings",
 ]

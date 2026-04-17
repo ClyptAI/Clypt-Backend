@@ -9,15 +9,15 @@ Use this file for the full env surface. Use `.env.example` for a starter file, a
 
 ## 1) Required Core Inputs
 
-### 1.1 H200 host (orchestrator + visual + worker)
+### 1.1 H200 host (orchestrator + visual + audio post + worker)
 
 Validated by `load_provider_settings()` at startup — config load fails
 fast if any are missing:
 
 - `GOOGLE_CLOUD_PROJECT`
 - `GCS_BUCKET`
-- `CLYPT_PHASE1_AUDIO_HOST_URL`
-- `CLYPT_PHASE1_AUDIO_HOST_TOKEN`
+- `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL`
+- `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN`
 - `GENAI_GENERATION_BACKEND=local_openai`
@@ -25,22 +25,32 @@ fast if any are missing:
 - `CLYPT_LOCAL_LLM_BASE_URL`
 - `CLYPT_LOCAL_LLM_MODEL` (or a compatible fallback such as `GENAI_FLASH_MODEL`)
 
+> **Compat note:** `CLYPT_PHASE1_AUDIO_HOST_URL` /
+> `CLYPT_PHASE1_AUDIO_HOST_TOKEN` still work for one release as
+> deprecated aliases of the `_VIBEVOICE_ASR_SERVICE_*` names. Prefer
+> the new names in new deployments.
+
 `VIBEVOICE_BACKEND` / `VIBEVOICE_VLLM_*` must **not** be set on the H200.
 
-### 1.2 RTX 6000 Ada audio host
+### 1.2 RTX 6000 Ada host (VibeVoice ASR + node-media prep)
 
-Required on the audio host (loaded by the FastAPI service and by its
+Required on the RTX host (loaded by the FastAPI service and by its
 embedded VibeVoice client):
 
 - `CLYPT_PHASE1_AUDIO_HOST_BIND`
 - `CLYPT_PHASE1_AUDIO_HOST_PORT`
-- `CLYPT_PHASE1_AUDIO_HOST_TOKEN`
+- `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN`
+  (legacy alias: `CLYPT_PHASE1_AUDIO_HOST_TOKEN`, accepted for one release)
 - `VIBEVOICE_BACKEND=vllm`
 - `VIBEVOICE_VLLM_BASE_URL`
 - `VIBEVOICE_VLLM_MODEL=vibevoice`
 - `GOOGLE_CLOUD_PROJECT`
 - `GCS_BUCKET`
 - `GOOGLE_APPLICATION_CREDENTIALS`
+
+NeMo / FunASR / TensorFlow / librosa / resampy are no longer required
+here — they moved back to the H200 with the NFA / emotion2vec+ / YAMNet
+post-processing chain.
 
 ## 2) Recommended Working Profile
 
@@ -51,10 +61,10 @@ local-fallback audio or node-media-prep mode; `run_phase1_sidecars` and
 ### 2.1 H200 profile
 
 ```bash
-CLYPT_PHASE1_AUDIO_HOST_URL=http://<rtx-host>:9100
-CLYPT_PHASE1_AUDIO_HOST_TOKEN=<shared-bearer>
-CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S=7200
-CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH=/health
+CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL=http://<rtx-host>:9100
+CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN=<shared-bearer>
+CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TIMEOUT_S=7200
+CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_HEALTHCHECK_PATH=/health
 
 CLYPT_PHASE24_NODE_MEDIA_PREP_URL=http://<rtx-host>:9100
 CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
@@ -74,7 +84,7 @@ CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite
 ```bash
 CLYPT_PHASE1_AUDIO_HOST_BIND=0.0.0.0
 CLYPT_PHASE1_AUDIO_HOST_PORT=9100
-CLYPT_PHASE1_AUDIO_HOST_TOKEN=<shared-bearer>
+CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN=<shared-bearer>
 CLYPT_PHASE1_AUDIO_HOST_SCRATCH_ROOT=/opt/clypt-audio-host/scratch
 
 VIBEVOICE_BACKEND=vllm
@@ -87,6 +97,9 @@ Fail-fast guardrails in current code:
 - `CLYPT_PHASE1_ASR_BACKEND` (if set on the H200) only accepts `vllm`; any other value raises
 - `CLYPT_GEMINI_MAX_CONCURRENT` has been removed and now raises at startup
 - Omitting any of the four remote-host vars in §1.1 raises at startup
+  (legacy `CLYPT_PHASE1_AUDIO_HOST_URL` / `_TOKEN` satisfy the
+  VibeVoice ASR service requirement for one release as deprecated
+  aliases)
 
 ## 3) Provider and Runtime Env Surface
 
@@ -108,23 +121,34 @@ Fail-fast guardrails in current code:
 |---|---|---|
 | `CLYPT_PHASE1_ASR_BACKEND` | `vllm` | Only `vllm` is supported today. |
 
-### 3.3 Remote audio host (H200 → RTX 6000 Ada)
+### 3.3 Remote VibeVoice ASR service (H200 → RTX 6000 Ada)
 
-`RemoteAudioChainClient` settings loaded on the H200. All four of the
-first entries are required; startup fails fast if either `URL` or
-`TOKEN` is missing.
+`RemoteVibeVoiceAsrClient` (legacy class name: `RemoteAudioChainClient`)
+settings loaded on the H200. `URL` and `AUTH_TOKEN` are required;
+startup fails fast if either is missing.
 
 | Env | Default | Notes |
 |---|---|---|
-| `CLYPT_PHASE1_AUDIO_HOST_URL` | required | Base URL of the RTX 6000 Ada FastAPI service. |
-| `CLYPT_PHASE1_AUDIO_HOST_TOKEN` | required | Shared bearer for the RTX service. |
-| `CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S` | `7200` | Request timeout for `/tasks/phase1-audio`. |
-| `CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH` | `/health` | Used by deploy probe and diagnostics. |
+| `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL` | required | Base URL of the RTX 6000 Ada FastAPI service. |
+| `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN` | required | Shared bearer for the RTX service. |
+| `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TIMEOUT_S` | `7200` | Request timeout for `/tasks/vibevoice-asr`. |
+| `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_HEALTHCHECK_PATH` | `/health` | Used by deploy probe and diagnostics. |
+
+> **Compat note:** `CLYPT_PHASE1_AUDIO_HOST_URL`,
+> `CLYPT_PHASE1_AUDIO_HOST_TOKEN`, `CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S`,
+> and `CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH` are accepted for one
+> release as deprecated aliases and log a warning at startup.
 
 ### 3.4 VibeVoice local vLLM settings (RTX 6000 Ada only)
 
-These live on the RTX audio host, not the H200. The FastAPI service
-loads them when building its in-process VibeVoice vLLM client.
+These live on the RTX host, not the H200. The FastAPI service
+loads them when building its in-process VibeVoice vLLM client. Because
+the RTX box is a sole tenant for VibeVoice, the systemd unit launches
+vLLM with its default/sole-tenant flags; the earlier
+`--max-num-seqs 1 / --max-model-len 32768 / --enforce-eager /
+--gpu-memory-utilization 0.60 /
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` co-tenancy
+workarounds have been removed.
 
 | Env | Default | Notes |
 |---|---|---|
@@ -226,13 +250,13 @@ The local OpenAI-compatible Qwen path always sends `chat_template_kwargs.enable_
 
 ### 4.2 Node-media prep (remote RTX 6000 Ada)
 
-Node-media prep is always delegated to the RTX audio host via
+Node-media prep is always delegated to the RTX host via
 `RemoteNodeMediaPrepClient`. There is no in-process ffmpeg path on the
 H200 worker anymore; startup fails fast if `URL` or `TOKEN` is missing.
 
 | Env | Default | Notes |
 |---|---|---|
-| `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` | required | Base URL of the RTX service. Typically the same as `CLYPT_PHASE1_AUDIO_HOST_URL`. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` | required | Base URL of the RTX service. Typically the same as `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL`. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` | required | Shared bearer for the RTX service. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S` | `600` | Per-request timeout. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` | `8` | Caller-side concurrency ceiling for `/tasks/node-media-prep`. |

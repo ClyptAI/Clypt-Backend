@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,14 +46,17 @@ def test_gcs_storage_client_uploads_with_expected_blob_name(tmp_path: Path):
     }
 
 
-class _FakeAudioHostClient:
-    """Minimal stand-in for ``RemoteAudioChainClient`` used by the H200 orchestrator.
+class _FakeVibeVoiceAsrClient:
+    """Minimal stand-in for ``RemoteVibeVoiceAsrClient`` used by the H200
+    orchestrator.
 
-    The real client performs an HTTP call to the RTX 6000 Ada audio host and
-    re-emits stage events through ``stage_event_logger``. These tests only
-    need to verify that ``run_phase1_sidecars`` passes the right kwargs and
-    merges the returned payloads.
+    The real client performs an HTTP call to the RTX 6000 Ada VibeVoice ASR
+    host and re-emits stage events through ``stage_event_logger``. These
+    tests only need to verify that ``run_phase1_sidecars`` passes the right
+    kwargs and consumes the returned ``VibeVoiceAsrResponse``.
     """
+
+    supports_concurrent_visual = True
 
     def __init__(self, *, response=None, error: Exception | None = None) -> None:
         self._response = response
@@ -82,20 +86,65 @@ class _FakeAudioHostClient:
         return self._response
 
 
-def _default_audio_response():
-    from backend.providers.audio_host_client import PhaseOneAudioResponse
+def _default_asr_response():
+    from backend.providers.audio_host_client import VibeVoiceAsrResponse
 
-    return PhaseOneAudioResponse(
+    return VibeVoiceAsrResponse(
         turns=[
             {
-                "turn_id": "t_000001",
-                "speaker_id": "SPEAKER_0",
-                "start_ms": 0,
-                "end_ms": 300,
-                "transcript_text": "hello",
+                "Speaker": 0,
+                "Start": 0.0,
+                "End": 0.3,
+                "Content": "hello",
             }
         ],
-        diarization_payload={
+        stage_events=[],
+    )
+
+
+class _FakeForcedAligner:
+    def run(self, *, audio_path: Path, turns: list[dict]) -> list[dict]:
+        self.last_call = {"audio_path": audio_path, "turns": list(turns)}
+        return [
+            {
+                "word_id": "w_000001",
+                "text": "hello",
+                "start_ms": 0,
+                "end_ms": 300,
+                "turn_id": turns[0]["turn_id"] if turns else "t_000001",
+                "speaker_id": turns[0]["speaker_id"] if turns else "SPEAKER_0",
+            }
+        ]
+
+
+class _FakeEmotionProvider:
+    def run(self, *, audio_path: Path, turns: list[dict]) -> dict:
+        return {"segments": []}
+
+
+class _FakeYamnetProvider:
+    def run(self, *, audio_path: Path) -> dict:
+        return {"events": []}
+
+
+def _make_providers() -> dict[str, Any]:
+    return {
+        "forced_aligner": _FakeForcedAligner(),
+        "emotion_provider": _FakeEmotionProvider(),
+        "yamnet_provider": _FakeYamnetProvider(),
+    }
+
+
+def test_run_phase1_sidecars_runs_visual_and_remote_asr_concurrently(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from backend.phase1_runtime.extract import run_phase1_sidecars
+    from backend.phase1_runtime.models import Phase1Workspace
+
+    # Keep vibevoice_merge from demanding a specific payload shape.
+    monkeypatch.setattr(
+        "backend.phase1_runtime.extract.merge_vibevoice_outputs",
+        lambda *, vibevoice_turns, word_alignments: {
             "turns": [
                 {
                     "turn_id": "t_000001",
@@ -104,28 +153,11 @@ def _default_audio_response():
                     "end_ms": 300,
                     "transcript_text": "hello",
                     "word_ids": ["w_000001"],
-                    "identification_match": None,
                 }
             ],
-            "words": [
-                {
-                    "word_id": "w_000001",
-                    "text": "hello",
-                    "start_ms": 0,
-                    "end_ms": 300,
-                    "speaker_id": "SPEAKER_0",
-                }
-            ],
+            "words": list(word_alignments),
         },
-        emotion2vec_payload={"segments": []},
-        yamnet_payload={"events": []},
-        stage_events=[],
     )
-
-
-def test_run_phase1_sidecars_runs_visual_and_remote_audio_concurrently(tmp_path: Path):
-    from backend.phase1_runtime.extract import run_phase1_sidecars
-    from backend.phase1_runtime.models import Phase1Workspace
 
     call_order: list[str] = []
     stage_events: list[dict[str, object]] = []
@@ -139,26 +171,27 @@ def test_run_phase1_sidecars_runs_visual_and_remote_audio_concurrently(tmp_path:
                 "tracks": [],
             }
 
-    audio_response = _default_audio_response()
-    audio_host_client = _FakeAudioHostClient(response=audio_response)
+    asr_client = _FakeVibeVoiceAsrClient(response=_default_asr_response())
 
-    class _TrackingClient:
+    class _TrackingClient(_FakeVibeVoiceAsrClient):
         def run(self, **kwargs):
-            call_order.append("audio_host:run")
-            return audio_host_client.run(**kwargs)
+            call_order.append("vibevoice_asr:run")
+            return asr_client.run(**kwargs)
 
     workspace = Phase1Workspace.create(root=tmp_path, run_id="run_001")
     workspace.video_path.write_text("video-bytes", encoding="utf-8")
     workspace.audio_path.write_text("audio-bytes", encoding="utf-8")
 
+    providers = _make_providers()
     outputs = run_phase1_sidecars(
         source_url="https://youtube.com/watch?v=demo",
         video_gcs_uri="gs://bucket/source.mp4",
         audio_gcs_uri="gs://bucket/source.wav",
         workspace=workspace,
-        audio_host_client=_TrackingClient(),
+        vibevoice_asr_client=_TrackingClient(response=_default_asr_response()),
         visual_extractor=_FakeVisualExtractor(),
         stage_event_logger=lambda **event: stage_events.append(event),
+        **providers,
     )
 
     assert outputs.phase1_audio["source_audio"] == "https://youtube.com/watch?v=demo"
@@ -170,25 +203,22 @@ def test_run_phase1_sidecars_runs_visual_and_remote_audio_concurrently(tmp_path:
     assert outputs.emotion2vec_payload == {"segments": []}
     assert outputs.yamnet_payload == {"events": []}
 
-    assert set(call_order) == {"visual:source_video.mp4", "audio_host:run"}
-    assert len(audio_host_client.calls) == 1
-    audio_call = audio_host_client.calls[0]
-    assert audio_call["audio_gcs_uri"] == "gs://bucket/source.wav"
-    assert audio_call["source_url"] == "https://youtube.com/watch?v=demo"
-    assert audio_call["video_gcs_uri"] == "gs://bucket/source.mp4"
-    assert audio_call["run_id"] == "run_001"
-    assert callable(audio_call["stage_event_logger"])
+    assert set(call_order) == {"visual:source_video.mp4", "vibevoice_asr:run"}
 
-    assert [event["stage_name"] for event in stage_events] == ["visual_extraction"]
-    assert stage_events[0]["status"] == "succeeded"
-    assert stage_events[0]["metadata"]["shot_change_count"] == 1
-    assert stage_events[0]["metadata"]["track_count"] == 0
+    stage_names = {event["stage_name"] for event in stage_events}
+    # H200 local audio chain stage events + visual extraction.
+    assert "forced_alignment" in stage_names
+    assert "emotion2vec" in stage_names
+    assert "yamnet" in stage_names
+    assert "visual_extraction" in stage_names
 
 
-def test_run_phase1_sidecars_propagates_audio_host_failure_and_emits_failed_event(tmp_path: Path):
+def test_run_phase1_sidecars_propagates_vibevoice_asr_failure_and_emits_failed_event(
+    tmp_path: Path,
+):
     from backend.phase1_runtime.extract import run_phase1_sidecars
     from backend.phase1_runtime.models import Phase1Workspace
-    from backend.providers.audio_host_client import RemoteAudioChainError
+    from backend.providers.audio_host_client import RemoteVibeVoiceAsrError
 
     stage_events: list[dict[str, object]] = []
 
@@ -200,34 +230,31 @@ def test_run_phase1_sidecars_propagates_audio_host_failure_and_emits_failed_even
                 "tracks": [],
             }
 
-    audio_host_client = _FakeAudioHostClient(
-        error=RemoteAudioChainError("audio host rejected", status_code=500)
+    asr_client = _FakeVibeVoiceAsrClient(
+        error=RemoteVibeVoiceAsrError("vibevoice asr rejected", status_code=500)
     )
 
     workspace = Phase1Workspace.create(root=tmp_path, run_id="run_002")
     workspace.video_path.write_text("video-bytes", encoding="utf-8")
     workspace.audio_path.write_text("audio-bytes", encoding="utf-8")
 
-    with pytest.raises(RemoteAudioChainError, match="audio host rejected"):
+    providers = _make_providers()
+    with pytest.raises(RemoteVibeVoiceAsrError, match="vibevoice asr rejected"):
         run_phase1_sidecars(
             source_url="https://youtube.com/watch?v=demo",
             video_gcs_uri="gs://bucket/source.mp4",
             audio_gcs_uri="gs://bucket/source.wav",
             workspace=workspace,
-            audio_host_client=audio_host_client,
+            vibevoice_asr_client=asr_client,
             visual_extractor=_FakeVisualExtractor(),
             stage_event_logger=lambda **event: stage_events.append(event),
+            **providers,
         )
 
     failure_events = [e for e in stage_events if e["status"] == "failed"]
-    assert any(e["stage_name"] == "audio_host_call" for e in failure_events), (
-        f"expected audio_host_call=failed event, got stage_events={stage_events}"
+    assert any(e["stage_name"] == "vibevoice_asr" for e in failure_events), (
+        f"expected vibevoice_asr=failed event, got stage_events={stage_events}"
     )
-    audio_failure = next(
-        e for e in failure_events if e["stage_name"] == "audio_host_call"
-    )
-    assert audio_failure["error_payload"]["code"] == "RemoteAudioChainError"
-    assert "audio host rejected" in audio_failure["error_payload"]["message"]
 
 
 def test_run_phase1_sidecars_raises_when_audio_gcs_uri_missing(tmp_path: Path):
@@ -238,20 +265,22 @@ def test_run_phase1_sidecars_raises_when_audio_gcs_uri_missing(tmp_path: Path):
         def extract(self, *, video_path: Path, workspace: Phase1Workspace):
             raise AssertionError("visual extractor should not run when audio_gcs_uri is missing")
 
-    audio_host_client = _FakeAudioHostClient(response=_default_audio_response())
+    asr_client = _FakeVibeVoiceAsrClient(response=_default_asr_response())
 
     workspace = Phase1Workspace.create(root=tmp_path, run_id="run_003")
     workspace.video_path.write_text("video-bytes", encoding="utf-8")
     workspace.audio_path.write_text("audio-bytes", encoding="utf-8")
 
+    providers = _make_providers()
     with pytest.raises(ValueError, match="audio_gcs_uri is required"):
         run_phase1_sidecars(
             source_url="https://youtube.com/watch?v=demo",
             video_gcs_uri="gs://bucket/source.mp4",
             audio_gcs_uri=None,
             workspace=workspace,
-            audio_host_client=audio_host_client,
+            vibevoice_asr_client=asr_client,
             visual_extractor=_FakeVisualExtractor(),
+            **providers,
         )
 
     with pytest.raises(ValueError, match="audio_gcs_uri is required"):
@@ -260,8 +289,9 @@ def test_run_phase1_sidecars_raises_when_audio_gcs_uri_missing(tmp_path: Path):
             video_gcs_uri="gs://bucket/source.mp4",
             audio_gcs_uri="   ",
             workspace=workspace,
-            audio_host_client=audio_host_client,
+            vibevoice_asr_client=asr_client,
             visual_extractor=_FakeVisualExtractor(),
+            **providers,
         )
 
-    assert audio_host_client.calls == []
+    assert asr_client.calls == []

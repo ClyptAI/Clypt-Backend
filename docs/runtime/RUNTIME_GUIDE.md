@@ -10,14 +10,19 @@ For the full environment variable catalog, see `docs/runtime/ENV_REFERENCE.md`.
 ## 1) Runtime Topology
 
 Phase 1 runs on two single-GPU DigitalOcean droplets. There is **no local
-fallback** — the H200 always calls the RTX host over HTTP; config loading
-fails fast if the remote host URL/token are missing.
+fallback** — the H200 always calls the RTX host over HTTP for VibeVoice
+ASR and node-media prep; config loading fails fast if the remote host
+URL/token are missing.
 
 Phase 1 is conceptually split into two sub-chains:
 
-- **Phase 1 audio chain (RTX 6000 Ada):** VibeVoice vLLM ASR → NeMo forced
-  aligner → emotion2vec+ → YAMNet (CPU). One `POST /tasks/phase1-audio`
-  call per run returns the merged payload + re-emits stage events.
+- **Phase 1 audio chain:**
+  - ASR leg (RTX 6000 Ada, sole tenant): VibeVoice vLLM ASR, dispatched
+    via one `POST /tasks/vibevoice-asr` call per run. Returns
+    `{turns, stage_events}`.
+  - Post-ASR leg (H200, in-process): NeMo forced aligner →
+    emotion2vec+ → YAMNet (CPU). Runs on the H200 immediately when the
+    ASR HTTP call returns.
 - **Phase 1 visual chain (H200):** RF-DETR + ByteTrack (TensorRT FP16 fast
   path), in-process.
 
@@ -28,18 +33,23 @@ the Phase 2-4 enqueue without waiting for visual join.
 
 | Host | Runs |
 | --- | --- |
-| **H200** | Phase 1 orchestrator (`run_phase1`, Phase 1 API/worker), RF-DETR + ByteTrack, Phase 2-4 local SQLite queue + worker, SGLang Qwen3.6-35B-A3B on `:8001`, Vertex embedding calls, Spanner/GCS I/O. |
-| **RTX 6000 Ada** | VibeVoice vLLM on `:8000`, NFA, emotion2vec+, YAMNet (CPU), ffmpeg NVENC node-clip extraction, FastAPI service (`backend.runtime.phase1_audio_service.app:create_app`). |
+| **H200** | Phase 1 orchestrator (`run_phase1`, Phase 1 API/worker), RF-DETR + ByteTrack, in-process NFA + emotion2vec+ + YAMNet (CPU), Phase 2-4 local SQLite queue + worker, SGLang Qwen3.6-35B-A3B on `:8001`, Vertex embedding calls, Spanner/GCS I/O. |
+| **RTX 6000 Ada (sole tenant)** | VibeVoice vLLM on `:8000`, ffmpeg NVENC/NVDEC node-clip extraction, FastAPI service (`backend.runtime.phase1_audio_service.app:create_app`) exposing `/tasks/vibevoice-asr` and `/tasks/node-media-prep`. |
 
 ### 1.2 H200 runtime
 
 - **Phase 1 runtime:** local process (`python -m backend.runtime.run_phase1`)
-  backed by `Phase1JobRunner`. Visual chain runs in-process; audio chain is
-  dispatched to the RTX host via `RemoteAudioChainClient`.
+  backed by `Phase1JobRunner`. Visual chain runs in-process; ASR is
+  dispatched to the RTX host via `RemoteVibeVoiceAsrClient` (legacy
+  alias: `RemoteAudioChainClient`), and NFA / emotion2vec+ / YAMNet run
+  in-process on the H200 after the ASR response returns.
 - **Phase 1 runtime env:** `/opt/clypt-phase1/venvs/phase1` on the H200.
-- **ASR backend:** exclusively remote. `backend/providers/config.py` requires
-  `CLYPT_PHASE1_AUDIO_HOST_URL` and `CLYPT_PHASE1_AUDIO_HOST_TOKEN`; there
-  is no in-process VibeVoice provider on this host.
+- **ASR backend:** exclusively remote. `backend/providers/config.py`
+  requires `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL` and
+  `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN`; there is no
+  in-process VibeVoice provider on this host. The legacy
+  `CLYPT_PHASE1_AUDIO_HOST_URL` / `_TOKEN` names remain accepted for one
+  release as deprecated aliases.
 - **Qwen serving env:** dedicated SGLang env at
   `/opt/clypt-phase1/venvs/sglang`, driven by
   `SG_SCHEDULE_POLICY`, `SG_CHUNKED_PREFILL_SIZE`, `SG_MEM_FRACTION_STATIC`,
@@ -61,46 +71,58 @@ the Phase 2-4 enqueue without waiting for visual join.
 - **Storage and graph persistence:** GCS + Spanner remain active
   dependencies on the H200.
 
-### 1.3 RTX 6000 Ada audio host runtime
+### 1.3 RTX 6000 Ada runtime (sole tenant)
 
 - **Service:** `uvicorn backend.runtime.phase1_audio_service.app:create_app`
   behind `clypt-audio-host.service`. Bearer-auth bound to
-  `CLYPT_PHASE1_AUDIO_HOST_TOKEN`.
+  `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN` (legacy alias:
+  `CLYPT_PHASE1_AUDIO_HOST_TOKEN`).
 - **vLLM:** `clypt-vllm-vibevoice.service` runs the VibeVoice container at
-  `127.0.0.1:8000` with native dtype (no bf16 patch).
-- **Providers held hot in-process:** VibeVoice vLLM client, NFA,
-  emotion2vec+, YAMNet, GCS storage client. Singletons constructed lazily
-  on first request via `backend/runtime/phase1_audio_service/deps.py`.
-- **Concurrency:** one global `asyncio.Lock` serializes the audio chain on
-  GPU; node-media prep runs under a bounded semaphore and can overlap with
-  audio. Concurrency ceilings on the caller side are
+  `127.0.0.1:8000`. Because this host is a sole tenant for VibeVoice,
+  vLLM runs with its default/sole-tenant flags — no more co-tenancy
+  workarounds (`--max-num-seqs 1`, `--max-model-len 32768`,
+  `--enforce-eager`, `--gpu-memory-utilization 0.60`, or
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`).
+- **Providers held hot in-process:** VibeVoice vLLM client, GCS storage
+  client. NFA, emotion2vec+, and YAMNet are **not** instantiated on this
+  host anymore. Singletons are constructed lazily on first request via
+  `backend/runtime/phase1_audio_service/deps.py`.
+- **Concurrency:** one global `asyncio.Lock` serializes ASR on the GPU;
+  node-media prep runs under a bounded semaphore and can overlap with
+  ASR. Concurrency ceilings on the caller side are
   `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY`.
 
 Why the split: H200 NVENC is unusable (`h264_nvenc` returns
-`unsupported device (2)`), RTX 6000 Ada's 48 GB VRAM keeps VibeVoice in
-native dtype, and moving VibeVoice + ffmpeg off the H200 frees SM time for
-RF-DETR and SGLang.
+`unsupported device (2)`), and NFA global alignment OOM'd reliably when
+co-tenant with VibeVoice on the 48 GiB RTX card. Keeping the RTX as the
+VibeVoice + ffmpeg sole-tenant host and moving NFA / emotion2vec+ /
+YAMNet back to the H200 gets us a working NVENC path **and** a stable
+NFA run against 141 GiB of H200 memory.
 
 ## 2) Phase 1 Execution Semantics
 
 Phase 1 executes visual and audio sub-chains concurrently across the two
-hosts. The H200 runs the visual chain in-process and awaits the audio
-chain's HTTP round-trip to the RTX host.
+hosts. The H200 runs the visual chain and the audio post-processing
+chain in-process, and awaits the ASR HTTP round-trip to the RTX host.
 
 ```text
 Phase 1 visual chain (H200, in-process):
   RF-DETR + ByteTrack --------------------------------\
                                                        +--> join
-Phase 1 audio chain (RTX 6000 Ada, POST /tasks/phase1-audio):
-  VibeVoice vLLM ASR ---------------------------------/
-     |
-     +--> NeMo forced aligner -> emotion2vec+ -> YAMNet (CPU)
+Phase 1 audio chain:
+  RTX 6000 Ada (POST /tasks/vibevoice-asr):
+    VibeVoice vLLM ASR -------------------------------/
+       |
+       v   (HTTP response)
+  H200 (in-process):
+    NeMo forced aligner -> emotion2vec+ -> YAMNet (CPU)
 ```
 
-Critical invariant in code: the audio chain launches immediately after
-ASR completion and does not wait for visual completion. Phase 2-4
-enqueue fires from the audio-chain completion callback, not from the
-visual join.
+Critical invariant in code: the audio post-processing chain launches
+immediately after ASR completion and does not wait for visual
+completion. Phase 2-4 enqueue fires from the audio-chain completion
+callback once the H200-side NFA / emotion2vec+ / YAMNet steps finish —
+not from the visual join.
 
 ## 3) Phase 1 Input Contract
 
@@ -108,7 +130,7 @@ visual join.
 - In strict mode (`CLYPT_PHASE1_TEST_BANK_STRICT=1`), `CLYPT_PHASE1_TEST_BANK_PATH` is required.
 - Test-bank mapping supports `video_gcs_uri` and `audio_gcs_uri` hydration/signing paths.
 - Known-good DO H200 runtime uses `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`.
-- That path requires both host `trtexec` (`libnvinfer-bin`) and Python TensorRT in the Phase 1 env; `deploy_vllm_service.sh` now provisions both automatically.
+- That path requires both host `trtexec` (`libnvinfer-bin`) and Python TensorRT in the Phase 1 env; `deploy_visual_service.sh` now provisions both automatically.
 - The current TensorRT fast path decodes directly to detector resolution on GPU (`scale_cuda`) before `hwdownload`, then performs tensor conversion, resize/shape reconciliation, and Imagenet normalization on CUDA with `torch`.
 - The runtime preserves original source frame dimensions alongside the resized decode output so TensorRT postprocess can still rescale detection boxes back to source-video coordinates correctly.
 
@@ -162,7 +184,7 @@ Meaning:
 
 - only `GENAI_GENERATION_BACKEND=local_openai`
 - local model must be set (`CLYPT_LOCAL_LLM_MODEL` or `GENAI_FLASH_MODEL` fallback)
-- node-media prep is always delegated to the remote RTX audio host via
+- node-media prep is always delegated to the remote RTX host via
   `RemoteNodeMediaPrepClient`; config load fails if
   `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` / `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN`
   are unset
@@ -240,9 +262,10 @@ curl -fsS http://127.0.0.1:8001/v1/models | python3 -m json.tool
 trtexec --help >/dev/null
 /opt/clypt-phase1/venvs/phase1/bin/python -c "import tensorrt as trt; print(trt.__version__)"
 /opt/clypt-phase1/venvs/sglang/bin/python -c "import sglang, torch; print(sglang.__version__, torch.__version__)"
+/opt/clypt-phase1/venvs/phase1/bin/python -c "import nemo, funasr, tensorflow, tensorflow_hub, librosa, resampy; print('audio post ok')"
 systemctl cat clypt-sglang-qwen | rg "ExecStart|schedule-policy|chunked-prefill-size|mem-fraction-static|context-length"
-curl -fsS -H "Authorization: Bearer ${CLYPT_PHASE1_AUDIO_HOST_TOKEN}" \
-  "${CLYPT_PHASE1_AUDIO_HOST_URL%/}/health"
+curl -fsS -H "Authorization: Bearer ${CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN}" \
+  "${CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL%/}/health"
 ```
 
 On the RTX 6000 Ada:
@@ -282,19 +305,23 @@ Always required on the H200 (config load fails fast otherwise):
 - `GCS_BUCKET`
 - `GENAI_GENERATION_BACKEND=local_openai` for the local Phase 2-4 worker
 - `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite` for the local queue runtime
-- `CLYPT_PHASE1_AUDIO_HOST_URL` (remote RTX audio service base URL)
-- `CLYPT_PHASE1_AUDIO_HOST_TOKEN` (bearer for the RTX audio service)
+- `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL` (remote RTX VibeVoice ASR base URL)
+- `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN` (bearer for the RTX service)
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN`
 
+> **Compat note:** `CLYPT_PHASE1_AUDIO_HOST_URL` /
+> `CLYPT_PHASE1_AUDIO_HOST_TOKEN` are still accepted as deprecated
+> aliases for one release but should not be used in new deployments.
+
 VibeVoice environment variables (`VIBEVOICE_BACKEND`,
 `VIBEVOICE_VLLM_BASE_URL`, `VIBEVOICE_VLLM_MODEL`) must **not** be set on
-the H200. They belong to the RTX audio host only.
+the H200. They belong to the RTX VibeVoice ASR host only.
 
-Required on the RTX 6000 Ada audio host:
+Required on the RTX 6000 Ada host:
 
 - `CLYPT_PHASE1_AUDIO_HOST_BIND`, `CLYPT_PHASE1_AUDIO_HOST_PORT`
-- `CLYPT_PHASE1_AUDIO_HOST_TOKEN` (must match the H200 value)
+- `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN` (must match the H200 value)
 - `VIBEVOICE_BACKEND=vllm`, `VIBEVOICE_VLLM_BASE_URL`, `VIBEVOICE_VLLM_MODEL=vibevoice`
 - `GOOGLE_CLOUD_PROJECT`, `GCS_BUCKET`, `GOOGLE_APPLICATION_CREDENTIALS`
 
@@ -312,7 +339,8 @@ For the full env catalog, see `docs/runtime/ENV_REFERENCE.md`.
 3. **Stale queue lease:** with default fail-fast settings, worker exits until operator manually resolves stale running row.
 4. **Structured output mismatch:** schema/type violations are terminal non-transient failures.
 5. **Shared-env drift:** if SGLang and Phase 1 share a venv, SGLang can overwrite Phase 1 runtime packages; the current deploy path avoids this by using separate envs.
-6. **Remote audio host unavailable:** Phase 1 fails with a `RemoteAudioChainError` if the RTX audio host is down, mis-tokened, or unreachable. There is no local fallback — fix the host or the bearer token and retry. Same applies to `RemoteNodeMediaPrepError` at Phase 2 boundary.
-7. **Visual throughput unexpectedly low on TensorRT path:** if a visual-only H200 replay drops back toward `~50 fps` instead of `~240 fps`, the most likely causes are stale code on-host, loss of `scale_cuda` decode-to-resolution behavior, or a fallback to host-side preprocessing before TensorRT.
+6. **Remote VibeVoice ASR unavailable:** Phase 1 fails with a `RemoteVibeVoiceAsrError` (legacy alias: `RemoteAudioChainError`) if the RTX host is down, mis-tokened, or unreachable. There is no local fallback — fix the host or the bearer token and retry. Same applies to `RemoteNodeMediaPrepError` at the Phase 2 boundary.
+7. **H200 audio-post import failure:** if `nemo`, `funasr`, `tensorflow`, `tensorflow_hub`, `librosa`, or `resampy` fail to import on the H200, the in-process audio post-processing chain won't start — reinstall `requirements-do-phase1-visual.txt` (these moved back onto the H200 from the RTX host).
+8. **Visual throughput unexpectedly low on TensorRT path:** if a visual-only H200 replay drops back toward `~50 fps` instead of `~240 fps`, the most likely causes are stale code on-host, loss of `scale_cuda` decode-to-resolution behavior, or a fallback to host-side preprocessing before TensorRT.
 
 For incident history and recovery notes, see `docs/ERROR_LOG.md`.

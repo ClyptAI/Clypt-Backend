@@ -1,15 +1,14 @@
-"""Remote client for the Phase 1 audio chain hosted on the RTX 6000 Ada box.
+"""Remote client for the VibeVoice ASR service on the RTX 6000 Ada box.
 
-The H200 orchestrator calls ``RemoteAudioChainClient.run`` once per Phase 1 job.
-The RTX host runs VibeVoice vLLM, NeMo Forced Aligner, emotion2vec+ and YAMNet
-back-to-back on a single GPU, then returns the combined payload in one round
-trip. This module is the **only** audio path on the H200 — there is no
-in-process fallback.
+The H200 orchestrator calls :meth:`RemoteVibeVoiceAsrClient.run` once per
+Phase 1 job to invoke VibeVoice vLLM on the RTX. NFA/emotion2vec+/YAMNet
+run **in-process** on the H200 afterwards — they are no longer the RTX's
+responsibility (see docs/ERROR_LOG.md 2026-04-17).
 
 Stage telemetry reported by the remote service is re-emitted through the
-caller-supplied ``stage_event_logger`` so the H200 orchestrator preserves the
-exact same stage-events stream it produced when the audio chain ran locally
-(``vibevoice_asr`` → ``forced_alignment`` → ``emotion2vec`` → ``yamnet``).
+caller-supplied ``stage_event_logger`` so the H200 orchestrator preserves
+the same ``vibevoice_asr`` stage event it produced when VibeVoice ran
+locally.
 
 HTTP is implemented with ``urllib.request`` to stay aligned with the existing
 client patterns in ``backend/providers/openai_local.py`` — no extra runtime
@@ -27,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .config import AudioHostSettings
+from .config import VibeVoiceAsrServiceSettings
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +36,7 @@ StageEventLogger = Callable[..., None]
 
 
 def _is_transient(exc: BaseException) -> bool:
-    # Check the wrapped status first so retries work after ``_do_request``
-    # translates the raw ``urllib.error.HTTPError`` into a
-    # :class:`RemoteAudioChainError` with ``status_code``.
-    if isinstance(exc, RemoteAudioChainError):
+    if isinstance(exc, RemoteVibeVoiceAsrError):
         code = exc.status_code
         if code is None:
             return False
@@ -77,75 +73,71 @@ def _emit(
         )
     except Exception:  # pragma: no cover - defensive
         logger.exception(
-            "[audio_host_client] stage_event_logger re-emission failed stage=%s status=%s",
+            "[vibevoice_asr_client] stage_event_logger re-emission failed "
+            "stage=%s status=%s",
             stage_name,
             status,
         )
 
 
 @dataclass(slots=True)
-class PhaseOneAudioResponse:
-    """Typed view over the ``/tasks/phase1-audio`` response payload."""
+class VibeVoiceAsrResponse:
+    """Typed view over the ``/tasks/vibevoice-asr`` response payload."""
 
     turns: list[dict[str, Any]]
-    diarization_payload: dict[str, Any]
-    emotion2vec_payload: dict[str, Any]
-    yamnet_payload: dict[str, Any]
     stage_events: list[dict[str, Any]]
 
     @classmethod
-    def from_json(cls, payload: dict[str, Any]) -> "PhaseOneAudioResponse":
+    def from_json(cls, payload: dict[str, Any]) -> "VibeVoiceAsrResponse":
         def _as_list(key: str) -> list[dict[str, Any]]:
             value = payload.get(key) or []
             if not isinstance(value, list):
                 raise ValueError(
-                    f"audio host response field {key!r} must be a list, "
+                    f"vibevoice-asr response field {key!r} must be a list, "
                     f"got {type(value).__name__}"
                 )
             return [dict(item) for item in value]
 
-        def _as_dict(key: str) -> dict[str, Any]:
-            value = payload.get(key) or {}
-            if not isinstance(value, dict):
-                raise ValueError(
-                    f"audio host response field {key!r} must be an object, "
-                    f"got {type(value).__name__}"
-                )
-            return dict(value)
-
         return cls(
             turns=_as_list("turns"),
-            diarization_payload=_as_dict("diarization_payload"),
-            emotion2vec_payload=_as_dict("emotion2vec_payload"),
-            yamnet_payload=_as_dict("yamnet_payload"),
             stage_events=_as_list("stage_events"),
         )
 
 
-class RemoteAudioChainError(RuntimeError):
-    """Raised when the audio host rejects or fails a Phase 1 audio request."""
+# Deprecated alias retained for one release.
+PhaseOneAudioResponse = VibeVoiceAsrResponse
+
+
+class RemoteVibeVoiceAsrError(RuntimeError):
+    """Raised when the VibeVoice ASR host rejects or fails a request."""
 
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
 
 
-class RemoteAudioChainClient:
-    """HTTP client for the RTX 6000 Ada ``POST /tasks/phase1-audio`` endpoint.
+# Deprecated alias retained for one release.
+RemoteAudioChainError = RemoteVibeVoiceAsrError
 
-    The client issues a **single** request per Phase 1 job. The remote service
-    is responsible for running VibeVoice vLLM → NFA → emotion2vec+ → YAMNet on
-    the hot GPU and returning the combined payload plus a stage-events trail.
+
+class RemoteVibeVoiceAsrClient:
+    """HTTP client for the RTX 6000 Ada ``POST /tasks/vibevoice-asr`` endpoint.
+
+    The client issues a single request per Phase 1 job. The remote service
+    is responsible for running VibeVoice vLLM on the hot GPU and returning
+    the raw turns plus a stage-events trail. NFA/emotion2vec+/YAMNet are
+    handled on the H200 side after this call returns.
 
     Parameters
     ----------
     settings:
-        :class:`AudioHostSettings` loaded from env. ``service_url`` is the
-        private-VPC base URL of the audio host (e.g. ``http://10.0.0.5:9100``).
+        :class:`VibeVoiceAsrServiceSettings` loaded from env. ``service_url``
+        is the private-VPC base URL of the RTX host
+        (e.g. ``http://10.0.0.5:9100``).
     max_retries:
         Transient-error retries for connection-level failures. Kept small
-        because the full chain is long-running; retrying a 10-minute request
-        repeatedly is worse than fail-fast.
+        because the ASR call can be multi-minute for long content; retrying
+        a long-running request repeatedly is worse than fail-fast.
     """
 
     _DEFAULT_MAX_RETRIES = 2
@@ -157,7 +149,7 @@ class RemoteAudioChainClient:
     def __init__(
         self,
         *,
-        settings: AudioHostSettings,
+        settings: VibeVoiceAsrServiceSettings,
         max_retries: int | None = None,
     ) -> None:
         self.settings = settings
@@ -169,7 +161,7 @@ class RemoteAudioChainClient:
 
     @property
     def supports_concurrent_visual(self) -> bool:
-        """Remote audio chain always runs concurrently with H200-local visual extraction."""
+        """Remote VibeVoice ASR runs concurrently with H200-local visual extraction."""
         return True
 
     def _endpoint(self, path: str) -> str:
@@ -211,27 +203,25 @@ class RemoteAudioChainClient:
                 except Exception:  # pragma: no cover
                     err_body = ""
                 message = (
-                    f"audio host {path} returned HTTP {exc.code}: "
+                    f"vibevoice-asr host {path} returned HTTP {exc.code}: "
                     f"{err_body[:512] or exc.reason}"
                 )
-                # Wrap with ``status_code`` so the outer retry loop can decide
-                # whether the failure is transient (``_is_transient``).
-                raise RemoteAudioChainError(message, status_code=exc.code) from exc
+                raise RemoteVibeVoiceAsrError(message, status_code=exc.code) from exc
 
             if status >= 400:
-                raise RemoteAudioChainError(
-                    f"audio host {path} returned HTTP {status}",
+                raise RemoteVibeVoiceAsrError(
+                    f"vibevoice-asr host {path} returned HTTP {status}",
                     status_code=status,
                 )
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError as exc:
-                raise RemoteAudioChainError(
-                    f"audio host {path} returned non-JSON body: {exc}"
+                raise RemoteVibeVoiceAsrError(
+                    f"vibevoice-asr host {path} returned non-JSON body: {exc}"
                 ) from exc
             if not isinstance(parsed, dict):
-                raise RemoteAudioChainError(
-                    f"audio host {path} response must be an object, got "
+                raise RemoteVibeVoiceAsrError(
+                    f"vibevoice-asr host {path} response must be an object, got "
                     f"{type(parsed).__name__}"
                 )
             return parsed
@@ -251,7 +241,7 @@ class RemoteAudioChainClient:
                 jitter = base_delay * self._DEFAULT_JITTER_RATIO * random.random()
                 sleep_s = base_delay + jitter
                 logger.warning(
-                    "[audio_host_client] transient error on %s attempt=%d/%d; "
+                    "[vibevoice_asr_client] transient error on %s attempt=%d/%d; "
                     "retrying in %.2fs: %s",
                     path,
                     retry_index + 1,
@@ -261,11 +251,12 @@ class RemoteAudioChainClient:
                 )
                 if sleep_s > 0.0:
                     time.sleep(sleep_s)
-        # Unreachable: the loop above either returns or raises.
-        raise RemoteAudioChainError(f"audio host {path} retries exhausted")
+        raise RemoteVibeVoiceAsrError(
+            f"vibevoice-asr host {path} retries exhausted"
+        )
 
     def healthcheck(self) -> dict[str, Any]:
-        """GET ``{healthcheck_path}`` — raises :class:`RemoteAudioChainError` on failure."""
+        """GET ``{healthcheck_path}`` — raises :class:`RemoteVibeVoiceAsrError` on failure."""
         url = self._endpoint(self.settings.healthcheck_path)
         req = urllib.request.Request(
             url,
@@ -277,17 +268,17 @@ class RemoteAudioChainClient:
                 raw = resp.read().decode("utf-8")
                 status = resp.status
         except urllib.error.HTTPError as exc:
-            raise RemoteAudioChainError(
-                f"audio host healthcheck returned HTTP {exc.code}",
+            raise RemoteVibeVoiceAsrError(
+                f"vibevoice-asr host healthcheck returned HTTP {exc.code}",
                 status_code=exc.code,
             ) from exc
         except Exception as exc:
-            raise RemoteAudioChainError(
-                f"audio host healthcheck failed: {exc}"
+            raise RemoteVibeVoiceAsrError(
+                f"vibevoice-asr host healthcheck failed: {exc}"
             ) from exc
         if status >= 400:
-            raise RemoteAudioChainError(
-                f"audio host healthcheck returned HTTP {status}",
+            raise RemoteVibeVoiceAsrError(
+                f"vibevoice-asr host healthcheck returned HTTP {status}",
                 status_code=status,
             )
         try:
@@ -303,17 +294,18 @@ class RemoteAudioChainClient:
         video_gcs_uri: str | None = None,
         run_id: str | None = None,
         stage_event_logger: StageEventLogger | None = None,
-    ) -> PhaseOneAudioResponse:
-        """Invoke the remote audio chain for a single Phase 1 job.
+    ) -> VibeVoiceAsrResponse:
+        """Invoke the remote VibeVoice ASR service for a single Phase 1 job.
 
-        The server runs VibeVoice ASR, NeMo Forced Aligner, emotion2vec+ and
-        YAMNet sequentially on a hot GPU and returns the combined payload plus
-        a stage-events trail. Stage events are re-emitted through
+        The server runs VibeVoice vLLM only and returns the raw turns plus a
+        stage-events trail. Stage events are re-emitted through
         ``stage_event_logger`` so downstream telemetry matches the previous
         in-process execution.
         """
         if not audio_gcs_uri:
-            raise ValueError("RemoteAudioChainClient.run requires a non-empty audio_gcs_uri")
+            raise ValueError(
+                "RemoteVibeVoiceAsrClient.run requires a non-empty audio_gcs_uri"
+            )
 
         payload: dict[str, Any] = {"audio_gcs_uri": audio_gcs_uri}
         if source_url:
@@ -325,13 +317,13 @@ class RemoteAudioChainClient:
 
         t_start = time.perf_counter()
         logger.info(
-            "[audio_host_client] invoking phase1-audio run_id=%s audio=%s",
+            "[vibevoice_asr_client] invoking vibevoice-asr run_id=%s audio=%s",
             run_id or "-",
             audio_gcs_uri,
         )
         try:
             raw = self._post_json(
-                path="/tasks/phase1-audio",
+                path="/tasks/vibevoice-asr",
                 payload=payload,
                 timeout_s=float(self.settings.timeout_s),
             )
@@ -339,7 +331,7 @@ class RemoteAudioChainClient:
             status_code = getattr(exc, "status_code", None)
             _emit(
                 stage_event_logger,
-                stage_name="audio_host_call",
+                stage_name="vibevoice_asr",
                 status="failed",
                 duration_ms=(time.perf_counter() - t_start) * 1000.0,
                 metadata={"run_id": run_id or "", "status_code": status_code},
@@ -351,11 +343,11 @@ class RemoteAudioChainClient:
             raise
 
         try:
-            response = PhaseOneAudioResponse.from_json(raw)
+            response = VibeVoiceAsrResponse.from_json(raw)
         except Exception as exc:
             _emit(
                 stage_event_logger,
-                stage_name="audio_host_call",
+                stage_name="vibevoice_asr",
                 status="failed",
                 duration_ms=(time.perf_counter() - t_start) * 1000.0,
                 metadata={"run_id": run_id or ""},
@@ -364,8 +356,8 @@ class RemoteAudioChainClient:
                     "message": str(exc)[:2048],
                 },
             )
-            raise RemoteAudioChainError(
-                f"invalid audio host response shape: {exc}"
+            raise RemoteVibeVoiceAsrError(
+                f"invalid vibevoice-asr response shape: {exc}"
             ) from exc
 
         for event in response.stage_events:
@@ -398,20 +390,23 @@ class RemoteAudioChainClient:
 
         elapsed_ms = (time.perf_counter() - t_start) * 1000.0
         logger.info(
-            "[audio_host_client] phase1-audio completed run_id=%s turns=%d words=%d "
-            "emotion_segments=%d yamnet_events=%d in %.1f ms",
+            "[vibevoice_asr_client] vibevoice-asr completed run_id=%s turns=%d in %.1f ms",
             run_id or "-",
             len(response.turns),
-            len((response.diarization_payload or {}).get("words") or []),
-            len((response.emotion2vec_payload or {}).get("segments") or []),
-            len((response.yamnet_payload or {}).get("events") or []),
             elapsed_ms,
         )
         return response
 
 
+# Deprecated alias retained for one release.
+RemoteAudioChainClient = RemoteVibeVoiceAsrClient
+
+
 __all__ = [
-    "PhaseOneAudioResponse",
-    "RemoteAudioChainClient",
-    "RemoteAudioChainError",
+    "PhaseOneAudioResponse",  # deprecated alias of VibeVoiceAsrResponse
+    "RemoteAudioChainClient",  # deprecated alias of RemoteVibeVoiceAsrClient
+    "RemoteAudioChainError",  # deprecated alias of RemoteVibeVoiceAsrError
+    "RemoteVibeVoiceAsrClient",
+    "RemoteVibeVoiceAsrError",
+    "VibeVoiceAsrResponse",
 ]

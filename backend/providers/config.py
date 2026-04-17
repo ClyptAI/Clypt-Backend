@@ -254,17 +254,23 @@ class Phase1ASRSettings:
 
 
 @dataclass(slots=True)
-class AudioHostSettings:
-    """Required settings for the remote Phase 1 audio host (RTX 6000 Ada).
+class VibeVoiceAsrServiceSettings:
+    """Required settings for the remote VibeVoice ASR service (RTX 6000 Ada).
 
-    The H200 has no in-process audio chain; the audio host is the only path.
-    Fail-fast at load if URL or token are missing.
+    The H200 still runs NFA + emotion2vec+ + YAMNet in-process (they do not
+    compete with vLLM for VRAM on the 141 GiB card); only VibeVoice ASR lives
+    on the RTX box. Fail-fast at load if URL or token are missing.
     """
 
     service_url: str
     auth_token: str
     timeout_s: float = 7200.0
     healthcheck_path: str = "/health"
+
+
+# Legacy name kept for import compatibility with older call-sites during the
+# one-release deprecation window. Prefer ``VibeVoiceAsrServiceSettings``.
+AudioHostSettings = VibeVoiceAsrServiceSettings
 
 
 @dataclass(slots=True)
@@ -288,7 +294,7 @@ class ProviderSettings:
     vertex: VertexSettings
     local_generation: LocalGenerationSettings
     storage: StorageSettings
-    audio_host: AudioHostSettings
+    vibevoice_asr_service: VibeVoiceAsrServiceSettings
     node_media_prep: NodeMediaPrepSettings
     phase1_asr: Phase1ASRSettings = field(default_factory=Phase1ASRSettings)
     spanner: SpannerSettings = field(default_factory=SpannerSettings)
@@ -296,18 +302,27 @@ class ProviderSettings:
     phase24_local_queue: Phase24LocalQueueSettings = field(default_factory=Phase24LocalQueueSettings)
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
 
+    @property
+    def audio_host(self) -> VibeVoiceAsrServiceSettings:
+        """Deprecated alias for ``vibevoice_asr_service``.
+
+        Retained for one release so out-of-tree callers keep working; switch
+        to ``vibevoice_asr_service`` directly. The remote service now runs
+        only VibeVoice ASR; NFA/emotion/YAMNet have moved back to the H200.
+        """
+        return self.vibevoice_asr_service
+
 
 @dataclass(slots=True)
 class AudioHostProcessSettings:
-    """Settings consumed by the RTX 6000 Ada audio host process itself.
+    """Settings consumed by the RTX 6000 Ada VibeVoice ASR host process itself.
 
-    Distinct from ``AudioHostSettings``, which are the *caller-side* bearer
-    token + URL the H200 uses to reach this service. This dataclass holds
-    only what the audio host needs to run: the co-located VibeVoice vLLM
-    sidecar, VibeVoice generation controls, GCS bucket for URL resolution,
-    and Phase 1 runtime knobs (e.g. YAMNet device placement). It intentionally
-    does not require ``CLYPT_PHASE1_AUDIO_HOST_URL`` or ``..._TOKEN`` so the
-    audio host does not need to be configured as its own remote client.
+    Distinct from ``VibeVoiceAsrServiceSettings``, which are the *caller-side*
+    bearer token + URL the H200 uses to reach this service. This dataclass holds
+    only what the host needs to run: the co-located VibeVoice vLLM sidecar,
+    VibeVoice generation controls, GCS bucket for URL resolution, and the
+    Phase 1 working-root knob. NFA/emotion/YAMNet no longer live on this host,
+    so those settings are intentionally absent.
     """
 
     vibevoice: VibeVoiceSettings
@@ -348,13 +363,13 @@ def load_provider_settings() -> ProviderSettings:
 
     # VIBEVOICE_VLLM_BASE_URL is intentionally optional here. The H200 never
     # talks to the VibeVoice vLLM sidecar directly — it goes through the
-    # RemoteAudioChainClient to the RTX audio host, which owns vLLM locally.
+    # RemoteVibeVoiceAsrClient to the RTX host, which owns vLLM locally.
     # On the H200 the deploy script actively BANS this env var (see
-    # scripts/do_phase1_visual/deploy_visual_service.sh). The audio host has
+    # scripts/do_phase1_visual/deploy_visual_service.sh). The RTX host has
     # its own loader (``load_audio_host_settings``) that requires it.
     vllm_base_url = _read_env("VIBEVOICE_VLLM_BASE_URL")
     vllm_settings = VibeVoiceVLLMSettings(
-        base_url=vllm_base_url or "unused://vibevoice-moved-to-rtx-audio-host",
+        base_url=vllm_base_url or "unused://vibevoice-moved-to-rtx-vibevoice-asr-host",
         model=_read_env("VIBEVOICE_VLLM_MODEL") or "vibevoice",
         timeout_s=float(_read_env("VIBEVOICE_VLLM_TIMEOUT_S") or "7200"),
         healthcheck_path=_read_env("VIBEVOICE_VLLM_HEALTHCHECK_PATH") or "/health",
@@ -375,24 +390,49 @@ def load_provider_settings() -> ProviderSettings:
             f"{embedding_backend!r}; expected 'developer' or 'vertex'."
         )
 
-    audio_host_url = _read_env("CLYPT_PHASE1_AUDIO_HOST_URL")
-    if not audio_host_url:
+    # Accept both the new ``CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_*`` names and
+    # the legacy ``CLYPT_PHASE1_AUDIO_HOST_*`` names for one release. The new
+    # names reflect the narrower scope of the RTX service: only VibeVoice ASR
+    # runs there; NFA/emotion/YAMNet are back on the H200.
+    vibevoice_asr_url = _read_env(
+        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL",
+        "CLYPT_PHASE1_AUDIO_HOST_URL",
+    )
+    if not vibevoice_asr_url:
         raise ValueError(
-            "CLYPT_PHASE1_AUDIO_HOST_URL is required. The Phase 1 audio chain runs "
-            "exclusively on the RTX 6000 Ada audio host; there is no in-process fallback. "
-            "Point this at the audio host's private VPC URL (e.g. http://10.0.0.5:9100)."
+            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL is required. VibeVoice ASR runs "
+            "exclusively on the RTX 6000 Ada host; there is no in-process fallback. "
+            "Point this at the host's private VPC URL (e.g. http://10.0.0.5:9100). "
+            "The legacy CLYPT_PHASE1_AUDIO_HOST_URL alias is still accepted for one "
+            "release."
         )
-    audio_host_token = _read_env("CLYPT_PHASE1_AUDIO_HOST_TOKEN")
-    if not audio_host_token:
+    vibevoice_asr_token = _read_env(
+        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN",
+        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TOKEN",
+        "CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN",
+        "CLYPT_PHASE1_AUDIO_HOST_TOKEN",
+    )
+    if not vibevoice_asr_token:
         raise ValueError(
-            "CLYPT_PHASE1_AUDIO_HOST_TOKEN is required (shared bearer token with the "
-            "RTX 6000 Ada audio host)."
+            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN is required (shared bearer "
+            "token with the RTX 6000 Ada VibeVoice ASR host). The legacy "
+            "CLYPT_PHASE1_AUDIO_HOST_TOKEN alias is still accepted for one release."
         )
-    audio_host = AudioHostSettings(
-        service_url=audio_host_url.rstrip("/"),
-        auth_token=audio_host_token,
-        timeout_s=float(_read_env("CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S") or "7200"),
-        healthcheck_path=_read_env("CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH") or "/health",
+    vibevoice_asr_service = VibeVoiceAsrServiceSettings(
+        service_url=vibevoice_asr_url.rstrip("/"),
+        auth_token=vibevoice_asr_token,
+        timeout_s=float(
+            _read_env(
+                "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TIMEOUT_S",
+                "CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S",
+            )
+            or "7200"
+        ),
+        healthcheck_path=_read_env(
+            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_HEALTHCHECK_PATH",
+            "CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH",
+        )
+        or "/health",
     )
 
     node_media_prep_url = _read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_URL")
@@ -564,7 +604,7 @@ def load_provider_settings() -> ProviderSettings:
             ),
         ),
         storage=StorageSettings(gcs_bucket=gcs_bucket),
-        audio_host=audio_host,
+        vibevoice_asr_service=vibevoice_asr_service,
         node_media_prep=node_media_prep,
         spanner=SpannerSettings(
             project=_read_env("CLYPT_SPANNER_PROJECT") or vertex_project,
@@ -699,7 +739,7 @@ def load_audio_host_settings() -> AudioHostProcessSettings:
 
 __all__ = [
     "AudioHostProcessSettings",
-    "AudioHostSettings",
+    "AudioHostSettings",  # deprecated alias of VibeVoiceAsrServiceSettings
     "LocalGenerationSettings",
     "NodeMediaPrepSettings",
     "Phase24LocalQueueSettings",
@@ -710,6 +750,7 @@ __all__ = [
     "SpannerSettings",
     "Phase24WorkerSettings",
     "VertexSettings",
+    "VibeVoiceAsrServiceSettings",
     "VibeVoiceSettings",
     "VibeVoiceVLLMSettings",
     "load_audio_host_settings",

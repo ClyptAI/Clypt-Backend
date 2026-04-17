@@ -1,8 +1,9 @@
-"""Unit tests for the Phase 1 remote audio host client.
+"""Unit tests for the Phase 1 remote VibeVoice ASR client.
 
-The Phase 1 audio chain lives exclusively on the RTX 6000 Ada box. These tests
-stub out the underlying HTTP call at ``urllib.request.urlopen`` so the client's
-retry/parse/re-emit logic can be verified without any real network.
+VibeVoice ASR lives on the RTX 6000 Ada host; NFA / emotion2vec+ / YAMNet
+run in-process on the H200 after this call returns. These tests stub out
+``urllib.request.urlopen`` so the client's retry / parse / re-emit logic
+can be verified without any real network.
 """
 
 from __future__ import annotations
@@ -15,11 +16,11 @@ from urllib.error import HTTPError
 import pytest
 
 from backend.providers.audio_host_client import (
-    PhaseOneAudioResponse,
-    RemoteAudioChainClient,
-    RemoteAudioChainError,
+    RemoteVibeVoiceAsrClient,
+    RemoteVibeVoiceAsrError,
+    VibeVoiceAsrResponse,
 )
-from backend.providers.config import AudioHostSettings
+from backend.providers.config import VibeVoiceAsrServiceSettings
 
 
 class _FakeResponse:
@@ -37,8 +38,8 @@ class _FakeResponse:
         return self._body
 
 
-def _settings() -> AudioHostSettings:
-    return AudioHostSettings(
+def _settings() -> VibeVoiceAsrServiceSettings:
+    return VibeVoiceAsrServiceSettings(
         service_url="http://rtx-box:9100",
         auth_token="secret-token",
     )
@@ -50,9 +51,6 @@ def _ok_payload(stage_events: list[dict[str, Any]] | None = None) -> dict[str, A
         "turns": [
             {"Speaker": 0, "Start": 0.0, "End": 1.0, "Content": "hello"},
         ],
-        "diarization_payload": {"turns": [{"turn_id": "t_000001"}], "words": []},
-        "emotion2vec_payload": {"segments": [{"turn_id": "t_000001"}]},
-        "yamnet_payload": {"events": [{"start_ms": 0, "end_ms": 500}]},
         "stage_events": stage_events
         or [
             {
@@ -60,25 +58,7 @@ def _ok_payload(stage_events: list[dict[str, Any]] | None = None) -> dict[str, A
                 "status": "succeeded",
                 "duration_ms": 1234.5,
                 "metadata": {"turn_count": 1},
-            },
-            {
-                "stage_name": "forced_alignment",
-                "status": "succeeded",
-                "duration_ms": 500.0,
-                "metadata": {"word_count": 3},
-            },
-            {
-                "stage_name": "emotion2vec",
-                "status": "succeeded",
-                "duration_ms": 250.0,
-                "metadata": {"segment_count": 1},
-            },
-            {
-                "stage_name": "yamnet",
-                "status": "succeeded",
-                "duration_ms": 150.0,
-                "metadata": {"event_count": 1},
-            },
+            }
         ],
     }
 
@@ -103,7 +83,7 @@ def test_run_posts_payload_returns_typed_response_and_reemits_stage_events(
     def logger_fn(**kwargs: Any) -> None:
         emitted.append(kwargs)
 
-    client = RemoteAudioChainClient(settings=_settings(), max_retries=0)
+    client = RemoteVibeVoiceAsrClient(settings=_settings(), max_retries=0)
     response = client.run(
         audio_gcs_uri="gs://bucket/audio.wav",
         source_url="https://example.com/video",
@@ -112,7 +92,7 @@ def test_run_posts_payload_returns_typed_response_and_reemits_stage_events(
         stage_event_logger=logger_fn,
     )
 
-    assert captured["url"] == "http://rtx-box:9100/tasks/phase1-audio"
+    assert captured["url"] == "http://rtx-box:9100/tasks/vibevoice-asr"
     assert captured["method"] == "POST"
     header_dict = {k.lower(): v for k, v in captured["headers"].items()}
     assert header_dict["authorization"] == "Bearer secret-token"
@@ -125,26 +105,24 @@ def test_run_posts_payload_returns_typed_response_and_reemits_stage_events(
     }
     assert captured["timeout"] == pytest.approx(7200.0)
 
-    assert isinstance(response, PhaseOneAudioResponse)
+    assert isinstance(response, VibeVoiceAsrResponse)
     assert response.turns[0]["Content"] == "hello"
-    assert response.diarization_payload["turns"][0]["turn_id"] == "t_000001"
-    assert response.emotion2vec_payload["segments"][0]["turn_id"] == "t_000001"
-    assert response.yamnet_payload["events"][0]["end_ms"] == 500
 
+    # Stage events from the remote service are re-emitted through the logger.
     stage_names = [event["stage_name"] for event in emitted]
-    assert stage_names == ["vibevoice_asr", "forced_alignment", "emotion2vec", "yamnet"]
-    assert all(event["status"] == "succeeded" for event in emitted)
+    assert stage_names == ["vibevoice_asr"]
+    assert emitted[0]["status"] == "succeeded"
     assert emitted[0]["duration_ms"] == 1234.5
-    assert emitted[1]["metadata"] == {"word_count": 3}
+    assert emitted[0]["metadata"] == {"turn_count": 1}
 
 
 def test_run_requires_audio_gcs_uri() -> None:
-    client = RemoteAudioChainClient(settings=_settings(), max_retries=0)
+    client = RemoteVibeVoiceAsrClient(settings=_settings(), max_retries=0)
     with pytest.raises(ValueError, match="audio_gcs_uri"):
         client.run(audio_gcs_uri="")
 
 
-def test_run_raises_remote_audio_chain_error_on_http_error_and_emits_failure(
+def test_run_raises_remote_error_on_http_error_and_emits_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_urlopen(req, timeout):  # noqa: ARG001
@@ -163,17 +141,17 @@ def test_run_raises_remote_audio_chain_error_on_http_error_and_emits_failure(
     def logger_fn(**kwargs: Any) -> None:
         emitted.append(kwargs)
 
-    client = RemoteAudioChainClient(settings=_settings(), max_retries=0)
-    with pytest.raises(RemoteAudioChainError) as excinfo:
+    client = RemoteVibeVoiceAsrClient(settings=_settings(), max_retries=0)
+    with pytest.raises(RemoteVibeVoiceAsrError) as excinfo:
         client.run(
             audio_gcs_uri="gs://bucket/audio.wav",
             run_id="run-err",
             stage_event_logger=logger_fn,
         )
     assert excinfo.value.status_code == 500
-    assert emitted and emitted[0]["stage_name"] == "audio_host_call"
+    assert emitted and emitted[0]["stage_name"] == "vibevoice_asr"
     assert emitted[0]["status"] == "failed"
-    assert emitted[0]["error_payload"]["code"] == "RemoteAudioChainError"
+    assert emitted[0]["error_payload"]["code"] == "RemoteVibeVoiceAsrError"
 
 
 def test_run_retries_transient_5xx_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,7 +172,7 @@ def test_run_retries_transient_5xx_then_succeeds(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     monkeypatch.setattr("backend.providers.audio_host_client.time.sleep", lambda _s: None)
 
-    client = RemoteAudioChainClient(settings=_settings(), max_retries=2)
+    client = RemoteVibeVoiceAsrClient(settings=_settings(), max_retries=2)
     response = client.run(audio_gcs_uri="gs://bucket/audio.wav", run_id="run-retry")
     assert calls["n"] == 2
     assert response.turns
@@ -206,8 +184,8 @@ def test_run_raises_on_invalid_response_shape(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    with pytest.raises(RemoteAudioChainError, match="invalid audio host response shape"):
-        RemoteAudioChainClient(settings=_settings(), max_retries=0).run(
+    with pytest.raises(RemoteVibeVoiceAsrError, match="invalid vibevoice-asr response shape"):
+        RemoteVibeVoiceAsrClient(settings=_settings(), max_retries=0).run(
             audio_gcs_uri="gs://bucket/audio.wav",
         )
 
@@ -220,10 +198,25 @@ def test_healthcheck_returns_parsed_json(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    client = RemoteAudioChainClient(settings=_settings(), max_retries=0)
+    client = RemoteVibeVoiceAsrClient(settings=_settings(), max_retries=0)
     assert client.healthcheck() == {"status": "ready"}
 
 
 def test_supports_concurrent_visual_is_true() -> None:
-    client = RemoteAudioChainClient(settings=_settings())
+    client = RemoteVibeVoiceAsrClient(settings=_settings())
     assert client.supports_concurrent_visual is True
+
+
+def test_deprecated_aliases_still_importable() -> None:
+    """The legacy class names must continue to resolve during the deprecation window."""
+    from backend.providers.audio_host_client import (
+        PhaseOneAudioResponse,
+        RemoteAudioChainClient,
+        RemoteAudioChainError,
+    )
+    from backend.providers.config import AudioHostSettings
+
+    assert RemoteAudioChainClient is RemoteVibeVoiceAsrClient
+    assert RemoteAudioChainError is RemoteVibeVoiceAsrError
+    assert PhaseOneAudioResponse is VibeVoiceAsrResponse
+    assert AudioHostSettings is VibeVoiceAsrServiceSettings

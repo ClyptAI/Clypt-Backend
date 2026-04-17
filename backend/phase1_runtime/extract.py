@@ -1,34 +1,42 @@
 """H200-side Phase 1 sidecar orchestration.
 
-On the H200 the audio chain (VibeVoice + NFA + emotion2vec+ + YAMNet) runs
-exclusively on the RTX 6000 Ada box via
-:class:`backend.providers.audio_host_client.RemoteAudioChainClient`. The H200
-itself runs only the visual extraction (RF-DETR) and coordinates the two
-chains.
+On the H200 we run the visual extraction (RF-DETR + ByteTrack) **and** the
+post-VibeVoice audio chain (NFA → emotion2vec+ → YAMNet) in-process. Only
+VibeVoice ASR itself is remote: it runs on the RTX 6000 Ada box via
+:class:`backend.providers.audio_host_client.RemoteVibeVoiceAsrClient`.
 
-This module therefore keeps only:
+Execution order (H200 perspective)::
 
-* the concurrent overlap of visual extraction + a single remote audio call,
-* the optional early-handoff callback so Phase 2-4 can start while RF-DETR is
-  still finishing, and
-* stage-event forwarding so Spanner telemetry is identical to the previous
-  in-process execution.
+    1a. Visual extraction (RF-DETR + ByteTrack) on H200  ─┐ concurrent
+    1b. Remote VibeVoice ASR call on RTX 6000 Ada        ─┘  via a pool.
 
-All former in-process audio providers (``vibevoice_provider``, ``forced_aligner``,
-``emotion_provider``, ``yamnet_provider``) have been removed from this module
-and moved to :mod:`backend.runtime.phase1_audio_service.audio_chain` (RTX only).
+        ↓ ASR returns — local NFA → emotion2vec+ → YAMNet starts
+          concurrently with RF-DETR.
+
+        ↓ local audio chain done — optional callback fires so Phase 2-4
+          can start while RF-DETR continues.
+
+Phase 2-4 only depend on the audio-chain outputs (canonical_timeline,
+speech_emotion_timeline, audio_event_timeline). The early-handoff callback
+fires as soon as the local audio chain is done so Phase 2-4 work can be
+queued before the visual future finishes.
+
+See docs/ERROR_LOG.md 2026-04-17 for why NFA/emotion/YAMNet run on the H200
+again instead of on the RTX alongside VibeVoice vLLM.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
+from backend.pipeline.timeline.vibevoice_merge import merge_vibevoice_outputs
 from backend.providers.audio_host_client import (
-    PhaseOneAudioResponse,
-    RemoteAudioChainClient,
+    RemoteVibeVoiceAsrClient,
+    VibeVoiceAsrResponse,
 )
 
 from .models import Phase1SidecarOutputs, Phase1Workspace
@@ -63,61 +71,230 @@ def _emit_stage_event(
         )
 
 
+def _is_forced_alignment_required() -> bool:
+    return (os.getenv("CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT") or "1") == "1"
+
+
+def _run_audio_chain(
+    *,
+    workspace: Phase1Workspace,
+    vibevoice_turns: list[dict],
+    forced_aligner: Any,
+    emotion_provider: Any,
+    yamnet_provider: Any,
+    stage_event_logger: Callable[..., None] | None = None,
+) -> tuple[dict, Any, Any]:
+    """NFA → emotion2vec+ → YAMNet, serial with each other to avoid CUDA graph
+    conflicts between them. Returns ``(diarization_payload, emotion2vec_payload,
+    yamnet_payload)``.
+
+    Runs on the H200 in a ThreadPoolExecutor worker thread while RF-DETR
+    visual extraction is still on the main GPU stream. The H200 has 141 GiB
+    of VRAM, which is more than enough to co-locate RF-DETR + NFA global
+    alignment without starvation.
+    """
+    prelim_turns = []
+    for idx, t in enumerate(vibevoice_turns, start=1):
+        prelim_turns.append(
+            {
+                "turn_id": f"t_{idx:06d}",
+                "speaker_id": f"SPEAKER_{int(t.get('Speaker') or 0)}",
+                "start_ms": int(round(float(t.get("Start") or 0) * 1000)),
+                "end_ms": int(round(float(t.get("End") or 0) * 1000)),
+                "transcript_text": str(t.get("Content") or "").strip(),
+            }
+        )
+
+    logger.info("[extract] starting forced-alignment on %d turns ...", len(prelim_turns))
+    t_fa = time.perf_counter()
+    try:
+        word_alignments = forced_aligner.run(
+            audio_path=workspace.audio_path,
+            turns=prelim_turns,
+        )
+    except Exception as exc:
+        _emit_stage_event(
+            stage_event_logger,
+            stage_name="forced_alignment",
+            status="failed",
+            error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
+        )
+        raise
+    logger.info(
+        "[extract] forced-alignment done in %.1f s — %d words",
+        time.perf_counter() - t_fa,
+        len(word_alignments),
+    )
+    alignable_turns = [
+        t
+        for t in prelim_turns
+        if int(t.get("end_ms") or 0) > int(t.get("start_ms") or 0)
+        and str(t.get("transcript_text") or "").strip()
+    ]
+    if alignable_turns and not word_alignments:
+        msg = (
+            "[extract] forced-alignment produced 0 words for non-empty ASR turns; "
+            "this indicates NFA is unhealthy."
+        )
+        if _is_forced_alignment_required():
+            _emit_stage_event(
+                stage_event_logger,
+                stage_name="forced_alignment",
+                status="failed",
+                duration_ms=(time.perf_counter() - t_fa) * 1000.0,
+                metadata={"turn_count": len(prelim_turns), "word_count": len(word_alignments)},
+                error_payload={"code": "RuntimeError", "message": msg[:2048]},
+            )
+            raise RuntimeError(
+                f"{msg} Set CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=0 only for temporary debugging bypass."
+            )
+        logger.warning("%s Continuing because CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=0.", msg)
+
+    _emit_stage_event(
+        stage_event_logger,
+        stage_name="forced_alignment",
+        status="succeeded",
+        duration_ms=(time.perf_counter() - t_fa) * 1000.0,
+        metadata={"turn_count": len(prelim_turns), "word_count": len(word_alignments)},
+    )
+
+    merged = merge_vibevoice_outputs(
+        vibevoice_turns=vibevoice_turns,
+        word_alignments=word_alignments,
+    )
+    turns = list(merged.get("turns") or [])
+
+    diarization_payload: dict[str, Any] = {
+        "turns": [
+            {
+                "turn_id": t["turn_id"],
+                "speaker_id": t["speaker_id"],
+                "start_ms": t["start_ms"],
+                "end_ms": t["end_ms"],
+                "transcript_text": t["transcript_text"],
+                "word_ids": t.get("word_ids", []),
+                "identification_match": None,
+            }
+            for t in turns
+        ],
+        "words": merged.get("words", []),
+    }
+
+    logger.info("[extract] starting emotion2vec+ on %d turns ...", len(turns))
+    t_emotion = time.perf_counter()
+    try:
+        emotion2vec_payload = emotion_provider.run(
+            audio_path=workspace.audio_path,
+            turns=turns,
+        )
+    except Exception as exc:
+        _emit_stage_event(
+            stage_event_logger,
+            stage_name="emotion2vec",
+            status="failed",
+            error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
+        )
+        raise
+    logger.info("[extract] emotion2vec+ done in %.1f s", time.perf_counter() - t_emotion)
+    emotion_segments = len((emotion2vec_payload or {}).get("segments") or [])
+    _emit_stage_event(
+        stage_event_logger,
+        stage_name="emotion2vec",
+        status="succeeded",
+        duration_ms=(time.perf_counter() - t_emotion) * 1000.0,
+        metadata={"turn_count": len(turns), "segment_count": emotion_segments},
+    )
+
+    logger.info("[extract] starting YAMNet ...")
+    t_yamnet = time.perf_counter()
+    try:
+        yamnet_payload = yamnet_provider.run(audio_path=workspace.audio_path)
+    except Exception as exc:
+        _emit_stage_event(
+            stage_event_logger,
+            stage_name="yamnet",
+            status="failed",
+            error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
+        )
+        raise
+    yamnet_event_count = len((yamnet_payload or {}).get("events") or [])
+    logger.info(
+        "[extract] YAMNet done in %.1f s — %d events",
+        time.perf_counter() - t_yamnet,
+        yamnet_event_count,
+    )
+    _emit_stage_event(
+        stage_event_logger,
+        stage_name="yamnet",
+        status="succeeded",
+        duration_ms=(time.perf_counter() - t_yamnet) * 1000.0,
+        metadata={"event_count": yamnet_event_count},
+    )
+
+    return diarization_payload, emotion2vec_payload, yamnet_payload
+
+
 def run_phase1_sidecars(
     *,
     source_url: str,
     video_gcs_uri: str,
     audio_gcs_uri: str | None = None,
     workspace: Phase1Workspace,
-    audio_host_client: RemoteAudioChainClient,
+    vibevoice_asr_client: RemoteVibeVoiceAsrClient,
+    forced_aligner: Any,
     visual_extractor: Any,
+    emotion_provider: Any,
+    yamnet_provider: Any,
     on_audio_chain_complete: Any | None = None,
     stage_event_logger: Callable[..., None] | None = None,
 ) -> Phase1SidecarOutputs:
-    """Run Phase 1 sidecar tasks against the remote audio host.
+    """Run Phase 1 sidecar tasks with remote VibeVoice ASR + local audio chain.
 
     Execution order (H200 perspective)::
 
         1a. Visual extraction (RF-DETR + ByteTrack) on H200  ─┐ concurrent
-        1b. Remote audio chain call (VibeVoice vLLM → NFA →   │  via a
-            emotion2vec+ → YAMNet) on RTX 6000 Ada            ─┘  pool.
+        1b. Remote VibeVoice ASR on RTX 6000 Ada              ─┘
 
-        ↓ remote chain returns — Phase 2-4 may start immediately while
-          RF-DETR continues on the H200.
+            ↓ ASR done — NFA → emotion2vec+ → YAMNet starts on H200,
+              concurrent with RF-DETR, serial with each other.
 
-    Phases 2-4 only depend on the audio-chain outputs (canonical_timeline,
-    speech_emotion_timeline, audio_event_timeline). The early-handoff
-    callback fires as soon as the remote audio call returns so Phase 2-4
-    work can be queued before the visual future finishes, preserving the
-    ~230 s savings we had on the ~13-min clip when the chain was in-process.
+    Phase 2-4 only depend on the audio-chain outputs. The early-handoff
+    callback fires as soon as the local audio chain returns so Phase 2-4
+    work can be queued before the visual future finishes.
     """
-    if audio_host_client is None:
+    if vibevoice_asr_client is None:
         raise ValueError(
-            "run_phase1_sidecars requires an audio_host_client; the Phase 1 audio "
-            "chain has no in-process fallback on the H200."
+            "run_phase1_sidecars requires a vibevoice_asr_client; VibeVoice ASR "
+            "runs only on the RTX 6000 Ada host."
         )
     if audio_gcs_uri is None or not str(audio_gcs_uri).strip():
         raise ValueError(
-            "audio_gcs_uri is required: the RTX audio host fetches audio from GCS."
+            "audio_gcs_uri is required: the RTX VibeVoice ASR host fetches audio "
+            "from GCS."
+        )
+    if not getattr(vibevoice_asr_client, "supports_concurrent_visual", False):
+        raise RuntimeError(
+            "Phase 1 requires a concurrent-capable VibeVoice ASR client."
         )
 
     t_total = time.perf_counter()
 
     logger.info(
-        "[extract] starting visual extraction (H200) + remote audio chain (RTX) in parallel ..."
+        "[extract] starting visual extraction (H200) + remote VibeVoice ASR (RTX) "
+        "in parallel ..."
     )
     t_overlap = time.perf_counter()
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         t_visual = time.perf_counter()
         visual_future = pool.submit(
             visual_extractor.extract,
             video_path=workspace.video_path,
             workspace=workspace,
         )
-        t_audio = time.perf_counter()
-        audio_future = pool.submit(
-            audio_host_client.run,
+        t_asr = time.perf_counter()
+        asr_future = pool.submit(
+            vibevoice_asr_client.run,
             audio_gcs_uri=audio_gcs_uri,
             source_url=source_url,
             video_gcs_uri=video_gcs_uri,
@@ -126,15 +303,15 @@ def run_phase1_sidecars(
         )
 
         try:
-            audio_response: PhaseOneAudioResponse = audio_future.result()
+            asr_response: VibeVoiceAsrResponse = asr_future.result()
         except Exception as exc:
             # The client already re-emits a failure stage event, but we also
-            # emit a summary audio_host_call failure if none was emitted yet.
+            # emit a summary one in case none reached the logger.
             _emit_stage_event(
                 stage_event_logger,
-                stage_name="audio_host_call",
+                stage_name="vibevoice_asr",
                 status="failed",
-                duration_ms=(time.perf_counter() - t_audio) * 1000.0,
+                duration_ms=(time.perf_counter() - t_asr) * 1000.0,
                 metadata={"audio_gcs_uri": audio_gcs_uri},
                 error_payload={
                     "code": exc.__class__.__name__,
@@ -143,13 +320,25 @@ def run_phase1_sidecars(
             )
             raise
 
-        diarization_payload = audio_response.diarization_payload
-        emotion2vec_payload = audio_response.emotion2vec_payload
-        yamnet_payload = audio_response.yamnet_payload
-
+        vibevoice_turns = asr_response.turns
         logger.info(
-            "[extract] remote audio chain done — starting Phase 2-4 handoff "
-            "while RF-DETR continues on H200 ..."
+            "[extract] remote VibeVoice ASR done (%d turns) — starting local audio "
+            "chain while RF-DETR continues ...",
+            len(vibevoice_turns),
+        )
+
+        audio_chain_future = pool.submit(
+            _run_audio_chain,
+            workspace=workspace,
+            vibevoice_turns=vibevoice_turns,
+            forced_aligner=forced_aligner,
+            emotion_provider=emotion_provider,
+            yamnet_provider=yamnet_provider,
+            stage_event_logger=stage_event_logger,
+        )
+
+        diarization_payload, emotion2vec_payload, yamnet_payload = (
+            audio_chain_future.result()
         )
 
         if on_audio_chain_complete is not None:
@@ -168,7 +357,8 @@ def run_phase1_sidecars(
             )
             on_audio_chain_complete(_partial)
             logger.info(
-                "[extract] audio-chain callback fired — Phases 2-4 starting while RF-DETR finishes"
+                "[extract] audio-chain callback fired — Phases 2-4 starting while "
+                "RF-DETR finishes"
             )
 
         try:
@@ -193,7 +383,7 @@ def run_phase1_sidecars(
         )
 
     logger.info(
-        "[extract] visual + remote audio chain both done in %.1f s",
+        "[extract] visual + audio chain both done in %.1f s",
         time.perf_counter() - t_overlap,
     )
 
