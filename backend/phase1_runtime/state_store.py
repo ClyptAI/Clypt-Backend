@@ -15,6 +15,8 @@ UTC = timezone.utc
 def _jsonable(value):
     if is_dataclass(value):
         return {key: _jsonable(item) for key, item in asdict(value).items()}
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, list):

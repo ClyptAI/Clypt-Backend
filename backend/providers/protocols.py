@@ -33,3 +33,29 @@ class EmbeddingClient(Protocol):
         *,
         model: str | None = None,
     ) -> list[list[float]]: ...
+
+
+from pathlib import Path
+
+from backend.phase1_runtime.payloads import Phase1SidecarOutputs
+
+
+@runtime_checkable
+class StorageClient(Protocol):
+    def upload_file(self, *, local_path: Path, object_name: str) -> str: ...
+
+    def download_file(self, *, gcs_uri: str, local_path: Path) -> Path: ...
+
+    def get_https_url(self, gcs_uri: str, expiry_hours: int = 24) -> str: ...
+
+    def exists(self, gcs_uri: str) -> bool: ...
+
+
+class NodeMediaPreparerCallable(Protocol):
+    def __call__(
+        self,
+        *,
+        nodes: list[Any],
+        paths: Any,
+        phase1_outputs: Phase1SidecarOutputs,
+    ) -> list[dict[str, str]]: ...

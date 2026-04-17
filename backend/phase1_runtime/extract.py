@@ -39,7 +39,15 @@ from backend.providers.audio_host_client import (
     VibeVoiceAsrResponse,
 )
 
-from .models import Phase1SidecarOutputs, Phase1Workspace
+from .models import Phase1Workspace
+from .payloads import (
+    DiarizationPayload,
+    EmotionSegmentsPayload,
+    Phase1AudioAssets,
+    Phase1SidecarOutputs,
+    VisualPayload,
+    YamnetPayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +91,7 @@ def _run_audio_chain(
     emotion_provider: Any,
     yamnet_provider: Any,
     stage_event_logger: Callable[..., None] | None = None,
-) -> tuple[dict, Any, Any]:
+) -> tuple[DiarizationPayload, EmotionSegmentsPayload, YamnetPayload]:
     """NFA → emotion2vec+ → YAMNet, serial with each other to avoid CUDA graph
     conflicts between them. Returns ``(diarization_payload, emotion2vec_payload,
     yamnet_payload)``.
@@ -164,28 +172,32 @@ def _run_audio_chain(
     )
     turns = list(merged.get("turns") or [])
 
-    diarization_payload: dict[str, Any] = {
-        "turns": [
-            {
-                "turn_id": t["turn_id"],
-                "speaker_id": t["speaker_id"],
-                "start_ms": t["start_ms"],
-                "end_ms": t["end_ms"],
-                "transcript_text": t["transcript_text"],
-                "word_ids": t.get("word_ids", []),
-                "identification_match": None,
-            }
-            for t in turns
-        ],
-        "words": merged.get("words", []),
-    }
+    diarization_payload = DiarizationPayload.model_validate(
+        {
+            "turns": [
+                {
+                    "turn_id": t["turn_id"],
+                    "speaker_id": t["speaker_id"],
+                    "start_ms": t["start_ms"],
+                    "end_ms": t["end_ms"],
+                    "transcript_text": t["transcript_text"],
+                    "word_ids": t.get("word_ids", []),
+                    "identification_match": None,
+                }
+                for t in turns
+            ],
+            "words": merged.get("words", []),
+        }
+    )
 
     logger.info("[extract] starting emotion2vec+ on %d turns ...", len(turns))
     t_emotion = time.perf_counter()
     try:
-        emotion2vec_payload = emotion_provider.run(
-            audio_path=workspace.audio_path,
-            turns=turns,
+        emotion2vec_payload = EmotionSegmentsPayload.model_validate(
+            emotion_provider.run(
+                audio_path=workspace.audio_path,
+                turns=turns,
+            )
         )
     except Exception as exc:
         _emit_stage_event(
@@ -196,7 +208,7 @@ def _run_audio_chain(
         )
         raise
     logger.info("[extract] emotion2vec+ done in %.1f s", time.perf_counter() - t_emotion)
-    emotion_segments = len((emotion2vec_payload or {}).get("segments") or [])
+    emotion_segments = len(emotion2vec_payload.segments)
     _emit_stage_event(
         stage_event_logger,
         stage_name="emotion2vec",
@@ -208,7 +220,9 @@ def _run_audio_chain(
     logger.info("[extract] starting YAMNet ...")
     t_yamnet = time.perf_counter()
     try:
-        yamnet_payload = yamnet_provider.run(audio_path=workspace.audio_path)
+        yamnet_payload = YamnetPayload.model_validate(
+            yamnet_provider.run(audio_path=workspace.audio_path)
+        )
     except Exception as exc:
         _emit_stage_event(
             stage_event_logger,
@@ -217,7 +231,7 @@ def _run_audio_chain(
             error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
         )
         raise
-    yamnet_event_count = len((yamnet_payload or {}).get("events") or [])
+    yamnet_event_count = len(yamnet_payload.events)
     logger.info(
         "[extract] YAMNet done in %.1f s — %d events",
         time.perf_counter() - t_yamnet,
@@ -245,7 +259,7 @@ def run_phase1_sidecars(
     visual_extractor: Any,
     emotion_provider: Any,
     yamnet_provider: Any,
-    on_audio_chain_complete: Any | None = None,
+    on_audio_chain_complete: Callable[[Phase1SidecarOutputs], None] | None = None,
     stage_event_logger: Callable[..., None] | None = None,
 ) -> Phase1SidecarOutputs:
     """Run Phase 1 sidecar tasks with remote VibeVoice ASR + local audio chain.
@@ -343,15 +357,15 @@ def run_phase1_sidecars(
 
         if on_audio_chain_complete is not None:
             _partial = Phase1SidecarOutputs(
-                phase1_audio={
-                    "source_audio": source_url,
-                    "video_gcs_uri": video_gcs_uri,
-                    "audio_gcs_uri": audio_gcs_uri,
-                    "local_video_path": str(workspace.video_path),
-                    "local_audio_path": str(workspace.audio_path),
-                },
+                phase1_audio=Phase1AudioAssets(
+                    source_audio=source_url,
+                    video_gcs_uri=video_gcs_uri,
+                    audio_gcs_uri=str(audio_gcs_uri),
+                    local_video_path=str(workspace.video_path),
+                    local_audio_path=str(workspace.audio_path),
+                ),
                 diarization_payload=diarization_payload,
-                phase1_visual={},
+                phase1_visual=VisualPayload(),
                 emotion2vec_payload=emotion2vec_payload,
                 yamnet_payload=yamnet_payload,
             )
@@ -362,7 +376,7 @@ def run_phase1_sidecars(
             )
 
         try:
-            phase1_visual = visual_future.result()
+            phase1_visual = VisualPayload.model_validate(visual_future.result())
         except Exception as exc:
             _emit_stage_event(
                 stage_event_logger,
@@ -377,8 +391,8 @@ def run_phase1_sidecars(
             status="succeeded",
             duration_ms=(time.perf_counter() - t_visual) * 1000.0,
             metadata={
-                "shot_change_count": len((phase1_visual or {}).get("shot_changes") or []),
-                "track_count": len((phase1_visual or {}).get("tracks") or []),
+                "shot_change_count": len(phase1_visual.shot_changes),
+                "track_count": len(phase1_visual.tracks),
             },
         )
 
@@ -390,13 +404,13 @@ def run_phase1_sidecars(
     logger.info("[extract] all sidecars done in %.1f s", time.perf_counter() - t_total)
 
     return Phase1SidecarOutputs(
-        phase1_audio={
-            "source_audio": source_url,
-            "video_gcs_uri": video_gcs_uri,
-            "audio_gcs_uri": audio_gcs_uri,
-            "local_video_path": str(workspace.video_path),
-            "local_audio_path": str(workspace.audio_path),
-        },
+        phase1_audio=Phase1AudioAssets(
+            source_audio=source_url,
+            video_gcs_uri=video_gcs_uri,
+            audio_gcs_uri=str(audio_gcs_uri),
+            local_video_path=str(workspace.video_path),
+            local_audio_path=str(workspace.audio_path),
+        ),
         diarization_payload=diarization_payload,
         phase1_visual=phase1_visual,
         emotion2vec_payload=emotion2vec_payload,

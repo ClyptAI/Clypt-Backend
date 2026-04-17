@@ -3,6 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from backend.phase1_runtime.payloads import (
+    DiarizationPayload,
+    EmotionSegmentsPayload,
+    Phase1AudioAssets,
+    VisualPayload,
+    YamnetPayload,
+)
+
 from .artifacts import V31RunPaths, build_run_paths, save_json
 from .config import V31Config, get_v31_config
 from .contracts import (
@@ -16,6 +24,10 @@ from .timeline.emotion_events import build_speech_emotion_timeline
 from .timeline.timeline_builder import build_canonical_timeline
 from .timeline.tracklets import build_tracklet_artifacts
 from .semantics.turn_neighborhoods import build_turn_neighborhoods
+from .semantics.responses import (
+    BoundaryReconciliationResponse,
+    SemanticsMergeAndClassifyBatchResponse,
+)
 from .semantics.merge_and_classify import merge_and_classify_neighborhood
 from .semantics.boundary_reconciliation import reconcile_boundary_nodes
 from .semantics.node_embeddings import embed_semantic_nodes
@@ -34,11 +46,11 @@ from .candidates.review_candidate_pool import review_candidate_pool
 
 @dataclass(slots=True)
 class V31Phase14RunInputs:
-    phase1_audio: dict[str, Any]
-    diarization_payload: dict[str, Any]
-    phase1_visual: dict[str, Any] | None = None
-    emotion2vec_payload: dict[str, Any] | None = None
-    yamnet_payload: dict[str, Any] | None = None
+    phase1_audio: Phase1AudioAssets
+    diarization_payload: DiarizationPayload
+    phase1_visual: VisualPayload | None = None
+    emotion2vec_payload: EmotionSegmentsPayload | None = None
+    yamnet_payload: YamnetPayload | None = None
     phase2_target_turn_count: int = 8
     phase2_halo_turn_count: int = 2
     phase2_merge_responses: dict[str, dict] | None = None
@@ -62,6 +74,12 @@ class V31Phase14Orchestrator:
     def build_run_paths(self, *, run_id: str) -> V31RunPaths:
         return build_run_paths(output_root=self.config.output_root, run_id=run_id)
 
+    @staticmethod
+    def _json_payload(payload: Any) -> dict[str, Any]:
+        if hasattr(payload, "model_dump"):
+            return payload.model_dump(mode="json")
+        return payload
+
     def run(self, *, run_id: str, source_url: str, inputs: V31Phase14RunInputs) -> Phase14RunSummary:
         paths = self.build_run_paths(run_id=run_id)
         phase1_outputs = self.run_phase_1(run_id=run_id, source_url=source_url, paths=paths, inputs=inputs)
@@ -72,12 +90,30 @@ class V31Phase14Orchestrator:
 
     def run_phase_1(self, *, run_id: str, source_url: str, paths: V31RunPaths, inputs: V31Phase14RunInputs) -> dict[str, Any]:
         canonical_timeline = build_canonical_timeline(
-            phase1_audio=inputs.phase1_audio,
-            diarization_payload=inputs.diarization_payload,
+            phase1_audio=self._json_payload(inputs.phase1_audio),
+            diarization_payload=self._json_payload(inputs.diarization_payload),
         )
-        speech_emotion_timeline = build_speech_emotion_timeline(emotion2vec_payload=inputs.emotion2vec_payload or {})
-        audio_event_timeline = build_audio_event_timeline(yamnet_payload=inputs.yamnet_payload or {})
-        shot_tracklet_index, tracklet_geometry = build_tracklet_artifacts(phase1_visual=inputs.phase1_visual or {})
+        speech_emotion_timeline = build_speech_emotion_timeline(
+            emotion2vec_payload=(
+                self._json_payload(inputs.emotion2vec_payload)
+                if inputs.emotion2vec_payload is not None
+                else {}
+            )
+        )
+        audio_event_timeline = build_audio_event_timeline(
+            yamnet_payload=(
+                self._json_payload(inputs.yamnet_payload)
+                if inputs.yamnet_payload is not None
+                else {}
+            )
+        )
+        shot_tracklet_index, tracklet_geometry = build_tracklet_artifacts(
+            phase1_visual=(
+                self._json_payload(inputs.phase1_visual)
+                if inputs.phase1_visual is not None
+                else {}
+            )
+        )
 
         save_json(paths.canonical_timeline, canonical_timeline.model_dump(mode="json"))
         save_json(paths.speech_emotion_timeline, speech_emotion_timeline.model_dump(mode="json"))
@@ -106,15 +142,16 @@ class V31Phase14Orchestrator:
         merge_debug: list[dict[str, Any]] = []
         for neighborhood in neighborhoods:
             batch_id = neighborhood["batch_id"]
-            response = merge_responses.get(batch_id)
-            if response is None:
+            response_data = merge_responses.get(batch_id)
+            if response_data is None:
                 raise ValueError(f"missing phase 2 merge response for batch {batch_id}")
+            response = SemanticsMergeAndClassifyBatchResponse.model_validate(response_data)
             nodes = merge_and_classify_neighborhood(
                 neighborhood_payload=neighborhood,
                 llm_response=response,
             )
             batch_nodes.append(nodes)
-            merge_debug.append({"batch_id": batch_id, "response": response})
+            merge_debug.append({"batch_id": batch_id, "response": response.model_dump(mode="json")})
 
         final_nodes: list[SemanticGraphNode] = []
         if batch_nodes:
@@ -124,9 +161,10 @@ class V31Phase14Orchestrator:
                 left_batch_id = neighborhoods[idx - 1]["batch_id"]
                 right_batch_id = neighborhoods[idx]["batch_id"]
                 boundary_key = f"{left_batch_id}__{right_batch_id}"
-                boundary_response = boundary_responses.get(boundary_key)
+                boundary_response_data = boundary_responses.get(boundary_key)
                 next_nodes = batch_nodes[idx]
-                if boundary_response and final_nodes and next_nodes:
+                if boundary_response_data and final_nodes and next_nodes:
+                    boundary_response = BoundaryReconciliationResponse.model_validate(boundary_response_data)
                     reconciled_boundary_nodes = reconcile_boundary_nodes(
                         left_batch_nodes=[final_nodes[-1]],
                         right_batch_nodes=[next_nodes[0]],

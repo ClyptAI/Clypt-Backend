@@ -92,6 +92,12 @@ class GCSStorageClient:
         blob.download_to_filename(str(local_path))
         return local_path
 
+    def exists(self, gcs_uri: GcsUri | str) -> bool:
+        bucket_name, object_name = parse_gcs_uri(gcs_uri)
+        bucket = self._client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        return bool(blob.exists())
+
     def get_https_url(self, gcs_uri: GcsUri | str, expiry_hours: int = 24) -> str:
         """Return a V4 signed HTTPS URL for a GCS object.
 

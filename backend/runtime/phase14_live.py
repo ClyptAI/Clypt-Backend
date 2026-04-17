@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from concurrent.futures import ThreadPoolExecutor
 import logging
 from pathlib import Path
 import re
 import time
 from typing import Any, Callable
 
-from backend.phase1_runtime.models import Phase1SidecarOutputs
+from backend.phase1_runtime.payloads import Phase1SidecarOutputs
 from backend.pipeline.artifacts import V31RunPaths, build_run_paths, save_json
 from backend.pipeline.candidates.build_local_subgraphs import build_local_subgraphs
 from backend.pipeline.candidates.dedupe_candidates import dedupe_clip_candidates
@@ -45,7 +45,12 @@ from backend.pipeline.timeline.audio_events import build_audio_event_timeline
 from backend.pipeline.timeline.emotion_events import build_speech_emotion_timeline
 from backend.pipeline.timeline.timeline_builder import build_canonical_timeline
 from backend.pipeline.timeline.tracklets import build_tracklet_artifacts
-from backend.providers.protocols import EmbeddingClient, LLMGenerateJsonClient
+from backend.providers.protocols import (
+    EmbeddingClient,
+    LLMGenerateJsonClient,
+    NodeMediaPreparerCallable,
+    StorageClient,
+)
 from backend.repository import (
     CandidateSignalLinkRecord,
     ClipCandidateRecord,
@@ -78,16 +83,16 @@ class V31LivePhase14Runner:
     llm_client: LLMGenerateJsonClient
     embedding_client: EmbeddingClient
     flash_model: str = "Qwen/Qwen3.6-35B-A3B"
-    storage_client: Any | None = None
-    node_media_preparer: Any | None = None
+    storage_client: StorageClient | None = None
+    node_media_preparer: NodeMediaPreparerCallable | None = None
     repository: Phase14Repository | None = None
     query_version: str | None = None
     debug_snapshots: bool = False
     log_event: Callable[..., None] | None = None
-    _prefetched_phase3_local_future: Any | None = field(default=None, init=False, repr=False)
+    _prefetched_phase3_local_future: Future[Any] | None = field(default=None, init=False, repr=False)
     _prefetched_phase3_local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
     _prefetched_phase3_local_node_ids: tuple[str, ...] | None = field(default=None, init=False, repr=False)
-    _prefetched_phase3_long_range_future: Any | None = field(default=None, init=False, repr=False)
+    _prefetched_phase3_long_range_future: Future[Any] | None = field(default=None, init=False, repr=False)
     _prefetched_phase3_long_range_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
     _prefetched_phase3_long_range_node_ids: tuple[str, ...] | None = field(default=None, init=False, repr=False)
 
@@ -98,8 +103,8 @@ class V31LivePhase14Runner:
         llm_client: LLMGenerateJsonClient,
         embedding_client: EmbeddingClient,
         flash_model: str = "Qwen/Qwen3.6-35B-A3B",
-        storage_client: Any | None = None,
-        node_media_preparer: Any | None = None,
+        storage_client: StorageClient | None = None,
+        node_media_preparer: NodeMediaPreparerCallable | None = None,
         repository: Phase14Repository | None = None,
         query_version: str | None = None,
         debug_snapshots: bool = False,

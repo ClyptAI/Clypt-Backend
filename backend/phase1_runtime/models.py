@@ -7,6 +7,15 @@ from typing import Any
 from backend.common.domain_enums import JobStatus
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .payloads import (
+    DiarizationPayload,
+    EmotionSegmentsPayload,
+    Phase1AudioAssets,
+    Phase1SidecarOutputs,
+    VisualPayload,
+    YamnetPayload,
+)
+
 
 class Phase1JobCreatePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -67,18 +76,14 @@ class Phase1Workspace:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class Phase1SidecarOutputs:
-    phase1_audio: dict
-    diarization_payload: dict
-    phase1_visual: dict
-    emotion2vec_payload: dict
-    yamnet_payload: dict
-
-
 __all__ = [
+    "DiarizationPayload",
+    "EmotionSegmentsPayload",
     "Phase1JobCreatePayload",
     "Phase1JobRecord",
+    "Phase1AudioAssets",
     "Phase1SidecarOutputs",
     "Phase1Workspace",
+    "VisualPayload",
+    "YamnetPayload",
 ]

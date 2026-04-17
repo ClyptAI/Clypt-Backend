@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.phase1_runtime.models import Phase1SidecarOutputs
+from backend.phase1_runtime.payloads import Phase1SidecarOutputs
 from backend.providers import (
     LocalOpenAIQwenClient,
     RemoteNodeMediaPrepClient,
@@ -38,7 +38,7 @@ class Phase24TaskPayload(BaseModel):
     source_url: str | None = None
     source_uri: str | None = None
     source_video_gcs_uri: str | None = None
-    phase1_outputs: dict[str, Any] | None = None
+    phase1_outputs: Phase1SidecarOutputs | None = None
     phase1_outputs_gcs_uri: str | None = None
     phase3_long_range_top_k: int | None = None
     phase4_extra_prompt_texts: list[str] = Field(default_factory=list)
@@ -75,7 +75,7 @@ class Phase24WorkerService:
         if payload.source_video_gcs_uri:
             return payload.source_video_gcs_uri
         if payload.phase1_outputs:
-            return (payload.phase1_outputs.get("phase1_audio") or {}).get("video_gcs_uri")
+            return payload.phase1_outputs.phase1_audio.video_gcs_uri
         return None
 
     def handle_task(
@@ -217,13 +217,13 @@ class Phase24WorkerService:
             runner = self.runner
             runner.query_version = query_version
             runner.log_event = lambda **event: self._emit_and_check_admission(**event)
-        phase1_outputs_payload, temp_video_dir = self._prepare_phase1_outputs(payload)
+        phase1_outputs, temp_video_dir = self._prepare_phase1_outputs(payload)
         try:
             self._assert_preemption_fail_fast()
             summary = runner.run(
                 run_id=payload.run_id,
                 source_url=payload.source_reference,
-                phase1_outputs=Phase1SidecarOutputs(**phase1_outputs_payload),
+                phase1_outputs=phase1_outputs,
                 phase3_long_range_top_k=payload.phase3_long_range_top_k,
                 phase4_extra_prompt_texts=payload.phase4_extra_prompt_texts,
                 job_id=job_id,
@@ -382,10 +382,10 @@ class Phase24WorkerService:
     def _prepare_phase1_outputs(
         self,
         payload: Phase24TaskPayload,
-    ) -> tuple[dict[str, Any], tempfile.TemporaryDirectory[str] | None]:
+    ) -> tuple[Phase1SidecarOutputs, tempfile.TemporaryDirectory[str] | None]:
         temp_dir: tempfile.TemporaryDirectory[str] | None = None
         if payload.phase1_outputs is not None:
-            phase1_outputs_payload = dict(payload.phase1_outputs)
+            phase1_outputs = payload.phase1_outputs
         else:
             if not payload.phase1_outputs_gcs_uri:
                 raise ValueError("phase1_outputs_gcs_uri is required when phase1_outputs is omitted")
@@ -398,8 +398,8 @@ class Phase24WorkerService:
                     gcs_uri=payload.phase1_outputs_gcs_uri,
                     local_path=handoff_path,
                 )
-                phase1_outputs_payload = json.loads(
-                    handoff_path.read_text(encoding="utf-8")
+                phase1_outputs = Phase1SidecarOutputs.model_validate(
+                    json.loads(handoff_path.read_text(encoding="utf-8"))
                 )
             except Exception:
                 temp_dir.cleanup()
@@ -409,18 +409,21 @@ class Phase24WorkerService:
         # need to have the source video on local disk. We only require that
         # video_gcs_uri is present (the remote NVENC endpoint downloads from
         # GCS itself).
-        phase1_audio = dict(phase1_outputs_payload.get("phase1_audio") or {})
-        video_gcs_uri = (
-            payload.source_video_gcs_uri or phase1_audio.get("video_gcs_uri")
-        )
+        phase1_audio = phase1_outputs.phase1_audio
+        video_gcs_uri = payload.source_video_gcs_uri or phase1_audio.video_gcs_uri
         if not video_gcs_uri:
             raise ValueError(
                 "phase1_outputs.phase1_audio.video_gcs_uri or source_video_gcs_uri is required "
                 "(remote NVENC node-media prep fetches from GCS)."
             )
-        phase1_audio["video_gcs_uri"] = video_gcs_uri
-        phase1_outputs_payload["phase1_audio"] = phase1_audio
-        return phase1_outputs_payload, temp_dir
+        phase1_outputs = phase1_outputs.model_copy(
+            update={
+                "phase1_audio": phase1_audio.model_copy(
+                    update={"video_gcs_uri": video_gcs_uri}
+                )
+            }
+        )
+        return phase1_outputs, temp_dir
 
     @staticmethod
     def _extract_p95_latency_ms(summary_payload: dict[str, Any]) -> float | None:
