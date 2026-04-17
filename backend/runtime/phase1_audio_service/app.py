@@ -21,8 +21,12 @@ back to the H200 because NFA's global-alignment pass needs ~17 GiB of VRAM
 that it could not get while co-located with vLLM on the 48 GiB RTX card.
 See docs/ERROR_LOG.md 2026-04-17.
 
-Concurrency: ASR requests serialize on a per-process asyncio lock (vLLM
-runs max-num-seqs 1). Node-media prep can accept multiple concurrent
+Concurrency: ASR requests serialize on a per-process asyncio lock even
+though vLLM now runs with ``--max-num-seqs 2`` as a sole tenant. The lock
+is intentional: VibeVoice encoder-decoder throughput on the RTX 6000 Ada
+is single-sequence-bound and letting multiple HTTP callers in flight at
+once starves ffmpeg of NVDEC/NVENC context. Node-media prep can accept
+multiple concurrent
 requests — each request owns its own bounded ffmpeg thread pool inside
 :func:`backend.runtime.phase1_audio_service.node_media_prep.run_node_media_prep`.
 """

@@ -56,8 +56,12 @@ the Phase 2-4 enqueue without waiting for visual join.
   `SG_CONTEXT_LENGTH`, `SG_EXTRA_ARGS`. Current effective flags:
   `--context-length 65536` (reduced from 131072),
   `--kv-cache-dtype fp8_e4m3`, `--mem-fraction-static 0.78`,
-  `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-num-draft-tokens 4`,
-  `HF_HUB_OFFLINE=1`.
+  `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4`,
+  `--mamba-scheduler-strategy extra_buffer`, `--schedule-policy lpm`,
+  `--chunked-prefill-size 8192`, `--grammar-backend xgrammar`,
+  `--reasoning-parser qwen3`, plus environment `HF_HUB_OFFLINE=1` and
+  `SGLANG_ENABLE_SPEC_V2=1` (both exported from the systemd unit; the Mamba
+  hybrid refuses to start with MTP + radix cache unless SPEC_V2 is on).
 - **Phase 2-4 dispatch path:** local SQLite queue + local worker loop.
   `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`; Phase 1 enqueues through
   `Phase24LocalDispatcherClient`.
@@ -242,6 +246,11 @@ Current code-backed defaults:
 - keep Phase 3 long-range shortlist controls explicit:
   - `CLYPT_PHASE3_LONG_RANGE_TOP_K=2`
   - `CLYPT_PHASE3_LONG_RANGE_PAIRS_PER_SHARD=24`
+- per-stage output token caps (DO-speedup-and-OSS-swap baseline, 2026-04-17):
+  - `CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS=8192` (down from 32768)
+  - `CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS=8192` (down from 32768)
+  - `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=4096` (up from 2048)
+  - `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096` (up from 2048)
 - full env inventory lives in `docs/runtime/ENV_REFERENCE.md`
 
 Reference measurements captured on `2026-04-15` against the live droplet service:

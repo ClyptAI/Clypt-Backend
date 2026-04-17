@@ -101,6 +101,16 @@ and validates `/health` + `/v1/models`. Honors `SG_SCHEDULE_POLICY`,
 `SG_CHUNKED_PREFILL_SIZE`, `SG_MEM_FRACTION_STATIC`, `SG_CONTEXT_LENGTH`, and
 `SG_EXTRA_ARGS` from the env file.
 
+The committed `ExecStart` for the SGLang unit bakes in the current flag set:
+`--context-length 65536 --kv-cache-dtype fp8_e4m3 --mem-fraction-static 0.78
+--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1
+--speculative-num-draft-tokens 4 --mamba-scheduler-strategy extra_buffer
+--schedule-policy lpm --chunked-prefill-size 8192 --grammar-backend xgrammar
+--reasoning-parser qwen3`, plus systemd `Environment=HF_HUB_OFFLINE=1` and
+`Environment=SGLANG_ENABLE_SPEC_V2=1`. Both env vars are load-bearing — the
+Qwen3.6 hybrid Mamba/Attention path refuses to start with MTP + radix cache
+unless `SPEC_V2` is on, and the H200 runs in offline cache mode.
+
 ## 4) Minimum Environment Contract
 
 Start from [`docs/runtime/known-good.env`](../runtime/known-good.env) and

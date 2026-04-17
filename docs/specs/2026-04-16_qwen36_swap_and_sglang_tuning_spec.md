@@ -31,7 +31,7 @@ The `rg` gate in §8 enforces this doctrine.
    - `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4` (NextN MTP; Qwen3.6 ships draft heads).
    - `--mamba-scheduler-strategy extra_buffer` plus `SGLANG_ENABLE_SPEC_V2=1` as an environment variable. Qwen3.6 is a hybrid Mamba/Attention MoE and SGLang 0.5.10 refuses to start with speculative decoding + radix cache unless both are set.
    - `--mem-fraction-static 0.78` (H200 hosts only Qwen + Phase 2-4 worker; VibeVoice runs on a separate Phase 1 host).
-   - `--context-length 131072`, `--chunked-prefill-size 8192`, `--schedule-policy lpm` (unchanged).
+   - `--context-length 65536` (reduced from the spec-original 131072 during the 2026-04-17 DO-speedup-and-OSS-swap to reclaim KV-cache headroom after FP8 KV + MTP were enabled), `--chunked-prefill-size 8192`, `--schedule-policy lpm`.
    - `--reasoning-parser qwen3` (required for Qwen3.6 response format).
    - `--grammar-backend xgrammar` (kept for step 1 to isolate the model swap from a grammar-backend swap; §6 R1 describes the `llguidance` follow-up).
 4. **Thinking mode:** disabled at every call site via `chat_template_kwargs.enable_thinking=False`. Qwen3.6 **does not** support the `/think` / `/nothink` soft switch; the chat-template kwarg is the only correct toggle. `LocalOpenAIQwenClient.generate_json` sends it as a top-level field on the chat-completion payload (alongside `top_k` and `min_p`) because the client uses stdlib `urllib.request`, not the OpenAI Python SDK, so SDK-side `extra_body` unwrapping does not apply.
@@ -121,7 +121,7 @@ No client-side logic changes. `LocalOpenAIQwenClient.generate_json` already sets
     --host 127.0.0.1 --port 8001 \
     --reasoning-parser qwen3 --grammar-backend xgrammar \
     --schedule-policy lpm --chunked-prefill-size 8192 \
-    --mem-fraction-static 0.78 --context-length 131072 \
+    --mem-fraction-static 0.78 --context-length 65536 \
     --kv-cache-dtype fp8_e4m3 \
     --mamba-scheduler-strategy extra_buffer \
     --speculative-algorithm NEXTN --speculative-num-steps 3 \

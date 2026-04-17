@@ -85,8 +85,11 @@ Current H200 SGLang (Qwen3.6-35B-A3B) flags:
 - `--context-length 65536` (reduced from 131072 to reclaim KV-cache headroom)
 - `--kv-cache-dtype fp8_e4m3`
 - `--mem-fraction-static 0.78`
-- `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-num-draft-tokens 4`
-- `HF_HUB_OFFLINE=1` (prevents DNS failures on startup)
+- `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4`
+- `--mamba-scheduler-strategy extra_buffer` (required by Qwen3.6 hybrid Mamba/Attention when MTP + radix cache are both on)
+- `--schedule-policy lpm`, `--chunked-prefill-size 8192`
+- `--grammar-backend xgrammar`, `--reasoning-parser qwen3`
+- systemd environment: `HF_HUB_OFFLINE=1` (prevents DNS failures on startup) and `SGLANG_ENABLE_SPEC_V2=1` (required by SGLang 0.5.10 for MTP + radix cache on the Mamba hybrid)
 - Effective limits: `max_total_num_tokens=1,739,188`, `max_running_requests=48`
 
 No-fallback rule: `backend/providers/config.py` requires

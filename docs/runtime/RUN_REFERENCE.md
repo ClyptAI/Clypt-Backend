@@ -61,7 +61,7 @@ DO-speedup-and-OSS-swap branch baseline, `openclawyc.mp4` (22m 36s):
 | Phase 3 (LR prefetch during media_prep) | ~40–65ms |
 | Full pipeline end-to-end | ~5m 22s – 5m 56s |
 
-Config: RTX vLLM `--gpu-memory-utilization 0.77 --max-num-seqs 2 --dtype bfloat16`; SGLang `--context-length 65536`; node-media prep concurrency 8 (`-c:v h264_cuvid`); multimodal embedding chained inside Phase 2 pool (max_workers=32).
+Config: RTX vLLM `--gpu-memory-utilization 0.77 --max-num-seqs 2 --dtype bfloat16`, CUDA graph capture enabled, no speculative decoding; SGLang `--context-length 65536 --kv-cache-dtype fp8_e4m3 --mem-fraction-static 0.78 --speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mamba-scheduler-strategy extra_buffer --schedule-policy lpm --chunked-prefill-size 8192 --grammar-backend xgrammar --reasoning-parser qwen3` plus `HF_HUB_OFFLINE=1` and `SGLANG_ENABLE_SPEC_V2=1`; node-media prep concurrency 8 (ffmpeg `-c:v h264_cuvid` NVDEC → `-c:v h264_nvenc` NVENC); multimodal embedding chained inside Phase 2 pool (Gemini `embed_media_uris` `max_workers=32`); Phase 2 output token caps `8192` (merge/boundary); Phase 4 pool/meta caps `4096`.
 
 ## 5) Recorded Phase 2-4 Timing Snapshots (mrbeastflagrant)
 

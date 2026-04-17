@@ -301,11 +301,18 @@ to them.
 | `CLYPT_PHASE4_SUBGRAPH_MAX_OUTPUT_TOKENS` | `4096` |
 | `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS` | `4096` |
 | `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT` | `16` |
+| `CLYPT_PHASE4_SUBGRAPH_OVERLAP_DEDUPE_THRESHOLD` | `0.70` |
 
 > Renamed (2026-04-16): `CLYPT_PHASE2_MAX_CONCURRENT` is now
 > `CLYPT_PHASE2_MERGE_MAX_CONCURRENT` (to mirror `*_BOUNDARY_MAX_CONCURRENT`).
 > The old name now raises `ValueError` at config load.
-| `CLYPT_PHASE4_SUBGRAPH_OVERLAP_DEDUPE_THRESHOLD` | `0.70` |
+
+> Retuned (2026-04-17 DO-speedup-and-OSS-swap):
+> - `CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS` / `CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS`: `32768` → `8192`.
+>   The 32768 cap was ~4x typical response size and negated MTP gains.
+> - `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS` / `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS`: `2048` → `4096`.
+>   Phase 4 pool/meta on 20+ minute videos routinely exceeded 2048 tokens
+>   and was hitting `finish_reason=length` (see `docs/ERROR_LOG.md`).
 
 ### 5.2 Phase 4 budget knobs
 
@@ -388,8 +395,14 @@ Current effective SGLang flags (DO-speedup-and-OSS-swap baseline):
 - `--context-length 65536` (reduced from 131072 to reclaim KV-cache headroom)
 - `--kv-cache-dtype fp8_e4m3`
 - `--mem-fraction-static 0.78`
-- `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-num-draft-tokens 4`
+- `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4`
+- `--mamba-scheduler-strategy extra_buffer` (required by Qwen3.6 hybrid Mamba/Attention when MTP + radix cache are both on)
+- `--schedule-policy lpm`
+- `--chunked-prefill-size 8192`
+- `--grammar-backend xgrammar`
+- `--reasoning-parser qwen3`
 - `HF_HUB_OFFLINE=1` (set in the systemd unit to prevent DNS failures at startup)
+- `SGLANG_ENABLE_SPEC_V2=1` (environment variable, set in the systemd unit; required by SGLang 0.5.10 to run speculative decoding + radix cache on the Mamba/Attention hybrid)
 - Effective runtime limits: `max_total_num_tokens=1,739,188`, `max_running_requests=48`
 
 > Removed (2026-04-16 Qwen3.6 + SGLang cutover): `CLYPT_VLLM_PROFILE`,

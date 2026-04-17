@@ -22,6 +22,31 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > tenant. The flag band and `PYTORCH_CUDA_ALLOC_CONF` hint called out in the
 > co-tenancy entry are no longer in effect.
 
+## 2026-04-17 - Phase 2 merge/boundary token cap too high (32768) wasted MTP budget
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** Phase 2 merge + boundary local LLM calls (`backend/pipeline/phase2/`)
+- **Environment:** DO H200, `clypt-v31-phase24-local-worker`, SGLang Qwen3.6-35B-A3B with NextN MTP + FP8 KV.
+- **Symptom / Error signature:** Per-call wall-clock for Phase 2 merge/boundary was higher than predicted from the SGLang bench curves. Investigation showed SGLang was decoding against a 32768-token output budget even when actual responses came back in the 1.5–5 kB range (~1500 tokens). MTP speculative decoding efficiency drops off when the server is pre-allocating KV slots for a max output that is ~4x the realized length: concurrent slots are tied up unnecessarily and the scheduler falls back to single-sequence draft acceptance more often.
+- **Root cause:** `CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS` and `CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS` were both set to `32768` — the historical Qwen3.5-27B-era default that predates MTP + FP8 KV and predates the Phase 2 prompt trimming from 2026-04-16. At those prompt sizes, 32768 is approximately 4x the realistic upper bound on Phase 2 merge/boundary responses.
+- **Fix applied:** Lowered both caps to `8192`: `CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS=8192` and `CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS=8192`. Updated `.env.example`, `docs/runtime/known-good.env`, and `docs/runtime/ENV_REFERENCE.md`. Code defaults in `backend/providers/config.py` and the Phase 2 pipeline stage config also updated so the values apply uniformly whether or not the operator has overridden them.
+- **Verification evidence:** Re-run on `openclawyc.mp4` showed Phase 2 merge/boundary wall-clock dropped into the expected band without any increase in `finish_reason=length` warnings (all responses continued to finish well below 8192 tokens).
+- **Follow-up guardrails:** Keep Phase 2 output caps around 4–6x the p95 response length observed in prod. Do not raise them back toward 32768 without evidence that Phase 2 is actually producing longer structured outputs. If Phase 2 prompts are rewritten to request substantially larger outputs in the future, re-profile first and adjust as a deliberate change (not as a copy-paste from the Phase 1 Qwen3.5 baseline).
+
+## 2026-04-17 - SGLang Qwen3.6 serving flags consolidated (context, MTP, scheduler, grammar, offline mode)
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** SGLang Qwen3.6-35B-A3B serving (`clypt-sglang-qwen.service`, H200); launch flag contract in `scripts/do_phase1_visual/deploy_sglang_qwen_service.sh`.
+- **Environment:** DO H200 droplet; SGLang 0.5.10; model cached locally at `/opt/clypt-phase1/hf-cache`; serving on `127.0.0.1:8001`.
+- **Symptom / Error signature:** Several serving defects accumulated on the pre-2026-04-17 flag set: (a) the Qwen3.6 hybrid Mamba/Attention path refused to run MTP + radix cache together until `SGLANG_ENABLE_SPEC_V2=1` was exported, (b) the configured `--context-length 131072` left too little KV headroom for concurrent Phase 2-4 calls under FP8 KV + MTP, (c) `--speculative-eagle-topk` was omitted so the NextN MTP draft heads fell back to a non-optimal top-1 behavior without being explicitly pinned, (d) `--mamba-scheduler-strategy extra_buffer`, `--grammar-backend xgrammar`, and `--reasoning-parser qwen3` were not all pinned in the committed unit, leaving direct-boot hosts at risk of drifting to SGLang defaults that do not match the Phase 4 schema-compile contract.
+- **Root cause:** The launch flag set had been accumulating across the 2026-04-16 Qwen3.5→3.6 cutover and the 2026-04-17 MTP + FP8-KV enablement, and the committed systemd unit had drifted behind the effective deploy-script-rewritten command. A direct-boot without the deploy script was producing a launch line that differed from the canary-validated line.
+- **Fix applied:**
+  - **Launch flags consolidated into the committed unit.** `scripts/do_phase1_visual/systemd/clypt-sglang-qwen.service` `ExecStart` is now the authoritative line: `--context-length 65536 --kv-cache-dtype fp8_e4m3 --mem-fraction-static 0.78 --speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mamba-scheduler-strategy extra_buffer --schedule-policy lpm --chunked-prefill-size 8192 --grammar-backend xgrammar --reasoning-parser qwen3`, with `Environment=HF_HUB_OFFLINE=1` and `Environment=SGLANG_ENABLE_SPEC_V2=1`. Direct-boot hosts now serve the same contract as deploy-script-run hosts.
+  - **`SG_CONTEXT_LENGTH` default lowered to `65536`** in both `deploy_sglang_qwen_service.sh` and `docs/runtime/known-good.env`. The historical `131072` default is explicitly stale.
+  - **Docs pass:** `docs/ARCHITECTURE.md`, `docs/runtime/RUNTIME_GUIDE.md`, `docs/runtime/ENV_REFERENCE.md`, `docs/runtime/RUN_REFERENCE.md`, `docs/deployment/P1_DEPLOY.md`, `AGENTS.md`, and the active spec `docs/specs/2026-04-16_qwen36_swap_and_sglang_tuning_spec.md` were all updated to list the full flag set and the two env vars.
+- **Verification evidence:** `clypt-sglang-qwen.service` starts cleanly with the consolidated unit; `/health` returns 200; `/v1/models` lists the Qwen3.6 model; bench of `phase4_subgraph` / `phase3_long_range` / `phase2_merge` shows the expected MTP speedups without any Mamba-scheduler boot failures.
+- **Follow-up guardrails:** Any change to the SGLang flag set must update the committed systemd unit, `deploy_sglang_qwen_service.sh`, `docs/runtime/known-good.env`, `docs/runtime/ENV_REFERENCE.md`, `docs/ARCHITECTURE.md`, and `docs/runtime/RUNTIME_GUIDE.md` in the same commit. Direct-boot drift is the specific risk the consolidated unit is guarding against; do not "simplify" the unit by removing flags that match SGLang defaults, because those defaults drift between SGLang releases.
+
 ## 2026-04-17 - SGLang HF_HUB_OFFLINE missing caused DNS failures on startup
 
 - **Date/Time (UTC):** 2026-04-17
