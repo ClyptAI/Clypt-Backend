@@ -80,7 +80,7 @@ def build_node_signal_links(
             ],
         }
 
-        selected_ids = resolve_cluster_span_with_llm(
+        selected = resolve_cluster_span_with_llm(
             llm_client=llm_client,
             model=model,
             cluster=cluster,
@@ -88,7 +88,7 @@ def build_node_signal_links(
             fail_fast=fail_fast,
             event_logger=signal_event_logger,
         )
-        direct_ids = [node_id for node_id in selected_ids if node_id in node_by_id]
+        direct_ids = [node_id for node_id in selected.node_ids if node_id in node_by_id]
         if not direct_ids:
             raise SignalLLMCallError(
                 callpoint_id="5",

@@ -23,6 +23,12 @@ from .llm_runtime import (
     generate_cluster_prompt_with_llm,
     synthesize_trend_queries_with_llm,
 )
+from .responses import (
+    SignalsCommentClassificationResponse,
+    SignalsThreadConsolidationResponse,
+    SignalsTrendQueryResponse,
+    SignalsTrendRelevanceResponse,
+)
 from .trends_client import TrendSpygClient, to_external_signals_from_trends
 
 _COMMENT_CLASSIFY_BATCH_SIZE = 12
@@ -190,7 +196,7 @@ def _build_comments_output(
     )
 
     # Callpoint #10: per-thread consolidation (parallel).
-    thread_intents: list[dict[str, Any] | None] = [None] * len(selected_threads)
+    thread_intents: list[SignalsThreadConsolidationResponse | None] = [None] * len(selected_threads)
     with ThreadPoolExecutor(
         max_workers=_signal_max_workers(cfg=cfg, task_count=len(selected_threads))
     ) as pool:
@@ -208,7 +214,10 @@ def _build_comments_output(
         for future in as_completed(futures):
             idx = futures[future]
             thread_intents[idx] = future.result()
-    thread_intents = [item or {} for item in thread_intents]
+    thread_intents_dump = [
+        item.model_dump(mode="json") if item is not None else {}
+        for item in thread_intents
+    ]
 
     signals = to_external_signals_from_threads(thread_items=selected_threads, include_replies=True)
     thread_signal_text_by_id = {
@@ -228,7 +237,7 @@ def _build_comments_output(
     # Callpoint #3: quality filter (micro-batched + parallel).
     filtered_signals: list[ExternalSignal] = []
     signal_batches = _chunked(signals, _COMMENT_CLASSIFY_BATCH_SIZE)
-    classified_batches: list[list[dict[str, Any]] | None] = [None] * len(signal_batches)
+    classified_batches: list[list[SignalsCommentClassificationResponse] | None] = [None] * len(signal_batches)
     with ThreadPoolExecutor(
         max_workers=_signal_max_workers(cfg=cfg, task_count=len(signal_batches))
     ) as pool:
@@ -252,9 +261,9 @@ def _build_comments_output(
         strict=True,
     ):
         for signal, classified in zip(batch_signals, batch_classifications, strict=True):
-            quality = str(classified.get("quality") or "").strip().lower()
+            quality = str(classified.quality).strip().lower()
             signal.metadata["quality"] = quality
-            signal.metadata["quality_reason"] = str(classified.get("reason") or "")
+            signal.metadata["quality_reason"] = str(classified.reason or "")
             if quality in {"spam", "low_signal"}:
                 continue
             filtered_signals.append(signal)
@@ -291,7 +300,7 @@ def _build_comments_output(
             }
             for future in as_completed(futures):
                 idx = futures[future]
-                prompt_texts[idx] = future.result()
+                prompt_texts[idx] = future.result().prompt
         for idx, (cluster, prompt_text) in enumerate(zip(clusters, prompt_texts, strict=True), start=1):
             prompt_specs.append(
                 SignalPromptSpec(
@@ -312,7 +321,7 @@ def _build_comments_output(
             "threads_total": total_threads,
             "threads_selected": len(selected_threads),
             "replies_total": replies_total,
-            "thread_intents": thread_intents,
+            "thread_intents": thread_intents_dump,
         },
     )
 
@@ -344,13 +353,14 @@ def _build_trends_output(
             for node in nodes[:120]
         ],
     }
-    queries = synthesize_trend_queries_with_llm(
+    queries_response: SignalsTrendQueryResponse = synthesize_trend_queries_with_llm(
         llm_client=llm_client,
         model=cfg.llm.model_9,
         video_context=video_context,
         fail_fast=cfg.llm_fail_fast,
         event_logger=signal_event_logger,
     )
+    queries = [str(query).strip() for query in queries_response.queries if str(query).strip()]
     if not queries:
         return SignalPipelineOutput(metadata={"trend_queries": []})
 
@@ -378,7 +388,7 @@ def _build_trends_output(
         for batch in _chunked(trend_items, _TREND_RELEVANCE_BATCH_SIZE):
             batch_jobs.append((query_idx, batch))
 
-    batch_results: list[list[dict[str, Any]] | None] = [None] * len(batch_jobs)
+    batch_results: list[list[SignalsTrendRelevanceResponse] | None] = [None] * len(batch_jobs)
     if batch_jobs:
         with ThreadPoolExecutor(
             max_workers=_signal_max_workers(cfg=cfg, task_count=len(batch_jobs))
@@ -411,14 +421,14 @@ def _build_trends_output(
                 f"{query!r}: expected {len(trend_items)} got {len(adjudications)}"
             )
         for item, adjudication in zip(trend_items, adjudications, strict=True):
-            keep = bool(adjudication.get("keep"))
-            relevance = float(adjudication.get("relevance") or 0.0)
+            keep = bool(adjudication.keep)
+            relevance = float(adjudication.relevance or 0.0)
             if not keep and relevance < float(cfg.trend_relevance_threshold):
                 continue
             signals = to_external_signals_from_trends(query=query, items=[item])
             for signal in signals:
                 signal.metadata["relevance"] = relevance
-                signal.metadata["relevance_reason"] = str(adjudication.get("reason") or "")
+                signal.metadata["relevance_reason"] = str(adjudication.reason or "")
                 retained_signals.append(signal)
 
     if not retained_signals:
@@ -451,7 +461,7 @@ def _build_trends_output(
             }
             for future in as_completed(futures):
                 idx = futures[future]
-                prompt_texts[idx] = future.result()
+                prompt_texts[idx] = future.result().prompt
         for idx, (cluster, prompt_text) in enumerate(zip(clusters, prompt_texts, strict=True), start=1):
             prompt_specs.append(
                 SignalPromptSpec(
@@ -475,12 +485,16 @@ def _build_trends_output(
     )
 
 
-def _build_thread_signal_text(*, thread: dict[str, Any], consolidated: dict[str, Any]) -> str:
+def _build_thread_signal_text(
+    *,
+    thread: dict[str, Any],
+    consolidated: SignalsThreadConsolidationResponse,
+) -> str:
     top_comment = _top_comment_text(thread)
-    summary = str(consolidated.get("thread_summary") or "").strip()
+    summary = str(consolidated.thread_summary).strip()
     hints = [
         str(item).strip()
-        for item in list(consolidated.get("moment_hints") or [])
+        for item in list(consolidated.moment_hints)
         if str(item).strip()
     ]
     lines: list[str] = []
