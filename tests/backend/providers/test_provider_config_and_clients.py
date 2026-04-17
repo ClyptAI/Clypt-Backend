@@ -804,7 +804,7 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     assert settings.phase24_worker.admission_metrics_path == "/tmp/admission_metrics.json"
     assert settings.phase24_worker.block_on_phase1_active is True
     assert settings.phase24_local_queue.queue_backend == "local_sqlite"
-    assert str(settings.phase24_local_queue.path).endswith("backend/outputs/phase24.sqlite")
+    assert settings.phase24_local_queue.path == Path("backend/outputs/phase24.sqlite")
     assert settings.phase24_local_queue.poll_interval_ms == 700
     assert settings.phase24_local_queue.lease_timeout_s == 1200
     assert settings.phase24_local_queue.max_inflight == 3
