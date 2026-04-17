@@ -70,15 +70,17 @@ for required in \
   fi
 done
 
-# Require at least one of the VibeVoice-ASR URL/token pairs (new or deprecated name).
-for pair in URL TOKEN; do
-  new_name="CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_${pair}"
-  old_name="CLYPT_PHASE1_AUDIO_HOST_${pair}"
-  if ! /usr/bin/env -i bash -c "set -a; source '$ENV_FILE'; set +a; [[ -n \${$new_name:-} || -n \${$old_name:-} ]]" >/dev/null 2>&1; then
-    echo "[deploy-visual] ERROR: set $new_name (or legacy $old_name) in $ENV_FILE." >&2
-    exit 1
-  fi
-done
+# Require the VibeVoice-ASR service URL (new canonical name or deprecated alias).
+if ! /usr/bin/env -i bash -c "set -a; source '$ENV_FILE'; set +a; [[ -n \${CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL:-} || -n \${CLYPT_PHASE1_AUDIO_HOST_URL:-} ]]" >/dev/null 2>&1; then
+  echo "[deploy-visual] ERROR: set CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL (or legacy CLYPT_PHASE1_AUDIO_HOST_URL) in $ENV_FILE." >&2
+  exit 1
+fi
+# Require the bearer token under any of the accepted aliases (canonical is
+# _AUTH_TOKEN; code also accepts _TOKEN and the legacy _AUDIO_HOST_TOKEN).
+if ! /usr/bin/env -i bash -c "set -a; source '$ENV_FILE'; set +a; [[ -n \${CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN:-} || -n \${CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TOKEN:-} || -n \${CLYPT_PHASE1_AUDIO_HOST_TOKEN:-} ]]" >/dev/null 2>&1; then
+  echo "[deploy-visual] ERROR: set CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN (or legacy CLYPT_PHASE1_AUDIO_HOST_TOKEN) in $ENV_FILE." >&2
+  exit 1
+fi
 
 # Hard-fail if VibeVoice vLLM envs are still on the H200 — vLLM runs on the RTX
 # box, not here.
