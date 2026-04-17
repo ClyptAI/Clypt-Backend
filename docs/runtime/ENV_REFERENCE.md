@@ -142,13 +142,15 @@ startup fails fast if either is missing.
 ### 3.4 VibeVoice local vLLM settings (RTX 6000 Ada only)
 
 These live on the RTX host, not the H200. The FastAPI service
-loads them when building its in-process VibeVoice vLLM client. Because
-the RTX box is a sole tenant for VibeVoice, the systemd unit launches
-vLLM with its default/sole-tenant flags; the earlier
-`--max-num-seqs 1 / --max-model-len 32768 / --enforce-eager /
---gpu-memory-utilization 0.60 /
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` co-tenancy
-workarounds have been removed.
+loads them when building its in-process VibeVoice vLLM client. The
+systemd unit launches vLLM with current sole-tenant flags:
+`--gpu-memory-utilization 0.77` (leaves ~8 GiB for NVDEC contexts),
+`--max-num-seqs 2`, `--dtype bfloat16`, CUDA graph capture enabled
+(`enforce_eager=False`). No speculative decoding (VibeVoice is Whisper
+encoder-decoder). The earlier co-tenancy workarounds
+(`--max-num-seqs 1`, `--max-model-len 32768`, `--enforce-eager`,
+`--gpu-memory-utilization 0.60`,
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`) have been removed.
 
 | Env | Default | Notes |
 |---|---|---|
@@ -285,8 +287,8 @@ to them.
 | `CLYPT_PHASE2_MAX_TURNS_PER_BATCH` | `25` |
 | `CLYPT_PHASE2_MERGE_MAX_CONCURRENT` | `16` |
 | `CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT` | `16` |
-| `CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS` | `32768` |
-| `CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS` | `32768` |
+| `CLYPT_PHASE2_MERGE_MAX_OUTPUT_TOKENS` | `8192` |
+| `CLYPT_PHASE2_BOUNDARY_MAX_OUTPUT_TOKENS` | `8192` |
 | `CLYPT_PHASE3_TARGET_BATCH_COUNT` | `3` |
 | `CLYPT_PHASE3_MAX_NODES_PER_BATCH` | `24` |
 | `CLYPT_PHASE3_LOCAL_MAX_OUTPUT_TOKENS` | `4096` |
@@ -295,9 +297,9 @@ to them.
 | `CLYPT_PHASE3_LONG_RANGE_PAIRS_PER_SHARD` | `24` |
 | `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT` | `24` |
 | `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT` | `24` |
-| `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS` | `2048` |
+| `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS` | `4096` |
 | `CLYPT_PHASE4_SUBGRAPH_MAX_OUTPUT_TOKENS` | `4096` |
-| `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS` | `2048` |
+| `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS` | `4096` |
 | `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT` | `16` |
 
 > Renamed (2026-04-16): `CLYPT_PHASE2_MAX_CONCURRENT` is now
@@ -381,6 +383,14 @@ SGLang startup flags for the Qwen3.6 service are driven by `SG_*` knobs in
 `scripts/do_phase1_visual/deploy_sglang_qwen_service.sh` and the
 `clypt-sglang-qwen.service` systemd unit on the H200, not via
 Python-level envs.
+
+Current effective SGLang flags (DO-speedup-and-OSS-swap baseline):
+- `--context-length 65536` (reduced from 131072 to reclaim KV-cache headroom)
+- `--kv-cache-dtype fp8_e4m3`
+- `--mem-fraction-static 0.78`
+- `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-num-draft-tokens 4`
+- `HF_HUB_OFFLINE=1` (set in the systemd unit to prevent DNS failures at startup)
+- Effective runtime limits: `max_total_num_tokens=1,739,188`, `max_running_requests=48`
 
 > Removed (2026-04-16 Qwen3.6 + SGLang cutover): `CLYPT_VLLM_PROFILE`,
 > `CLYPT_VLLM_MAX_NUM_SEQS`, `CLYPT_VLLM_MAX_NUM_BATCHED_TOKENS`,

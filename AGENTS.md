@@ -112,8 +112,8 @@ python -m backend.runtime.run_phase24_local_worker --worker-id local-worker-1
 - `VIBEVOICE_VLLM_MODEL` must be `vibevoice` **on the RTX 6000 Ada**. VibeVoice envs must not be set on the H200.
 - `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required on both hosts.
 - Phase 1 is split across two hosts:
-  - **H200**: visual chain (RF-DETR + ByteTrack), **post-ASR audio chain in-process (NFA → emotion2vec+ → YAMNet CPU)**, Phase 1 orchestrator, Phase 2-4 queue + worker, SGLang Qwen on `:8001`.
-  - **RTX 6000 Ada (sole tenant)**: VibeVoice vLLM ASR + ffmpeg NVENC node-media prep, served via one FastAPI app with `POST /tasks/vibevoice-asr` and `POST /tasks/node-media-prep`. The vLLM service runs with default / sole-tenant flags — no co-tenancy hacks.
+  - **H200**: visual chain (RF-DETR + ByteTrack), **post-ASR audio chain in-process (NFA → emotion2vec+ → YAMNet CPU)**, Phase 1 orchestrator, Phase 2-4 queue + worker, SGLang Qwen on `:8001`. Current SGLang flags: `--context-length 65536`, `--kv-cache-dtype fp8_e4m3`, `--mem-fraction-static 0.78`, speculative NEXTN (3 steps, 4 draft tokens), `HF_HUB_OFFLINE=1`.
+  - **RTX 6000 Ada (sole tenant)**: VibeVoice vLLM ASR + ffmpeg NVENC/NVDEC node-media prep, served via one FastAPI app with `POST /tasks/vibevoice-asr` and `POST /tasks/node-media-prep`. Current vLLM flags: `--gpu-memory-utilization 0.77 --max-num-seqs 2 --dtype bfloat16`, CUDA graph capture enabled, no speculative decoding.
 - There is **no local fallback**. `backend/providers/config.py` requires `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL`, `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN`, `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`, and `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` on the H200. Missing any of these fails fast at startup. The legacy `CLYPT_PHASE1_AUDIO_HOST_URL` / `CLYPT_PHASE1_AUDIO_HOST_TOKEN` names are still accepted as deprecated aliases for one release.
 - The H200 Python client is `RemoteVibeVoiceAsrClient` (legacy alias: `RemoteAudioChainClient`); the response type is `VibeVoiceAsrResponse` (legacy alias: `PhaseOneAudioResponse`); the settings type is `VibeVoiceAsrServiceSettings` (legacy alias: `AudioHostSettings`).
 - Phase 1 audio chain (in-process NFA → emotion2vec+ → YAMNet) must launch immediately after the VibeVoice ASR HTTP call returns, not after RF-DETR finishes.
@@ -125,7 +125,7 @@ python -m backend.runtime.run_phase24_local_worker --worker-id local-worker-1
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
 - Qwen serving target is the SGLang service on H200 `127.0.0.1:8001`.
 - `CLYPT_PHASE1_ASR_BACKEND` (if set at all) only accepts `vllm`. The active ASR path is a remote HTTP call to the RTX VibeVoice ASR service; the H200 has no in-process VibeVoice provider.
-- Node-media prep is always delegated to the RTX host. Do not re-introduce an in-process ffmpeg fallback on the H200 — H200 NVENC returns `unsupported device (2)`.
+- Node-media prep is always delegated to the RTX host. Do not re-introduce an in-process ffmpeg fallback on the H200 — H200 NVENC returns `unsupported device (2)`. NVDEC clip extraction uses `-c:v h264_cuvid` (explicit, not just `-hwaccel cuda`). Max concurrency is 8 (`CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY`); 16 OOMs NVENC input buffers at the current vLLM footprint.
 - NFA / emotion2vec+ / YAMNet are installed from `requirements-do-phase1-visual.txt` on the H200 only. Do not add them to `requirements-do-phase1-audio.txt` — the RTX host must stay a narrow VibeVoice + ffmpeg box.
 
 ## Critical Maintenance Rule

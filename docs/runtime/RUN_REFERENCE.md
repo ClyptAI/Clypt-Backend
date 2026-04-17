@@ -15,6 +15,7 @@ This document records known baseline runs and recent migration test attempts.
 | Queue worker benchmark rerun | `mrbeastflagrant.mp4` | 392.9s | 104 | n/a | 421.2s | n/a | `run_20260409_1517_phase24_bench` |
 | Queue worker tuned replay | `mrbeastflagrant.mp4` | 392.9s | 104 | n/a | 143.8s | n/a | `run_20260409_175717_phase24_dispatch` |
 | Longer clip stress reference | `joeroganflagrant.mp4` | 788.7s | 201 | 285s | incomplete | incomplete | historical quota/compute pressure |
+| DO-speedup-and-OSS-swap baseline | `openclawyc.mp4` | 1356s (22m 36s) | — | ~200s | ~123–154s | ~322–354s (~5m 22s–5m 56s) | RTX vLLM 0.77/2-seqs/bf16; SGLang ctx 65536; Phase 3 LR prefetch; GCS-upload-bound media_prep |
 
 ## 2) Supplemental Historical Runs
 
@@ -47,7 +48,22 @@ This document records known baseline runs and recent migration test attempts.
   [`../deployment/P1_DEPLOY.md`](../deployment/P1_DEPLOY.md) and
   [`../deployment/P1_AUDIO_HOST_DEPLOY.md`](../deployment/P1_AUDIO_HOST_DEPLOY.md).
 
-## 4) Recorded Phase 2-4 Timing Snapshots
+## 4) Recorded Phase 1 + Phase 2-4 Timing Snapshots (openclawyc, 2026-04-17)
+
+DO-speedup-and-OSS-swap branch baseline, `openclawyc.mp4` (22m 36s):
+
+| Sub-component | Wall-clock |
+|---|---|
+| Phase 1 total | ~200s |
+| VibeVoice ASR (RTX, sole tenant) | ~159–167s |
+| node-media prep (RTX, GCS-upload bound) | ~90–124s |
+| Phase 2-4 total | ~123–154s |
+| Phase 3 (LR prefetch during media_prep) | ~40–65ms |
+| Full pipeline end-to-end | ~5m 22s – 5m 56s |
+
+Config: RTX vLLM `--gpu-memory-utilization 0.77 --max-num-seqs 2 --dtype bfloat16`; SGLang `--context-length 65536`; node-media prep concurrency 8 (`-c:v h264_cuvid`); multimodal embedding chained inside Phase 2 pool (max_workers=32).
+
+## 5) Recorded Phase 2-4 Timing Snapshots (mrbeastflagrant)
 
 ### 5.1 Queue baseline (`job_430a676441ab42af8a43a25d190dbc13`)
 
@@ -72,7 +88,7 @@ This document records known baseline runs and recent migration test attempts.
 - Total: `143,816.557 ms`
 - Spanner summary: `node_count=23`, `edge_count=109`, `candidate_count=11`
 
-## 5) Candidate Snapshot References
+## 6) Candidate Snapshot References
 
 ### 6.1 Successful mrbeast run (ranked excerpt)
 
@@ -90,7 +106,7 @@ This document records known baseline runs and recent migration test attempts.
 4. `00:00.00-00:32.20`
 5. `05:47.95-06:17.91`
 
-## 6) How To Use This Reference
+## 7) How To Use This Reference
 
 - Use this file as the baseline target when validating runtime/deploy changes.
 - Compare new runs against these numbers before claiming improvements.

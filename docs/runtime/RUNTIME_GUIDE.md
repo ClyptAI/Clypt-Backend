@@ -53,7 +53,11 @@ the Phase 2-4 enqueue without waiting for visual join.
 - **Qwen serving env:** dedicated SGLang env at
   `/opt/clypt-phase1/venvs/sglang`, driven by
   `SG_SCHEDULE_POLICY`, `SG_CHUNKED_PREFILL_SIZE`, `SG_MEM_FRACTION_STATIC`,
-  `SG_CONTEXT_LENGTH`, `SG_EXTRA_ARGS`.
+  `SG_CONTEXT_LENGTH`, `SG_EXTRA_ARGS`. Current effective flags:
+  `--context-length 65536` (reduced from 131072),
+  `--kv-cache-dtype fp8_e4m3`, `--mem-fraction-static 0.78`,
+  `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-num-draft-tokens 4`,
+  `HF_HUB_OFFLINE=1`.
 - **Phase 2-4 dispatch path:** local SQLite queue + local worker loop.
   `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`; Phase 1 enqueues through
   `Phase24LocalDispatcherClient`.
@@ -78,18 +82,33 @@ the Phase 2-4 enqueue without waiting for visual join.
   `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN` (legacy alias:
   `CLYPT_PHASE1_AUDIO_HOST_TOKEN`).
 - **vLLM:** `clypt-vllm-vibevoice.service` runs the VibeVoice container at
-  `127.0.0.1:8000`. Because this host is a sole tenant for VibeVoice,
-  vLLM runs with its default/sole-tenant flags — no more co-tenancy
-  workarounds (`--max-num-seqs 1`, `--max-model-len 32768`,
-  `--enforce-eager`, `--gpu-memory-utilization 0.60`, or
-  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`).
+  `127.0.0.1:8000`. Current sole-tenant vLLM flags:
+  - `--gpu-memory-utilization 0.77` (leaves ~8 GiB free for NVDEC contexts)
+  - `--max-num-seqs 2`
+  - `--dtype bfloat16`
+  - CUDA graph capture enabled (`enforce_eager=False`, the default)
+  - No speculative decoding (VibeVoice is Whisper encoder-decoder, not
+    decoder-only; MTP heads do not apply)
+  - The earlier co-tenancy workarounds (`--max-num-seqs 1`,
+    `--max-model-len 32768`, `--enforce-eager`,
+    `--gpu-memory-utilization 0.60`,
+    `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`) are gone.
+- **Docker image:** VibeVoice is baked into the image (767 MB layer:
+  ffmpeg, libsndfile1, vibevoice[vllm] deps). Model weights are on the
+  host mount at `/root/.cache/huggingface`. Cold restart ~45 s.
 - **Providers held hot in-process:** VibeVoice vLLM client, GCS storage
   client. NFA, emotion2vec+, and YAMNet are **not** instantiated on this
   host anymore. Singletons are constructed lazily on first request via
   `backend/runtime/phase1_audio_service/deps.py`.
+- **Node-media prep NVDEC:** clip extraction uses `-c:v h264_cuvid`
+  (explicit NVDEC decode) + `h264_nvenc` (NVENC encode). Max concurrency
+  is 8 (`CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=8`); 16 OOMs the
+  NVENC input buffers at the current VRAM footprint. `-ss` seek is
+  output-side (after `-i`) — intentional; input seek was evaluated but
+  rejected.
 - **Concurrency:** one global `asyncio.Lock` serializes ASR on the GPU;
-  node-media prep runs under a bounded semaphore and can overlap with
-  ASR. Concurrency ceilings on the caller side are
+  node-media prep runs under a bounded semaphore (cap=8) and can overlap
+  with ASR. Concurrency ceilings on the caller side are controlled by
   `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY`.
 
 Why the split: H200 NVENC is unusable (`h264_nvenc` returns

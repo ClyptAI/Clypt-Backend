@@ -22,6 +22,42 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > tenant. The flag band and `PYTORCH_CUDA_ALLOC_CONF` hint called out in the
 > co-tenancy entry are no longer in effect.
 
+## 2026-04-17 - SGLang HF_HUB_OFFLINE missing caused DNS failures on startup
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** SGLang Qwen3.6-35B-A3B startup (`clypt-sglang-qwen.service`, H200)
+- **Environment:** DO H200 droplet; SGLang service at `127.0.0.1:8001`; model loaded from local HF cache.
+- **Symptom / Error signature:** SGLang scheduler crashed during startup with DNS resolution errors when the H200 droplet had limited or no outbound internet (private VPC, no default route, or transient DNS failure): errors of the form `socket.gaierror: [Errno -3] Temporary failure in name resolution` while SGLang attempted to contact `huggingface.co` to check for model updates.
+- **Root cause:** SGLang (and the underlying `transformers`/`huggingface_hub` libraries) will attempt to reach HuggingFace Hub on startup to resolve the latest model revision unless explicitly told not to. On a production H200 droplet where the model is already fully cached locally and outbound DNS/HTTP is constrained, this lookup stalls or errors, causing the service to crash before reaching healthy state.
+- **Fix applied:** Added `HF_HUB_OFFLINE=1` to the `clypt-sglang-qwen.service` systemd unit `Environment=` block. This instructs `huggingface_hub` to skip all network calls and use only the local cache. Verified model is fully resident in the HF cache on the H200 before relying on this flag.
+- **Verification evidence:** After adding `HF_HUB_OFFLINE=1`, `clypt-sglang-qwen.service` starts cleanly without DNS calls; `curl -fsS http://127.0.0.1:8001/health` returns 200 and `/v1/models` lists the Qwen model.
+- **Follow-up guardrails:** Keep `HF_HUB_OFFLINE=1` in the SGLang systemd unit for all production droplet deployments. If the model needs to be updated, temporarily remove the flag, pull the new revision to cache, then re-add the flag before restarting the service. Add this env to `docs/runtime/ENV_REFERENCE.md` SGLang flag documentation.
+
+## 2026-04-17 - Phase 4 pool and meta token cap was truncating LLM responses
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** Phase 4 pool subgraph generation (`backend/pipeline/phase4/`)
+- **Environment:** DO H200, `clypt-v31-phase24-local-worker`, SGLang Qwen3.6-35B-A3B.
+- **Symptom / Error signature:** Phase 4 pool LLM calls returned `finish_reason=length` with truncated JSON responses. The worker logged warnings such as `[local-openai] finish_reason=length — structured JSON reply may be token-capped` and downstream JSON parse occasionally failed on the truncated output.
+- **Root cause:** `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS` and `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS` were both set to `2048` (the historical default). Phase 4 pool and meta prompts for longer videos (22+ minutes) routinely generate responses in the 2500–3800 token range, so the 2048 cap was consistently triggering `finish_reason=length` and silently truncating structured output.
+- **Fix applied:** Raised both caps to `4096`: `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=4096` and `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096`. Updated `docs/runtime/ENV_REFERENCE.md` to reflect new defaults.
+- **Verification evidence:** Re-run on `openclawyc.mp4` (22m 36s) completed Phase 4 pool without any `finish_reason=length` warnings; all structured JSON responses parsed cleanly.
+- **Follow-up guardrails:** Monitor `finish_reason=length` log warnings as a sentinel for token cap underprovisioning. If longer source videos are added to the test bank, re-profile Phase 4 pool output lengths and adjust `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS` accordingly.
+
+## 2026-04-17 - NVENC silent CPU fallback in node-media prep: full fix chain
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** Phase 2 node-media prep ffmpeg clip extraction (RTX 6000 Ada host, `POST /tasks/node-media-prep`)
+- **Environment:** DO RTX 6000 Ada droplet; ffmpeg with NVDEC/NVENC; VibeVoice vLLM at `--gpu-memory-utilization 0.77`.
+- **Symptom / Error signature:** Clip extraction was silently falling back to CPU decode/encode despite NVDEC and NVENC being available on the card. ffmpeg ran without error but CPU utilization was unexpectedly high and throughput was lower than expected. Investigating `ffmpeg` process arguments and strace confirmed no NVDEC or NVENC codecs were actually in use.
+- **Root cause (three-stage fix chain):**
+  1. **Original bug:** ffmpeg command used `-hwaccel cuda -hwaccel_output_format cuda` with a seek (`-ss`) flag. The CUDA hwaccel filter graph fails to reinitialize after seek when `hwaccel_output_format cuda` is active, producing a filter reinit error that ffmpeg silently recovers from by falling back to CPU decode. The output was valid but fully software-decoded.
+  2. **First fix attempt:** Removed `-hwaccel_output_format cuda`, kept `-hwaccel cuda`. This avoided the filter reinit error but did **not** actually engage NVDEC. On ffmpeg 4.4, `-hwaccel cuda` alone does not force hardware decode codec selection — ffmpeg still selects a software decoder unless an explicit hardware decoder is named.
+  3. **Final fix:** Replaced the hwaccel flags with the explicit codec selection `-c:v h264_cuvid`. This directly names the NVDEC decoder and forces hardware decoding for H.264 input. Combined with `-c:v h264_nvenc` on the output side, both NVDEC and NVENC are fully engaged. Verified with `ffmpeg -report` that the selected decoder is `h264_cuvid` and encoder is `h264_nvenc`.
+- **Fix applied:** Updated node-media prep ffmpeg invocation to use `-c:v h264_cuvid` for decode. Max concurrency kept at 8 (`CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=8`); testing at concurrency 16 OOM'd the NVENC input buffers with vLLM seated at 0.77 GPU utilization (~8 GiB free). `-ss` seek remains output-side (after `-i`) — input-side seek was evaluated but rejected due to imprecise keyframe alignment on the test assets.
+- **Verification evidence:** `ffmpeg -report` confirmed `h264_cuvid` decoder and `h264_nvenc` encoder active on the RTX host. `nvidia-smi` showed NVDEC engine utilization during concurrent clip extraction. End-to-end `openclawyc.mp4` run completed node-media prep at ~90–124s wall-clock (GCS upload is the new bottleneck, not decode/encode).
+- **Follow-up guardrails:** Always use `-c:v h264_cuvid` (not just `-hwaccel cuda`) to force NVDEC. Do not raise node-media prep concurrency above 8 without re-profiling VRAM with the current vLLM footprint. GCS upload latency (~90–124s for 1080p clips) is the dominant bottleneck — the Phase 3 long-range prefetch window was added specifically to hide this latency.
+
 ## 2026-04-17 - Reverted NFA/emotion2vec+/YAMNet to H200; narrowed RTX to VibeVoice ASR + node-media-prep sole tenant
 
 - **Date/Time (UTC):** 2026-04-17

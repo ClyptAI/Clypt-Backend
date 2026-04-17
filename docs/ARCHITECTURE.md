@@ -68,6 +68,27 @@ Design rationale:
 - Keeping ffmpeg NVENC on the RTX host is still forced by the H200 NVENC
   bug, so node-media prep stays there.
 
+Current RTX 6000 Ada vLLM (VibeVoice) flags:
+- `--gpu-memory-utilization 0.77` — leaves ~8 GiB free for concurrent
+  NVDEC contexts during node-media prep
+- `--max-num-seqs 2`
+- `--dtype bfloat16`
+- CUDA graph capture enabled (`enforce_eager=False`, the default)
+- No speculative decoding — VibeVoice is an encoder-decoder (Whisper
+  architecture), not decoder-only; MTP/speculative heads do not apply.
+- VibeVoice weights and all Python deps are baked into the Docker image
+  (767 MB layer: ffmpeg, libsndfile1, vibevoice[vllm] dependencies).
+  Model weights live on a host mount at `/root/.cache/huggingface`.
+  Cold restart ~45 s (vs ~5 min before baking).
+
+Current H200 SGLang (Qwen3.6-35B-A3B) flags:
+- `--context-length 65536` (reduced from 131072 to reclaim KV-cache headroom)
+- `--kv-cache-dtype fp8_e4m3`
+- `--mem-fraction-static 0.78`
+- `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-num-draft-tokens 4`
+- `HF_HUB_OFFLINE=1` (prevents DNS failures on startup)
+- Effective limits: `max_total_num_tokens=1,739,188`, `max_running_requests=48`
+
 No-fallback rule: `backend/providers/config.py` requires
 `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL` /
 `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN` and
@@ -139,7 +160,15 @@ in-process VibeVoice or ffmpeg path on the orchestrator host.
   concurrency caps.
 - After raw nodes exist, semantic text embeddings and node-media prep
   are launched in parallel.
-- Multimodal embeddings begin as soon as media URIs arrive.
+- **Multimodal embedding is chained inside the Phase 2 pool** — it
+  begins as soon as media URIs arrive from node-media prep, with no
+  inter-pool gap. Gemini multimodal embedding `max_workers` is 32
+  (raised from 10).
+- **Phase 3 long-range adjudication is prefetched during the Phase 2
+  node-media prep window** (alongside the existing Phase 3 local
+  prefetch). This overlaps the GCS-upload-bound media_prep latency
+  with long-range pair selection, reducing Phase 3 wall-clock to
+  ~40–65 ms observed.
 - Phase 3 local-edge work can start from raw nodes before the rest of
   Phase 2 fully finishes.
 - Phase 3 local-edge and long-range lanes run concurrently, each with

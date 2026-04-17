@@ -140,16 +140,28 @@ cd /opt/clypt-audio-host/repo
 bash scripts/do_phase1_audio/deploy_vllm_service.sh
 ```
 
-Installs Docker + NVIDIA runtime if missing, clones the VibeVoice repo mount,
-builds `clypt-vllm-vibevoice:latest`, installs `clypt-vllm-vibevoice.service`,
-and waits for `http://127.0.0.1:8000/health` to go green. Because VibeVoice
-is the only GPU workload on this box now, the systemd unit runs with
-**default/sole-tenant** vLLM flags — no more `--max-num-seqs 1`,
-`--max-model-len 32768`, `--enforce-eager`, `--gpu-memory-utilization 0.60`,
-or `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. Those were
-workarounds for sharing the 48 GiB card with NFA, which has moved back to
-the H200. See `scripts/do_phase1_audio/deploy_vllm_service.sh` for the
-current flag set.
+Installs Docker + NVIDIA runtime if missing, builds
+`clypt-vllm-vibevoice:latest` (VibeVoice and all Python deps are **baked
+into the image** — 767 MB layer: ffmpeg, libsndfile1, vibevoice[vllm]
+deps), installs `clypt-vllm-vibevoice.service`, and waits for
+`http://127.0.0.1:8000/health` to go green. Model weights live on the
+host mount at `/root/.cache/huggingface`; cold restart takes ~45 s (vs
+~5 min before baking).
+
+Current systemd unit vLLM flags (sole-tenant tuned):
+- `--gpu-memory-utilization 0.77` — leaves ~8 GiB for concurrent NVDEC
+  contexts during node-media prep
+- `--max-num-seqs 2`
+- `--dtype bfloat16`
+- CUDA graph capture enabled (`enforce_eager=False`, the default)
+- No speculative decoding — VibeVoice is a Whisper encoder-decoder, not
+  decoder-only; MTP/speculative heads do not apply.
+
+The earlier co-tenancy workarounds (`--max-num-seqs 1`,
+`--max-model-len 32768`, `--enforce-eager`,
+`--gpu-memory-utilization 0.60`,
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`) are gone — they were
+required when NFA shared the card.
 
 ### 5.2 Audio host FastAPI
 
@@ -193,6 +205,20 @@ curl -fsS \
   via an `asyncio.Lock`. Node-media prep runs concurrently with ASR via
   a bounded semaphore but competes only for encoder slices, not general
   SM time.
+- **NVDEC/NVENC concurrency cap.** Clip extraction uses explicit
+  `-c:v h264_cuvid` (NVDEC hardware decode) + `h264_nvenc` (NVENC
+  encode). Max concurrency is **8** (`CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY`).
+  16 OOMs the NVENC input buffers with vLLM seated at 0.77 utilization
+  (~8 GiB free). Do not raise the cap above 8 without re-profiling VRAM.
+  The `-ss` seek is output-side (after `-i`) — intentional; input seek
+  was evaluated and rejected.
+- **NVDEC history.** Originally `-hwaccel_output_format cuda` + seek
+  caused a filter reinit error that silently fell back to CPU decode. The
+  interim fix (`-hwaccel cuda` only, without `-hwaccel_output_format`)
+  also fell through to CPU decode on ffmpeg 4.4 (that version does not
+  auto-select NVDEC with just `-hwaccel cuda`). The current fix uses
+  explicit `-c:v h264_cuvid` to force NVDEC. See `docs/ERROR_LOG.md`
+  for the full fix chain.
 - **Scratch lifecycle.** Every request writes to `tempfile.mkdtemp(dir=...)`
   under `CLYPT_PHASE1_AUDIO_HOST_SCRATCH_ROOT` and cleans up on exit. If
   the droplet reboots mid-request, stale dirs under `scratch/` can be
