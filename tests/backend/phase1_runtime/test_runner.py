@@ -94,7 +94,6 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
         yamnet_provider=_FakeYamnet(),
         phase24_task_queue_client=_FakeQueueClient(),
         phase14_repository=repository,
-        phase24_worker_url="https://phase24-worker.example.com/tasks/phase24",
         phase24_query_version="graph-v2",
     )
 
@@ -113,7 +112,6 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
         "artifact_paths": {},
     }
     assert captured["run_id"] == "job_001"
-    assert captured["worker_url"] == "https://phase24-worker.example.com/tasks/phase24"
     assert captured["payload"]["run_id"] == "job_001"
     assert captured["payload"]["query_version"] == "graph-v2"
     assert (
@@ -217,7 +215,6 @@ def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path:
         emotion_provider=_FakeEmotion(),
         yamnet_provider=_FakeYamnet(),
         phase24_task_queue_client=_FakeQueueClient(),
-        phase24_worker_url="https://phase24-worker.example.com/tasks/phase24",
         phase24_query_version="graph-v2",
     )
 

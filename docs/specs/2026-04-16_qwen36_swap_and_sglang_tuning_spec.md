@@ -30,7 +30,7 @@ The `rg` gate in §8 enforces this doctrine.
    - Radix cache stays enabled (SGLang default in 0.5.10; only `--disable-radix-cache` exists, so we emit no flag unless the operator sets `SG_ENABLE_RADIX_CACHE=0`).
    - `--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4` (NextN MTP; Qwen3.6 ships draft heads).
    - `--mamba-scheduler-strategy extra_buffer` plus `SGLANG_ENABLE_SPEC_V2=1` as an environment variable. Qwen3.6 is a hybrid Mamba/Attention MoE and SGLang 0.5.10 refuses to start with speculative decoding + radix cache unless both are set.
-   - `--mem-fraction-static 0.78` (VibeVoice no longer co-resident after `2026-04-16_phase14_l4_offload_concurrency_revamp_spec.md`; H200 has headroom).
+   - `--mem-fraction-static 0.78` (H200 hosts only Qwen + Phase 2-4 worker; VibeVoice runs on a separate Phase 1 host).
    - `--context-length 131072`, `--chunked-prefill-size 8192`, `--schedule-policy lpm` (unchanged).
    - `--reasoning-parser qwen3` (required for Qwen3.6 response format).
    - `--grammar-backend xgrammar` (kept for step 1 to isolate the model swap from a grammar-backend swap; §6 R1 describes the `llguidance` follow-up).
@@ -39,7 +39,7 @@ The `rg` gate in §8 enforces this doctrine.
    - `temperature=0.0`, `top_p=1.0`, `top_k=40`, `min_p=0.0`, `presence_penalty=0.0`, `repetition_penalty=1.0`.
    - These replace the Qwen3.5-era generic defaults (`temp=0.7, top_p=0.8, presence=1.5`) which were actively harmful for strict JSON (presence penalty pushes the sampler away from repeated schema keys).
 6. **Bench sampler == prod sampler.** `scripts/bench_phase24_llm_concurrency.py` constructs its client with `LocalGenerationSettings` values identical to §1.5 so concurrency curves are faithful to production load.
-7. **Concurrency caps** stay at the spec-2026-04-16 L4-offload floor unless rebench data in §7 unambiguously permits raising them: Phase 2 merge=8, boundary=10, Phase 3 local=8, long-range=8, Phase 4 subgraph=10.
+7. **Concurrency caps** stay at the 2026-04-16 baseline (Phase 2 merge=8, boundary=10, Phase 3 local=8, long-range=8, Phase 4 subgraph=10) unless rebench data in §7 unambiguously permits raising them.
 8. **No Qwen3.5-27B fallback anywhere.** Enforced by the §0 doctrine and the §8 `rg` gate.
 
 ---
@@ -54,7 +54,7 @@ The `rg` gate in §8 enforces this doctrine.
    - Sampler used `presence_penalty=1.5` (inherited from Qwen general recommendation), which is actively wrong for strict-schema JSON because schemas require repeated keys.
    - Bench script used a different sampler than production, so concurrency curves were not comparable.
    - `xgrammar` schema-compile was the cause of the 2026-04-15 Phase 4 crash documented in `docs/ERROR_LOG.md`; `llguidance` is a tested SGLang alternative worth A/B-ing (§6 R1, §7 follow-up).
-3. **H200 headroom is now available.** After `2026-04-16_phase14_l4_offload_concurrency_revamp_spec.md` moved VibeVoice ASR + node-media prep to Cloud Run L4, the H200 hosts only RF-DETR + SGLang Qwen + Phase 2-4 worker. 141 GB VRAM − ~72 GB weights − ~6 GB RF-DETR activations leaves ample room for KV and working set at higher static memory fractions.
+3. **H200 headroom is now available.** VibeVoice ASR + node-media prep run on a separate Phase 1 host; the H200 hosts only RF-DETR + SGLang Qwen + Phase 2-4 worker. 141 GB VRAM − ~72 GB weights − ~6 GB RF-DETR activations leaves ample room for KV and working set at higher static memory fractions.
 
 ---
 
@@ -75,7 +75,7 @@ The `rg` gate in §8 enforces this doctrine.
 | Soft `/think /nothink` switch | **Not supported** — must use `chat_template_kwargs.enable_thinking=False` | model card |
 | Default thinking | **On** — must explicitly disable at every call site | model card |
 | H200 VRAM | 141 GB HBM3e | hardware spec |
-| Target `mem-fraction-static` | `0.78` canary (model card says 0.8; L4-offload spec ladder: 0.72 → 0.78 → higher) | `2026-04-16_phase14_l4_offload_concurrency_revamp_spec.md:374-378` |
+| Target `mem-fraction-static` | `0.78` canary (model card says 0.8; stepped ladder: 0.72 → 0.78 → higher) | Qwen3.6 model card |
 
 Per-sequence KV cost estimate at 131K context: GQA-2 × head-dim 256 × two layers of attention × FP8 ≈ ~5 GB worst-case, well within the §1.7 concurrency caps at mem-fraction 0.78.
 
@@ -350,7 +350,7 @@ This swap is complete when **all** of the following hold:
 
 ## 9. Out of Scope
 
-- VibeVoice ASR (remains on the Cloud Run L4 combined service or local vLLM per `CLYPT_PHASE1_ASR_BACKEND`).
+- VibeVoice ASR (runs as local vLLM on the Phase 1 GPU host via `CLYPT_PHASE1_ASR_BACKEND=vllm`).
 - Vertex embeddings, RF-DETR visual, Phase 1 ASR chain.
 - Phase 4 candidate-scoring semantics / prompt rewrites.
 - Multi-GPU tensor parallelism (single H200 stays single-GPU).

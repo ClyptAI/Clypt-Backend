@@ -100,52 +100,43 @@ def _build_payload() -> dict[str, object]:
     }
 
 
-def test_phase24_worker_app_processes_task_and_updates_repository():
-    from fastapi.testclient import TestClient
-    from backend.runtime.phase24_worker_app import Phase24WorkerService, create_app
+def test_phase24_worker_service_processes_task_and_updates_repository():
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
 
     repository = _FakeRepository()
     runner = _FakeRunner()
-    app = create_app(
-        service=Phase24WorkerService(
-            repository=repository,
-            runner=runner,
-            service_name="clypt-phase24-worker",
-            environment="staging",
-            default_query_version="graph-v1",
-            max_attempts=3,
-        )
-    )
-    client = TestClient(app)
-
-    response = client.post(
-        "/tasks/phase24",
-        json=_build_payload(),
-        headers={
-            "X-CloudTasks-TaskName": "projects/test/locations/us-central1/queues/phase24/tasks/task-001",
-            "X-CloudTasks-TaskExecutionCount": "2",
-        },
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=runner,
+        service_name="clypt-phase24-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=3,
     )
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "succeeded"
-    assert response.json()["summary"]["metadata"]["candidate_count"] == 1
+    response = service.handle_task(
+        payload=Phase24TaskPayload(**_build_payload()),
+        job_id="task-001",
+        attempt=3,
+    )
+
+    assert response["status"] == "succeeded"
+    assert response["summary"]["metadata"]["candidate_count"] == 1
     assert len(runner.calls) == 1
     assert runner.calls[0]["run_id"] == "run_001"
-    assert runner.calls[0]["job_id"] == "projects/test/locations/us-central1/queues/phase24/tasks/task-001"
+    assert runner.calls[0]["job_id"] == "task-001"
     assert runner.calls[0]["attempt"] == 3
     assert repository.run_record is not None
     assert repository.run_record.status == "PHASE24_DONE"
     assert repository.job_record is not None
     assert repository.job_record.status == "succeeded"
     assert repository.job_record.attempt_count == 3
-    assert repository.job_record.task_name == "projects/test/locations/us-central1/queues/phase24/tasks/task-001"
+    assert repository.job_record.task_name == "task-001"
 
 
-def test_phase24_worker_app_short_circuits_completed_jobs():
-    from fastapi.testclient import TestClient
+def test_phase24_worker_service_short_circuits_completed_jobs():
     from backend.repository.models import Phase24JobRecord
-    from backend.runtime.phase24_worker_app import Phase24WorkerService, create_app
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
 
     repository = _FakeRepository()
     repository.job_record = Phase24JobRecord(
@@ -154,37 +145,35 @@ def test_phase24_worker_app_short_circuits_completed_jobs():
         attempt_count=1,
         last_error=None,
         worker_name="clypt-phase24-worker",
-        task_name="projects/test/locations/us-central1/queues/phase24/tasks/task-001",
+        task_name="task-001",
         locked_at=None,
         updated_at=datetime(2026, 4, 8, 12, 0, tzinfo=UTC),
         completed_at=datetime(2026, 4, 8, 12, 1, tzinfo=UTC),
         metadata={"query_version": "graph-v2"},
     )
     runner = _FakeRunner()
-    client = TestClient(
-        create_app(
-            service=Phase24WorkerService(
-                repository=repository,
-                runner=runner,
-                service_name="clypt-phase24-worker",
-                environment="staging",
-                default_query_version="graph-v1",
-                max_attempts=3,
-            )
-        )
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=runner,
+        service_name="clypt-phase24-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=3,
     )
 
-    response = client.post("/tasks/phase24", json=_build_payload())
+    response = service.handle_task(
+        payload=Phase24TaskPayload(**_build_payload()),
+        job_id="task-001",
+        attempt=1,
+    )
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "already_succeeded"
+    assert response["status"] == "already_succeeded"
     assert runner.calls == []
 
 
-def test_phase24_worker_app_short_circuits_running_jobs():
-    from fastapi.testclient import TestClient
+def test_phase24_worker_service_short_circuits_running_jobs():
     from backend.repository.models import Phase24JobRecord
-    from backend.runtime.phase24_worker_app import Phase24WorkerService, create_app
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
 
     repository = _FakeRepository()
     repository.job_record = Phase24JobRecord(
@@ -193,30 +182,29 @@ def test_phase24_worker_app_short_circuits_running_jobs():
         attempt_count=1,
         last_error=None,
         worker_name="clypt-phase24-worker",
-        task_name="projects/test/locations/us-central1/queues/phase24/tasks/task-001",
+        task_name="task-001",
         locked_at=None,
         updated_at=datetime(2026, 4, 8, 12, 0, tzinfo=UTC),
         completed_at=None,
         metadata={"query_version": "graph-v2"},
     )
     runner = _FakeRunner()
-    client = TestClient(
-        create_app(
-            service=Phase24WorkerService(
-                repository=repository,
-                runner=runner,
-                service_name="clypt-phase24-worker",
-                environment="staging",
-                default_query_version="graph-v1",
-                max_attempts=3,
-            )
-        )
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=runner,
+        service_name="clypt-phase24-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=3,
     )
 
-    response = client.post("/tasks/phase24", json=_build_payload())
+    response = service.handle_task(
+        payload=Phase24TaskPayload(**_build_payload()),
+        job_id="task-001",
+        attempt=1,
+    )
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "already_running"
+    assert response["status"] == "already_running"
     assert runner.calls == []
 
 
@@ -475,9 +463,6 @@ def test_build_default_phase24_worker_service_uses_local_model_for_flash(monkeyp
             model="Qwen/Qwen3.6-35B-A3B",
         ),
         storage=SimpleNamespace(),
-        phase24_media_prep=SimpleNamespace(
-            backend="local",
-        ),
         phase24_worker=SimpleNamespace(
             query_version="v1",
             debug_snapshots=False,

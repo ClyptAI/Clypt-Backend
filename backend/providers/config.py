@@ -194,15 +194,6 @@ class StorageSettings:
 
 
 @dataclass(slots=True)
-class CloudTasksSettings:
-    project: str = ""
-    location: str = "us-central1"
-    queue: str = "clypt-phase24"
-    worker_url: str | None = None
-    service_account_email: str | None = None
-
-
-@dataclass(slots=True)
 class SpannerSettings:
     project: str = ""
     instance: str = "clypt-phase14"
@@ -222,15 +213,6 @@ class Phase24WorkerSettings:
     fail_fast_p95_latency_ms: float = 0.0
     admission_metrics_path: str | None = None
     block_on_phase1_active: bool = False
-
-
-@dataclass(slots=True)
-class Phase24MediaPrepSettings:
-    backend: str = "local"
-    service_url: str | None = None
-    auth_mode: str = "id_token"
-    audience: str | None = None
-    timeout_s: float = 600.0
 
 
 @dataclass(slots=True)
@@ -268,9 +250,6 @@ class Phase1RuntimeSettings:
 @dataclass(slots=True)
 class Phase1ASRSettings:
     backend: str = "vllm"
-    service_url: str | None = None
-    auth_mode: str = "id_token"
-    audience: str | None = None
     timeout_s: float = 7200.0
 
 
@@ -282,10 +261,8 @@ class ProviderSettings:
     local_generation: LocalGenerationSettings
     storage: StorageSettings
     phase1_asr: Phase1ASRSettings = field(default_factory=Phase1ASRSettings)
-    cloud_tasks: CloudTasksSettings = field(default_factory=CloudTasksSettings)
     spanner: SpannerSettings = field(default_factory=SpannerSettings)
     phase24_worker: Phase24WorkerSettings = field(default_factory=Phase24WorkerSettings)
-    phase24_media_prep: Phase24MediaPrepSettings = field(default_factory=Phase24MediaPrepSettings)
     phase24_local_queue: Phase24LocalQueueSettings = field(default_factory=Phase24LocalQueueSettings)
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
 
@@ -312,31 +289,19 @@ def load_provider_settings() -> ProviderSettings:
         )
     phase1_asr = Phase1ASRSettings(
         backend=((_read_env("CLYPT_PHASE1_ASR_BACKEND") or "vllm").strip().lower()),
-        service_url=_read_env("CLYPT_PHASE1_ASR_SERVICE_URL"),
-        auth_mode=((_read_env("CLYPT_PHASE1_ASR_AUTH_MODE") or "id_token").strip().lower()),
-        audience=_read_env("CLYPT_PHASE1_ASR_AUDIENCE"),
         timeout_s=float(_read_env("CLYPT_PHASE1_ASR_TIMEOUT_S") or "7200"),
     )
-    if phase1_asr.backend not in {"vllm", "cloud_run_l4"}:
+    if phase1_asr.backend != "vllm":
         raise ValueError(
             "Unsupported CLYPT_PHASE1_ASR_BACKEND="
-            f"{phase1_asr.backend!r}; expected 'vllm' or 'cloud_run_l4'."
+            f"{phase1_asr.backend!r}; only 'vllm' is supported."
         )
 
     vllm_base_url = _read_env("VIBEVOICE_VLLM_BASE_URL")
-    if phase1_asr.backend == "cloud_run_l4":
-        if vllm_base_url:
-            raise ValueError(
-                "VIBEVOICE_VLLM_BASE_URL must be unset when CLYPT_PHASE1_ASR_BACKEND=cloud_run_l4."
-            )
-        if not phase1_asr.service_url:
-            raise ValueError(
-                "CLYPT_PHASE1_ASR_SERVICE_URL is required when CLYPT_PHASE1_ASR_BACKEND=cloud_run_l4."
-            )
-    elif not vllm_base_url:
+    if not vllm_base_url:
         raise ValueError("VIBEVOICE_VLLM_BASE_URL is required.")
     vllm_settings = VibeVoiceVLLMSettings(
-        base_url=vllm_base_url or "",
+        base_url=vllm_base_url,
         model=_read_env("VIBEVOICE_VLLM_MODEL") or "vibevoice",
         timeout_s=float(_read_env("VIBEVOICE_VLLM_TIMEOUT_S") or "7200"),
         healthcheck_path=_read_env("VIBEVOICE_VLLM_HEALTHCHECK_PATH") or "/health",
@@ -503,13 +468,6 @@ def load_provider_settings() -> ProviderSettings:
             ),
         ),
         storage=StorageSettings(gcs_bucket=gcs_bucket),
-        cloud_tasks=CloudTasksSettings(
-            project=_read_env("CLYPT_PHASE24_PROJECT") or vertex_project,
-            location=_read_env("CLYPT_PHASE24_TASKS_LOCATION") or "us-central1",
-            queue=_read_env("CLYPT_PHASE24_TASKS_QUEUE") or "clypt-phase24",
-            worker_url=_read_env("CLYPT_PHASE24_WORKER_URL"),
-            service_account_email=_read_env("CLYPT_PHASE24_WORKER_SERVICE_ACCOUNT_EMAIL"),
-        ),
         spanner=SpannerSettings(
             project=_read_env("CLYPT_SPANNER_PROJECT") or vertex_project,
             instance=_read_env("CLYPT_SPANNER_INSTANCE") or "clypt-phase14",
@@ -536,13 +494,6 @@ def load_provider_settings() -> ProviderSettings:
             block_on_phase1_active=_read_bool_env(
                 "CLYPT_PHASE24_BLOCK_ON_PHASE1_ACTIVE", default=False
             ),
-        ),
-        phase24_media_prep=Phase24MediaPrepSettings(
-            backend=((_read_env("CLYPT_PHASE24_MEDIA_PREP_BACKEND") or "local").strip().lower()),
-            service_url=_read_env("CLYPT_PHASE24_MEDIA_PREP_SERVICE_URL"),
-            auth_mode=((_read_env("CLYPT_PHASE24_MEDIA_PREP_AUTH_MODE") or "id_token").strip().lower()),
-            audience=_read_env("CLYPT_PHASE24_MEDIA_PREP_AUDIENCE"),
-            timeout_s=float(_read_env("CLYPT_PHASE24_MEDIA_PREP_TIMEOUT_S") or "600"),
         ),
         phase24_local_queue=Phase24LocalQueueSettings(
             path=Path(
@@ -580,12 +531,10 @@ def load_provider_settings() -> ProviderSettings:
 __all__ = [
     "LocalGenerationSettings",
     "Phase24LocalQueueSettings",
-    "Phase24MediaPrepSettings",
     "Phase1RuntimeSettings",
     "Phase1ASRSettings",
     "ProviderSettings",
     "StorageSettings",
-    "CloudTasksSettings",
     "SpannerSettings",
     "Phase24WorkerSettings",
     "VertexSettings",

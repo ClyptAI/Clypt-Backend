@@ -8,12 +8,10 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.phase1_runtime.models import Phase1SidecarOutputs
 from backend.providers import (
-    CloudRunMediaPrepClient,
     LocalOpenAIQwenClient,
     VertexEmbeddingClient,
     load_provider_settings,
@@ -550,23 +548,12 @@ def build_default_phase24_worker_service() -> Phase24WorkerService:
         raise ValueError(
             "Local OpenAI generation requires CLYPT_LOCAL_LLM_MODEL (or GENAI_FLASH_MODEL as fallback)."
         )
-    node_media_preparer = None
-    media_prep_backend = (settings.phase24_media_prep.backend or "local").strip().lower()
-    if media_prep_backend == "cloud_run_l4":
-        node_media_preparer = CloudRunMediaPrepClient(
-            settings=settings.phase24_media_prep
-        ).prepare_node_media
-    elif media_prep_backend != "local":
-        raise ValueError(
-            "Phase24 media prep supports only backend=local or cloud_run_l4 "
-            f"(got {media_prep_backend!r})."
-        )
     runner = V31LivePhase14Runner.from_env(
         llm_client=llm_client,
         embedding_client=VertexEmbeddingClient(settings=settings.vertex),
         flash_model=local_flash_model,
         storage_client=GCSStorageClient(settings=settings.storage),
-        node_media_preparer=node_media_preparer,
+        node_media_preparer=None,
         repository=repository,
         query_version=settings.phase24_worker.query_version,
         debug_snapshots=settings.phase24_worker.debug_snapshots,
@@ -584,83 +571,8 @@ def build_default_phase24_worker_service() -> Phase24WorkerService:
     )
 
 
-def _parse_attempt(request: Request) -> int:
-    execution_count = request.headers.get("X-CloudTasks-TaskExecutionCount")
-    retry_count = request.headers.get("X-CloudTasks-TaskRetryCount")
-    raw_value = execution_count or retry_count
-    if raw_value is None:
-        return 1
-    try:
-        parsed = int(raw_value)
-    except ValueError:
-        return 1
-    # Cloud Tasks counters are zero-based; convert to human attempt number.
-    return max(1, parsed + 1)
-
-
-def create_app(*, service: Phase24WorkerService | None = None) -> FastAPI:
-    app = FastAPI(title="Clypt Phase24 Worker")
-    app.state.service = service
-
-    def _service() -> Phase24WorkerService:
-        if app.state.service is None:
-            app.state.service = build_default_phase24_worker_service()
-        return app.state.service
-
-    @app.get("/healthz")
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
-
-    def _handle(payload: Phase24TaskPayload, request: Request) -> dict[str, Any]:
-        task_name = request.headers.get("X-CloudTasks-TaskName") or payload.run_id
-        attempt = _parse_attempt(request)
-        logger.info(
-            "phase24 task dispatch run_id=%s task_name=%s attempt=%s",
-            payload.run_id,
-            task_name,
-            attempt,
-        )
-        try:
-            response = _service().handle_task(
-                payload,
-                job_id=task_name,
-                attempt=attempt,
-            )
-            logger.info(
-                "phase24 task complete run_id=%s task_name=%s attempt=%s status=%s",
-                payload.run_id,
-                task_name,
-                attempt,
-                response.get("status"),
-            )
-            return response
-        except Exception as exc:
-            logger.exception(
-                "phase24 task failed run_id=%s task_name=%s attempt=%s",
-                payload.run_id,
-                task_name,
-                attempt,
-            )
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    @app.post("/")
-    def root_task(payload: Phase24TaskPayload, request: Request) -> dict[str, Any]:
-        return _handle(payload, request)
-
-    @app.post("/tasks/phase24")
-    def phase24_task(payload: Phase24TaskPayload, request: Request) -> dict[str, Any]:
-        return _handle(payload, request)
-
-    return app
-
-
-app = create_app()
-
-
 __all__ = [
     "Phase24TaskPayload",
     "Phase24WorkerService",
-    "app",
     "build_default_phase24_worker_service",
-    "create_app",
 ]

@@ -7,9 +7,8 @@ Operational startup and maintenance guide for coding agents and maintainers.
 - Product: Clypt V3.1 backend
 - Implemented: Phases 1-4
 - Planned: Phases 5-6
-- Current Phase 1 ASR modes: local vLLM VibeVoice or remote GCE L4 combined service
+- Current Phase 1 ASR backend: local vLLM VibeVoice on the Phase 1 GPU host
 - Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint
-- Optional combined L4 service on GCE: `POST /tasks/asr` and `POST /tasks/node-media-prep` (backend enum is still `cloud_run_l4` for backward compatibility; deploy target is a GCE g2-standard-8 L4 VM)
 
 ## Read Order (Required - You MUST read these before reporting back to the user.)
 
@@ -96,9 +95,8 @@ python -m backend.runtime.run_phase24_local_worker --worker-id local-worker-1
 - Default crash handling mode is fail-fast (`CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`, `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`).
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
 - Qwen serving target is the SGLang service on `127.0.0.1:8001`.
-- If `CLYPT_PHASE1_ASR_BACKEND=cloud_run_l4`, the caller must set `CLYPT_PHASE1_ASR_SERVICE_URL` and must not set `VIBEVOICE_VLLM_BASE_URL`. The URL currently points at a GCE L4 VM (`http://<VM_IP>:8080`), not a Cloud Run `*.run.app` URL. The backend enum name is retained for compatibility.
-- The L4 combined service must run with the VibeVoice audio-encoder forced to `bfloat16`. The Dockerfile at `docker/phase24-media-prep/Dockerfile` sed-patches `vllm_plugin/model.py`; the `float32` default will OOM a 24 GB L4 during vLLM `profile_run`.
-- GCE L4 deployment requires `GPUS_ALL_REGIONS >= 1` in the project. Standard (non-SPOT) L4 VMs will not create with the default `0` quota. Request via `gcloud alpha quotas preferences create --service=compute.googleapis.com --quota-id=GPUS-ALL-REGIONS-per-project --preferred-value=1 --email=<you>`.
+- `CLYPT_PHASE1_ASR_BACKEND` only accepts `vllm`. `VIBEVOICE_VLLM_BASE_URL` is required.
+- Node-media prep for Phase 2 runs in-process on the Phase 2-4 worker host; there is no remote media-prep offload.
 
 ## Critical Maintenance Rule
 

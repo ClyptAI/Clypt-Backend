@@ -6,7 +6,7 @@ from .phase24_local_queue import Phase24LocalQueue
 
 
 class Phase24LocalDispatcherClient:
-    """Enqueue Phase 2–4 work into the local SQLite queue (replaces Cloud Tasks for local runs)."""
+    """Enqueue Phase 2–4 work into the local SQLite queue."""
 
     def __init__(self, *, queue: Phase24LocalQueue) -> None:
         self._queue = queue

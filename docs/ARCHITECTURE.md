@@ -11,8 +11,7 @@ This document describes the code-backed architecture currently in this repositor
 flowchart TD
   source["Source URL or local path"]
   p1["Phase 1 runner"]
-  asr["Phase 1 ASR backend"]
-  l4["Optional L4 combined service (GCE g2-standard-8)"]
+  asr["VibeVoice vLLM ASR"]
   audio["Aligner -> Emotion2Vec -> YAMNet"]
   visual["RF-DETR + ByteTrack"]
   handoff["Phase24 local queue enqueue"]
@@ -26,13 +25,11 @@ flowchart TD
   source --> p1
   p1 --> asr
   p1 --> visual
-  asr --> l4
   asr --> audio
   audio --> handoff
   handoff --> q --> w
   w --> llm
   w --> emb
-  w --> l4
   w --> sp
   visual --> p1
   w --> out
@@ -44,10 +41,8 @@ flowchart TD
 
 - `run_phase1` builds `Phase1JobRunner` through `build_default_phase1_job_runner()`.
 - Input mode is `test_bank` only (enforced).
-- Phase 1 ASR path is selected by `CLYPT_PHASE1_ASR_BACKEND`:
-  - `vllm` uses local `VibeVoiceVLLMProvider`
-  - `cloud_run_l4` uses `CloudRunVibeVoiceProvider` against `POST /tasks/asr`; the enum name is historical and the deployment target is currently a GCE L4 VM, not Cloud Run.
-- `VIBEVOICE_BACKEND` is still `vllm` only on mainline. The backend selector is `CLYPT_PHASE1_ASR_BACKEND`, not `VIBEVOICE_BACKEND`.
+- Phase 1 ASR path uses local `VibeVoiceVLLMProvider` (`CLYPT_PHASE1_ASR_BACKEND=vllm`; only supported option today).
+- `VIBEVOICE_BACKEND` is also `vllm` only on mainline.
 - Visual branch and ASR branch run concurrently.
 - Audio sidecar chain begins right after ASR returns.
 
@@ -70,9 +65,7 @@ flowchart TD
 - Generation path in local worker is hard-gated to `GENAI_GENERATION_BACKEND=local_openai`.
 - LLM client is `LocalOpenAIQwenClient` (OpenAI-compatible chat completions).
 - Embeddings remain Vertex-backed.
-- Node-media prep may run:
-  - locally inside the Phase 2-4 worker
-  - remotely via `CLYPT_PHASE24_MEDIA_PREP_BACKEND=cloud_run_l4` against the combined L4 service (currently hosted on a GCE L4 VM; the enum name is historical)
+- Node-media prep runs in-process on the Phase 2-4 worker host (ffmpeg + GCS upload); no remote offload.
 
 ### 3.3 Execution overlap
 
@@ -128,7 +121,7 @@ flowchart TD
 ## 7) Architectural Invariants
 
 1. Phase 1 output is mandatory upstream input for Phase 2-4.
-2. Phase 1 ASR mode is explicit. `cloud_run_l4` does not silently fall back to local VibeVoice.
+2. Phase 1 ASR runs locally on the Phase 1 GPU host (VibeVoice vLLM).
 3. Local phase24 worker requires local OpenAI generation backend.
 4. Queue backend for local runtime is SQLite only.
 5. Fail-fast behavior on stale leases/crash signatures is intentional and currently default.

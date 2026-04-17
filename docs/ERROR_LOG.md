@@ -2,6 +2,13 @@
 
 Persistent record of major runtime/deployment/pipeline errors and their recoveries.
 
+> **2026-04-17 note:** Entries below that reference GCE L4 / Cloud Run L4 combined
+> service, the VibeVoice `bfloat16` Dockerfile patch, and Cloud Tasks dispatch
+> describe infrastructure that has since been torn down. The code paths,
+> deploy scripts, and Docker images referenced by those incidents no longer
+> exist in this repository; the entries are retained for historical context
+> only. Current Phase 1 ASR and node-media prep are both single-host.
+
 ## Entry Template
 
 - **Date/Time (UTC):**
@@ -36,6 +43,100 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
   - Keep `scripts/deploy_l4_gce.sh` as the canonical L4 deploy path. Do not resurrect the Cloud Run path unless the container can be proven to fit under 24 GB with the bf16 patch.
   - Treat `GPUS_ALL_REGIONS=0` as a hard prerequisite to fix before first deploy; document it in P1_DEPLOY.md §3.4.1.
   - The bind mount overlays the baked-in HF cache layer, so first boot on a fresh VM always re-downloads; treat this as expected and rely on the `/var/clypt/hf-cache` host volume for persistence across restarts.
+
+## 2026-04-17 - L4 Dockerfile bf16 sed guard undercounted bfloat16 assignments, failing the build
+
+- **Date/Time (UTC):** 2026-04-17 ~03:20
+- **Subsystem:** L4 combined service Docker build (`docker/phase24-media-prep/Dockerfile`, bf16 patch step)
+- **Environment:** Cloud Build targeting `us-east4-docker.pkg.dev/clypt-v3/cloud-run-source-deploy/clypt-phase1-l4-combined` — builds `gce-bf16-20260416-194909` and `gce-bf16-20260416-201857`.
+- **Symptom / Error signature:** Both builds failed at the bf16 patch step with `returned a non-zero code: 1`. The failing chain was the final `[ $(grep -c 'self._audio_encoder_dtype = torch.bfloat16' ...) -ge 3 ]` count check inside the `RUN grep ... && sed ... && ! grep ... && [ ... -ge 3 ]` guard.
+- **Root cause:** Upstream `vllm_plugin/model.py` resolves `self._audio_encoder_dtype` via a **three-way** branch:
+  ```python
+  root_torch_dtype = get_cfg(config, "torch_dtype", None)
+  if root_torch_dtype is not None:
+      if isinstance(root_torch_dtype, str):
+          self._audio_encoder_dtype = getattr(torch, root_torch_dtype)   # (A)
+      else:
+          self._audio_encoder_dtype = root_torch_dtype                   # (B)
+  else:
+      self._audio_encoder_dtype = torch.float32                          # (C)
+  ```
+  The previous guard only `sed`-rewrote (A) and (B) and commented that (C) was already `torch.bfloat16`. But upstream's (C) is `torch.float32`, so post-patch the file contained only **two** `torch.bfloat16` assignments while the guard asserted `-ge 3`. Separately, leaving (C) as `torch.float32` was also a latent correctness bug: any future HF checkpoint that drops `torch_dtype` from its config would fall through the `else:` branch and re-trigger the original fp32 OOM.
+- **Fix applied:**
+  - Extended the `sed` step in `docker/phase24-media-prep/Dockerfile` with a third `-e 's|...= torch.float32|...= torch.bfloat16|'` expression so all three assignments are pinned to bfloat16.
+  - Added a pre-`sed` `grep -q 'self\._audio_encoder_dtype = torch\.float32'` guard so the build fails loudly if upstream ever drops branch (C).
+  - Added a post-`sed` `! grep -q` anti-assertion for branch (C) and tightened the final count check from `-ge 3` to `-eq 3` so over-substitution is caught too.
+  - Validated the rewritten guard locally against `vllm_plugin/model.py@main` before rebuilding (all three pre-grep checks pass, all three anti-greps pass, final count is exactly 3).
+- **Verification evidence:** Local dry-run of the new `sed` chain against the upstream file produces the expected block shape (three `self._audio_encoder_dtype = torch.bfloat16  # Clypt: forced bf16 ...` lines in the if/else ladder) and the final `-eq 3` check succeeds.
+- **Follow-up guardrails:**
+  - Count check is now `-eq 3`, not `-ge 3` — if upstream adds a fourth assignment site the build fails, forcing us to re-read the dtype resolver before shipping.
+  - Keep all three pre-grep and all three anti-grep guards; they collectively pin the shape of the upstream branch.
+
+## 2026-04-17 - VibeVoice embed_multimodal returned [] during vLLM v1 profile_run; crash-loop on sanity_check_mm_encoder_outputs
+
+- **Date/Time (UTC):** 2026-04-17 03:10
+- **Subsystem:** Phase 1 ASR / Phase 2 node-media prep combined L4 service (VibeVoice vLLM plugin)
+- **Environment:** GCE `clypt-phase1-l4-gce` (`us-central1-a`, external IP `34.59.75.53`), image `clypt-phase1-l4-combined:gce-bf16-20260416-185650` (bf16 patch landed correctly, `/app/vllm_plugin/model.py` confirmed `_audio_encoder_dtype = torch.bfloat16`).
+- **Symptom / Error signature:** With OOM fixed by the bf16 patch, the container progressed past model load and `determine_available_memory` but crashed inside `profile_run`:
+  ```
+  File ".../vllm/v1/worker/utils.py", line 192, in sanity_check_mm_encoder_outputs
+    assert len(mm_embeddings) == expected_num_items, (
+  AssertionError: Expected number of multimodal embeddings to match number of input
+  items: 1, but got len(mm_embeddings)=0 instead. This is most likely due to
+  incorrect implementation of the model's `embed_multimodal` method.
+  RuntimeError: Engine core initialization failed.
+  ```
+  Docker restart-policy `always` drove a crash loop (`restartCount=1`, uptime ~3 min/cycle). GPU held 0 MiB used on subsequent cycles because the crash aborts boot before weights reload.
+- **Root cause:** VibeVoice `vllm_plugin/model.py:988` `embed_multimodal` short-circuits with `return []` when `raw_audio is None` or empty, with an inline comment "this happens during memory profiling". vLLM v1's profile_run (present in 0.14.1+, the officially recommended version per `docs/vibevoice-vllm-asr.md`) builds **one** synthetic multimodal input and then asserts that `embed_multimodal` returns exactly one embedding per input item. Upstream's plugin was written against an older vLLM that tolerated zero-length returns during profile. No upstream fix exists: VibeVoice repo `main` at `4a78d3e` still has the `return []` branch; the only adjacent PR (#291) addresses vLLM 0.16+ processor-API compat, not this assertion, and is still open/unmerged.
+- **Fix applied:** Added `docker/phase24-media-prep/patches/vibevoice_profile_run.py`, a Python patcher invoked from the Dockerfile after the existing bf16 `sed` step. It rewrites the two `return []` branches to synthesize one second of silence (`torch.zeros(sample_rate, dtype=self._audio_encoder_dtype, device=encoder_device)`) and fall through to the normal encoder path, so the encoder emits one correctly-shaped embedding and vLLM also gets an honest profile-run memory read. The patcher is idempotent (sentinel-guarded) and fails the Docker build with exit 2 if upstream reshapes the target block. The Dockerfile step additionally greps the sentinel post-patch and runs `py_compile` on the rewritten `model.py`.
+- **Verification evidence:** Patcher dry-run against the live container's `model.py` produced clean output, `py_compile` passed, idempotent re-run printed "already applied", drift simulation (stripped sentinel) failed loudly as designed. Pending: rebuilt image tag `gce-bf16-20260417-03*` deployed to `clypt-phase1-l4-gce`, container reaches `/health` 200, and ASR round-trip from droplet succeeds.
+- **Follow-up guardrails:**
+  - Dockerfile must keep both the bf16 `sed` patch and the `vibevoice_profile_run.py` patch. Neither alone is sufficient for a functional 24 GB L4 deploy.
+  - When upstream ships a real fix (track PRs #291, #223 and any successors that touch `embed_multimodal` profile-run semantics), retire the Python patcher but keep the sentinel to detect rebase conflicts.
+  - Any future plugin-source patch MUST go through a sentinel-guarded, idempotent Python patcher (not sed) if it spans multiple lines of logic — blind sed on this surface already cost us one silent-no-op cycle (see previous entry).
+
+## 2026-04-17 - VibeVoice bf16 Dockerfile patch was a no-op; model.py sets audio_encoder_dtype from config.torch_dtype
+
+- **Date/Time (UTC):** 2026-04-17 02:46
+- **Subsystem:** Phase 1 ASR / Phase 2 node-media prep combined L4 service (VibeVoice vLLM plugin)
+- **Environment:** GCE `clypt-phase1-l4-gce` (`us-central1-a`, external IP `34.59.75.53`), image `clypt-phase1-l4-combined:gce-bf16-20260416-185650`.
+- **Symptom / Error signature:** Container warmed fine through model load (~18.22 GiB reported by vLLM), then died during `profile_run`:
+  ```
+  [VibeVoice] Converted acoustic_tokenizer to torch.float32 (was torch.bfloat16)
+  [VibeVoice] Converted semantic_tokenizer to torch.float32 (was torch.bfloat16)
+  [VibeVoice] Converted acoustic_connector to torch.float32 (was torch.bfloat16)
+  [VibeVoice] Converted semantic_connector to torch.float32 (was torch.bfloat16)
+  ...
+  [VibeVoice] Error encoding audio 0: CUDA out of memory. Tried to allocate 704.00 MiB.
+  GPU 0 has a total capacity of 22.03 GiB of which 555.12 MiB is free.
+  ...
+  AssertionError: Expected number of multimodal embeddings to match number of input
+  items: 1, but got len(mm_embeddings)=0
+  RuntimeError: Engine core initialization failed.
+  ```
+  Docker-restart loop, port 8080 never listened.
+- **Root cause:** The bf16 Dockerfile patch shipped in the previous ERROR_LOG entry (`sed 's|self._audio_encoder_dtype = torch.float32|... = torch.bfloat16|'`) did not match anything in upstream `vllm_plugin/model.py`. The real code reads the dtype from the HF checkpoint's `config.torch_dtype` (= `float32` for VibeVoice-ASR):
+  ```python
+  root_torch_dtype = get_cfg(config, "torch_dtype", None)
+  if root_torch_dtype is not None:
+      if isinstance(root_torch_dtype, str):
+          self._audio_encoder_dtype = getattr(torch, root_torch_dtype)
+      else:
+          self._audio_encoder_dtype = root_torch_dtype
+  else:
+      self._audio_encoder_dtype = torch.bfloat16
+  ```
+  The `grep -q 'self._audio_encoder_dtype = torch.bfloat16'` guard passed against the `else:` branch, so the build reported success even though the `if` branches kept producing `torch.float32`. At runtime the audio encoder and the four submodules that follow it (`acoustic_tokenizer`, `semantic_tokenizer`, `acoustic_connector`, `semantic_connector`) all upcast to fp32, bloating the model to 18.22 GiB and leaving only 555 MiB free. `profile_run` then OOM'd on the 704 MiB audio-encoder forward pass.
+- **Fix applied:** Rewrote the Dockerfile patch in `docker/phase24-media-prep/Dockerfile` to:
+  1. `grep -q` the two config-driven assignments (`self._audio_encoder_dtype = getattr(torch, root_torch_dtype)` and `self._audio_encoder_dtype = root_torch_dtype`) to fail the build if upstream reshapes them.
+  2. `sed` both lines to `self._audio_encoder_dtype = torch.bfloat16  # Clypt: forced bf16 to fit on 24 GB L4`.
+  3. Negative-grep to prove the original strings no longer exist.
+  4. Count that `self._audio_encoder_dtype = torch.bfloat16` appears at least 3 times post-patch (the two rewritten branches + the pre-existing `else:`).
+  The `_ensure_audio_encoder_dtype` helper then converts tokenizers/connectors bf16→bf16 (a no-op), so all five "Converted ... to torch.float32" log lines should disappear.
+- **Verification evidence:** Pending: new image tag `gce-bf16-20260417-0*` (writing to `/tmp/new_image_tag.txt` in the dev shell). Will re-pull on `clypt-phase1-l4-gce`, restart container, and confirm `Model loading took <12 GiB memory` + port 8080 green.
+- **Follow-up guardrails:**
+  - Any sed-based patch in this Dockerfile must include a negative-grep that proves the original string is gone, not just that the target string is present.
+  - When adding future guards, assume upstream will split a hot path across multiple conditional branches. Match against every branch, not the default/fallback.
 
 ## 2026-04-17 - GCE startup-script failed on nvidia-container-toolkit version skew
 

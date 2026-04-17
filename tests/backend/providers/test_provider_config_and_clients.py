@@ -71,7 +71,7 @@ def test_load_provider_settings_vllm_defaults(tmp_path: Path, monkeypatch: pytes
     assert settings.vibevoice.repetition_penalty == 1.03
 
 
-def test_load_provider_settings_reads_phase1_cloud_run_asr_settings(
+def test_load_provider_settings_rejects_non_vllm_phase1_asr_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -80,36 +80,10 @@ def test_load_provider_settings_reads_phase1_cloud_run_asr_settings(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
     monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("CLYPT_PHASE1_ASR_BACKEND", "cloud_run_l4")
-    monkeypatch.setenv("CLYPT_PHASE1_ASR_SERVICE_URL", "https://phase1-asr.example.com")
-    monkeypatch.setenv("CLYPT_PHASE1_ASR_AUTH_MODE", "id_token")
-    monkeypatch.setenv("CLYPT_PHASE1_ASR_AUDIENCE", "https://phase1-asr.example.com")
-    monkeypatch.setenv("CLYPT_PHASE1_ASR_TIMEOUT_S", "901")
-    monkeypatch.delenv("VIBEVOICE_VLLM_BASE_URL", raising=False)
-
-    settings = load_provider_settings()
-
-    assert settings.phase1_asr.backend == "cloud_run_l4"
-    assert settings.phase1_asr.service_url == "https://phase1-asr.example.com"
-    assert settings.phase1_asr.auth_mode == "id_token"
-    assert settings.phase1_asr.audience == "https://phase1-asr.example.com"
-    assert settings.phase1_asr.timeout_s == 901.0
-
-
-def test_load_provider_settings_rejects_legacy_vllm_url_when_phase1_asr_is_remote(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from backend.providers.config import load_provider_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("CLYPT_PHASE1_ASR_BACKEND", "cloud_run_l4")
-    monkeypatch.setenv("CLYPT_PHASE1_ASR_SERVICE_URL", "https://phase1-asr.example.com")
     monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("CLYPT_PHASE1_ASR_BACKEND", "something_else")
 
-    with pytest.raises(ValueError, match="VIBEVOICE_VLLM_BASE_URL"):
+    with pytest.raises(ValueError, match="CLYPT_PHASE1_ASR_BACKEND"):
         load_provider_settings()
 
 
@@ -478,7 +452,6 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
 ) -> None:
     from backend.providers.config import (
         LocalGenerationSettings,
-        Phase24MediaPrepSettings,
         ProviderSettings,
         StorageSettings,
         VertexSettings,
@@ -527,19 +500,6 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
     assert captured["llm_client"].settings.model == "local-qwen"
     assert captured["node_media_preparer"] is None
 
-    settings_remote = ProviderSettings(
-        **base,
-        vertex=VertexSettings(project="clypt-v3", generation_backend="local_openai"),
-        phase24_media_prep=Phase24MediaPrepSettings(
-            backend="cloud_run_l4",
-            service_url="https://media-prep.example.com",
-            auth_mode="none",
-        ),
-    )
-    monkeypatch.setattr(phase24_worker_app, "load_provider_settings", lambda: settings_remote)
-    phase24_worker_app.build_default_phase24_worker_service()
-    assert callable(captured["node_media_preparer"])
-
     settings_dev = ProviderSettings(
         **base,
         vertex=VertexSettings(
@@ -552,15 +512,6 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
     with pytest.raises(ValueError, match="only GENAI_GENERATION_BACKEND=local_openai"):
         phase24_worker_app.build_default_phase24_worker_service()
 
-    settings_invalid_media = ProviderSettings(
-        **base,
-        vertex=VertexSettings(project="clypt-v3", generation_backend="local_openai"),
-        phase24_media_prep=Phase24MediaPrepSettings(backend="mystery"),
-    )
-    monkeypatch.setattr(phase24_worker_app, "load_provider_settings", lambda: settings_invalid_media)
-    with pytest.raises(ValueError, match="backend=local or cloud_run_l4"):
-        phase24_worker_app.build_default_phase24_worker_service()
-
 
 def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -571,10 +522,6 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
     monkeypatch.setenv("GCS_BUCKET", "bucket-a")
     monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("CLYPT_PHASE24_TASKS_LOCATION", "us-central1")
-    monkeypatch.setenv("CLYPT_PHASE24_TASKS_QUEUE", "phase24-queue")
-    monkeypatch.setenv("CLYPT_PHASE24_WORKER_URL", "https://phase24-worker.example.com")
-    monkeypatch.setenv("CLYPT_PHASE24_WORKER_SERVICE_ACCOUNT_EMAIL", "worker-sa@example.com")
     monkeypatch.setenv("CLYPT_SPANNER_INSTANCE", "phase14-instance")
     monkeypatch.setenv("CLYPT_SPANNER_DATABASE", "phase14-db")
     monkeypatch.setenv("CLYPT_SPANNER_DDL_OPERATION_TIMEOUT_S", "42")
@@ -588,11 +535,6 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     monkeypatch.setenv("CLYPT_PHASE24_FAILFAST_P95_LATENCY_MS", "4500")
     monkeypatch.setenv("CLYPT_PHASE24_ADMISSION_METRICS_PATH", "/tmp/admission_metrics.json")
     monkeypatch.setenv("CLYPT_PHASE24_BLOCK_ON_PHASE1_ACTIVE", "1")
-    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_BACKEND", "cloud_run_l4")
-    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_SERVICE_URL", "https://phase24-media-prep.example.com")
-    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_AUTH_MODE", "id_token")
-    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_AUDIENCE", "https://phase24-media-prep.example.com")
-    monkeypatch.setenv("CLYPT_PHASE24_MEDIA_PREP_TIMEOUT_S", "901")
     monkeypatch.setenv("CLYPT_PHASE24_QUEUE_BACKEND", "local_sqlite")
     monkeypatch.setenv("CLYPT_PHASE24_LOCAL_QUEUE_PATH", "backend/outputs/phase24.sqlite")
     monkeypatch.setenv("CLYPT_PHASE24_LOCAL_POLL_INTERVAL_MS", "700")
@@ -602,11 +544,6 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
 
     settings = load_provider_settings()
 
-    assert settings.cloud_tasks.project == "clypt-v3"
-    assert settings.cloud_tasks.location == "us-central1"
-    assert settings.cloud_tasks.queue == "phase24-queue"
-    assert settings.cloud_tasks.worker_url == "https://phase24-worker.example.com"
-    assert settings.cloud_tasks.service_account_email == "worker-sa@example.com"
     assert settings.spanner.project == "clypt-v3"
     assert settings.spanner.instance == "phase14-instance"
     assert settings.spanner.database == "phase14-db"
@@ -621,11 +558,6 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
     assert settings.phase24_worker.fail_fast_p95_latency_ms == 4500.0
     assert settings.phase24_worker.admission_metrics_path == "/tmp/admission_metrics.json"
     assert settings.phase24_worker.block_on_phase1_active is True
-    assert settings.phase24_media_prep.backend == "cloud_run_l4"
-    assert settings.phase24_media_prep.service_url == "https://phase24-media-prep.example.com"
-    assert settings.phase24_media_prep.auth_mode == "id_token"
-    assert settings.phase24_media_prep.audience == "https://phase24-media-prep.example.com"
-    assert settings.phase24_media_prep.timeout_s == 901.0
     assert settings.phase24_local_queue.queue_backend == "local_sqlite"
     assert str(settings.phase24_local_queue.path).endswith("backend/outputs/phase24.sqlite")
     assert settings.phase24_local_queue.poll_interval_ms == 700
@@ -668,100 +600,3 @@ def test_load_provider_settings_exposes_split_generation_and_embedding_retry_set
     assert settings.vertex.embedding_api_jitter_ratio == 0.01
 
 
-def test_phase24_task_queue_client_uses_run_id_for_idempotent_task_name() -> None:
-    from backend.providers.config import CloudTasksSettings
-    from backend.providers.task_queue import AlreadyExists, Phase24TaskQueueClient, _task_id_for_run_id
-
-    captured: dict[str, object] = {}
-
-    class _FakeTasksClient:
-        def create_task(self, request):
-            captured["request"] = request
-
-            class _Response:
-                name = request["task"]["name"]
-
-            return _Response()
-
-    queue_client = Phase24TaskQueueClient(
-        settings=CloudTasksSettings(
-            project="clypt-v3",
-            location="us-central1",
-            queue="clypt-phase24",
-            worker_url="https://phase24-worker.example.com",
-            service_account_email="worker-sa@example.com",
-        ),
-        tasks_client=_FakeTasksClient(),
-    )
-
-    task_name = queue_client.enqueue_phase24(
-        run_id="run/001",
-        payload={"run_id": "run/001", "source_url": "https://example.com/video"},
-    )
-
-    request = captured["request"]
-    assert task_name == queue_client.task_name_for_run_id("run/001")
-    assert task_name.endswith(_task_id_for_run_id("run/001"))
-    assert request == {
-        "parent": "projects/clypt-v3/locations/us-central1/queues/clypt-phase24",
-        "task": {
-            "name": task_name,
-            "http_request": {
-                "http_method": "POST",
-                "url": "https://phase24-worker.example.com",
-                "headers": {"Content-Type": "application/json"},
-                "body": json.dumps(
-                    {"run_id": "run/001", "source_url": "https://example.com/video"},
-                    ensure_ascii=True,
-                    separators=(",", ":"),
-                ).encode("utf-8"),
-                "oidc_token": {
-                    "service_account_email": "worker-sa@example.com",
-                    "audience": "https://phase24-worker.example.com",
-                },
-            },
-        },
-    }
-
-
-def test_phase24_task_queue_client_treats_already_exists_as_idempotent_success() -> None:
-    from backend.providers.config import CloudTasksSettings
-    from backend.providers.task_queue import AlreadyExists, Phase24TaskQueueClient, _task_id_for_run_id
-
-    requested: dict[str, object] = {}
-
-    class _FakeTasksClient:
-        def create_task(self, request):
-            requested["request"] = request
-            raise AlreadyExists("task already exists")
-
-    queue_client = Phase24TaskQueueClient(
-        settings=CloudTasksSettings(
-            project="clypt-v3",
-            location="us-central1",
-            queue="clypt-phase24",
-            worker_url="https://phase24-worker.example.com",
-        ),
-        tasks_client=_FakeTasksClient(),
-    )
-
-    task_name = queue_client.enqueue_phase24(run_id="run-001", payload={"run_id": "run-001"})
-
-    assert task_name == queue_client.task_name_for_run_id("run-001")
-    assert task_name.endswith(_task_id_for_run_id("run-001"))
-    assert requested["request"]["task"]["name"] == task_name
-
-
-def test_phase24_task_queue_client_task_id_uses_hash_suffix_for_collisions_and_length() -> None:
-    from backend.providers.task_queue import _task_id_for_run_id
-
-    first = _task_id_for_run_id("run/abc")
-    second = _task_id_for_run_id("run?abc")
-    long_id = _task_id_for_run_id("run-" + ("a" * 1000))
-
-    assert first != second
-    assert first.startswith("phase24-run-abc-")
-    assert second.startswith("phase24-run-abc-")
-    assert len(long_id) <= 500
-    assert long_id.startswith("phase24-run-")
-    assert len(long_id.rsplit("-", 1)[-1]) == 12

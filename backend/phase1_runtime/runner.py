@@ -49,7 +49,6 @@ class Phase1JobRunner:
         yamnet_provider: Any,
         phase24_task_queue_client: Any | None = None,
         phase14_repository: Any | None = None,
-        phase24_worker_url: str | None = None,
         phase24_query_version: str | None = None,
         input_resolver: Phase1InputResolver | None = None,
         input_resolver_strict: bool = True,
@@ -64,7 +63,6 @@ class Phase1JobRunner:
         self.yamnet_provider = yamnet_provider
         self.phase24_task_queue_client = phase24_task_queue_client
         self.phase14_repository = phase14_repository
-        self.phase24_worker_url = phase24_worker_url
         self.phase24_query_version = phase24_query_version
         self.input_resolver = input_resolver
         self.input_resolver_strict = input_resolver_strict
@@ -205,7 +203,6 @@ class Phase1JobRunner:
         task_name = self.phase24_task_queue_client.enqueue_phase24(
             run_id=job_id,
             payload=payload,
-            worker_url=self.phase24_worker_url,
         )
         metadata = {
             "query_version": self.phase24_query_version,

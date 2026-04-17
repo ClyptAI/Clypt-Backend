@@ -4,7 +4,6 @@ import logging
 from pathlib import Path
 
 from backend.providers import (
-    CloudRunVibeVoiceProvider,
     ForcedAlignmentProvider,
     VibeVoiceVLLMProvider,
     build_gcs_uri_url_resolver,
@@ -48,35 +47,23 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
             f"(got {settings.phase24_local_queue.queue_backend!r})."
         )
     storage_client = GCSStorageClient(settings=settings.storage)
-    if settings.phase1_asr.backend == "cloud_run_l4":
-        vibevoice_provider = CloudRunVibeVoiceProvider(
-            settings=settings.phase1_asr,
-            hotwords_context=settings.vibevoice.hotwords_context,
-            max_new_tokens=settings.vibevoice.max_new_tokens,
-            do_sample=settings.vibevoice.do_sample,
-            temperature=settings.vibevoice.temperature,
-            top_p=settings.vibevoice.top_p,
-            repetition_penalty=settings.vibevoice.repetition_penalty,
-            num_beams=settings.vibevoice.num_beams,
-        )
-    else:
-        vv = settings.vllm_vibevoice
-        vibevoice_provider = VibeVoiceVLLMProvider(
-            base_url=vv.base_url,
-            model=vv.model,
-            timeout_s=vv.timeout_s,
-            healthcheck_path=vv.healthcheck_path,
-            max_retries=vv.max_retries,
-            audio_mode=vv.audio_mode,
-            audio_gcs_url_resolver=build_gcs_uri_url_resolver(storage_client=storage_client),
-            hotwords_context=settings.vibevoice.hotwords_context,
-            max_new_tokens=settings.vibevoice.max_new_tokens,
-            do_sample=settings.vibevoice.do_sample,
-            temperature=settings.vibevoice.temperature,
-            top_p=settings.vibevoice.top_p,
-            repetition_penalty=settings.vibevoice.repetition_penalty,
-            num_beams=settings.vibevoice.num_beams,
-        )
+    vv = settings.vllm_vibevoice
+    vibevoice_provider = VibeVoiceVLLMProvider(
+        base_url=vv.base_url,
+        model=vv.model,
+        timeout_s=vv.timeout_s,
+        healthcheck_path=vv.healthcheck_path,
+        max_retries=vv.max_retries,
+        audio_mode=vv.audio_mode,
+        audio_gcs_url_resolver=build_gcs_uri_url_resolver(storage_client=storage_client),
+        hotwords_context=settings.vibevoice.hotwords_context,
+        max_new_tokens=settings.vibevoice.max_new_tokens,
+        do_sample=settings.vibevoice.do_sample,
+        temperature=settings.vibevoice.temperature,
+        top_p=settings.vibevoice.top_p,
+        repetition_penalty=settings.vibevoice.repetition_penalty,
+        num_beams=settings.vibevoice.num_beams,
+    )
 
     forced_aligner = ForcedAlignmentProvider()
     phase14_repository = _build_phase14_repository(settings=settings)
@@ -111,7 +98,6 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
         ),
         phase24_task_queue_client=phase24_task_queue_client,
         phase14_repository=phase14_repository,
-        phase24_worker_url=settings.cloud_tasks.worker_url,
         phase24_query_version=settings.phase24_worker.query_version,
         input_resolver=input_resolver,
         input_resolver_strict=settings.phase1_runtime.test_bank_strict,

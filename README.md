@@ -4,13 +4,13 @@ Clypt V3.1 is a long-form video understanding and clip-candidate system.
 
 - Implemented today: **Phases 1-4**
 - Planned next: **Phases 5-6** (speaker participation grounding + final 9:16 render)
-- Current Phase 1 ASR modes: **local vLLM VibeVoice** or **remote GCE L4 combined service** (backend enum is still `cloud_run_l4` for backward compatibility; the target is a GCE g2-standard-8 L4 VM)
+- Current Phase 1 ASR: **local vLLM VibeVoice** on the Phase 1 GPU host
 
 ## Current Pipeline State
 
 1. **Phase 1 — Timeline Foundation**
    - RF-DETR + ByteTrack visual extraction
-   - VibeVoice ASR via `CLYPT_PHASE1_ASR_BACKEND` (`vllm` or `cloud_run_l4`)
+   - VibeVoice ASR (`CLYPT_PHASE1_ASR_BACKEND=vllm`)
    - NeMo forced alignment
    - emotion2vec+ and YAMNet sidecars
 2. **Phase 2 — Semantic Node Construction**
@@ -36,7 +36,7 @@ See [2026-04-09_comments_trends_augment_spec.md](docs/specs/2026-04-09_comments_
 - Default local Phase 2-4 route is SQLite queue -> local worker loop.
 - Local worker generation is hard-gated to `GENAI_GENERATION_BACKEND=local_openai`.
 - Embeddings remain Vertex-backed by default.
-- Optional GCE L4 offload can handle both Phase 1 ASR and Phase 2 node-media prep. The VibeVoice audio encoder is pinned to `bfloat16` via a Dockerfile sed patch to fit the 24 GB L4 VRAM.
+- Node-media prep for Phase 2 runs in-process on the Phase 2-4 host (no remote offload).
 - Per-stage concurrency is explicit. `CLYPT_GEMINI_MAX_CONCURRENT` has been removed.
 
 ## Canonical Docs
@@ -82,11 +82,8 @@ python -m pip install -r requirements-do-phase1.txt
 backend/pipeline/          Phase 1-4 contracts, transforms, orchestrator
 backend/providers/         ASR, local OpenAI, Vertex, GCS, emotion2vec+, YAMNet
 backend/phase1_runtime/    Phase 1 sidecar orchestration, visual pipeline, job store
-backend/runtime/           Live Phase 1-4 runner, local worker, combined L4 service entrypoints
+backend/runtime/           Phase 1 + Phase 2-4 runners, local SQLite worker
 docker/vibevoice-vllm/     Local VibeVoice vLLM image
-docker/phase24-media-prep/ Combined L4 ASR + node-media-prep image (runs on GCE L4 VM; bf16 audio-encoder patched)
 scripts/do_phase1/         Deployment scripts and systemd units for the DO GPU host
-scripts/deploy_l4_gce.sh   Build + provision the GCE L4 VM for the combined L4 service
-scripts/deploy_l4_combined_service.sh  Deprecated Cloud Run L4 deploy path (retained for history; OOMs on 24 GB L4)
 docs/                      Runtime, deployment, architecture, specs, outputs
 ```

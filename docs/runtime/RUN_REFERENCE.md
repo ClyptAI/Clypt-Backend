@@ -31,10 +31,9 @@ This document records known baseline runs and recent migration test attempts.
 - Current code paths to validate against these historical baselines:
   - local SQLite queue + local Phase 2-4 worker
   - SGLang Qwen on `:8001`
-  - Phase 1 ASR selectable between local vLLM and the combined GCE L4 service (backend enum `cloud_run_l4`; target is a GCE `g2-standard-8` L4 VM with the bf16 audio-encoder patch)
-  - node-media prep selectable between local extraction and the combined GCE L4 service
-- No fresh, code-aligned benchmark has been written into this file yet for the new combined L4 offload path. The prior Cloud Run L4 target is deprecated (OOMed during vLLM `profile_run` without the bf16 patch).
-- Until a new reference run is published, compare new measurements against Sections 1, 2, and 5, then append the new baseline here.
+  - Phase 1 ASR: local VibeVoice vLLM on the Phase 1 GPU host
+  - node-media prep: in-process on the Phase 2-4 worker host
+- Compare new measurements against Sections 1, 2, and 5, then append the new baseline here.
 
 ## 4) Recorded Phase 2-4 Timing Snapshots
 
