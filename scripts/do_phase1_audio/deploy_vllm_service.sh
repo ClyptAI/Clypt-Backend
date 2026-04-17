@@ -9,11 +9,14 @@
 # start_server.py wrapper (which reruns installs on every boot and cost us
 # ~5 min per restart — see docs/ERROR_LOG.md 2026-04-17).
 #
-# GPU memory budget on the 48 GiB RTX 6000 Ada — sole-tenant. As of 2026-04-17
-# the NFA / emotion2vec+ / YAMNet stages moved back to the H200, so vLLM owns
-# the card: it can use the full default 0.90 gpu_memory_utilization and
-# default --max-num-seqs / --max-model-len (65536) again. See
-# docs/ERROR_LOG.md 2026-04-17 for why co-tenancy did not work.
+# GPU memory budget on the 48 GiB RTX 6000 Ada. vLLM is now sole tenant for
+# model weights (NFA / emotion2vec+ / YAMNet moved back to the H200 on
+# 2026-04-17), but ffmpeg node-media-prep still runs here and needs ~11 GiB
+# of VRAM headroom for NVDEC CUDA contexts on concurrent h264_cuvid jobs.
+# That's why the systemd unit pins --gpu-memory-utilization 0.77 instead of
+# vLLM's 0.90 default — at 0.90 cuCtxCreate OOMs and every ffmpeg clip falls
+# back to CPU decode. See clypt-vllm-vibevoice.service and
+# docs/ERROR_LOG.md 2026-04-17.
 #
 # Usage (on the RTX host, as root):
 #   REPO_DIR=/opt/clypt-audio-host/repo bash scripts/do_phase1_audio/deploy_vllm_service.sh
