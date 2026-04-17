@@ -1,7 +1,7 @@
 # ARCHITECTURE
 
 **Status:** Active (implemented Phases 1-4, planned Phases 5-6)  
-**Last updated:** 2026-04-16
+**Last updated:** 2026-04-17
 
 This document describes the code-backed architecture currently in this repository.
 
@@ -12,7 +12,7 @@ flowchart TD
   source["Source URL or local path"]
   p1["Phase 1 runner"]
   asr["Phase 1 ASR backend"]
-  l4["Optional Cloud Run L4 combined service"]
+  l4["Optional L4 combined service (GCE g2-standard-8)"]
   audio["Aligner -> Emotion2Vec -> YAMNet"]
   visual["RF-DETR + ByteTrack"]
   handoff["Phase24 local queue enqueue"]
@@ -46,7 +46,7 @@ flowchart TD
 - Input mode is `test_bank` only (enforced).
 - Phase 1 ASR path is selected by `CLYPT_PHASE1_ASR_BACKEND`:
   - `vllm` uses local `VibeVoiceVLLMProvider`
-  - `cloud_run_l4` uses `CloudRunVibeVoiceProvider` against `POST /tasks/asr`
+  - `cloud_run_l4` uses `CloudRunVibeVoiceProvider` against `POST /tasks/asr`; the enum name is historical and the deployment target is currently a GCE L4 VM, not Cloud Run.
 - `VIBEVOICE_BACKEND` is still `vllm` only on mainline. The backend selector is `CLYPT_PHASE1_ASR_BACKEND`, not `VIBEVOICE_BACKEND`.
 - Visual branch and ASR branch run concurrently.
 - Audio sidecar chain begins right after ASR returns.
@@ -72,7 +72,7 @@ flowchart TD
 - Embeddings remain Vertex-backed.
 - Node-media prep may run:
   - locally inside the Phase 2-4 worker
-  - remotely via `CLYPT_PHASE24_MEDIA_PREP_BACKEND=cloud_run_l4` against the combined L4 service
+  - remotely via `CLYPT_PHASE24_MEDIA_PREP_BACKEND=cloud_run_l4` against the combined L4 service (currently hosted on a GCE L4 VM; the enum name is historical)
 
 ### 3.3 Execution overlap
 

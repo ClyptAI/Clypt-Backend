@@ -15,6 +15,39 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 
 ---
 
+## 2026-04-16 - Cloud Run L4 VibeVoice OOM during vLLM profile_run; cut over to GCE L4 with bf16 patch
+
+- **Date/Time (UTC):** 2026-04-16 (diagnosis and pivot across the day)
+- **Subsystem:** Phase 1 ASR / Phase 2 node-media prep combined L4 service
+- **Environment:** Cloud Run L4 (`clypt-phase1-l4-combined`) → GCE `g2-standard-8` L4 VM (`clypt-phase1-l4-gce`, `us-central1-a`, external IP `34.59.190.134`)
+- **Symptom / Error signature:** Container started vLLM, passed warmup, then crashed mid-`profile_run` with CUDA OOM. Cold-start also took 15-20 min because the ~12 GB model was re-downloaded on every revision.
+- **Root cause:**
+  1. VibeVoice's `vllm_plugin/model.py` defaults `_audio_encoder_dtype = torch.float32` "for numerical precision" even though the HF checkpoint ships every sub-module in `bfloat16`. The fp32 upcast inflated the model from ~10 GB to ~18 GB on a 24 GB L4, starving vLLM's KV-cache sizing during `profile_run`.
+  2. Cloud Run ephemeral filesystem forced a full HF model re-download on every cold start; no place to persist `/root/.cache/huggingface`.
+  3. Cloud Run L4 operationally hides GPU state (no `nvidia-smi` access, no persistent FS) making iterative debugging of (1) impractical.
+- **Fix applied:**
+  1. `docker/phase24-media-prep/Dockerfile` now (a) sets `HF_HOME=/root/.cache/huggingface` + `HF_HUB_ENABLE_HF_TRANSFER=1`, (b) installs `hf_transfer`, (c) bakes `microsoft/VibeVoice-ASR` into the image via `snapshot_download`, and (d) sed-patches `vllm_plugin/model.py` to force `_audio_encoder_dtype = torch.bfloat16` (grep-guarded so the build fails if upstream reshapes that line). The sed step is placed late so the 12 GB model-bake layer stays cached across rebuilds.
+  2. `backend/runtime/l4_combined_bootstrap.py` retuned defaults for L4: `max_num_seqs=4`, `max_model_len=16384`, `gpu_memory_utilization=0.90`, `VIBEVOICE_FFMPEG_MAX_CONCURRENCY=16`, startup health-wait `1500 s`, `--skip-deps`.
+  3. Cut over the deploy target from Cloud Run L4 to a GCE `g2-standard-8` L4 VM via new `scripts/deploy_l4_gce.sh` (firewall-gated to droplet egress IP, `AUTH_MODE=none`, persistent host cache at `/var/clypt/hf-cache`, multi-zone probing to survive transient L4 stockouts). Requested and obtained `GPUS_ALL_REGIONS=1` via `gcloud alpha quotas preferences create`.
+  4. Left Cloud Run deploy script in the repo but marked it deprecated in docs.
+- **Verification evidence:** Build succeeded with bf16-patched layer (`gce-bf16-20260416-181315`). GCE VM came up after multi-zone retry; droplet-scoped firewall rule `clypt-l4-combined-ingress` active on tcp:8080. Container launched with tuned CLI args visible in `docker inspect`; the baked image shipped `_audio_encoder_dtype = torch.bfloat16` in `/app/vllm_plugin/model.py`. Cold-start on fresh VM re-downloaded once (bind mount overlays baked layer) in ~3 min with `hf_transfer`, then cached to host disk for subsequent restarts.
+- **Follow-up guardrails:**
+  - Keep the sed grep-guard in the Dockerfile; the build must fail if the upstream model.py line changes shape.
+  - Keep `scripts/deploy_l4_gce.sh` as the canonical L4 deploy path. Do not resurrect the Cloud Run path unless the container can be proven to fit under 24 GB with the bf16 patch.
+  - Treat `GPUS_ALL_REGIONS=0` as a hard prerequisite to fix before first deploy; document it in P1_DEPLOY.md §3.4.1.
+  - The bind mount overlays the baked-in HF cache layer, so first boot on a fresh VM always re-downloads; treat this as expected and rely on the `/var/clypt/hf-cache` host volume for persistence across restarts.
+
+## 2026-04-16 - GCE startup-script failed on NVIDIA toolkit install (gpg TTY)
+
+- **Date/Time (UTC):** 2026-04-16
+- **Subsystem:** GCE VM provisioning (`scripts/deploy_l4_gce.sh` startup-script)
+- **Environment:** GCE `clypt-phase1-l4-gce` first-boot startup script
+- **Symptom / Error signature:** `gpg: cannot open '/dev/tty': No such device or address` and `curl: (23) Failed writing body`; startup script exited before installing `nvidia-container-toolkit`, so `docker run --gpus all` failed.
+- **Root cause:** `gpg --dearmor` expects a controlling TTY by default, which GCE startup scripts don't have. The keyring fetch pipeline failed silently and the script exited on `set -e`.
+- **Fix applied:** Manually SSH'd to the VM and re-ran the NVIDIA keyring import with `gpg --batch --yes --dearmor`, then completed Docker authentication, image pull, and `docker run` for the combined service. Long-term fix is to propagate the `--batch --yes` flags into the embedded startup script in `scripts/deploy_l4_gce.sh`.
+- **Verification evidence:** After the manual fix, `sudo docker ps` showed `clypt-l4-combined` running with `--gpus all`; subsequent `nvidia-smi` inside the container reported the L4 GPU.
+- **Follow-up guardrails:** All future `gpg --dearmor` invocations in non-interactive startup scripts must include `--batch --yes`. The `scripts/deploy_l4_gce.sh` embedded startup script now enforces that.
+
 ## 2026-04-15 - TensorRT detector load failed on binding shape type mismatch
 
 - **Date/Time (UTC):** 2026-04-15 19:07-19:23

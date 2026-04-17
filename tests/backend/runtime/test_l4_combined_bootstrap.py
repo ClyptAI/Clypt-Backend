@@ -8,6 +8,7 @@ def test_build_vibevoice_start_command_uses_expected_defaults(monkeypatch: pytes
 
     monkeypatch.delenv("CLYPT_L4_VIBEVOICE_REPO_DIR", raising=False)
     monkeypatch.delenv("CLYPT_L4_VIBEVOICE_MAX_NUM_SEQS", raising=False)
+    monkeypatch.delenv("CLYPT_L4_VIBEVOICE_MAX_MODEL_LEN", raising=False)
     monkeypatch.delenv("CLYPT_L4_VIBEVOICE_GPU_MEMORY_UTILIZATION", raising=False)
 
     command = build_vibevoice_start_command()
@@ -15,10 +16,13 @@ def test_build_vibevoice_start_command_uses_expected_defaults(monkeypatch: pytes
     assert command == [
         "python3",
         "/app/vllm_plugin/scripts/start_server.py",
+        "--skip-deps",
         "--max-num-seqs",
-        "2",
+        "4",
+        "--max-model-len",
+        "16384",
         "--gpu-memory-utilization",
-        "0.25",
+        "0.90",
     ]
 
 

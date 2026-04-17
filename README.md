@@ -4,7 +4,7 @@ Clypt V3.1 is a long-form video understanding and clip-candidate system.
 
 - Implemented today: **Phases 1-4**
 - Planned next: **Phases 5-6** (speaker participation grounding + final 9:16 render)
-- Current Phase 1 ASR modes: **local vLLM VibeVoice** or **remote Cloud Run L4 combined service**
+- Current Phase 1 ASR modes: **local vLLM VibeVoice** or **remote GCE L4 combined service** (backend enum is still `cloud_run_l4` for backward compatibility; the target is a GCE g2-standard-8 L4 VM)
 
 ## Current Pipeline State
 
@@ -36,7 +36,7 @@ See [2026-04-09_comments_trends_augment_spec.md](docs/specs/2026-04-09_comments_
 - Default local Phase 2-4 route is SQLite queue -> local worker loop.
 - Local worker generation is hard-gated to `GENAI_GENERATION_BACKEND=local_openai`.
 - Embeddings remain Vertex-backed by default.
-- Optional Cloud Run L4 offload can handle both Phase 1 ASR and Phase 2 node-media prep.
+- Optional GCE L4 offload can handle both Phase 1 ASR and Phase 2 node-media prep. The VibeVoice audio encoder is pinned to `bfloat16` via a Dockerfile sed patch to fit the 24 GB L4 VRAM.
 - Per-stage concurrency is explicit. `CLYPT_GEMINI_MAX_CONCURRENT` has been removed.
 
 ## Canonical Docs
@@ -84,7 +84,9 @@ backend/providers/         ASR, local OpenAI, Vertex, GCS, emotion2vec+, YAMNet
 backend/phase1_runtime/    Phase 1 sidecar orchestration, visual pipeline, job store
 backend/runtime/           Live Phase 1-4 runner, local worker, combined L4 service entrypoints
 docker/vibevoice-vllm/     Local VibeVoice vLLM image
-docker/phase24-media-prep/ Combined Cloud Run L4 ASR + node-media-prep image
-scripts/do_phase1/         Deployment scripts and systemd units
+docker/phase24-media-prep/ Combined L4 ASR + node-media-prep image (runs on GCE L4 VM; bf16 audio-encoder patched)
+scripts/do_phase1/         Deployment scripts and systemd units for the DO GPU host
+scripts/deploy_l4_gce.sh   Build + provision the GCE L4 VM for the combined L4 service
+scripts/deploy_l4_combined_service.sh  Deprecated Cloud Run L4 deploy path (retained for history; OOMs on 24 GB L4)
 docs/                      Runtime, deployment, architecture, specs, outputs
 ```

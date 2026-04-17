@@ -21,6 +21,23 @@ SET_ENV_VARS="${SET_ENV_VARS:-}"
 VIBEVOICE_REPO_URL="${VIBEVOICE_REPO_URL:-https://github.com/microsoft/VibeVoice.git}"
 VIBEVOICE_REPO_REF="${VIBEVOICE_REPO_REF:-main}"
 
+# GCS-FUSE-backed persistent HuggingFace cache. Belt-and-suspenders alongside
+# the in-image model bake: if a future rebuild adds new models (e.g. tokenizers,
+# aux weights) the bucket retains them across revisions. Mounted at a
+# NON-overlapping path (/mnt/hf-persist, not /root/.cache/huggingface) so the
+# baked model layer remains the primary read path for VibeVoice-ASR weights.
+HF_CACHE_BUCKET="${HF_CACHE_BUCKET:-clypt-v3-hf-cache}"
+HF_CACHE_MOUNT_PATH="${HF_CACHE_MOUNT_PATH:-/mnt/hf-persist}"
+
+echo "[l4-combined-deploy] ensuring GCS bucket gs://${HF_CACHE_BUCKET} (${REGION})"
+if ! gcloud storage buckets describe "gs://${HF_CACHE_BUCKET}" \
+     --project "${PROJECT}" >/dev/null 2>&1; then
+  gcloud storage buckets create "gs://${HF_CACHE_BUCKET}" \
+    --project "${PROJECT}" \
+    --location "${REGION}" \
+    --uniform-bucket-level-access
+fi
+
 echo "[l4-combined-deploy] building image: ${IMAGE}"
 TMP_CONFIG="$(mktemp)"
 trap 'rm -f "${TMP_CONFIG}"' EXIT
@@ -37,6 +54,10 @@ steps:
     ]
 images:
   - "${IMAGE}"
+options:
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 200
+timeout: 3600s
 EOF
 gcloud builds submit \
   --project "${PROJECT}" \
@@ -56,15 +77,15 @@ DEPLOY_CMD=(
   --max-instances "${MAX_INSTANCES}"
   --concurrency 1
   --timeout "${TIMEOUT}"
+  --execution-environment gen2
   --no-gpu-zonal-redundancy
   --no-allow-unauthenticated
-  # Combined service spawns a local VibeVoice vLLM subprocess and blocks on its /health
-  # before binding port 8080 for FastAPI. Cold-start on L4 is dominated by three
-  # sequential steps inside VibeVoice's start_server.py: `pip install -e /app[vllm]`
-  # (~2-3 min), snapshot_download of microsoft/VibeVoice-ASR (~1-3 min), and vLLM
-  # model load onto the GPU (~2-5 min). Realistic cold-start is 10-15 min, so we
-  # size the probe window for 25 min (initialDelay=300s + 30 retries * 45s = 1650s).
-  --startup-probe "tcpSocket.port=8080,initialDelaySeconds=300,periodSeconds=45,timeoutSeconds=10,failureThreshold=30"
+  --add-volume "name=hf-persist,type=cloud-storage,bucket=${HF_CACHE_BUCKET}"
+  --add-volume-mount "volume=hf-persist,mount-path=${HF_CACHE_MOUNT_PATH}"
+  # With the VibeVoice-ASR model baked into the image, cold start is dominated
+  # by image pull (~1-2 min from in-region Artifact Registry) + vLLM GPU load
+  # (~2-5 min). Budget ~14 min for the probe window: 240 (cap) + 10 * 60.
+  --startup-probe "tcpSocket.port=8080,initialDelaySeconds=240,periodSeconds=60,timeoutSeconds=10,failureThreshold=10"
   --quiet
 )
 

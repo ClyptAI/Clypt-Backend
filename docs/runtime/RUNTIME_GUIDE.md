@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-04-16
+**Last updated:** 2026-04-17
 
 This is the runtime source of truth for current backend code behavior (Phases 1-4).
 
@@ -20,11 +20,15 @@ For the full environment variable catalog, see `docs/runtime/ENV_REFERENCE.md`.
   - Queue backend must be `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`.
   - Phase 1 enqueues to local queue through `Phase24LocalDispatcherClient`.
 - **Phase 2-4 worker service:** `python -m backend.runtime.run_phase24_local_worker` from the Phase 1 env, with systemd dependency on `clypt-sglang-qwen.service`.
-- **Optional Cloud Run L4 combined service:** the host can offload both Phase 1 ASR and Phase 2 node-media prep to the same service.
+- **Optional GCE L4 combined service:** the host can offload both Phase 1 ASR and Phase 2 node-media prep to the same service.
+  - Deployment target: a GCE `g2-standard-8` L4 VM provisioned by `scripts/deploy_l4_gce.sh` (previously Cloud Run L4; the Cloud Run path OOMed during vLLM `profile_run` because the VibeVoice audio encoder upcast to fp32 and bloated the model from ~10 GB to ~18 GB on a 24 GB L4).
+  - Backend enum is still `cloud_run_l4` for backward compatibility with `CLYPT_PHASE1_ASR_BACKEND` and `CLYPT_PHASE24_MEDIA_PREP_BACKEND`.
   - ASR route: `POST /tasks/asr`
   - node-media route: `POST /tasks/node-media-prep`
   - combined service runner: `python -m backend.runtime.run_l4_combined_service`
   - container bootstrap launches `vllm_plugin/scripts/start_server.py`, waits for `/health`, then serves FastAPI
+  - Dockerfile (`docker/phase24-media-prep/Dockerfile`) sed-patches `vllm_plugin/model.py` to pin `_audio_encoder_dtype` to `torch.bfloat16`; without this patch the service will not fit on an L4.
+  - On the GCE path, auth is enforced by a VPC firewall rule scoped to the DO droplet IP, so callers use `AUTH_MODE=none` (no ID token). The droplet must reach `http://<VM_IP>:8080`.
 - **Generation backend for Phase 2-4:** local OpenAI-compatible endpoint (`GENAI_GENERATION_BACKEND=local_openai` enforced by `build_default_phase24_worker_service()`).
 - **Embedding backend:** Vertex (`VERTEX_EMBEDDING_BACKEND=vertex` default).
 - **Storage and graph persistence:** GCS + Spanner remain active dependencies.
@@ -192,14 +196,30 @@ trtexec --help >/dev/null
 systemctl cat clypt-sglang-qwen | rg "ExecStart|schedule-policy|chunked-prefill-size|mem-fraction-static|context-length"
 ```
 
-### 7.2.1 Verify Cloud Run L4 combined service
+### 7.2.1 Verify GCE L4 combined service
 
-If media prep offload is enabled:
+If ASR or media-prep offload is enabled:
 
 ```bash
-gcloud run services describe clypt-phase1-l4-combined --region us-east4 --format='value(status.url,status.latestReadyRevisionName)'
-curl -fsS https://<combined-service>/healthz
+# VM health
+gcloud compute instances describe clypt-phase1-l4-gce \
+  --zone us-central1-a --project clypt-v3 \
+  --format='value(status,networkInterfaces[0].accessConfigs[0].natIP)'
+
+# Container + GPU + local health probe (from the VM)
+gcloud compute ssh clypt-phase1-l4-gce --zone us-central1-a --project clypt-v3 \
+  --command "sudo docker ps --format 'table {{.Names}}\t{{.Status}}'; \
+             nvidia-smi --query-gpu=memory.used,memory.total --format=csv; \
+             curl -fsS -m 5 http://127.0.0.1:8080/healthz"
+
+# From the droplet (firewall-gated to the droplet's egress IP)
+curl -fsS http://<VM_EXTERNAL_IP>:8080/healthz
 ```
+
+Expected healthy VRAM footprint with bf16 audio-encoder patch applied:
+VibeVoice weights + KV cache under ~22 GB on the 24 GB L4 during steady-state
+serving. If `memory.used` stays at `0 MiB` after >5 minutes, vLLM is still in
+`profile_run` or the model is still being fetched into `/var/clypt/hf-cache`.
 
 ### 7.3 Run Phase 1 + queue-mode Phase 2-4
 
@@ -256,7 +276,11 @@ For the full env catalog, see `docs/runtime/ENV_REFERENCE.md`.
 3. **Stale queue lease:** with default fail-fast settings, worker exits until operator manually resolves stale running row.
 4. **Structured output mismatch:** schema/type violations are terminal non-transient failures.
 5. **Shared-env drift:** if SGLang and Phase 1 share a venv, SGLang can overwrite Phase 1 runtime packages; the current deploy path avoids this by using separate envs.
-6. **H200 local NVENC mismatch:** H200 has NVDEC but no NVENC, so local `h264_nvenc` node-media extraction will fail with `unsupported device (2)` unless media prep is offloaded to an NVENC-capable worker such as Cloud Run L4.
+6. **H200 local NVENC mismatch:** H200 has NVDEC but no NVENC, so local `h264_nvenc` node-media extraction will fail with `unsupported device (2)` unless media prep is offloaded to an NVENC-capable worker such as the GCE L4 combined service.
 7. **Visual throughput unexpectedly low on TensorRT path:** if a visual-only H200 replay drops back toward `~50 fps` instead of `~240 fps`, the most likely causes are stale code on-host, loss of `scale_cuda` decode-to-resolution behavior, or a fallback to host-side preprocessing before TensorRT.
+8. **L4 VibeVoice OOM during `profile_run`:** if the L4 container log shows a CUDA OOM during vLLM startup, verify the bf16 audio-encoder sed patch landed in the image and that `_audio_encoder_dtype = torch.bfloat16` is present in `/app/vllm_plugin/model.py` inside the container. The upstream default (`torch.float32`) bloats the model from ~10 GB to ~18 GB and does not fit in 24 GB.
+9. **GCE L4 VM creation fails with `GPUS_ALL_REGIONS` quota exceeded:** default project GPU quota is `0`. Request `GPUS-ALL-REGIONS-per-project=1` via `gcloud alpha quotas preferences create` before running `scripts/deploy_l4_gce.sh`.
+10. **GCE L4 VM creation fails with `ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS`:** L4 capacity is transient per zone; `scripts/deploy_l4_gce.sh` probes multiple `us-central1-*`/`us-east4-*` zones and retries on-demand until one accepts the request.
+11. **L4 cold-start re-downloads the VibeVoice model even though it is baked into the image:** the host bind mount `/var/clypt/hf-cache:/root/.cache/huggingface` overlays the in-image cache layer. First boot on a fresh VM will re-download (~3 min with `hf_transfer`) and persist to host disk; subsequent restarts are cache hits.
 
 For incident history and recovery notes, see `docs/ERROR_LOG.md`.
