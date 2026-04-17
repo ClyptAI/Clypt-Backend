@@ -49,12 +49,15 @@ def extract_node_clip(
             f"Unsupported CLYPT_PHASE24_FFMPEG_DEVICE={ffmpeg_device!r}; expected auto|gpu|cpu."
         )
 
+    # -hwaccel cuda enables NVDEC for decoding; omitting -hwaccel_output_format
+    # cuda avoids "No decoder surfaces left" / filter reinit errors that occur
+    # when combining cuda surface pinning with -ss seek on ffmpeg 4.4.
+    # NVENC still handles encoding, so we get GPU-accelerated encode without
+    # requiring a zero-copy CUDA-to-CUDA pipeline.
     gpu_cmd = [
         "ffmpeg",
         "-y",
         "-hwaccel",
-        "cuda",
-        "-hwaccel_output_format",
         "cuda",
         "-i",
         str(source_video_path),
