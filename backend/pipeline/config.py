@@ -7,7 +7,7 @@ import os
 
 _REMOVED_GLOBAL_CONCURRENCY_ENV = "CLYPT_GEMINI_MAX_CONCURRENT"
 _RENAMED_CONCURRENCY_ENVS = {
-    # old name -> new name (renamed for suffix/stage consistency)
+    # renamed for suffix/stage consistency
     "CLYPT_PHASE2_MAX_CONCURRENT": "CLYPT_PHASE2_MERGE_MAX_CONCURRENT",
     "CLYPT_PHASE24_NODE_MEDIA_CONCURRENCY": "CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT",
 }

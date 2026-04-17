@@ -243,7 +243,6 @@ def run_merge_classify_and_reconcile(
             max(0, (len(batch_nodes) - 1) - seams_skipped),
         )
 
-    # Stitch in order
     final_nodes: list[SemanticGraphNode] = list(batch_nodes[0])
     boundary_debug: list[dict[str, Any]] = []
     for idx in range(1, len(batch_nodes)):

@@ -109,7 +109,6 @@ Fail-fast guardrails in current code:
 |---|---|---|
 | `CLYPT_V31_OUTPUT_ROOT` | `backend/outputs/v3_1` | Root output dir for Phase 1-4 artifacts. |
 | `CLYPT_PHASE1_WORK_ROOT` | `backend/outputs/v3_1_phase1_work` | Phase 1 workdir root. |
-| `CLYPT_PHASE1_KEEP_WORKDIR` | `0` | Keep temp workdirs when `1`. |
 | `CLYPT_PHASE1_YAMNET_DEVICE` | `cpu` | `gpu` makes YAMNet run on GPU. |
 | `CLYPT_PHASE1_INPUT_MODE` | `test_bank` | Current code only supports `test_bank`. |
 | `CLYPT_PHASE1_TEST_BANK_PATH` | unset | Required when strict mode is enabled. |

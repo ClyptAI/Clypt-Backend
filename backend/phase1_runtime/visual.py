@@ -27,10 +27,6 @@ from .tracking_post import frame_time_ms, split_tracks_at_shot_boundaries
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Metadata & shot boundary helpers (unchanged from previous implementation)
-# ---------------------------------------------------------------------------
-
 def probe_video_metadata(*, video_path: Path) -> dict:
     result = subprocess.run(
         [

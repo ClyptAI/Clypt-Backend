@@ -310,7 +310,6 @@ class VertexEmbeddingClient:
         if not text_list:
             return []
         # embed_content treats a list of strings as a single multimodal document,
-        # returning 1 embedding for the whole batch. Call once per text instead.
         _model = model or self.settings.embedding_model
         config = {"task_type": task_type} if task_type else None
 
@@ -352,7 +351,6 @@ class VertexEmbeddingClient:
             _types = None
 
         # The embedding API only accepts 1 video/media part per call.
-        # Call once per item and collect results.
         _model = model or self.settings.embedding_model
 
         def _embed_one(item):

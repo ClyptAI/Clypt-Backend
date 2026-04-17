@@ -445,7 +445,6 @@ class Phase1JobRunner:
                 raise RuntimeError("phase24 enqueue callback completed without a summary.")
             result["summary"] = enqueue_summary[0]
         else:
-            # Original path: run sidecars, no phases 2-4
             def _on_stage_event(
                 *,
                 stage_name: str,

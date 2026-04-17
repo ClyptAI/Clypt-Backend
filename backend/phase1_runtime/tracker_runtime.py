@@ -132,11 +132,5 @@ class ByteTrackTrackerRuntime:
         self._metrics.total_tracked_out += len(rows)
         return rows
 
-    def reset(self) -> None:
-        """Reset tracker state (e.g. between videos)."""
-        if self._tracker is not None:
-            self._tracker = None
-            self.initialize()
-
 
 __all__ = ["ByteTrackTrackerRuntime", "TrackRow", "TrackerMetrics"]
