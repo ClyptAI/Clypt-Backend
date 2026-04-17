@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from ..contracts import SemanticGraphNode, SemanticNodeEvidence
+from .responses import SemanticsMergeAndClassifyResponse
 
 
 def merge_and_classify_neighborhood(
     *,
     neighborhood_payload: dict,
-    llm_response: dict | None = None,
+    llm_response: SemanticsMergeAndClassifyResponse | None = None,
     turn_word_ids_by_turn_id: dict[str, list[str]] | None = None,
 ) -> list[SemanticGraphNode]:
     """Convert one Qwen neighborhood response into proposed merged semantic nodes."""
@@ -17,13 +18,13 @@ def merge_and_classify_neighborhood(
     turn_map = {turn["turn_id"]: turn for turn in turns}
     target_turn_ids = list(neighborhood_payload.get("target_turn_ids") or [])
     target_turn_id_set = set(target_turn_ids)
-    merged_nodes = list(llm_response.get("merged_nodes") or [])
+    merged_nodes = list(llm_response.merged_nodes)
 
     seen_target_turn_ids: list[str] = []
     results: list[SemanticGraphNode] = []
 
     for raw_node in merged_nodes:
-        source_turn_ids = list(raw_node.get("source_turn_ids") or [])
+        source_turn_ids = list(raw_node.source_turn_ids)
         if not source_turn_ids:
             raise ValueError("each merged node must include source_turn_ids")
         if any(turn_id not in turn_map for turn_id in source_turn_ids):
@@ -62,14 +63,14 @@ def merge_and_classify_neighborhood(
         results.append(
             SemanticGraphNode(
                 node_id=f"node_{source_turn_ids[0]}__{source_turn_ids[-1]}",
-                node_type=raw_node["node_type"],
+                node_type=raw_node.node_type,
                 start_ms=first_turn["start_ms"],
                 end_ms=last_turn["end_ms"],
                 source_turn_ids=source_turn_ids,
                 word_ids=word_ids,
                 transcript_text=" ".join(segment for segment in transcript_segments if segment).strip(),
-                node_flags=list(raw_node.get("node_flags") or []),
-                summary=str(raw_node.get("summary") or "").strip(),
+                node_flags=list(raw_node.node_flags),
+                summary=str(raw_node.summary).strip(),
                 evidence=SemanticNodeEvidence(
                     emotion_labels=emotion_labels,
                     audio_events=audio_events,

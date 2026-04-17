@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+from typing import cast
 
-from ..contracts import SemanticGraphNode, SemanticNodeEvidence
+from ..contracts import NodeFlag, SemanticGraphNode, SemanticNodeEvidence
+from .responses import BoundaryReconciliationResponse, BoundarySkipDecision, BoundarySkipReason
 
 
 def _tokenize_text(text: str) -> set[str]:
@@ -36,9 +38,9 @@ def should_skip_boundary_reconciliation(
     *,
     left_node: SemanticGraphNode,
     right_node: SemanticGraphNode,
-) -> dict[str, object]:
+) -> BoundarySkipDecision:
     overlap_turns = sorted(set(left_node.source_turn_ids) & set(right_node.source_turn_ids))
-    shared_flags = sorted(set(left_node.node_flags) & set(right_node.node_flags))
+    shared_flags = cast(list[NodeFlag], sorted(set(left_node.node_flags) & set(right_node.node_flags)))
     summary_similarity = _jaccard(_tokenize_text(left_node.summary), _tokenize_text(right_node.summary))
     transcript_similarity = _jaccard(
         _tokenize_text(left_node.transcript_text),
@@ -51,7 +53,7 @@ def should_skip_boundary_reconciliation(
     if left_ordinals and right_ordinals:
         turn_gap = max(0, min(right_ordinals) - max(left_ordinals) - 1)
 
-    reason = "ambiguous_default"
+    reason: BoundarySkipReason = "ambiguous_default"
     skip_llm = False
     if overlap_turns:
         reason = "overlapping_turns"
@@ -71,21 +73,26 @@ def should_skip_boundary_reconciliation(
         skip_llm = True
         reason = "clear_semantic_split"
 
-    return {
-        "skip_llm": skip_llm,
-        "reason": reason,
-        "time_gap_ms": time_gap_ms,
-        "turn_gap": turn_gap,
-        "summary_similarity": summary_similarity,
-        "transcript_similarity": transcript_similarity,
-        "shared_flag_count": len(shared_flags),
-        "shared_flags": shared_flags,
-        "overlap_turn_count": len(overlap_turns),
-        "same_node_type": left_node.node_type == right_node.node_type,
-    }
+    return BoundarySkipDecision(
+        skip_llm=skip_llm,
+        reason=reason,
+        time_gap_ms=time_gap_ms,
+        turn_gap=turn_gap,
+        summary_similarity=summary_similarity,
+        transcript_similarity=transcript_similarity,
+        shared_flag_count=len(shared_flags),
+        shared_flags=shared_flags,
+        overlap_turn_count=len(overlap_turns),
+        same_node_type=left_node.node_type == right_node.node_type,
+    )
 
 
-def reconcile_boundary_nodes(*, left_batch_nodes: list[SemanticGraphNode], right_batch_nodes: list[SemanticGraphNode], llm_response: dict | None = None) -> list[SemanticGraphNode]:
+def reconcile_boundary_nodes(
+    *,
+    left_batch_nodes: list[SemanticGraphNode],
+    right_batch_nodes: list[SemanticGraphNode],
+    llm_response: BoundaryReconciliationResponse | None = None,
+) -> list[SemanticGraphNode]:
     """Resolve overlapping edge-node proposals between adjacent semantic batches."""
     if llm_response is None:
         raise ValueError("llm_response is required")
@@ -104,22 +111,22 @@ def reconcile_boundary_nodes(*, left_batch_nodes: list[SemanticGraphNode], right
                 node.transcript_text,
             )
 
-    resolution = llm_response.get("resolution")
+    resolution = llm_response.resolution
     if resolution == "keep_both":
         output_nodes: list[SemanticGraphNode] = []
-        for item in llm_response.get("nodes") or []:
-            existing_node = known_nodes[item["existing_node_id"]]
+        for item in llm_response.nodes:
+            existing_node = known_nodes[item.existing_node_id]
             output_nodes.append(
                 SemanticGraphNode(
                     node_id=existing_node.node_id,
-                    node_type=item["node_type"],
+                    node_type=item.node_type,
                     start_ms=existing_node.start_ms,
                     end_ms=existing_node.end_ms,
-                    source_turn_ids=list(item["source_turn_ids"]),
+                    source_turn_ids=list(item.source_turn_ids),
                     word_ids=list(existing_node.word_ids),
                     transcript_text=existing_node.transcript_text,
-                    node_flags=list(item.get("node_flags") or []),
-                    summary=str(item.get("summary") or "").strip(),
+                    node_flags=list(item.node_flags),
+                    summary=str(item.summary).strip(),
                     evidence=existing_node.evidence,
                     semantic_embedding=existing_node.semantic_embedding,
                     multimodal_embedding=existing_node.multimodal_embedding,
@@ -128,8 +135,10 @@ def reconcile_boundary_nodes(*, left_batch_nodes: list[SemanticGraphNode], right
         return output_nodes
 
     if resolution == "merge":
-        merged_node = llm_response.get("merged_node") or {}
-        source_turn_ids = list(merged_node.get("source_turn_ids") or [])
+        merged_node = llm_response.merged_node
+        if merged_node is None:
+            raise ValueError("merged boundary node must include source_turn_ids")
+        source_turn_ids = list(merged_node.source_turn_ids)
         if not source_turn_ids:
             raise ValueError("merged boundary node must include source_turn_ids")
 
@@ -158,14 +167,14 @@ def reconcile_boundary_nodes(*, left_batch_nodes: list[SemanticGraphNode], right
         return [
             SemanticGraphNode(
                 node_id=f"node_{source_turn_ids[0]}__{source_turn_ids[-1]}",
-                node_type=merged_node["node_type"],
+                node_type=merged_node.node_type,
                 start_ms=start_ms,
                 end_ms=end_ms,
                 source_turn_ids=source_turn_ids,
                 word_ids=word_ids,
                 transcript_text=" ".join(part.strip() for part in transcript_parts if part.strip()),
-                node_flags=list(merged_node.get("node_flags") or []),
-                summary=str(merged_node.get("summary") or "").strip(),
+                node_flags=list(merged_node.node_flags),
+                summary=str(merged_node.summary).strip(),
                 evidence=SemanticNodeEvidence(
                     emotion_labels=emotion_labels,
                     audio_events=audio_events,

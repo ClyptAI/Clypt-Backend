@@ -6,6 +6,7 @@ from backend.pipeline.semantics.boundary_reconciliation import (
     reconcile_boundary_nodes,
     should_skip_boundary_reconciliation,
 )
+from backend.pipeline.semantics.responses import BoundaryReconciliationResponse
 
 
 def _node(
@@ -44,7 +45,7 @@ def test_reconcile_boundary_nodes_keeps_distinct_nodes_when_requested():
     reconciled = reconcile_boundary_nodes(
         left_batch_nodes=left_nodes,
         right_batch_nodes=right_nodes,
-        llm_response={
+        llm_response=BoundaryReconciliationResponse.model_validate({
             "resolution": "keep_both",
             "nodes": [
                 {
@@ -62,7 +63,7 @@ def test_reconcile_boundary_nodes_keeps_distinct_nodes_when_requested():
                     "summary": "Right version",
                 },
             ],
-        },
+        }),
     )
 
     assert [node.node_id for node in reconciled] == ["node_overlap_a", "node_right"]
@@ -79,7 +80,7 @@ def test_reconcile_boundary_nodes_merges_overlapping_boundary_nodes():
     reconciled = reconcile_boundary_nodes(
         left_batch_nodes=left_nodes,
         right_batch_nodes=right_nodes,
-        llm_response={
+        llm_response=BoundaryReconciliationResponse.model_validate({
             "resolution": "merge",
             "merged_node": {
                 "source_turn_ids": ["t_000003", "t_000004"],
@@ -87,7 +88,7 @@ def test_reconcile_boundary_nodes_merges_overlapping_boundary_nodes():
                 "node_flags": ["high_resonance_candidate"],
                 "summary": "Merged boundary node",
             },
-        },
+        }),
     )
 
     assert len(reconciled) == 1
@@ -119,8 +120,8 @@ def test_should_skip_boundary_reconciliation_for_clear_time_gap():
         ),
     )
 
-    assert decision["skip_llm"] is True
-    assert decision["reason"] == "large_time_gap"
+    assert decision.skip_llm is True
+    assert decision.reason == "large_time_gap"
 
 
 def test_should_skip_boundary_reconciliation_keeps_ambiguous_adjacent_nodes_on_llm_path():
@@ -143,8 +144,8 @@ def test_should_skip_boundary_reconciliation_keeps_ambiguous_adjacent_nodes_on_l
         ),
     )
 
-    assert decision["skip_llm"] is False
-    assert decision["reason"] == "ambiguous_default"
+    assert decision.skip_llm is False
+    assert decision.reason == "ambiguous_default"
 
 
 def test_build_structural_edges_draws_next_prev_and_overlap_edges():

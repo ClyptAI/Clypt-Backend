@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from backend.pipeline.contracts import CanonicalTimeline, CanonicalTurn
+from backend.pipeline.semantics.responses import BoundarySkipDecision
 from backend.pipeline.semantics.runtime import run_merge_classify_and_reconcile
 
 
@@ -188,7 +189,18 @@ def test_run_merge_classify_and_reconcile_uses_separate_merge_and_boundary_concu
     monkeypatch.setattr(
         semantics_runtime,
         "should_skip_boundary_reconciliation",
-        lambda **kwargs: {"skip_llm": False, "reason": "llm_review"},
+        lambda **kwargs: BoundarySkipDecision(
+            skip_llm=False,
+            reason="ambiguous_default",
+            time_gap_ms=0,
+            turn_gap=None,
+            summary_similarity=0.0,
+            transcript_similarity=0.0,
+            shared_flag_count=0,
+            shared_flags=[],
+            overlap_turn_count=0,
+            same_node_type=True,
+        ),
     )
     monkeypatch.setattr(
         semantics_runtime,

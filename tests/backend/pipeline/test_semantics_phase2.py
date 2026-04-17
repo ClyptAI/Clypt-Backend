@@ -12,6 +12,7 @@ from backend.pipeline.contracts import (
     TranscriptWord,
 )
 from backend.pipeline.semantics.merge_and_classify import merge_and_classify_neighborhood
+from backend.pipeline.semantics.responses import SemanticsMergeAndClassifyBatchResponse
 from backend.pipeline.semantics.turn_neighborhoods import build_turn_neighborhoods
 
 
@@ -143,7 +144,7 @@ def test_merge_and_classify_neighborhood_builds_nodes_from_gemini_partition():
         halo_turn_count=1,
     )[0]
 
-    llm_response = {
+    llm_response = SemanticsMergeAndClassifyBatchResponse.model_validate({
         "merged_nodes": [
             {
                 "source_turn_ids": ["t_000001", "t_000002"],
@@ -152,7 +153,7 @@ def test_merge_and_classify_neighborhood_builds_nodes_from_gemini_partition():
                 "summary": "Expectation of failure gets immediate listener buy-in.",
             }
         ]
-    }
+    })
 
     nodes = merge_and_classify_neighborhood(
         neighborhood_payload=neighborhood,
@@ -186,7 +187,7 @@ def test_merge_and_classify_neighborhood_rejects_incomplete_target_partition():
     with pytest.raises(ValueError, match="partition"):
         merge_and_classify_neighborhood(
             neighborhood_payload=neighborhood,
-            llm_response={
+            llm_response=SemanticsMergeAndClassifyBatchResponse.model_validate({
                 "merged_nodes": [
                     {
                         "source_turn_ids": ["t_000001"],
@@ -195,5 +196,5 @@ def test_merge_and_classify_neighborhood_rejects_incomplete_target_partition():
                         "summary": "Incomplete",
                     }
                 ]
-            },
+            }),
         )

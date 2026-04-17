@@ -11,6 +11,11 @@ from .boundary_reconciliation import reconcile_boundary_nodes, should_skip_bound
 from .media_embeddings import prepare_node_media_embeddings
 from .merge_and_classify import merge_and_classify_neighborhood
 from .node_embeddings import build_semantic_embedding_payload
+from .responses import (
+    BoundaryReconciliationResponse,
+    SemanticsMergeAndClassifyBatchResponse,
+    SemanticsMergeAndClassifyLiveResponse,
+)
 from .prompts import (
     BOUNDARY_RECONCILIATION_SCHEMA,
     MERGE_AND_CLASSIFY_SCHEMA,
@@ -53,13 +58,16 @@ def run_merge_and_classify_batches(
     debug: list[dict[str, Any]] = []
     for neighborhood in neighborhoods:
         prompt = build_merge_and_classify_prompt(neighborhood_payload=neighborhood)
-        response = llm_client.generate_json(
-            prompt=prompt,
-            model=model,
-            temperature=0.0,
-            response_schema=MERGE_AND_CLASSIFY_SCHEMA,
-            max_output_tokens=merge_max_output_tokens,
+        response = SemanticsMergeAndClassifyBatchResponse.model_validate(
+            llm_client.generate_json(
+                prompt=prompt,
+                model=model,
+                temperature=0.0,
+                response_schema=MERGE_AND_CLASSIFY_SCHEMA,
+                max_output_tokens=merge_max_output_tokens,
+            )
         )
+        response_dump = response.model_dump(mode="json")
         merged_nodes = merge_and_classify_neighborhood(
             neighborhood_payload=neighborhood,
             llm_response=response,
@@ -70,7 +78,7 @@ def run_merge_and_classify_batches(
             {
                 "batch_id": neighborhood["batch_id"],
                 "prompt": prompt,
-                "response": response,
+                "response": response_dump,
             }
         )
     return nodes, debug
@@ -121,25 +129,28 @@ def run_merge_classify_and_reconcile(
     def _call_merge(neighborhood):
         started = time.perf_counter()
         prompt = build_merge_and_classify_prompt(neighborhood_payload=neighborhood)
-        response = llm_client.generate_json(
-            prompt=prompt,
-            model=model,
-            temperature=0.0,
-            response_schema=MERGE_AND_CLASSIFY_SCHEMA,
-            max_output_tokens=merge_max_output_tokens,
+        response = SemanticsMergeAndClassifyLiveResponse.model_validate(
+            llm_client.generate_json(
+                prompt=prompt,
+                model=model,
+                temperature=0.0,
+                response_schema=MERGE_AND_CLASSIFY_SCHEMA,
+                max_output_tokens=merge_max_output_tokens,
+            )
         )
+        response_dump = response.model_dump(mode="json")
         merged_nodes = merge_and_classify_neighborhood(
             neighborhood_payload=neighborhood,
             llm_response=response,
             turn_word_ids_by_turn_id=turn_word_ids_by_turn_id,
         )
         payload_chars = len(json.dumps(neighborhood, ensure_ascii=True, separators=(",", ":")))
-        response_chars = len(json.dumps(response, ensure_ascii=True, separators=(",", ":")))
+        response_chars = len(json.dumps(response_dump, ensure_ascii=True, separators=(",", ":")))
         prompt_chars = len(prompt)
         return merged_nodes, {
             "batch_id": neighborhood["batch_id"],
             "prompt": prompt,
-            "response": response,
+            "response": response_dump,
             "diagnostics": {
                 "latency_ms": (time.perf_counter() - started) * 1000.0,
                 "target_turn_count": len(neighborhood.get("target_turn_ids") or []),
@@ -174,12 +185,12 @@ def run_merge_classify_and_reconcile(
         left = [batch_nodes[idx - 1][-1]]
         right = [batch_nodes[idx][0]]
         heuristic = should_skip_boundary_reconciliation(left_node=left[0], right_node=right[0])
-        if bool(heuristic.get("skip_llm")):
+        if bool(heuristic.skip_llm):
             return idx, [left[0], right[0]], {
                 "left_batch_id": neighborhoods[idx - 1]["batch_id"],
                 "right_batch_id": neighborhoods[idx]["batch_id"],
                 "heuristic_skip": True,
-                "heuristic_reason": str(heuristic.get("reason") or "heuristic_skip"),
+                "heuristic_reason": str(heuristic.reason or "heuristic_skip"),
                 "prompt": None,
                 "response": None,
                 "diagnostics": {
@@ -193,7 +204,7 @@ def run_merge_classify_and_reconcile(
                     "response_chars": 0,
                     "heuristic_skip": True,
                     "heuristic_sent_to_llm": False,
-                    **heuristic,
+                    **heuristic.model_dump(mode="json"),
                 },
             }
         reconciled, debug = run_boundary_reconciliation(
@@ -207,13 +218,13 @@ def run_merge_classify_and_reconcile(
             "left_batch_id": neighborhoods[idx - 1]["batch_id"],
             "right_batch_id": neighborhoods[idx]["batch_id"],
             "heuristic_skip": False,
-            "heuristic_reason": str(heuristic.get("reason") or "llm_review"),
+            "heuristic_reason": str(heuristic.reason or "llm_review"),
             **debug,
             "diagnostics": {
                 **dict(debug.get("diagnostics") or {}),
                 "heuristic_skip": False,
                 "heuristic_sent_to_llm": True,
-                **heuristic,
+                **heuristic.model_dump(mode="json"),
             },
         }
 
@@ -272,13 +283,16 @@ def run_boundary_reconciliation(
     }
     started = time.perf_counter()
     prompt = build_boundary_reconciliation_prompt(overlap_payload=overlap_payload)
-    response = llm_client.generate_json(
-        prompt=prompt,
-        model=model,
-        temperature=0.0,
-        response_schema=BOUNDARY_RECONCILIATION_SCHEMA,
-        max_output_tokens=max_output_tokens,
+    response = BoundaryReconciliationResponse.model_validate(
+        llm_client.generate_json(
+            prompt=prompt,
+            model=model,
+            temperature=0.0,
+            response_schema=BOUNDARY_RECONCILIATION_SCHEMA,
+            max_output_tokens=max_output_tokens,
+        )
     )
+    response_dump = response.model_dump(mode="json")
     reconciled = reconcile_boundary_nodes(
         left_batch_nodes=left_batch_nodes,
         right_batch_nodes=right_batch_nodes,
@@ -286,7 +300,7 @@ def run_boundary_reconciliation(
     )
     return reconciled, {
         "prompt": prompt,
-        "response": response,
+        "response": response_dump,
         "diagnostics": {
             "latency_ms": (time.perf_counter() - started) * 1000.0,
             "left_node_count": len(left_batch_nodes),
@@ -295,7 +309,7 @@ def run_boundary_reconciliation(
             "prompt_chars": len(prompt),
             "prompt_token_estimate": max(1, round(len(prompt) / 4.0)),
             "payload_chars": len(json.dumps(overlap_payload, ensure_ascii=True, separators=(",", ":"))),
-            "response_chars": len(json.dumps(response, ensure_ascii=True, separators=(",", ":"))),
+            "response_chars": len(json.dumps(response_dump, ensure_ascii=True, separators=(",", ":"))),
         },
     }
 
