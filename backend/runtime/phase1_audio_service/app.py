@@ -42,7 +42,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from .deps import AppDeps, get_app_deps
 from .node_media_prep import NodeMediaPrepRequest, run_node_media_prep
@@ -57,16 +57,6 @@ class VibeVoiceAsrRequestBody(BaseModel):
     source_url: str | None = None
     video_gcs_uri: str | None = None
     run_id: str | None = None
-
-
-class StageEvent(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    stage_name: str
-    status: str
-    duration_ms: float | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    error_payload: dict[str, Any] | None = None
 
 
 def _require_bearer(request: Request, deps: AppDeps) -> None:
@@ -92,21 +82,13 @@ def _run_vibevoice_asr(
 ) -> list[dict[str, Any]]:
     """Invoke the in-process VibeVoice vLLM provider and return raw turns.
 
-    Tries the GCS-aware signature first so vLLM can stream audio directly
-    from the URL it already has (avoiding a second upload); falls back to
-    the local-file signature if the provider does not accept ``audio_gcs_uri``.
+    ``VibeVoiceVLLMProvider.run`` accepts ``audio_gcs_uri`` directly so vLLM
+    can stream audio from the URL it already has (avoiding a second upload).
     """
-    audio_path_str = str(audio_path)
-    if audio_gcs_uri:
-        try:
-            return vibevoice_provider.run(
-                audio_path=audio_path_str,
-                audio_gcs_uri=audio_gcs_uri,
-            )
-        except TypeError as exc:
-            if "audio_gcs_uri" not in str(exc):
-                raise
-    return vibevoice_provider.run(audio_path=audio_path_str)
+    return vibevoice_provider.run(
+        audio_path=str(audio_path),
+        audio_gcs_uri=audio_gcs_uri,
+    )
 
 
 def create_app() -> FastAPI:
@@ -278,4 +260,4 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
-__all__ = ["app", "create_app", "VibeVoiceAsrRequestBody", "StageEvent"]
+__all__ = ["app", "create_app", "VibeVoiceAsrRequestBody"]

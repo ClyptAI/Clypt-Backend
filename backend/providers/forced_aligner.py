@@ -519,13 +519,7 @@ class ForcedAlignmentProvider:
         )
         t0 = time.perf_counter()
 
-        try:
-            self._ensure_model(device)
-        except Exception as e:
-            logger.warning(
-                "[forced_aligner] failed to load NFA model: %s — skipping", e
-            )
-            return []
+        self._ensure_model(device)
 
         try:
             all_words = self._align_global_transcript(
@@ -555,18 +549,11 @@ class ForcedAlignmentProvider:
                 exc,
             )
 
-        try:
-            all_words = self._align_per_turn_fallback(
-                audio_path=audio_path,
-                turns=turns,
-                device=device,
-            )
-        except Exception as exc:  # pragma: no cover - runtime dependency path
-            logger.warning(
-                "[forced_aligner] fallback alignment failed: %s — returning partial results",
-                exc,
-            )
-            all_words = []
+        all_words = self._align_per_turn_fallback(
+            audio_path=audio_path,
+            turns=turns,
+            device=device,
+        )
 
         logger.info(
             "[forced_aligner] alignment done in %.1f s — %d words across %d turns",

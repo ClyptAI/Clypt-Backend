@@ -198,18 +198,20 @@ class VibeVoiceVLLMProvider:
         return Path(tmp), True
 
     def _probe_duration(self, audio_path: Path) -> float:
-        """Probe audio duration via ffprobe. Returns 0.0 on failure."""
-        try:
-            cmd = [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(audio_path),
-            ]
-            out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().strip()
-            return float(out)
-        except Exception:
-            return 0.0
+        """Probe audio duration via ffprobe.
+
+        Raises on ffprobe failure rather than returning 0.0 — a silent zero
+        poisons the RTF telemetry downstream, so Phase 1 prefers a hard crash
+        over a quietly wrong duration.
+        """
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(audio_path),
+        ]
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().strip()
+        return float(out)
 
     def _request_with_retry(
         self, audio_path: Path, context: str, duration_s: float, audio_url: str | None

@@ -171,6 +171,23 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 
 ---
 
+## 2026-04-16 - Phase 1 audio fail-fast cleanup: silent fallbacks removed across forced-aligner, VibeVoice probe, and audio_gcs_uri shim (F0.4 + F0.5 + F0.6 + StageEvent C2)
+
+- **Date/Time (UTC):** 2026-04-16
+- **Subsystem:** Phase 1 audio chain — `backend/providers/forced_aligner.py`, `backend/providers/vibevoice_vllm.py`, `backend/runtime/phase1_audio_service/app.py`
+- **Environment:** DO H200 (forced aligner, extract orchestration) + DO RTX 6000 Ada (VibeVoice ASR service). Discovered during the code-quality audit that produced `tmp/code-quality-reports/06-try-except.md` and `tmp/code-quality-reports/03-unused-code.md`.
+- **Symptom / Error signature:** Phase 1 runs could "succeed" while silently emitting degraded telemetry and missing data. Specifically: (a) a forced-aligner model-load failure returned `[]` with a `warning`, causing the upstream `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1` check to detect zero words and fail with an opaque "no alignments" error instead of the actual torch/NeMo load exception; (b) a per-turn forced-aligner fallback exception returned `all_words = []` and kept going, hiding real misalignment; (c) VibeVoice's `_probe_duration` swallowed every `ffprobe` exception and returned `0.0`, which then poisoned RTF/duration telemetry downstream; (d) `phase1_audio_service/app.py` had a `TypeError` compat shim that retried `vibevoice_provider.run(...)` without `audio_gcs_uri` when the *substring* `"audio_gcs_uri"` appeared in the exception message — so any unrelated `TypeError` inside `run` silently disabled URL streaming.
+- **Root cause:** Residual defensive `try/except` blocks (reports R5, R6, R2 from `06-try-except.md`) left over from the pre-RTX split topology. The `audio_gcs_uri` shim (R7) was a one-release compat patch for a provider signature change that has since shipped; it is now a time-bomb. The `StageEvent` Pydantic model in `app.py` (report C2 from `03-unused-code.md`) had zero importers or instantiations — the wire shape for `VibeVoiceAsrResponse.stage_events` is already `list[dict[str, Any]]`, so the class was dead code.
+- **Fix applied:**
+  - `forced_aligner.py` (`ForcedAlignmentProvider.align_turns`): deleted the `try/except` around `self._ensure_model(device)` (lines 522-528) and the per-turn `try/except Exception: all_words = []` fallback (lines 558-569). `CLYPT_PHASE1_REQUIRE_FORCED_ALIGNMENT=1` in `backend/phase1_runtime/extract.py` remains the single enforcement point.
+  - `vibevoice_vllm.py` (`_probe_duration`): deleted the `try/except Exception: return 0.0` (lines 200-212). Let `FileNotFoundError`, `subprocess.CalledProcessError`, `ValueError` propagate so RTF telemetry is never silently poisoned.
+  - `phase1_audio_service/app.py` (`_run_vibevoice_asr`): deleted the `TypeError`-substring shim (lines 100-109). The helper now calls `vibevoice_provider.run(audio_path=..., audio_gcs_uri=...)` directly — `VibeVoiceVLLMProvider.run` supports the kwarg natively.
+  - `phase1_audio_service/app.py`: deleted the unused `StageEvent` Pydantic class and removed it from `__all__`. Also dropped the now-unused `Field` import from `pydantic`.
+- **Verification evidence:** `python -m pytest tests/backend/providers -q -x --tb=short -k "forced_aligner or vibevoice"` → 14 passed / 57 deselected. `python -m pytest tests/backend/runtime/phase1_audio_service -q -x --tb=short` → 13 passed. `python -m pytest tests/backend/phase1_runtime/test_runner.py -q` → 9 passed. Import smoke: `from backend.runtime.phase1_audio_service.app import app` and `from backend.providers.forced_aligner import ForcedAlignmentProvider` both succeed. `rg '\bStageEvent\b' .` returns zero matches after the deletion (the `StageEventLogger` type alias in `audio_host_client.py` is a distinct symbol and was intentionally left alone).
+- **Follow-up guardrails:** Do not reintroduce empty-list or zero-duration fallbacks in Phase 1 audio providers — Phase 1 is contract to either succeed cleanly or crash cleanly, because downstream Phase 2-4 stages cannot tell the difference between "zero words" and "NFA crashed" when the audio chain silently degrades. Any future compat shim for provider signature changes must check the exception class, not substring-match the message, and must carry a TODO-dated removal note tied to the next release. If a new Pydantic model is added for the stage-event wire shape, update `VibeVoiceAsrResponse.stage_events` to reference it rather than leaving a dangling class in `app.py`.
+
+---
+
 ## 2026-04-16 - Cloud Run L4 VibeVoice OOM during vLLM profile_run; cut over to GCE L4 with bf16 patch
 
 - **Date/Time (UTC):** 2026-04-16 (diagnosis and pivot across the day)
