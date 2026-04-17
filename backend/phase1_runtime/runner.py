@@ -56,8 +56,8 @@ class Phase1JobRunner:
     ) -> None:
         if vibevoice_asr_client is None:
             raise ValueError(
-                "Phase1JobRunner requires vibevoice_asr_client; VibeVoice ASR runs "
-                "only on the RTX 6000 Ada host."
+                "Phase1JobRunner requires vibevoice_asr_client; VibeVoice ASR "
+                "must be routed through the Phase 1 service boundary."
             )
         if forced_aligner is None or emotion_provider is None or yamnet_provider is None:
             raise ValueError(

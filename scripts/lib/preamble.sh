@@ -1,10 +1,9 @@
 # shellcheck shell=bash
 # Shared bash preamble helpers for Clypt deploy scripts.
 #
-# This library is sourced (not executed) by scripts under
-# scripts/do_phase1_audio/ and scripts/do_phase1_visual/. It factors out
-# idioms that were duplicated across 3+ deploy scripts. Single-use or
-# 2-use helpers were intentionally not added.
+# This library is sourced (not executed) by the active host deploy scripts
+# under scripts/do_phase1/ and scripts/do_phase26/. It factors out idioms
+# that were duplicated across multiple deploy scripts.
 #
 # Usage:
 #     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

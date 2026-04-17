@@ -1,9 +1,8 @@
-"""Remote client for the VibeVoice ASR service on the RTX 6000 Ada box.
+"""Remote client for the Phase 1 VibeVoice ASR service.
 
-The H200 orchestrator calls :meth:`RemoteVibeVoiceAsrClient.run` once per
-Phase 1 job to invoke VibeVoice vLLM on the RTX. NFA/emotion2vec+/YAMNet
-run **in-process** on the H200 afterwards — they are no longer the RTX's
-responsibility (see docs/ERROR_LOG.md 2026-04-17).
+The Phase 1 runner calls :meth:`RemoteVibeVoiceAsrClient.run` once per
+job to invoke the hot local-or-remote VibeVoice service. NFA/emotion2vec+/
+YAMNet run in-process on the Phase 1 host afterwards.
 
 Stage telemetry reported by the remote service is re-emitted through the
 caller-supplied ``stage_event_logger`` so the H200 orchestrator preserves
@@ -121,7 +120,7 @@ RemoteAudioChainError = RemoteVibeVoiceAsrError
 
 
 class RemoteVibeVoiceAsrClient:
-    """HTTP client for the RTX 6000 Ada ``POST /tasks/vibevoice-asr`` endpoint.
+    """HTTP client for the ``POST /tasks/vibevoice-asr`` endpoint.
 
     The client issues a single request per Phase 1 job. The remote service
     is responsible for running VibeVoice vLLM on the hot GPU and returning
@@ -132,8 +131,8 @@ class RemoteVibeVoiceAsrClient:
     ----------
     settings:
         :class:`VibeVoiceAsrServiceSettings` loaded from env. ``service_url``
-        is the private-VPC base URL of the RTX host
-        (e.g. ``http://10.0.0.5:9100``).
+        is typically the loopback Phase 1 service URL
+        (for example ``http://127.0.0.1:9100``).
     max_retries:
         Transient-error retries for connection-level failures. Kept small
         because the ASR call can be multi-minute for long content; retrying

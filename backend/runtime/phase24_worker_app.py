@@ -519,8 +519,8 @@ class Phase24WorkerService:
         self._assert_preemption_fail_fast()
 
 
-def build_default_phase24_worker_service() -> Phase24WorkerService:
-    settings = load_provider_settings()
+def build_default_phase24_worker_service(*, settings=None) -> Phase24WorkerService:
+    settings = settings or load_provider_settings()
     repository = SpannerPhase14Repository.from_settings(settings=settings.spanner)
     repository.bootstrap_schema()
     generation_backend = (settings.vertex.generation_backend or "").strip().lower()
@@ -539,7 +539,7 @@ def build_default_phase24_worker_service() -> Phase24WorkerService:
         raise ValueError(
             "Local OpenAI generation requires CLYPT_LOCAL_LLM_MODEL (or GENAI_FLASH_MODEL as fallback)."
         )
-    # Node-media prep runs exclusively on the RTX 6000 Ada NVENC host; there
+    # Node-media prep runs exclusively on the remote media-prep service; there
     # is no in-process fallback. Always wire the remote client.
     node_media_preparer = RemoteNodeMediaPrepClient(settings=settings.node_media_prep)
     runner = V31LivePhase14Runner.from_env(

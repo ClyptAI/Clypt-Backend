@@ -2,6 +2,77 @@
 
 Persistent record of major runtime/deployment/pipeline errors and their recoveries.
 
+> Historical entries below may mention legacy file paths from the retired
+> H200/RTX split. Some of those files have since been deleted as part of the
+> `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
+> not current operator entrypoints.
+
+## 2026-04-17 - Phase 1 / downstream host coupling blocked the two-H200 + Modal split
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** Phase 1 orchestration, downstream enqueue boundary, deployment/runtime documentation
+- **Environment:** repository migration from the old mixed host naming into the new `phase1` + `phase26` + Modal topology
+- **Symptom / Error signature:** The repo still assumed the Phase 1 host directly owned the downstream SQLite queue and still documented the old H200/RTX split in canonical runtime/deploy surfaces. That made the intended topology ambiguous: Phase 1 could not cleanly dispatch to a second H200, and operators had no canonical host-scoped env/runbook set for the new split.
+- **Root cause:** Host-level responsibilities had evolved faster than the naming and service boundaries. The codebase still mixed Phase 1 orchestration, local queue ownership, and older deployment vocabulary, so the new architecture existed only as intent rather than as committed runtime surfaces.
+- **Fix applied:** Added persistent local Phase 1 service boundaries for VibeVoice and visual extraction, added a remote Phase26 dispatch client/service, moved host-level entrypoints and deploy assets to explicit `phase1` / `phase26` names, added new env baselines (`known-good-phase1-h200.env`, `known-good-phase1-h100-backup.env`, `known-good-phase26-h200.env`), added new deployment docs (`PHASE1_HOST_DEPLOY.md`, `PHASE26_HOST_DEPLOY.md`, `MODAL_NODE_MEDIA_PREP_DEPLOY.md`), and rewrote the canonical README/runtime/architecture docs around the two-H200 + Modal split.
+- **Verification evidence:** Focused regression suites passed after the migration: `tests/backend/runtime/phase1_visual_service/test_phase1_visual_service_app.py`, `tests/backend/runtime/phase26_dispatch_service/test_phase26_dispatch_service_app.py`, `tests/backend/providers/test_phase1_visual_and_phase26_clients.py`, `tests/backend/phase1_runtime/test_factory.py`, `tests/backend/phase1_runtime/test_runner.py`, `tests/backend/runtime/test_phase24_worker_app.py`, and the relevant config tests in `tests/backend/providers/test_provider_config_and_clients.py`.
+- **Follow-up guardrails:** Keep host-level naming semantic: use `phase1` for Phase 1 host surfaces, `phase26` for downstream host surfaces, and reserve `phase24` for the current business-logic modules only. Any future Phase 6 render/export rollout should follow the same pattern: Phase26 owns orchestration, Modal owns the stateless remote worker surface.
+
+## 2026-04-17 - Fresh H200 visual deploy failed because `youtokentome` needed explicit `--no-build-isolation`
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** H200 Phase 1 deploy automation (`scripts/do_phase1_visual/deploy_visual_service.sh`)
+- **Environment:** Fresh DigitalOcean NVIDIA AI/ML Ready image in `atl1` on `gpu-h200x1-141gb`, Phase 1 venv bootstrap from `requirements-do-phase1-visual.txt`
+- **Symptom / Error signature:** `deploy_visual_service.sh` failed during the `requirements-do-phase1-visual.txt` install when `nemo-toolkit[asr]` pulled `youtokentome>=1.0.5`; pip aborted with `ModuleNotFoundError: No module named 'Cython'` while getting build requirements for the `youtokentome` wheel.
+- **Root cause:** `youtokentome`'s build path imported `Cython` without declaring it in isolated build requirements, so a fresh venv on the H200 could not satisfy the NeMo ASR dependency tree. An initial script patch that exported `PIP_NO_BUILD_ISOLATION=1` was not sufficient on the host's pip 26.0.1 path; the build only became deterministic once pip was invoked with the explicit `--no-build-isolation` flag.
+- **Fix applied:** Updated [`scripts/do_phase1_visual/deploy_visual_service.sh`](../scripts/do_phase1_visual/deploy_visual_service.sh) to preinstall `Cython<4` and then install `youtokentome>=1.0.5` with `python -m pip install --no-build-isolation ...` before the main `requirements-do-phase1-visual.txt` solve. This forces the build to reuse the current venv where `Cython` is already present.
+- **Verification evidence:** On the fresh Atlanta H200, `source /opt/clypt-phase1/venvs/phase1/bin/activate && python -m pip install --no-build-isolation youtokentome==1.0.6` completed successfully and built the wheel in-venv. The failing `ModuleNotFoundError: No module named 'Cython'` only reproduced when relying on the earlier env-var-based workaround.
+- **Follow-up guardrails:** Treat NeMo's ASR extras as a fragile transitive graph on fresh GPU hosts. When adding or updating audio-post dependencies, validate the full H200 deploy script on a clean droplet rather than relying on an already-warmed venv.
+
+## 2026-04-17 - Fresh H200 visual deploy started Phase 2-4 worker before SGLang existed
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** H200 Phase 1 deploy automation (`scripts/do_phase1_visual/deploy_visual_service.sh`)
+- **Environment:** Fresh DigitalOcean NVIDIA AI/ML Ready image in `atl1` on `gpu-h200x1-141gb`, first-pass H200 bring-up before `deploy_sglang_qwen_service.sh`
+- **Symptom / Error signature:** `deploy_visual_service.sh` completed the Phase 1 venv install, TensorRT install, and NFA/emotion2vec+ prewarm, then failed at `systemctl restart clypt-v31-phase24-local-worker.service` with `Unit clypt-sglang-qwen.service not found.`
+- **Root cause:** `clypt-v31-phase24-local-worker.service` has `Requires=clypt-sglang-qwen.service`, but `deploy_visual_service.sh` restarted the Phase 2-4 worker before the documented next step (`deploy_sglang_qwen_service.sh`) had installed the SGLang unit. The script order contradicted the deploy order described in its own final message.
+- **Fix applied:** Updated [`scripts/do_phase1_visual/deploy_visual_service.sh`](../scripts/do_phase1_visual/deploy_visual_service.sh) to restart only the Phase 1 API and Phase 1 worker during the visual deploy. The script now starts `clypt-v31-phase24-local-worker.service` only when `/etc/systemd/system/clypt-sglang-qwen.service` already exists; otherwise it logs a skip message and leaves Phase 2-4 startup to `deploy_sglang_qwen_service.sh`.
+- **Verification evidence:** On the Atlanta H200, the failure reproduced exactly once on a fresh host before the patch (`Unit clypt-sglang-qwen.service not found`). After the sequencing fix, the visual deploy can complete without attempting to start Phase 2-4 early, and `deploy_sglang_qwen_service.sh` remains the step that restarts `clypt-v31-phase24-local-worker.service` after SGLang becomes healthy.
+- **Follow-up guardrails:** Keep the H200 bring-up order strict: `bootstrap_h200.sh` → `deploy_visual_service.sh` → `deploy_sglang_qwen_service.sh`. Do not reintroduce any unconditional Phase 2-4 worker restart in the visual deploy unless the SGLang unit is guaranteed to be installed first.
+
+## 2026-04-17 - Fresh H200 Phase 1 worker crashed on Python 3.10 because `TypeVar(default=...)` is too new
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** Phase 1 worker / Spanner repository import path (`backend/runtime/run_phase1_worker.py` → `backend/repository/spanner_phase14_repository.py`)
+- **Environment:** Fresh DigitalOcean NVIDIA AI/ML Ready image in `atl1` on `gpu-h200x1-141gb`, Ubuntu 22.04 / Python 3.10.12
+- **Symptom / Error signature:** `clypt-v31-phase1-worker.service` entered a restart loop immediately after the visual deploy. `journalctl -u clypt-v31-phase1-worker.service` showed `TypeError: TypeVar.__init__() got an unexpected keyword argument 'default'` at `backend/repository/spanner_phase14_repository.py:48`.
+- **Root cause:** `backend/repository/spanner_phase14_repository.py` used `TypeVar("T", default=Any)`, which is not supported by the H200 host's Python 3.10 interpreter. The import failed before the worker could initialize `build_default_phase1_job_runner()`.
+- **Fix applied:** Updated [`backend/repository/spanner_phase14_repository.py`](../backend/repository/spanner_phase14_repository.py) to use `T = TypeVar("T")` instead. The `default=Any` clause was only type-hint sugar for the overloaded helpers and had no runtime value, so removing it preserves behavior while restoring Python 3.10 compatibility.
+- **Verification evidence:** The worker crash signature reproduced consistently in the H200 systemd journal before the patch. After syncing the compatibility change and restarting the service, the Phase 1 worker can import the repository module on Python 3.10 instead of failing during module import.
+- **Follow-up guardrails:** Avoid Python-3.12+/3.13-only typing syntax in runtime codepaths unless the deploy images are upgraded first. If newer typing features are desired for static checking, prefer `typing_extensions` shims or keep them out of modules imported by production workers on Python 3.10.
+
+## 2026-04-17 - Rsynced `.env.local` poisoned the H200 worker with stale local VibeVoice settings
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** H200 Phase 1 worker config loading (`backend/providers/config.py` + `scripts/do_phase1_visual/deploy_visual_service.sh`)
+- **Environment:** Fresh DigitalOcean NVIDIA AI/ML Ready image in `atl1` on `gpu-h200x1-141gb`, repo rsynced from a local workstation that contained `.env.local`
+- **Symptom / Error signature:** `clypt-v31-phase1-worker.service` kept crashing after the Python 3.10 `TypeVar(default=...)` fix with `ValueError: Unsupported VIBEVOICE_BACKEND='native'; only 'vllm' is supported on main.` even though `/etc/clypt-phase1/v3_1_phase1.env` contained only the remote-ASR `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_*` settings and no `VIBEVOICE_*` keys.
+- **Root cause:** `backend/providers/config.py` auto-loads repo-root `.env` and `.env.local` from `Path.cwd()`. The rsynced droplet repo still had a workstation-local `.env.local` with `VIBEVOICE_BACKEND=native`, so the worker imported stale local-dev settings on top of the correct systemd env file.
+- **Fix applied:** Updated [`scripts/do_phase1_visual/deploy_visual_service.sh`](../scripts/do_phase1_visual/deploy_visual_service.sh) to delete repo-local `.env` and `.env.local` files on the droplet before any services start. Live H200 recovery also removes the stray `.env.local` from `/opt/clypt-phase1/repo` before restarting the worker.
+- **Verification evidence:** On the Atlanta H200, `grep -R '^VIBEVOICE_BACKEND=' /opt/clypt-phase1/repo` identified `/opt/clypt-phase1/repo/.env.local:VIBEVOICE_BACKEND=native` as the only live source of the bad setting. After removing the stray dotenv file, the worker no longer inherits the unsupported local VibeVoice backend from the repo checkout.
+- **Follow-up guardrails:** Do not rely on rsync alone to keep deploy repos clean; local dotenv files are operationally hazardous on the H200 because provider config auto-loads them. Keep `deploy_visual_service.sh` as the guardrail that strips `.env` / `.env.local` on the droplet before Phase 1 or Phase 2-4 services are started.
+
+## 2026-04-17 - Fresh H200 bootstrap failed because base-image pip lacked `--break-system-packages`
+
+- **Date/Time (UTC):** 2026-04-17
+- **Subsystem:** H200 bootstrap automation (`scripts/do_phase1_visual/bootstrap_h200.sh`)
+- **Environment:** Fresh DigitalOcean NVIDIA AI/ML Ready image in `atl1` on `gpu-h200x1-141gb`
+- **Symptom / Error signature:** `bootstrap_h200.sh` progressed through apt provisioning and then failed during Qwen cache prewarm with `pip3 install --break-system-packages --quiet "huggingface_hub>=0.28"` → `no such option: --break-system-packages`.
+- **Root cause:** The script assumed a newer pip CLI than the Ubuntu 22.04 NVIDIA AI/ML base image currently provides. On this image, `pip` predates the `--break-system-packages` flag, so the one-time `huggingface_hub` install aborts before `snapshot_download(...)` can run.
+- **Fix applied:** Updated [`scripts/do_phase1_visual/bootstrap_h200.sh`](../scripts/do_phase1_visual/bootstrap_h200.sh) to probe `python3 -m pip install --help` for `--break-system-packages` and only pass the flag when supported; otherwise it falls back to a normal `python3 -m pip install --quiet "huggingface_hub>=0.28"`.
+- **Verification evidence:** Re-running bootstrap on the fresh Atlanta H200 no longer aborts at the `huggingface_hub` install step and proceeds into the Qwen pre-cache flow.
+- **Follow-up guardrails:** Treat the DO GPU base image as Ubuntu 22.04 unless proven otherwise, and feature-detect pip flags in bootstrap scripts instead of assuming parity with newer Debian/Ubuntu packaging behavior.
+
 > **2026-04-17 note:** Entries below that reference GCE L4 / Cloud Run L4 combined
 > service, the VibeVoice `bfloat16` Dockerfile patch, and Cloud Tasks dispatch
 > describe infrastructure that has since been torn down. The code paths,

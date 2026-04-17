@@ -3,111 +3,56 @@
 **Status:** Active  
 **Last updated:** 2026-04-17
 
-This document records known baseline runs and recent migration test attempts.
+This document tracks reference runs and migration validation targets.
 
-## 1) Canonical Reference Runs
+## 1) Historical Baselines
+
+The entries below are still useful for relative performance comparison, but many were gathered under the earlier H200 + RTX topology.
 
 | Context | Video | Duration | Turns | Phase 1 | Phases 2-4 | Total | Notes |
-|---|---|---:|---:|---:|---:|---:|---|
-| Full Phase 1-4 validated | `mrbeastflagrant.mp4` | 392.9s | 104 | 153s | 98s | 251s | End-to-end baseline |
-| Full Phase 1-4 fresh redeploy | `mrbeastflagrant.mp4` | 392.9s | 104 | n/a | 271.8s | 273.5s | `run_20260408_095543_mrbeastflagrant` |
-| Queue worker baseline | `mrbeastflagrant.mp4` | 392.9s | 104 | n/a | 820.8s | n/a | CPU ffmpeg fallback path (`job_430a676441ab42af8a43a25d190dbc13`) |
-| Queue worker benchmark rerun | `mrbeastflagrant.mp4` | 392.9s | 104 | n/a | 421.2s | n/a | `run_20260409_1517_phase24_bench` |
-| Queue worker tuned replay | `mrbeastflagrant.mp4` | 392.9s | 104 | n/a | 143.8s | n/a | `run_20260409_175717_phase24_dispatch` |
-| Longer clip stress reference | `joeroganflagrant.mp4` | 788.7s | 201 | 285s | incomplete | incomplete | historical quota/compute pressure |
-| DO-speedup-and-OSS-swap baseline | `openclawyc.mp4` | 1356s (22m 36s) | — | ~200s | ~123–154s | ~322–354s (~5m 22s–5m 56s) | RTX vLLM 0.77/2-seqs/bf16; SGLang ctx 65536; Phase 3 LR prefetch; GCS-upload-bound media_prep |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Full Phase 1-4 validated | `mrbeastflagrant.mp4` | 392.9s | 104 | 153s | 98s | 251s | Historical full-pipeline baseline |
+| Full Phase 1-4 fresh redeploy | `mrbeastflagrant.mp4` | 392.9s | 104 | n/a | 271.8s | 273.5s | Historical redeploy baseline |
+| DO-speedup-and-OSS-swap baseline | `openclawyc.mp4` | 1356s | — | ~200s | ~123-154s | ~322-354s | Historical pre-split benchmark |
 
-## 2) Supplemental Historical Runs
+## 2) New Validation Focus
 
-| Context | Video | Duration | Turns | Wall time | Notes |
-|---|---|---:|---:|---:|---|
-| ASR only | `mrbeastflagrant.mp4` | 392.9s | 102 | 30.8s | vLLM RTF ~0.07x |
-| ASR only | `joeroganflagrant.mp4` | 788.7s | 200 | 64.3s | vLLM RTF ~0.07x |
-| Full Phase 1 (sequential audio chain) | `mrbeastflagrant.mp4` | 392.9s | 104 | 179.2s | pre-concurrency fix |
-| Full Phase 1 (sequential audio chain) | `joeroganflagrant.mp4` | 788.7s | 201 | 342.4s | pre-concurrency fix |
-| Full Phase 1 (parallel audio chain) | `joeroganflagrant.mp4` | 788.7s | 201 | 299.6s | concurrency validated |
+The current topology to validate is:
 
-## 3) Current Validation Focus
+- Phase1 H200:
+  - local VibeVoice service
+  - local visual service
+  - in-process NFA + emotion2vec+ + YAMNet
+- Phase26 H200:
+  - remote enqueue API
+  - local SQLite queue + local worker
+  - SGLang Qwen on `:8001`
+- Modal:
+  - node-media-prep after node creation
 
-- Current code paths to validate against these historical baselines (two-host topology):
-  - local SQLite queue + local Phase 2-4 worker on the H200
-  - SGLang Qwen on H200 `:8001`
-  - Phase 1 audio chain:
-    - VibeVoice vLLM ASR on the RTX 6000 Ada (sole tenant), dispatched
-      via `POST /tasks/vibevoice-asr`
-    - NFA + emotion2vec+ + YAMNet running in-process on the H200 after
-      the ASR response returns
-  - Phase 1 visual chain: RF-DETR + ByteTrack (TensorRT FP16 fast path), in-process on the H200
-  - node-media prep: RTX 6000 Ada via `POST /tasks/node-media-prep`
-- Compare new measurements against Sections 1, 2, and 5, then append the new baseline here.
-- Two-host benchmarks (RTX 6000 Ada VibeVoice ASR host + H200
-  visual/audio-post/Phase 2-4 host) should record the RTX round-trip
-  latency for `/tasks/vibevoice-asr` alongside the existing single-host
-  Phase 1 numbers, and the H200-side NFA + emotion2vec+ + YAMNet wall
-  time separately from that round-trip. See
-  [`../deployment/P1_DEPLOY.md`](../deployment/P1_DEPLOY.md) and
-  [`../deployment/P1_AUDIO_HOST_DEPLOY.md`](../deployment/P1_AUDIO_HOST_DEPLOY.md).
+For every new benchmark, record:
 
-## 4) Recorded Phase 1 + Phase 2-4 Timing Snapshots (openclawyc, 2026-04-17)
+- Phase 1 total wall time
+- local VibeVoice service wall time
+- audio-post wall time
+- local visual service wall time
+- dispatch latency to Phase26
+- Phase 2-4 total wall time
+- node-media-prep wall time on Modal
+- end-to-end total wall time
 
-DO-speedup-and-OSS-swap branch baseline, `openclawyc.mp4` (22m 36s):
+## 3) Migration Acceptance Targets
 
-| Sub-component | Wall-clock |
-|---|---|
-| Phase 1 total | ~200s |
-| VibeVoice ASR (RTX, sole tenant) | ~159–167s |
-| node-media prep (RTX, GCS-upload bound) | ~90–124s |
-| Phase 2-4 total | ~123–154s |
-| Phase 3 (LR prefetch during media_prep) | ~40–65ms |
-| Full pipeline end-to-end | ~5m 22s – 5m 56s |
+For this split, validate:
 
-Config: RTX vLLM `--gpu-memory-utilization 0.77 --max-num-seqs 2 --dtype bfloat16`, CUDA graph capture enabled, no speculative decoding; SGLang `--context-length 65536 --kv-cache-dtype fp8_e4m3 --mem-fraction-static 0.78 --speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --mamba-scheduler-strategy extra_buffer --schedule-policy lpm --chunked-prefill-size 8192 --grammar-backend xgrammar --reasoning-parser qwen3` plus `HF_HUB_OFFLINE=1` and `SGLANG_ENABLE_SPEC_V2=1`; node-media prep concurrency 8 (ffmpeg `-c:v h264_cuvid` NVDEC → `-c:v h264_nvenc` NVENC); multimodal embedding chained inside Phase 2 pool (Gemini `embed_media_uris` `max_workers=32`); Phase 2 output token caps `8192` (merge/boundary); Phase 4 pool/meta caps `4096`.
+1. Phase 1 can run with both local services hot and healthy.
+2. Phase 1 handoff reaches `POST /tasks/phase26-enqueue` successfully.
+3. Phase26 worker calls Modal for media prep, not the Phase1 host.
+4. RF-DETR output parity stays within expected bounds with the preserved fast settings.
+5. The H100 overlay changes only memory-sensitive VibeVoice knobs.
 
-## 5) Recorded Phase 2-4 Timing Snapshots (mrbeastflagrant)
+## 4) Notes
 
-### 5.1 Queue baseline (`job_430a676441ab42af8a43a25d190dbc13`)
-
-- Phase 2: `692,564.245 ms`
-- Phase 3: `75,776.984 ms`
-- Phase 4: `52,392.827 ms`
-- Total: `820,842.256 ms`
-
-### 5.2 Queue benchmark rerun (`run_20260409_1517_phase24_bench`)
-
-- Phase 2: `207,224.693 ms`
-- Phase 3: `164,671.637 ms`
-- Phase 4: `49,197.826 ms`
-- Total: `421,153.311 ms`
-- Spanner summary: `node_count=14`, `edge_count=67`, `candidate_count=7`
-
-### 5.3 Tuned queue replay (`run_20260409_175717_phase24_dispatch`)
-
-- Phase 2: `72,685.086 ms`
-- Phase 3: `8,893.872 ms`
-- Phase 4: `62,178.757 ms`
-- Total: `143,816.557 ms`
-- Spanner summary: `node_count=23`, `edge_count=109`, `candidate_count=11`
-
-## 6) Candidate Snapshot References
-
-### 6.1 Successful mrbeast run (ranked excerpt)
-
-1. `02:08.96-03:08.97`
-2. `00:00.00-00:32.20`
-3. `05:36.15-06:17.91`
-4. `01:22.36-02:01.36`
-5. `05:02.13-05:36.15`
-
-### 6.2 Tuned queue replay (`run_20260409_175717_phase24_dispatch`)
-
-1. `05:15.32-05:47.95`
-2. `02:08.96-03:08.97`
-3. `04:17.27-05:02.13`
-4. `00:00.00-00:32.20`
-5. `05:47.95-06:17.91`
-
-## 7) How To Use This Reference
-
-- Use this file as the baseline target when validating runtime/deploy changes.
-- Compare new runs against these numbers before claiming improvements.
-- Log major deviations and recoveries in [ERROR_LOG.md](../ERROR_LOG.md).
+- Until new measurements are recorded, use the historical table above only as directional context.
+- Add new entries here after the first successful two-H200 + Modal benchmark pass.
+- Log any regressions or deployment recoveries in [docs/ERROR_LOG.md](/Users/rithvik/Clypt-Backend/docs/ERROR_LOG.md).

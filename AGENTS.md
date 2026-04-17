@@ -1,54 +1,46 @@
 # AGENTS
 
-Operational startup and maintenance guide for coding agents and maintainers.
+Operational startup and maintenance guide for coding agents.
 
 ## Project Snapshot
 
 - Product: Clypt V3.1 backend
 - Implemented: Phases 1-4
 - Planned: Phases 5-6
-- Phase 1 topology: two-host, no local fallback.
-  - **RTX 6000 Ada (sole tenant)**: VibeVoice vLLM ASR + ffmpeg NVENC
-    node-media prep, served as one FastAPI app at
-    `POST /tasks/vibevoice-asr` (ASR only — NFA / emotion2vec+ / YAMNet
-    are **not** on this host) and `POST /tasks/node-media-prep`.
-  - **H200**: visual chain (RF-DETR + ByteTrack) **plus the post-ASR
-    audio chain in-process (NFA → emotion2vec+ → YAMNet CPU)**, SGLang
-    Qwen on `:8001`, Phase 1 orchestrator, Phase 2-4 SQLite queue and
-    local worker.
-  - H200 calls the RTX host over HTTP via `RemoteVibeVoiceAsrClient`
-    (legacy alias: `RemoteAudioChainClient`) and
-    `RemoteNodeMediaPrepClient`. Config load fails fast if the ASR /
-    node-media prep URL or bearer token is unset.
-- Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint
+- Active topology: **Phase1 H200 + Phase26 H200 + Modal**
+  - **Phase1 host (H200 default)**: Phase 1 runner/orchestrator, persistent local VibeVoice service, persistent local visual service, co-located VibeVoice vLLM sidecar, in-process NFA -> emotion2vec+ -> YAMNet.
+  - **Phase26 host (H200)**: `POST /tasks/phase26-enqueue`, local SQLite queue + worker, SGLang Qwen on `:8001`, current Phase 2-4 runtime, future Phase 5-6 orchestration.
+  - **Modal**: `POST /tasks/node-media-prep` on `L4` with `min_containers=1`; future render/export will follow the same external-worker pattern.
+- Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint on the Phase26 host.
 
 ## Read Order (Required - You MUST read these before reporting back to the user.)
 
 1. [README.md](README.md)
 2. [docs/runtime/RUNTIME_GUIDE.md](docs/runtime/RUNTIME_GUIDE.md)
-3. [docs/deployment/P1_DEPLOY.md](docs/deployment/P1_DEPLOY.md)
-4. [docs/deployment/P1_AUDIO_HOST_DEPLOY.md](docs/deployment/P1_AUDIO_HOST_DEPLOY.md)
-5. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-6. [docs/specs/SPEC_INDEX.md](docs/specs/SPEC_INDEX.md)
-7. [docs/EVALS.md](docs/EVALS.md)
-8. [docs/ERROR_LOG.md](docs/ERROR_LOG.md)
+3. [docs/deployment/PHASE1_HOST_DEPLOY.md](docs/deployment/PHASE1_HOST_DEPLOY.md)
+4. [docs/deployment/PHASE26_HOST_DEPLOY.md](docs/deployment/PHASE26_HOST_DEPLOY.md)
+5. [docs/deployment/MODAL_NODE_MEDIA_PREP_DEPLOY.md](docs/deployment/MODAL_NODE_MEDIA_PREP_DEPLOY.md)
+6. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+7. [docs/specs/SPEC_INDEX.md](docs/specs/SPEC_INDEX.md)
+8. [docs/EVALS.md](docs/EVALS.md)
+9. [docs/ERROR_LOG.md](docs/ERROR_LOG.md)
 
 ## Documentation-First Rule (Required)
 
 When in doubt, read documentation before making changes or running operational commands.
 
 - Start with the required read order above.
-- Always use GitNexus for codebase retrieval/search before falling back to ad-hoc file scanning. 
+- Always use GitNexus for codebase retrieval/search before falling back to ad-hoc file scanning.
 - If this is a brand new agent session, run `npx gitnexus analyze` as soon as you finish reading this doc.
 - IF YOU ARE OPENAI CODEX, you may NOT at any cost do "invocation": { "server": "codebase-retrieval", "tool": "codebase-retrieval" }. Use GitNexus for retrieval ALWAYS.
 - Always double-check `.gitignore` coverage before committing to avoid accidental local artifact commits.
 - Treat docs as the source of truth for runtime/deploy behavior unless code has clearly diverged.
-- If behavior is unclear, re-check `RUNTIME_GUIDE.md` and `P1_DEPLOY.md` before proceeding.
-- If you discover a docs/code mismatch, call it out and tell the user immediately!
+- If behavior is unclear, re-check `RUNTIME_GUIDE.md`, `PHASE1_HOST_DEPLOY.md`, and `PHASE26_HOST_DEPLOY.md` before proceeding.
+- If you discover a docs/code mismatch, call it out and tell the user immediately.
 
 ## Resolver-First Rule (Required)
 
-Before starting any task, read [docs/EVALS.md](docs/EVALS.md) and load the relevant skill pointers for that task type. If all the skills listed there are not installed into project-local .agents/skills/ and .claude/skills/ then do so ASAP.
+Before starting any task, read [docs/EVALS.md](docs/EVALS.md) and load the relevant skill pointers for that task type. If all the skills listed there are not installed into project-local `.agents/skills/` and `.claude/skills/` then do so ASAP.
 
 - Keep context lightweight: load only the skills needed for the current task.
 - For prompt/scoring/behavior changes, run pipeline evals and compare against baseline before shipping.
@@ -65,26 +57,19 @@ python -m pip install -r requirements-local.txt
 
 ### Phase 1 runtime deps
 
-H200 (visual + audio-post + Phase 2-4 worker):
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-do-phase1-h200.txt
+```
+
+### Phase26 runtime deps
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-do-phase1-visual.txt
+python -m pip install -r requirements-do-phase26-h200.txt
 ```
-
-RTX 6000 Ada (VibeVoice ASR + node-media prep, sole tenant):
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements-do-phase1-audio.txt
-```
-
-Notes:
-- `requirements-local.txt` is the local/dev dependency set.
-- `requirements-do-phase1-visual.txt` is the standalone GPU runtime set for the H200. It now includes the post-ASR audio chain deps (NFA, emotion2vec+, YAMNet) that previously lived on the RTX host.
-- `requirements-do-phase1-audio.txt` is the standalone GPU runtime set for the RTX 6000 Ada VibeVoice ASR host. It explicitly does **not** include NeMo / FunASR / TensorFlow / librosa / resampy.
 
 ### Pipeline tests (offline)
 
@@ -92,7 +77,7 @@ Notes:
 python -m pytest tests/backend/pipeline -q
 ```
 
-### Phase 1 + Phase 2-4 queue mode
+### Phase 1 + downstream enqueue
 
 ```bash
 python -m backend.runtime.run_phase1 \
@@ -101,32 +86,45 @@ python -m backend.runtime.run_phase1 \
   --run-phase14
 ```
 
-### Phase 2-4 local worker
+### Phase26 local worker
 
 ```bash
-python -m backend.runtime.run_phase24_local_worker --worker-id local-worker-1
+python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
 ```
 
 ## Runtime Truths To Preserve
 
-- `VIBEVOICE_VLLM_MODEL` must be `vibevoice` **on the RTX 6000 Ada**. VibeVoice envs must not be set on the H200.
-- `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required on both hosts.
-- Phase 1 is split across two hosts:
-  - **H200**: visual chain (RF-DETR + ByteTrack), **post-ASR audio chain in-process (NFA → emotion2vec+ → YAMNet CPU)**, Phase 1 orchestrator, Phase 2-4 queue + worker, SGLang Qwen on `:8001`. Current SGLang flags: `--context-length 65536`, `--kv-cache-dtype fp8_e4m3`, `--mem-fraction-static 0.78`, speculative NEXTN (3 steps, eagle-topk 1, 4 draft tokens), `--mamba-scheduler-strategy extra_buffer`, `--schedule-policy lpm`, `--chunked-prefill-size 8192`, `--grammar-backend xgrammar`, `--reasoning-parser qwen3`, plus systemd env `HF_HUB_OFFLINE=1` and `SGLANG_ENABLE_SPEC_V2=1`.
-  - **RTX 6000 Ada (sole tenant)**: VibeVoice vLLM ASR + ffmpeg NVENC/NVDEC node-media prep, served via one FastAPI app with `POST /tasks/vibevoice-asr` and `POST /tasks/node-media-prep`. Current vLLM flags: `--gpu-memory-utilization 0.77 --max-num-seqs 2 --dtype bfloat16`, CUDA graph capture enabled, no speculative decoding.
-- There is **no local fallback**. `backend/providers/config.py` requires `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL`, `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN`, `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`, and `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` on the H200. Missing any of these fails fast at startup. The legacy `CLYPT_PHASE1_AUDIO_HOST_URL` / `CLYPT_PHASE1_AUDIO_HOST_TOKEN` names are still accepted as deprecated aliases for one release.
-- The H200 Python client is `RemoteVibeVoiceAsrClient` (legacy alias: `RemoteAudioChainClient`); the response type is `VibeVoiceAsrResponse` (legacy alias: `PhaseOneAudioResponse`); the settings type is `VibeVoiceAsrServiceSettings` (legacy alias: `AudioHostSettings`).
-- Phase 1 audio chain (in-process NFA → emotion2vec+ → YAMNet) must launch immediately after the VibeVoice ASR HTTP call returns, not after RF-DETR finishes.
-- Phase 1 local runtime requires `CLYPT_PHASE1_INPUT_MODE=test_bank`.
-- `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; use explicit per-stage concurrency envs instead.
-- Phase 2-4 local runtime requires `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`.
-- Phase 2-4 local worker enforces `GENAI_GENERATION_BACKEND=local_openai`.
-- Default crash handling mode is fail-fast (`CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`, `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`).
+- `VIBEVOICE_VLLM_MODEL` must be `vibevoice` on the Phase1 host.
+- `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required on both H200 hosts.
+- Phase 1 now runs on one host with two hot local services:
+  - VibeVoice at `POST /tasks/vibevoice-asr`
+  - visual extraction at `POST /tasks/visual-extract`
+- Current Phase 1 visual settings must stay intact unless the user explicitly approves retuning:
+  - `tensorrt_fp16`
+  - batch size `16`
+  - threshold `0.35`
+  - shape `640`
+  - ByteTrack buffer `30`
+  - ByteTrack match threshold `0.7`
+  - GPU decode
+- NFA / emotion2vec+ / YAMNet remain persistent in-process on the Phase1 host.
+- There is **no local fallback**:
+  - Phase1 requires `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_*`
+  - Phase1 requires `CLYPT_PHASE1_VISUAL_SERVICE_*`
+  - Phase1 requires `CLYPT_PHASE24_DISPATCH_*`
+  - Phase26 requires `CLYPT_PHASE24_NODE_MEDIA_PREP_*`
+- Phase 1 audio-post must launch immediately after the VibeVoice HTTP call returns, not after visual completion.
+- Phase 1 runtime requires `CLYPT_PHASE1_INPUT_MODE=test_bank`.
+- `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; use explicit per-stage concurrency envs.
+- Phase26 local runtime requires `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`.
+- Phase26 worker enforces `GENAI_GENERATION_BACKEND=local_openai`.
+- Default crash handling mode remains fail-fast:
+  - `CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`
+  - `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
-- Qwen serving target is the SGLang service on H200 `127.0.0.1:8001`.
-- `CLYPT_PHASE1_ASR_BACKEND` (if set at all) only accepts `vllm`. The active ASR path is a remote HTTP call to the RTX VibeVoice ASR service; the H200 has no in-process VibeVoice provider.
-- Node-media prep is always delegated to the RTX host. Do not re-introduce an in-process ffmpeg fallback on the H200 — H200 NVENC returns `unsupported device (2)`. NVDEC clip extraction uses `-c:v h264_cuvid` (explicit, not just `-hwaccel cuda`). Max concurrency is 8 (`CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY`); 16 OOMs NVENC input buffers at the current vLLM footprint.
-- NFA / emotion2vec+ / YAMNet are installed from `requirements-do-phase1-visual.txt` on the H200 only. Do not add them to `requirements-do-phase1-audio.txt` — the RTX host must stay a narrow VibeVoice + ffmpeg box.
+- Qwen serving target is the SGLang service on Phase26 `127.0.0.1:8001`.
+- Node-media prep is always delegated remotely. Do not re-introduce an in-process ffmpeg fallback on either H200 host.
+- Phase 1 H100 backup settings belong only in [docs/runtime/known-good-phase1-h100-backup.env](docs/runtime/known-good-phase1-h100-backup.env), and that file must only adjust memory-sensitive knobs.
 
 ## Critical Maintenance Rule
 
@@ -146,7 +144,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (3414 symbols, 8548 relationships, 222 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (3447 symbols, 8631 relationships, 222 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -228,19 +226,5 @@ If the index previously included embeddings, preserve them by adding `--embeddin
 npx gitnexus analyze --embeddings
 ```
 
-To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
-
-> Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-
+To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (`0` means no embeddings). Running analyze without `--embeddings` will delete any previously generated embeddings.
 <!-- gitnexus:end -->

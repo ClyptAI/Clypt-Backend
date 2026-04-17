@@ -1,0 +1,19 @@
+[Unit]
+Description=Clypt Phase 1 VibeVoice vLLM Sidecar
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase1/repo
+EnvironmentFile=/etc/clypt-phase1/phase1.env
+ExecStartPre=-/usr/bin/docker stop clypt-phase1-vllm-vibevoice
+ExecStartPre=-/usr/bin/docker rm clypt-phase1-vllm-vibevoice
+ExecStart=/bin/bash -lc '/usr/bin/docker run --name clypt-phase1-vllm-vibevoice --gpus all --ipc=host -p 127.0.0.1:8000:8000 -e VIBEVOICE_FFMPEG_MAX_CONCURRENCY=64 -v /opt/clypt-phase1/hf-cache:/root/.cache/huggingface -w /opt/vibevoice-baked --entrypoint bash clypt-phase1-vllm-vibevoice:latest -c "set -euo pipefail; MODEL_PATH=$$(python3 -c '\''from huggingface_hub import snapshot_download; print(snapshot_download(\"microsoft/VibeVoice-ASR\"))'\''); python3 -m vllm_plugin.tools.generate_tokenizer_files --output \"$$MODEL_PATH\" || true; exec vllm serve \"$$MODEL_PATH\" --served-model-name vibevoice --trust-remote-code --dtype $${VIBEVOICE_VLLM_DTYPE:-bfloat16} --gpu-memory-utilization $${VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION:-0.82} --max-num-seqs $${VIBEVOICE_VLLM_MAX_NUM_SEQS:-4} --port 8000 --host 0.0.0.0"'
+ExecStop=/usr/bin/docker stop clypt-phase1-vllm-vibevoice
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

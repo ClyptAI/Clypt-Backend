@@ -232,6 +232,38 @@ def test_load_provider_settings_populates_vibevoice_asr_service_and_node_media_p
     assert settings.node_media_prep.max_concurrency == 4
 
 
+def test_load_provider_settings_populates_phase1_visual_service_and_phase26_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL", "http://127.0.0.1:9100")
+    monkeypatch.setenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN", "asr-token")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_URL", "https://modal.example/node-media-prep")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN", "modal-token")
+    monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SERVICE_URL", "http://127.0.0.1:9200/")
+    monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN", "visual-token")
+    monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S", "333")
+    monkeypatch.setenv("CLYPT_PHASE24_DISPATCH_URL", "http://10.0.0.8:9300/")
+    monkeypatch.setenv("CLYPT_PHASE24_DISPATCH_AUTH_TOKEN", "dispatch-token")
+    monkeypatch.setenv("CLYPT_PHASE24_DISPATCH_TIMEOUT_S", "444")
+
+    settings = load_provider_settings()
+
+    assert settings.phase1_visual_service is not None
+    assert settings.phase1_visual_service.service_url == "http://127.0.0.1:9200"
+    assert settings.phase1_visual_service.auth_token == "visual-token"
+    assert settings.phase1_visual_service.timeout_s == 333.0
+    assert settings.phase26_dispatch_service is not None
+    assert settings.phase26_dispatch_service.service_url == "http://10.0.0.8:9300"
+    assert settings.phase26_dispatch_service.auth_token == "dispatch-token"
+    assert settings.phase26_dispatch_service.timeout_s == 444.0
+
+
 def test_load_provider_settings_reads_untracked_env_local(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -741,5 +773,4 @@ def test_load_provider_settings_exposes_split_generation_and_embedding_retry_set
     assert settings.vertex.embedding_api_max_backoff_s == 6.0
     assert settings.vertex.embedding_api_backoff_multiplier == 1.4
     assert settings.vertex.embedding_api_jitter_ratio == 0.01
-
 

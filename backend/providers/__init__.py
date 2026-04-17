@@ -3,6 +3,8 @@ from .config import (
     AudioHostSettings,  # deprecated alias of VibeVoiceAsrServiceSettings
     LocalGenerationSettings,
     NodeMediaPrepSettings,
+    Phase1VisualServiceSettings,
+    Phase26DispatchServiceSettings,
     Phase1ASRSettings,
     Phase1RuntimeSettings,
     Phase24WorkerSettings,
@@ -14,6 +16,8 @@ from .config import (
     VibeVoiceSettings,
     VibeVoiceVLLMSettings,
     load_audio_host_settings,
+    load_phase1_host_settings,
+    load_phase26_host_settings,
     load_provider_settings,
 )
 from .audio_host_client import (
@@ -29,8 +33,16 @@ from .node_media_prep_client import (
     RemoteNodeMediaPrepClient,
     RemoteNodeMediaPrepError,
 )
+from .phase26_dispatch_client import (
+    RemotePhase26DispatchClient,
+    RemotePhase26DispatchError,
+)
 from .openai_local import LocalOpenAIQwenClient
 from .forced_aligner import ForcedAlignmentProvider
+from .visual_service_client import (
+    RemotePhase1VisualClient,
+    RemotePhase1VisualError,
+)
 from .vibevoice_vllm import (
     VibeVoiceVLLMProvider,
     build_gcs_uri_url_resolver,
@@ -47,6 +59,8 @@ __all__ = [
     "LocalGenerationSettings",
     "LocalOpenAIQwenClient",
     "NodeMediaPrepSettings",
+    "Phase1VisualServiceSettings",
+    "Phase26DispatchServiceSettings",
     "Phase1ASRSettings",
     "Phase1RuntimeSettings",
     "Phase24WorkerSettings",
@@ -56,6 +70,10 @@ __all__ = [
     "RemoteAudioChainError",  # deprecated alias of RemoteVibeVoiceAsrError
     "RemoteNodeMediaPrepClient",
     "RemoteNodeMediaPrepError",
+    "RemotePhase1VisualClient",
+    "RemotePhase1VisualError",
+    "RemotePhase26DispatchClient",
+    "RemotePhase26DispatchError",
     "RemoteVibeVoiceAsrClient",
     "RemoteVibeVoiceAsrError",
     "SpannerSettings",
@@ -73,5 +91,7 @@ __all__ = [
     "YAMNetProvider",
     "build_gcs_uri_url_resolver",
     "load_audio_host_settings",
+    "load_phase1_host_settings",
+    "load_phase26_host_settings",
     "load_provider_settings",
 ]

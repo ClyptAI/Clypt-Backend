@@ -25,7 +25,7 @@ def test_phase1_worker_run_forever_stops_after_idle_loops(tmp_path):
 
 
 def test_remote_job_client_builds_submit_and_logs_urls():
-    from scripts.do_phase1_visual.run_remote_job import Phase1RemoteClient
+    from scripts.do_phase1.run_remote_job import Phase1RemoteClient
 
     client = Phase1RemoteClient(base_url="http://127.0.0.1:8080")
 

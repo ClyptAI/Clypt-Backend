@@ -300,11 +300,11 @@ class Phase1ASRSettings:
 
 @dataclass(slots=True)
 class VibeVoiceAsrServiceSettings:
-    """Required settings for the remote VibeVoice ASR service (RTX 6000 Ada).
+    """Required settings for the Phase 1 VibeVoice ASR service.
 
-    The H200 still runs NFA + emotion2vec+ + YAMNet in-process (they do not
-    compete with vLLM for VRAM on the 141 GiB card); only VibeVoice ASR lives
-    on the RTX box. Fail-fast at load if URL or token are missing.
+    Phase 1 still runs NFA + emotion2vec+ + YAMNet in-process; this setting
+    covers only the HTTP boundary used for VibeVoice ASR. Fail-fast at load if
+    URL or token are missing.
     """
 
     service_url: str
@@ -319,8 +319,28 @@ AudioHostSettings = VibeVoiceAsrServiceSettings
 
 
 @dataclass(slots=True)
+class Phase1VisualServiceSettings:
+    """Settings for the persistent local Phase 1 visual extraction service."""
+
+    service_url: str
+    auth_token: str
+    timeout_s: float = 3600.0
+    healthcheck_path: str = "/health"
+
+
+@dataclass(slots=True)
+class Phase26DispatchServiceSettings:
+    """Settings for the remote Phase26 enqueue/dispatch service."""
+
+    service_url: str
+    auth_token: str
+    timeout_s: float = 30.0
+    healthcheck_path: str = "/health"
+
+
+@dataclass(slots=True)
 class NodeMediaPrepSettings:
-    """Required settings for remote node-media-prep (RTX 6000 Ada, NVENC).
+    """Required settings for remote node-media-prep.
 
     The Phase 2-4 worker has no local fallback; the remote service is the only path.
     Fail-fast at load if URL or token are missing.
@@ -341,6 +361,8 @@ class ProviderSettings:
     storage: StorageSettings
     vibevoice_asr_service: VibeVoiceAsrServiceSettings
     node_media_prep: NodeMediaPrepSettings
+    phase1_visual_service: Phase1VisualServiceSettings | None = None
+    phase26_dispatch_service: Phase26DispatchServiceSettings | None = None
     phase1_asr: Phase1ASRSettings = field(default_factory=Phase1ASRSettings)
     spanner: SpannerSettings = field(default_factory=SpannerSettings)
     phase24_worker: Phase24WorkerSettings = field(default_factory=Phase24WorkerSettings)
@@ -357,13 +379,13 @@ class ProviderSettings:
 
 @dataclass(slots=True)
 class AudioHostProcessSettings:
-    """Settings consumed by the RTX 6000 Ada VibeVoice ASR host process itself.
+    """Settings consumed by the Phase 1 VibeVoice service process itself.
 
     Distinct from ``VibeVoiceAsrServiceSettings``, which are the *caller-side*
-    bearer token + URL the H200 uses to reach this service. This dataclass holds
-    only what the host needs to run: the co-located VibeVoice vLLM sidecar,
+    bearer token + URL the runner uses to reach this service. This dataclass holds
+    only what the process needs to run: the co-located VibeVoice vLLM sidecar,
     VibeVoice generation controls, GCS bucket for URL resolution, and the
-    Phase 1 working-root knob. NFA/emotion/YAMNet no longer live on this host,
+    Phase 1 working-root knob. NFA/emotion/YAMNet do not live in this process,
     so those settings are intentionally absent.
     """
 
@@ -373,7 +395,13 @@ class AudioHostProcessSettings:
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
 
 
-def load_provider_settings() -> ProviderSettings:
+def load_provider_settings(
+    *,
+    require_vibevoice_asr_service: bool = True,
+    require_node_media_prep: bool = True,
+    require_phase1_visual_service: bool = False,
+    require_phase26_dispatch_service: bool = False,
+) -> ProviderSettings:
     _load_local_env_files()
     _raise_if_removed_local_generation_env_present()
 
@@ -403,15 +431,13 @@ def load_provider_settings() -> ProviderSettings:
             f"{phase1_asr.backend!r}; only 'vllm' is supported."
         )
 
-    # VIBEVOICE_VLLM_BASE_URL is intentionally optional here. The H200 never
-    # talks to the VibeVoice vLLM sidecar directly — it goes through the
-    # RemoteVibeVoiceAsrClient to the RTX host, which owns vLLM locally.
-    # On the H200 the deploy script actively BANS this env var (see
-    # scripts/do_phase1_visual/deploy_visual_service.sh). The RTX host has
-    # its own loader (``load_audio_host_settings``) that requires it.
+    # VIBEVOICE_VLLM_BASE_URL is intentionally optional here because the
+    # general provider loader is used outside the dedicated Phase1 service
+    # process. The active Phase1 host loader accepts VibeVoice settings, while
+    # the service process loader (``load_audio_host_settings``) requires them.
     vllm_base_url = _read_env("VIBEVOICE_VLLM_BASE_URL")
     vllm_settings = VibeVoiceVLLMSettings(
-        base_url=vllm_base_url or "unused://vibevoice-moved-to-rtx-vibevoice-asr-host",
+        base_url=vllm_base_url or "unused://phase1-vibevoice-service",
         model=_read_env("VIBEVOICE_VLLM_MODEL") or "vibevoice",
         timeout_s=float(_read_env("VIBEVOICE_VLLM_TIMEOUT_S") or "7200"),
         healthcheck_path=_read_env("VIBEVOICE_VLLM_HEALTHCHECK_PATH") or "/health",
@@ -439,30 +465,29 @@ def load_provider_settings() -> ProviderSettings:
         "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL",
         _VIBEVOICE_ASR_SERVICE_ENV_ALIASES["CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL"],
     )
-    if not vibevoice_asr_url:
-        raise ValueError(
-            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL is required. VibeVoice ASR runs "
-            "exclusively on the RTX 6000 Ada host; there is no in-process fallback. "
-            "Point this at the host's private VPC URL (e.g. http://10.0.0.5:9100). "
-            "The legacy CLYPT_PHASE1_AUDIO_HOST_URL alias is accepted through "
-            "2026-05-17 (commit 393abaee)."
-        )
     vibevoice_asr_token = _getenv_with_aliases(
         "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN",
         _VIBEVOICE_ASR_SERVICE_ENV_ALIASES[
             "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN"
         ],
     )
-    if not vibevoice_asr_token:
+    if require_vibevoice_asr_service and not vibevoice_asr_url:
         raise ValueError(
-            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN is required (shared bearer "
-            "token with the RTX 6000 Ada VibeVoice ASR host). The legacy "
-            "CLYPT_PHASE1_AUDIO_HOST_TOKEN alias is accepted through 2026-05-17 "
+            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL is required. VibeVoice ASR has no "
+            "in-process fallback for callers. Point this at the local Phase 1 "
+            "service URL or another explicitly provisioned ASR service. The legacy "
+            "CLYPT_PHASE1_AUDIO_HOST_URL alias is accepted through 2026-05-17 "
             "(commit 393abaee)."
         )
+    if require_vibevoice_asr_service and not vibevoice_asr_token:
+        raise ValueError(
+            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN is required for callers "
+            "of the VibeVoice ASR service. The legacy CLYPT_PHASE1_AUDIO_HOST_TOKEN "
+            "alias is accepted through 2026-05-17 (commit 393abaee)."
+        )
     vibevoice_asr_service = VibeVoiceAsrServiceSettings(
-        service_url=vibevoice_asr_url.rstrip("/"),
-        auth_token=vibevoice_asr_token,
+        service_url=(vibevoice_asr_url or "").rstrip("/"),
+        auth_token=vibevoice_asr_token or "",
         timeout_s=float(
             _getenv_with_aliases(
                 "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TIMEOUT_S",
@@ -482,27 +507,69 @@ def load_provider_settings() -> ProviderSettings:
     )
 
     node_media_prep_url = _read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_URL")
-    if not node_media_prep_url:
-        raise ValueError(
-            "CLYPT_PHASE24_NODE_MEDIA_PREP_URL is required. Phase 2 node-media prep runs "
-            "exclusively on the RTX 6000 Ada NVENC host; the H200 has no local fallback."
-        )
     node_media_prep_token = _read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN")
-    if not node_media_prep_token:
+    if require_node_media_prep and not node_media_prep_url:
         raise ValueError(
-            "CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN is required (shared bearer token with the "
-            "RTX 6000 Ada node-media-prep endpoint; may equal CLYPT_PHASE1_AUDIO_HOST_TOKEN "
-            "when both endpoints live on the same host)."
+            "CLYPT_PHASE24_NODE_MEDIA_PREP_URL is required. Phase 2 node-media prep "
+            "runs through the configured remote media-prep service; there is no "
+            "local fallback."
+        )
+    if require_node_media_prep and not node_media_prep_token:
+        raise ValueError(
+            "CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN is required for the remote "
+            "node-media-prep endpoint."
         )
     node_media_prep = NodeMediaPrepSettings(
-        service_url=node_media_prep_url.rstrip("/"),
-        auth_token=node_media_prep_token,
+        service_url=(node_media_prep_url or "").rstrip("/"),
+        auth_token=node_media_prep_token or "",
         timeout_s=float(_read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S") or "3600"),
         max_concurrency=max(
             1,
             _read_int_env("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY", default=8),
         ),
     )
+
+    phase1_visual_service: Phase1VisualServiceSettings | None = None
+    phase1_visual_service_url = _read_env("CLYPT_PHASE1_VISUAL_SERVICE_URL")
+    phase1_visual_service_token = _read_env("CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN")
+    if require_phase1_visual_service and not phase1_visual_service_url:
+        raise ValueError(
+            "CLYPT_PHASE1_VISUAL_SERVICE_URL is required. Phase 1 visual extraction "
+            "runs through the persistent local Phase 1 visual service."
+        )
+    if require_phase1_visual_service and not phase1_visual_service_token:
+        raise ValueError(
+            "CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN is required for the Phase 1 "
+            "visual service."
+        )
+    if phase1_visual_service_url or phase1_visual_service_token:
+        phase1_visual_service = Phase1VisualServiceSettings(
+            service_url=(phase1_visual_service_url or "").rstrip("/"),
+            auth_token=phase1_visual_service_token or "",
+            timeout_s=float(_read_env("CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S") or "3600"),
+            healthcheck_path=_read_env("CLYPT_PHASE1_VISUAL_SERVICE_HEALTHCHECK_PATH") or "/health",
+        )
+
+    phase26_dispatch_service: Phase26DispatchServiceSettings | None = None
+    phase26_dispatch_url = _read_env("CLYPT_PHASE24_DISPATCH_URL")
+    phase26_dispatch_token = _read_env("CLYPT_PHASE24_DISPATCH_AUTH_TOKEN")
+    if require_phase26_dispatch_service and not phase26_dispatch_url:
+        raise ValueError(
+            "CLYPT_PHASE24_DISPATCH_URL is required. Phase 1 hands off completed "
+            "artifacts to the remote Phase26 enqueue service."
+        )
+    if require_phase26_dispatch_service and not phase26_dispatch_token:
+        raise ValueError(
+            "CLYPT_PHASE24_DISPATCH_AUTH_TOKEN is required for the remote Phase26 "
+            "enqueue service."
+        )
+    if phase26_dispatch_url or phase26_dispatch_token:
+        phase26_dispatch_service = Phase26DispatchServiceSettings(
+            service_url=(phase26_dispatch_url or "").rstrip("/"),
+            auth_token=phase26_dispatch_token or "",
+            timeout_s=float(_read_env("CLYPT_PHASE24_DISPATCH_TIMEOUT_S") or "30"),
+            healthcheck_path=_read_env("CLYPT_PHASE24_DISPATCH_HEALTHCHECK_PATH") or "/health",
+        )
 
     local_generation = LocalGenerationSettings(
         base_url=_read_env("CLYPT_LOCAL_LLM_BASE_URL") or "http://127.0.0.1:8001/v1",
@@ -652,6 +719,8 @@ def load_provider_settings() -> ProviderSettings:
         storage=StorageSettings(gcs_bucket=gcs_bucket),
         vibevoice_asr_service=vibevoice_asr_service,
         node_media_prep=node_media_prep,
+        phase1_visual_service=phase1_visual_service,
+        phase26_dispatch_service=phase26_dispatch_service,
         spanner=SpannerSettings(
             project=_read_env("CLYPT_SPANNER_PROJECT") or vertex_project,
             instance=_read_env("CLYPT_SPANNER_INSTANCE") or "clypt-phase14",
@@ -712,12 +781,12 @@ def load_provider_settings() -> ProviderSettings:
 
 
 def load_audio_host_settings() -> AudioHostProcessSettings:
-    """Load the subset of provider settings that the RTX audio host process needs.
+    """Load the subset of provider settings that the Phase 1 VibeVoice service needs.
 
-    Unlike ``load_provider_settings``, this does NOT require the H200-caller
+    Unlike ``load_provider_settings``, this does NOT require the runner-caller
     envs (``CLYPT_PHASE1_AUDIO_HOST_URL``, ``CLYPT_PHASE24_NODE_MEDIA_PREP_URL``,
     their tokens, Vertex/Spanner/Phase 2-4 worker settings, etc.) because the
-    audio host is the endpoint being called — it does not need to configure
+    service process is the endpoint being called — it does not need to configure
     itself as its own remote client.
     """
     _load_local_env_files()
@@ -726,7 +795,7 @@ def load_audio_host_settings() -> AudioHostProcessSettings:
     gcs_bucket = _read_env("GCS_BUCKET", "CLYPT_GCS_BUCKET")
     if not gcs_bucket:
         raise ValueError(
-            "GCS_BUCKET or CLYPT_GCS_BUCKET is required on the audio host "
+            "GCS_BUCKET or CLYPT_GCS_BUCKET is required on the Phase 1 VibeVoice service "
             "for Phase 1 asset URL resolution."
         )
 
@@ -740,7 +809,7 @@ def load_audio_host_settings() -> AudioHostProcessSettings:
     vllm_base_url = _read_env("VIBEVOICE_VLLM_BASE_URL")
     if not vllm_base_url:
         raise ValueError(
-            "VIBEVOICE_VLLM_BASE_URL is required on the audio host "
+            "VIBEVOICE_VLLM_BASE_URL is required on the Phase 1 VibeVoice service "
             "(co-located vLLM sidecar, typically http://127.0.0.1:8000)."
         )
     vllm_settings = VibeVoiceVLLMSettings(
@@ -781,11 +850,31 @@ def load_audio_host_settings() -> AudioHostProcessSettings:
     )
 
 
+def load_phase1_host_settings() -> ProviderSettings:
+    return load_provider_settings(
+        require_vibevoice_asr_service=True,
+        require_node_media_prep=False,
+        require_phase1_visual_service=True,
+        require_phase26_dispatch_service=True,
+    )
+
+
+def load_phase26_host_settings() -> ProviderSettings:
+    return load_provider_settings(
+        require_vibevoice_asr_service=False,
+        require_node_media_prep=True,
+        require_phase1_visual_service=False,
+        require_phase26_dispatch_service=False,
+    )
+
+
 __all__ = [
     "AudioHostProcessSettings",
     "AudioHostSettings",  # deprecated alias of VibeVoiceAsrServiceSettings
     "LocalGenerationSettings",
     "NodeMediaPrepSettings",
+    "Phase1VisualServiceSettings",
+    "Phase26DispatchServiceSettings",
     "Phase24LocalQueueSettings",
     "Phase1RuntimeSettings",
     "Phase1ASRSettings",
@@ -798,5 +887,7 @@ __all__ = [
     "VibeVoiceSettings",
     "VibeVoiceVLLMSettings",
     "load_audio_host_settings",
+    "load_phase1_host_settings",
+    "load_phase26_host_settings",
     "load_provider_settings",
 ]

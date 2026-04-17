@@ -1,10 +1,9 @@
-"""Remote client for GPU node-media prep hosted on the RTX 6000 Ada box.
+"""Remote client for GPU node-media prep.
 
-Phase 2 on the H200 needs one ~10-60 s ffmpeg clip (and a GCS upload) per
-semantic node so downstream multimodal embeddings can be produced. The H200
-lacks NVENC, so this work runs on the RTX audio/prep host via the
-``POST /tasks/node-media-prep`` endpoint and is the **only** supported path
-for this pipeline (no local fallback).
+Phase26 needs one ~10-60 s ffmpeg clip (and a GCS upload) per semantic node
+so downstream multimodal embeddings can be produced. This work runs through
+the remote ``POST /tasks/node-media-prep`` endpoint and is the only
+supported path for this pipeline (no local fallback).
 
 The client exposes itself as a callable matching the ``node_media_preparer``
 contract on :class:`backend.runtime.phase14_live.Phase14LiveRunner`:
@@ -16,8 +15,8 @@ downstream code (vertex multimodal embeddings + debug JSON) is untouched:
 
     {"node_id", "file_uri", "mime_type", "local_path"}
 
-Here ``local_path`` is always an empty string — clips live only on the RTX box
-and the H200 never needs the raw bytes (only ``file_uri`` is consumed).
+Here ``local_path`` is always an empty string — clips live only on the
+remote media-prep worker and downstream code only consumes ``file_uri``.
 """
 
 from __future__ import annotations
@@ -136,11 +135,11 @@ def _node_specs(nodes: list[Any]) -> list[_NodeSpec]:
 
 
 class RemoteNodeMediaPrepClient:
-    """Callable that proxies Phase 2 node-clip extraction to the RTX host.
+    """Callable that proxies node-clip extraction to the remote media-prep service.
 
-    The H200 invokes this once per Phase 2 job with the full list of semantic
-    nodes. The RTX host extracts each clip with NVENC ffmpeg, uploads to GCS,
-    and returns the media descriptors in the order requested.
+    The Phase26 worker invokes this once per Phase 2 job with the full list
+    of semantic nodes. The remote service extracts each clip with ffmpeg,
+    uploads to GCS, and returns the media descriptors in the order requested.
     """
 
     _DEFAULT_MAX_RETRIES = 2

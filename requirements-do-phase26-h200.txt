@@ -1,0 +1,18 @@
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+# Phase26 H200 runtime deps.
+#
+# Hosts:
+#   * Phase26 enqueue/dispatch service
+#   * Phase26 local SQLite queue worker
+#   * local OpenAI-compatible Qwen client integration
+
+pydantic>=2.11.0
+pytest>=8.4.0
+httpx>=0.28.0
+python-dotenv>=1.0.1
+google-genai>=1.17.0
+google-cloud-storage>=2.19.0
+google-cloud-spanner>=3.50.0
+fastapi>=0.116.0
+uvicorn>=0.35.0

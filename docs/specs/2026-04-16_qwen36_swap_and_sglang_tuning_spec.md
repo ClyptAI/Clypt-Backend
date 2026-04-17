@@ -144,9 +144,9 @@ No client-side logic changes. `LocalOpenAIQwenClient.generate_json` already sets
 All `Qwen/Qwen3.5-27B` literals replaced with `Qwen/Qwen3.6-35B-A3B` in:
 
 - `.env.example`
-- `docs/runtime/known-good.env` (including the commented reference `sglang.launch_server` command — updated to the §4.3 line)
+- `docs/runtime/known-good-phase26-h200.env`
 - `docs/runtime/ENV_REFERENCE.md`
-- `docs/deployment/P1_DEPLOY.md`
+- `docs/deployment/PHASE26_HOST_DEPLOY.md`
 - `docs/runtime/RUNTIME_GUIDE.md` (if any references exist)
 - `README.md` (if any references exist)
 
@@ -255,7 +255,7 @@ PY
 
 Target: ≥ 1.3× rps at zero-error concurrency on at least one of `phase4_subgraph`, `phase3_long_range`, `phase2_merge`. `phase4_pool` may show < 1.1× due to short-output path; that is acceptable.
 
-Raise Phase 2-4 concurrency caps only where the data is unambiguous; update `docs/runtime/known-good.env` and `docs/deployment/P1_DEPLOY.md` accordingly.
+Raise Phase 2-4 concurrency caps only where the data is unambiguous; update `docs/runtime/known-good-phase26-h200.env` and `docs/deployment/PHASE26_HOST_DEPLOY.md` accordingly.
 
 ### Step 7 — Host: end-to-end pipeline eval (the ±2% gate)
 

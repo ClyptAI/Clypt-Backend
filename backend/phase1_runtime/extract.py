@@ -1,14 +1,14 @@
-"""H200-side Phase 1 sidecar orchestration.
+"""Phase 1 sidecar orchestration.
 
-On the H200 we run the visual extraction (RF-DETR + ByteTrack) **and** the
-post-VibeVoice audio chain (NFA → emotion2vec+ → YAMNet) in-process. Only
-VibeVoice ASR itself is remote: it runs on the RTX 6000 Ada box via
-:class:`backend.providers.audio_host_client.RemoteVibeVoiceAsrClient`.
+Phase 1 runs visual extraction (RF-DETR + ByteTrack) and the post-VibeVoice
+audio chain (NFA -> emotion2vec+ -> YAMNet) on the same host. VibeVoice ASR
+is reached through :class:`backend.providers.audio_host_client.RemoteVibeVoiceAsrClient`,
+which now normally targets the local Phase 1 service boundary.
 
 Execution order (H200 perspective)::
 
-    1a. Visual extraction (RF-DETR + ByteTrack) on H200  ─┐ concurrent
-    1b. Remote VibeVoice ASR call on RTX 6000 Ada        ─┘  via a pool.
+    1a. Visual extraction (RF-DETR + ByteTrack)          ─┐ concurrent
+    1b. VibeVoice ASR service call                       ─┘  via a pool.
 
         ↓ ASR returns — local NFA → emotion2vec+ → YAMNet starts
           concurrently with RF-DETR.
@@ -21,8 +21,8 @@ speech_emotion_timeline, audio_event_timeline). The early-handoff callback
 fires as soon as the local audio chain is done so Phase 2-4 work can be
 queued before the visual future finishes.
 
-See docs/ERROR_LOG.md 2026-04-17 for why NFA/emotion/YAMNet run on the H200
-again instead of on the RTX alongside VibeVoice vLLM.
+NFA/emotion/YAMNet remain local to the Phase 1 host and intentionally do not
+get split into separate services.
 """
 
 from __future__ import annotations
@@ -97,9 +97,9 @@ def _run_audio_chain(
     yamnet_payload)``.
 
     Runs on the H200 in a ThreadPoolExecutor worker thread while RF-DETR
-    visual extraction is still on the main GPU stream. The H200 has 141 GiB
-    of VRAM, which is more than enough to co-locate RF-DETR + NFA global
-    alignment without starvation.
+        visual extraction is still on the main GPU stream. The default target
+        is an H200 with enough headroom to co-locate RF-DETR + NFA global
+        alignment without starvation.
     """
     prelim_turns = []
     for idx, t in enumerate(vibevoice_turns, start=1):
@@ -262,14 +262,14 @@ def run_phase1_sidecars(
     on_audio_chain_complete: Callable[[Phase1SidecarOutputs], None] | None = None,
     stage_event_logger: Callable[..., None] | None = None,
 ) -> Phase1SidecarOutputs:
-    """Run Phase 1 sidecar tasks with remote VibeVoice ASR + local audio chain.
+    """Run Phase 1 sidecar tasks with service-routed VibeVoice ASR + local audio chain.
 
-    Execution order (H200 perspective)::
+    Execution order::
 
-        1a. Visual extraction (RF-DETR + ByteTrack) on H200  ─┐ concurrent
-        1b. Remote VibeVoice ASR on RTX 6000 Ada              ─┘
+        1a. Visual extraction (RF-DETR + ByteTrack)           ─┐ concurrent
+        1b. VibeVoice ASR service call                        ─┘
 
-            ↓ ASR done — NFA → emotion2vec+ → YAMNet starts on H200,
+            ↓ ASR done — NFA → emotion2vec+ → YAMNet starts locally,
               concurrent with RF-DETR, serial with each other.
 
     Phase 2-4 only depend on the audio-chain outputs. The early-handoff
@@ -279,11 +279,11 @@ def run_phase1_sidecars(
     if vibevoice_asr_client is None:
         raise ValueError(
             "run_phase1_sidecars requires a vibevoice_asr_client; VibeVoice ASR "
-            "runs only on the RTX 6000 Ada host."
+            "must be routed through the Phase 1 service boundary."
         )
     if audio_gcs_uri is None or not str(audio_gcs_uri).strip():
         raise ValueError(
-            "audio_gcs_uri is required: the RTX VibeVoice ASR host fetches audio "
+            "audio_gcs_uri is required: the VibeVoice ASR service fetches audio "
             "from GCS."
         )
     if not getattr(vibevoice_asr_client, "supports_concurrent_visual", False):

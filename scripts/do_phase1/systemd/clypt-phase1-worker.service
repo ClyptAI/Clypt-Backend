@@ -1,0 +1,17 @@
+[Unit]
+Description=Clypt Phase 1 Worker
+After=network.target clypt-phase1-vibevoice.service clypt-phase1-visual.service
+Requires=clypt-phase1-vibevoice.service clypt-phase1-visual.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase1/repo
+EnvironmentFile=/etc/clypt-phase1/phase1.env
+EnvironmentFile=/etc/clypt/clypt-phase1-runtime.env
+Environment=PYTORCH_KERNEL_CACHE_PATH=/opt/clypt-phase1/.cache/torch/kernels
+ExecStart=/opt/clypt-phase1/venvs/phase1/bin/python -m backend.runtime.run_phase1_worker --db-path /var/lib/clypt/phase1/jobs.db --logs-root /var/log/clypt/phase1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

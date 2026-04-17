@@ -1,0 +1,15 @@
+[Unit]
+Description=Clypt Phase26 Dispatch Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase26/repo
+EnvironmentFile=/etc/clypt-phase26/phase26.env
+EnvironmentFile=/etc/clypt/clypt-phase26-runtime.env
+ExecStart=/opt/clypt-phase26/venvs/phase26/bin/python -m backend.runtime.run_phase26_dispatch_service --host 0.0.0.0 --port 9300
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

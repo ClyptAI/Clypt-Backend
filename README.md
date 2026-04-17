@@ -3,78 +3,60 @@
 Clypt V3.1 is a long-form video understanding and clip-candidate system.
 
 - Implemented today: **Phases 1-4**
-- Planned next: **Phases 5-6** (speaker participation grounding + final 9:16 render)
-- Two-host Phase 1 topology — **no local fallback**:
-  - **RTX 6000 Ada (48 GB, sole tenant)**: VibeVoice vLLM ASR and ffmpeg
-    NVENC/NVDEC node-media prep. Exposed as one FastAPI service with
-    `POST /tasks/vibevoice-asr` (VibeVoice ASR only — no NFA / emotion2vec+
-    / YAMNet on this host) and `POST /tasks/node-media-prep`.
-  - **H200**: Phase 1 orchestrator, RF-DETR + ByteTrack visual chain, the
-    post-ASR audio chain in-process (**NFA → emotion2vec+ → YAMNet (CPU)**),
-    SGLang Qwen3.6-35B-A3B on `:8001`, Phase 2-4 local SQLite queue and
-    worker, Spanner/GCS I/O. Calls the RTX host over HTTP for ASR and
-    node-media prep.
+- Planned next: **Phases 5-6** (participation grounding + final render/export)
+- Active production topology: **two H200 hosts + Modal L4 media prep**
+
+## Topology
+
+- **Phase 1 host (`phase1`, H200 by default)**
+  - Phase 1 runner/orchestrator
+  - persistent local VibeVoice service at `POST /tasks/vibevoice-asr`
+  - persistent local visual service at `POST /tasks/visual-extract`
+  - co-located VibeVoice vLLM sidecar
+  - in-process NFA -> emotion2vec+ -> YAMNet
+- **Downstream host (`phase26`, H200)**
+  - `POST /tasks/phase26-enqueue`
+  - local SQLite queue + local worker
+  - SGLang Qwen on `:8001`
+  - current Phase 2-4 logic, with Phase 5-6 orchestration planned here later
+- **Modal**
+  - `POST /tasks/node-media-prep` on `L4`, `min_containers=1`
+  - future `render-video` endpoint lives here later
+
+There is **no local fallback** for remote boundaries. Phase 1 requires the local VibeVoice service, the local visual service, and the remote Phase26 dispatch service. Phase26 requires the remote node-media-prep service.
 
 ## Current Pipeline State
 
-1. **Phase 1 — Timeline Foundation**
-   - Phase 1 **visual chain** (H200): RF-DETR + ByteTrack
-   - Phase 1 **audio chain** (split across hosts):
-     - VibeVoice ASR on the RTX 6000 Ada via `POST /tasks/vibevoice-asr`
-     - NFA forced alignment → emotion2vec+ → YAMNet (CPU), in-process on
-       the H200, seeded with the VibeVoice turns
-2. **Phase 2 — Semantic Node Construction** (node-media prep delegated to RTX host)
-3. **Phase 3 — Graph Construction**
-4. **Phase 4 — Candidate Retrieval, Review, Ranking**
-   - includes comments/trends signal augmentation in hard-join, fail-fast mode
-
-## Comments + Trends Augment Status
-
-The comments/trends augmentation spec is implemented in the Phase 2-4 flow:
-
-- signal futures run in parallel with core semantic phases
-- Phase 4 waits on a hard join before prompt seeding
-- enabled signal failures are terminal for the run
-- attribution/provenance is persisted in Spanner and propagated to candidate scoring
-
-See [2026-04-09_comments_trends_augment_spec.md](docs/specs/2026-04-09_comments_trends_augment_spec.md) for the canonical spec.
-
-## Runtime Highlights
-
-- Phase 1 visual chain (H200) and audio chain (split RTX + H200) execute
-  concurrently. The H200 dispatches the ASR step via
-  `RemoteVibeVoiceAsrClient` (legacy alias: `RemoteAudioChainClient`) and,
-  as soon as VibeVoice turns return, runs NFA / emotion2vec+ / YAMNet
-  in-process on the H200.
-- Audio chain enqueue to Phase 2-4 fires immediately when the VibeVoice HTTP
-  call returns and the in-process post-processing completes, not after
-  RF-DETR finishes.
-- Default Phase 2-4 route is SQLite queue → local worker loop on the H200.
-- Local worker generation is hard-gated to `GENAI_GENERATION_BACKEND=local_openai`.
-- Embeddings remain Vertex-backed by default.
-- Node-media prep is always delegated to the RTX host via
-  `RemoteNodeMediaPrepClient`; the H200 does not ship a local ffmpeg path.
-- Config load fails fast if `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL`,
-  `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN`,
-  `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`, or
-  `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` is missing on the H200. The legacy
-  `CLYPT_PHASE1_AUDIO_HOST_URL` / `CLYPT_PHASE1_AUDIO_HOST_TOKEN` names are
-  still accepted as deprecated aliases for one release.
-- Per-stage concurrency is explicit. `CLYPT_GEMINI_MAX_CONCURRENT` has been removed.
+1. **Phase 1**
+   - VibeVoice ASR served locally on the Phase 1 H200
+   - NFA -> emotion2vec+ -> YAMNet run in-process on the Phase 1 H200
+   - RF-DETR + ByteTrack served locally on the Phase 1 H200 with the existing fast settings preserved
+2. **Phase 2**
+   - semantic node construction on the Phase26 host
+   - node-media-prep delegated to Modal after node creation
+3. **Phase 3**
+   - graph construction on the Phase26 host
+4. **Phase 4**
+   - candidate retrieval, review, ranking on the Phase26 host
+5. **Phases 5-6**
+   - planned on the Phase26 host, with final render/export expected to call Modal later
 
 ## Canonical Docs
 
-- Runtime execution and env contract: [RUNTIME_GUIDE.md](docs/runtime/RUNTIME_GUIDE.md)
-- Full environment catalog: [ENV_REFERENCE.md](docs/runtime/ENV_REFERENCE.md)
-- Baseline runs and reference outputs: [RUN_REFERENCE.md](docs/runtime/RUN_REFERENCE.md)
-- H200 deployment runbook: [P1_DEPLOY.md](docs/deployment/P1_DEPLOY.md)
-- RTX 6000 Ada audio host runbook: [P1_AUDIO_HOST_DEPLOY.md](docs/deployment/P1_AUDIO_HOST_DEPLOY.md)
-- Architecture (implemented + planned): [ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- Active specs index: [docs/specs/SPEC_INDEX.md](docs/specs/SPEC_INDEX.md)
-- Agent/operator startup + maintenance rules: [AGENTS.md](AGENTS.md)
-- Historical incident/recovery log: [ERROR_LOG.md](docs/ERROR_LOG.md)
+- Runtime behavior: [docs/runtime/RUNTIME_GUIDE.md](/Users/rithvik/Clypt-Backend/docs/runtime/RUNTIME_GUIDE.md)
+- Environment catalog: [docs/runtime/ENV_REFERENCE.md](/Users/rithvik/Clypt-Backend/docs/runtime/ENV_REFERENCE.md)
+- Run baselines: [docs/runtime/RUN_REFERENCE.md](/Users/rithvik/Clypt-Backend/docs/runtime/RUN_REFERENCE.md)
+- Phase 1 host deploy: [docs/deployment/PHASE1_HOST_DEPLOY.md](/Users/rithvik/Clypt-Backend/docs/deployment/PHASE1_HOST_DEPLOY.md)
+- Phase26 host deploy: [docs/deployment/PHASE26_HOST_DEPLOY.md](/Users/rithvik/Clypt-Backend/docs/deployment/PHASE26_HOST_DEPLOY.md)
+- Modal media-prep deploy: [docs/deployment/MODAL_NODE_MEDIA_PREP_DEPLOY.md](/Users/rithvik/Clypt-Backend/docs/deployment/MODAL_NODE_MEDIA_PREP_DEPLOY.md)
+- Architecture: [docs/ARCHITECTURE.md](/Users/rithvik/Clypt-Backend/docs/ARCHITECTURE.md)
+- Specs index: [docs/specs/SPEC_INDEX.md](/Users/rithvik/Clypt-Backend/docs/specs/SPEC_INDEX.md)
+- Operator/agent rules: [AGENTS.md](/Users/rithvik/Clypt-Backend/AGENTS.md)
+- Incident log: [docs/ERROR_LOG.md](/Users/rithvik/Clypt-Backend/docs/ERROR_LOG.md)
 
-## Setup (Local Dev / Tests)
+## Setup
+
+Local/dev:
 
 ```bash
 python3 -m venv .venv
@@ -82,12 +64,21 @@ source .venv/bin/activate
 python -m pip install -r requirements-local.txt
 ```
 
-`requirements-local.txt` is for local repo work (tests, API/runtime code paths, tooling).
-`requirements-do-phase1-visual.txt` is the H200 Phase 1 runtime dependency set. It now
-includes the post-ASR audio chain deps (NFA, emotion2vec+, YAMNet).
-`requirements-do-phase1-audio.txt` is the RTX 6000 Ada dependency set — VibeVoice vLLM
-plus FastAPI plus ffmpeg. It explicitly does **not** include NeMo / FunASR / TensorFlow
-/ librosa / resampy (those moved to the H200).
+Phase 1 host runtime:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-do-phase1-h200.txt
+```
+
+Phase26 host runtime:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-do-phase26-h200.txt
+```
 
 ## Tests
 
@@ -96,35 +87,18 @@ source .venv/bin/activate
 python -m pytest tests/backend/pipeline -q
 ```
 
-## Phase 1 Runtime Deps
-
-H200 (visual + audio-post + Phase 2-4 worker):
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements-do-phase1-visual.txt
-```
-
-RTX 6000 Ada (VibeVoice ASR + node-media prep, sole tenant):
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements-do-phase1-audio.txt
-```
-
 ## Repository Structure
 
 ```text
-backend/pipeline/                          Phase 1-4 contracts, transforms, orchestrator
-backend/providers/                         Remote VibeVoice ASR / media clients, local OpenAI, Vertex, GCS
-backend/phase1_runtime/                    Phase 1 orchestration, visual pipeline, in-process audio-post chain, job store (H200)
-backend/runtime/phase1_audio_service/      RTX 6000 Ada FastAPI service (VibeVoice ASR + node-media prep)
-backend/runtime/                           Phase 1 + Phase 2-4 runners, local SQLite worker (H200)
-docker/vibevoice-vllm/                     VibeVoice vLLM image (RTX 6000 Ada)
-scripts/do_phase1_visual/                  Deployment scripts + systemd units for the H200
-scripts/do_phase1_audio/                   Deployment scripts + systemd units for the RTX 6000 Ada
-scripts/lib/                               Shared bash helpers sourced by deploy scripts (preamble.sh)
-docs/                                      Runtime, deployment, architecture, specs, outputs
+backend/phase1_runtime/                    Phase 1 orchestration, in-process audio-post chain
+backend/providers/                         Remote clients, config, storage, LLM, embeddings
+backend/runtime/phase1_vibevoice_service/ Local Phase 1 VibeVoice service
+backend/runtime/phase1_visual_service/    Local Phase 1 visual service
+backend/runtime/phase26_dispatch_service/ Downstream enqueue API
+backend/runtime/                          Phase 1/Phase26 runners and worker entrypoints
+docker/vibevoice-vllm/                    VibeVoice vLLM image used on the Phase 1 host
+scripts/do_phase1/                        Phase 1 host bootstrap, deploy, systemd units
+scripts/do_phase26/                       Phase26 host bootstrap, deploy, systemd units
+scripts/modal/                            Modal node-media-prep and future render services
+docs/                                     Runtime, deployment, architecture, specs, outputs
 ```

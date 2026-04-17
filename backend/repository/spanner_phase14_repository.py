@@ -45,7 +45,7 @@ UTC = timezone.utc
 _MAX_DDL_OPERATION_MESSAGES = ("already exists", "already defined", "duplicate name in schema")
 _STRING_PARAM_TYPE = spanner_param_types.STRING if spanner_param_types is not None else "STRING"
 SpannerRow = Mapping[str, Any] | Sequence[Any]
-T = TypeVar("T", default=Any)
+T = TypeVar("T")
 
 
 def _json_dumps(value: Any | None) -> str | None:

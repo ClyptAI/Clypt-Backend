@@ -29,3 +29,15 @@ def _default_remote_host_envs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN", "test-node-media-prep-token"
     )
+    monkeypatch.setenv(
+        "CLYPT_PHASE1_VISUAL_SERVICE_URL", "http://test-phase1-visual:9200"
+    )
+    monkeypatch.setenv(
+        "CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN", "test-phase1-visual-token"
+    )
+    monkeypatch.setenv(
+        "CLYPT_PHASE24_DISPATCH_URL", "http://test-phase26-dispatch:9300"
+    )
+    monkeypatch.setenv(
+        "CLYPT_PHASE24_DISPATCH_AUTH_TOKEN", "test-phase26-dispatch-token"
+    )
