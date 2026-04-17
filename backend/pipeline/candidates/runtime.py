@@ -15,6 +15,11 @@ from .prompts import (
     build_pooled_candidate_review_prompt,
     build_subgraph_review_prompt,
 )
+from .responses import (
+    CandidatesMetaPromptGenerationResponse,
+    CandidatesPooledCandidateReviewResponse,
+    CandidatesSubgraphReviewResponse,
+)
 from .review_candidate_pool import review_candidate_pool
 from .review_subgraphs import review_local_subgraph
 from backend.providers.protocols import EmbeddingClient, LLMGenerateJsonClient
@@ -139,18 +144,19 @@ def generate_meta_prompts_live(
         target_count=target_count,
     )
     started = time.perf_counter()
-    response = llm_client.generate_json(
-        prompt=prompt,
-        model=model,
-        temperature=0.0,
-        response_schema=META_PROMPT_GENERATION_SCHEMA,
-        max_output_tokens=max_output_tokens,
-    )
-    prompts = response.get("prompts") or []
-    if not prompts or not isinstance(prompts, list):
-        raise ValueError(
-            f"generate_meta_prompts_live: Qwen returned no prompts list. response={response!r}"
+    parsed = CandidatesMetaPromptGenerationResponse.model_validate(
+        llm_client.generate_json(
+            prompt=prompt,
+            model=model,
+            temperature=0.0,
+            response_schema=META_PROMPT_GENERATION_SCHEMA,
+            max_output_tokens=max_output_tokens,
         )
+    )
+    response_dump = parsed.model_dump(mode="json")
+    prompts = parsed.prompts
+    if not prompts:
+        raise ValueError(f"generate_meta_prompts_live: Qwen returned no prompts list. response={response_dump!r}")
     final_prompts = [str(p) for p in prompts if p]
     diagnostics = {
         "target_prompt_count": target_count,
@@ -160,7 +166,7 @@ def generate_meta_prompts_live(
         "prompt_chars": len(prompt),
         "prompt_token_estimate": max(1, round(len(prompt) / 4.0)),
         "payload_chars": len(json.dumps(node_summaries, ensure_ascii=True, separators=(",", ":"))),
-        "response_chars": len(json.dumps(response, ensure_ascii=True, separators=(",", ":"))),
+        "response_chars": len(json.dumps(response_dump, ensure_ascii=True, separators=(",", ":"))),
     }
     if return_debug:
         return final_prompts, diagnostics
@@ -222,14 +228,17 @@ def run_subgraph_reviews(
         if subgraph_provenance_by_id is not None:
             provenance_payload = _compact_provenance_payload(subgraph_provenance_by_id.get(subgraph.subgraph_id))
         prompt = build_subgraph_review_prompt(subgraph_payload=payload, provenance_payload=provenance_payload)
-        response = llm_client.generate_json(
-            prompt=prompt,
-            model=model,
-            temperature=0.0,
-            response_schema=SUBGRAPH_REVIEW_SCHEMA,
-            max_output_tokens=max_output_tokens,
+        parsed = CandidatesSubgraphReviewResponse.model_validate(
+            llm_client.generate_json(
+                prompt=prompt,
+                model=model,
+                temperature=0.0,
+                response_schema=SUBGRAPH_REVIEW_SCHEMA,
+                max_output_tokens=max_output_tokens,
+            )
         )
-        review = review_local_subgraph(subgraph=subgraph, llm_response=response)
+        response_dump = parsed.model_dump(mode="json")
+        review = review_local_subgraph(subgraph=subgraph, llm_response=parsed)
         latency_ms = (time.perf_counter() - started) * 1000.0
         prompt_chars = len(prompt)
         debug_payload = {
@@ -248,13 +257,13 @@ def run_subgraph_reviews(
                     if provenance_payload is not None
                     else 0
                 ),
-                "response_chars": len(json.dumps(response, ensure_ascii=True, separators=(",", ":"))),
+                "response_chars": len(json.dumps(response_dump, ensure_ascii=True, separators=(",", ":"))),
                 "reject_all": review.reject_all,
                 "candidate_count": len(review.candidates),
                 "invalid_structured_output": review.reject_reason.startswith("invalid_structured_output:"),
             },
             "prompt": prompt,
-            "response": response,
+            "response": response_dump,
         }
         return review, debug_payload
 
@@ -296,15 +305,18 @@ def run_candidate_pool_review_with_debug(
     payload_chars = len(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
     prompt = build_pooled_candidate_review_prompt(candidate_payload=payload)
     started = time.perf_counter()
-    response = llm_client.generate_json(
-        prompt=prompt,
-        model=model,
-        temperature=0.0,
-        response_schema=POOL_REVIEW_SCHEMA,
-        max_output_tokens=max_output_tokens,
+    parsed = CandidatesPooledCandidateReviewResponse.model_validate(
+        llm_client.generate_json(
+            prompt=prompt,
+            model=model,
+            temperature=0.0,
+            response_schema=POOL_REVIEW_SCHEMA,
+            max_output_tokens=max_output_tokens,
+        )
     )
+    response_dump = parsed.model_dump(mode="json")
     latency_ms = (time.perf_counter() - started) * 1000.0
-    pooled = review_candidate_pool(candidates=candidates, llm_response=response)
+    pooled = review_candidate_pool(candidates=candidates, llm_response=parsed)
     max_pool_rank = max(
         (decision.pool_rank or 0) for decision in pooled.ranked_candidates
     ) if pooled.ranked_candidates else 0
@@ -318,7 +330,7 @@ def run_candidate_pool_review_with_debug(
         # Heuristic estimator for quick operator diagnostics (not billing-accurate).
         "prompt_token_estimate": max(1, round(len(prompt) / 4.0)),
         "payload_chars": payload_chars,
-        "response_chars": len(json.dumps(response, ensure_ascii=True, separators=(",", ":"))),
+        "response_chars": len(json.dumps(response_dump, ensure_ascii=True, separators=(",", ":"))),
     }
     return pooled, debug
 

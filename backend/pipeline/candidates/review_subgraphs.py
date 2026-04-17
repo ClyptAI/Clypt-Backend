@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import ValidationError
 
 from ..contracts import ClipCandidate, LocalSubgraph, SubgraphReviewResponse
+from .responses import CandidatesSubgraphReviewResponse
 
 
 def _invalid_subgraph_response(*, subgraph: LocalSubgraph, reason: str) -> SubgraphReviewResponse:
@@ -15,7 +16,11 @@ def _invalid_subgraph_response(*, subgraph: LocalSubgraph, reason: str) -> Subgr
     )
 
 
-def review_local_subgraph(*, subgraph: LocalSubgraph, llm_response: dict | None = None) -> SubgraphReviewResponse:
+def review_local_subgraph(
+    *,
+    subgraph: LocalSubgraph,
+    llm_response: CandidatesSubgraphReviewResponse | dict | None = None,
+) -> SubgraphReviewResponse:
     """Validate or adapt one Qwen subgraph-review response."""
     if llm_response is None:
         raise ValueError("llm_response is required")
@@ -25,14 +30,20 @@ def review_local_subgraph(*, subgraph: LocalSubgraph, llm_response: dict | None 
     node_by_id = {node.node_id: node for node in subgraph.nodes}
 
     try:
-        if llm_response.get("subgraph_id") != subgraph.subgraph_id:
+        parsed = (
+            llm_response
+            if isinstance(llm_response, CandidatesSubgraphReviewResponse)
+            else CandidatesSubgraphReviewResponse.model_validate(llm_response)
+        )
+
+        if parsed.subgraph_id != subgraph.subgraph_id:
             raise ValueError("subgraph_id must match the reviewed subgraph")
-        if llm_response.get("seed_node_id") != subgraph.seed_node_id:
+        if parsed.seed_node_id != subgraph.seed_node_id:
             raise ValueError("seed_node_id must match the reviewed subgraph")
 
-        reject_all = bool(llm_response.get("reject_all"))
-        reject_reason = str(llm_response.get("reject_reason") or "")
-        raw_candidates = list(llm_response.get("candidates") or [])
+        reject_all = bool(parsed.reject_all)
+        reject_reason = str(parsed.reject_reason or "")
+        raw_candidates = list(parsed.candidates)
 
         if len(raw_candidates) > 3:
             raise ValueError("subgraph review may return at most 3 candidates")
@@ -53,7 +64,7 @@ def review_local_subgraph(*, subgraph: LocalSubgraph, llm_response: dict | None 
 
         candidates: list[ClipCandidate] = []
         for idx, raw_candidate in enumerate(raw_candidates, start=1):
-            candidate_node_ids = list(raw_candidate.get("node_ids") or [])
+            candidate_node_ids = list(raw_candidate.node_ids)
             if not candidate_node_ids:
                 raise ValueError("candidate node_ids are required")
             if any(node_id not in node_id_set for node_id in candidate_node_ids):
@@ -70,9 +81,9 @@ def review_local_subgraph(*, subgraph: LocalSubgraph, llm_response: dict | None 
 
             first_node = node_by_id[candidate_node_ids[0]]
             last_node = node_by_id[candidate_node_ids[-1]]
-            if raw_candidate.get("start_ms") != first_node.start_ms:
+            if raw_candidate.start_ms != first_node.start_ms:
                 raise ValueError("candidate start_ms must match the chosen node span exactly")
-            if raw_candidate.get("end_ms") != last_node.end_ms:
+            if raw_candidate.end_ms != last_node.end_ms:
                 raise ValueError("candidate end_ms must match the chosen node span exactly")
 
             candidates.append(
@@ -81,8 +92,8 @@ def review_local_subgraph(*, subgraph: LocalSubgraph, llm_response: dict | None 
                     node_ids=candidate_node_ids,
                     start_ms=first_node.start_ms,
                     end_ms=last_node.end_ms,
-                    score=float(raw_candidate["score"]),
-                    rationale=str(raw_candidate.get("rationale") or "").strip(),
+                    score=float(raw_candidate.score),
+                    rationale=str(raw_candidate.rationale).strip(),
                     source_prompt_ids=list(subgraph.source_prompt_ids),
                     seed_node_id=subgraph.seed_node_id,
                     subgraph_id=subgraph.subgraph_id,

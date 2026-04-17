@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..contracts import ClipCandidate, PooledCandidateReviewResponse, RankedCandidateDecision
+from .responses import CandidatesPooledCandidateReviewResponse
 
 
 def _candidate_temp_id_map(candidates: list[ClipCandidate]) -> dict[str, ClipCandidate]:
@@ -13,14 +14,23 @@ def _candidate_temp_id_map(candidates: list[ClipCandidate]) -> dict[str, ClipCan
     return mapping
 
 
-def review_candidate_pool(*, candidates: list[ClipCandidate], llm_response: dict | None = None) -> PooledCandidateReviewResponse:
+def review_candidate_pool(
+    *,
+    candidates: list[ClipCandidate],
+    llm_response: CandidatesPooledCandidateReviewResponse | dict | None = None,
+) -> PooledCandidateReviewResponse:
     """Validate or adapt the final pooled Qwen candidate-review response."""
     if llm_response is None:
         raise ValueError("pooled review call failed: llm_response is required")
 
     candidate_map = _candidate_temp_id_map(candidates)
     candidate_ids = set(candidate_map)
-    parsed = PooledCandidateReviewResponse.model_validate(llm_response)
+    parsed_response = (
+        llm_response
+        if isinstance(llm_response, CandidatesPooledCandidateReviewResponse)
+        else CandidatesPooledCandidateReviewResponse.model_validate(llm_response)
+    )
+    parsed = PooledCandidateReviewResponse.model_validate(parsed_response.model_dump(mode="json"))
 
     kept_ids: list[str] = []
     ranked: list[RankedCandidateDecision] = []
