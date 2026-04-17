@@ -87,6 +87,16 @@ This script:
 - enforces that `VIBEVOICE_BACKEND` / `VIBEVOICE_VLLM_BASE_URL` / `VIBEVOICE_VLLM_MODEL`
   are **not** set in the H200 env file (those are a deployment bug on this host)
 - probes `${CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL}/health` with the shared bearer token
+- installs `scripts/do_phase1_visual/clypt-phase1-runtime.env` to
+  `/etc/clypt/clypt-phase1-runtime.env` (0644 root:root). The three
+  H200 Phase 1 units (`clypt-v31-phase1-api.service`,
+  `clypt-v31-phase1-worker.service`,
+  `clypt-v31-phase24-local-worker.service`) reference this file via
+  `EnvironmentFile=` for the shared cache/home vars (`HOME`,
+  `CLYPT_PHASE1_CACHE_HOME`, `XDG_CACHE_HOME`, `TORCH_HOME`, `HF_HOME`).
+  `clypt-sglang-qwen.service` is intentionally not a consumer — it uses
+  a different `HF_HOME` path (`/opt/clypt-phase1/hf-cache`) and keeps
+  its SGLang-specific `Environment=` lines inline
 - installs and starts `clypt-v31-phase1-api.service`,
   `clypt-v31-phase1-worker.service`, and `clypt-v31-phase24-local-worker.service`
 
