@@ -6,11 +6,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/clypt-phase1/repo
 EnvironmentFile=/etc/clypt-phase1/v3_1_phase1.env
-Environment=HOME=/opt/clypt-phase1
-Environment=CLYPT_PHASE1_CACHE_HOME=/opt/clypt-phase1/.cache
-Environment=XDG_CACHE_HOME=/opt/clypt-phase1/.cache
-Environment=TORCH_HOME=/opt/clypt-phase1/.cache/torch
-Environment=HF_HOME=/opt/clypt-phase1/.cache/huggingface
+EnvironmentFile=/etc/clypt/clypt-phase1-runtime.env
 ExecStart=/opt/clypt-phase1/venvs/phase1/bin/python -m backend.runtime.run_phase1_service --host 0.0.0.0 --port 8080 --db-path /var/lib/clypt/v3_1_phase1_service/jobs.db --logs-root /var/log/clypt/v3_1_phase1
 Restart=always
 RestartSec=3

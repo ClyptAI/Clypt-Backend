@@ -195,6 +195,15 @@ install -d -m 0755 /var/lib/clypt/v3_1_phase1_service
 install -d -m 0755 /var/log/clypt/v3_1_phase1
 install -d -m 0755 "$PHASE1_CACHE_HOME/torch/kernels"
 
+# Shared cache/home env file referenced via EnvironmentFile= from the
+# H200 Phase 1 units. Must be installed BEFORE the unit files so
+# systemd doesn't fail to start if it sees EnvironmentFile= before the
+# file exists on a fresh host.
+install -d -m 0755 -o root -g root /etc/clypt
+install -D -m 0644 -o root -g root \
+  scripts/do_phase1_visual/clypt-phase1-runtime.env \
+  /etc/clypt/clypt-phase1-runtime.env
+
 install -D -m 0644 \
   scripts/do_phase1_visual/systemd/clypt-v31-phase1-api.service \
   /etc/systemd/system/clypt-v31-phase1-api.service
