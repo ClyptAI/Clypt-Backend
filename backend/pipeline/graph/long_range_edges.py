@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import Any
+
+from .responses import LongRangeEdgeResponse
 from .._embedding_utils import cosine_similarity
 from ..contracts import SemanticGraphEdge, SemanticGraphNode
 
@@ -46,7 +49,11 @@ def shortlist_long_range_pairs(*, nodes: list[SemanticGraphNode], top_k: int) ->
     return shortlisted
 
 
-def build_long_range_edges(*, candidate_pairs: list[dict], llm_response: dict | None = None) -> list[SemanticGraphEdge]:
+def build_long_range_edges(
+    *,
+    candidate_pairs: list[dict],
+    llm_response: dict[str, Any] | LongRangeEdgeResponse | None = None,
+) -> list[SemanticGraphEdge]:
     """Build callback/topic recurrence edges from LLM-adjudicated pairs."""
     if llm_response is None:
         raise ValueError("llm_response is required")
@@ -55,11 +62,13 @@ def build_long_range_edges(*, candidate_pairs: list[dict], llm_response: dict | 
         (str(pair.get("later_node_id") or ""), str(pair.get("earlier_node_id") or ""))
         for pair in candidate_pairs
     }
+    if isinstance(llm_response, dict):
+        llm_response = LongRangeEdgeResponse.model_validate(llm_response)
     edges: list[SemanticGraphEdge] = []
-    for raw_edge in list(llm_response.get("edges") or []):
-        source_node_id = str(raw_edge.get("source_node_id") or "")
-        target_node_id = str(raw_edge.get("target_node_id") or "")
-        edge_type = str(raw_edge.get("edge_type") or "")
+    for raw_edge in list(llm_response.edges):
+        source_node_id = str(raw_edge.source_node_id)
+        target_node_id = str(raw_edge.target_node_id)
+        edge_type = str(raw_edge.edge_type)
         if edge_type not in {"callback_to", "topic_recurrence"}:
             raise ValueError(f"invalid long-range edge type: {edge_type}")
         if (source_node_id, target_node_id) not in pair_set:
@@ -70,8 +79,8 @@ def build_long_range_edges(*, candidate_pairs: list[dict], llm_response: dict | 
                 source_node_id=source_node_id,
                 target_node_id=target_node_id,
                 edge_type=edge_type,
-                rationale=str(raw_edge.get("rationale") or "").strip() or None,
-                confidence=raw_edge.get("confidence"),
+                rationale=str(raw_edge.rationale or "").strip() or None,
+                confidence=raw_edge.confidence,
             )
         )
     return edges

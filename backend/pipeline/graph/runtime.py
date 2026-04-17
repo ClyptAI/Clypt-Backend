@@ -9,7 +9,17 @@ from typing import Any
 from backend.providers.protocols import LLMGenerateJsonClient
 from .local_semantic_edges import LOCAL_EDGE_TYPES, build_local_semantic_edges
 from .long_range_edges import build_long_range_edges, shortlist_long_range_pairs
-from .prompts import LOCAL_SEMANTIC_EDGE_SCHEMA, LONG_RANGE_EDGE_SCHEMA, build_local_semantic_edge_prompt, build_long_range_edge_prompt
+from .prompts import (
+    LOCAL_SEMANTIC_EDGE_SCHEMA,
+    LONG_RANGE_EDGE_SCHEMA,
+    build_local_semantic_edge_prompt,
+    build_long_range_edge_prompt,
+)
+from .responses import (
+    LocalSemanticEdgeBatchResponse,
+    LocalSemanticEdgeResponse,
+    LongRangeEdgeResponse,
+)
 from .reconcile_edges import reconcile_semantic_edges
 from ..contracts import SemanticGraphEdge, SemanticGraphNode
 
@@ -79,45 +89,30 @@ def run_local_semantic_edge_batches(
         target_batch_count=target_batch_count,
         max_nodes_per_batch=max_nodes_per_batch,
     )
+    node_ids = {node.node_id for node in nodes}
 
     def _call_batch(batch):
         started = time.perf_counter()
         prompt = build_local_semantic_edge_prompt(batch_payload=batch)
-        response = llm_client.generate_json(
-            prompt=prompt,
-            model=model,
-            temperature=0.0,
-            response_schema=LOCAL_SEMANTIC_EDGE_SCHEMA,
-            max_output_tokens=max_output_tokens,
+        parsed = LocalSemanticEdgeResponse.model_validate(
+            llm_client.generate_json(
+                prompt=prompt,
+                model=model,
+                temperature=0.0,
+                response_schema=LOCAL_SEMANTIC_EDGE_SCHEMA,
+                max_output_tokens=max_output_tokens,
+            )
         )
-        return batch, prompt, response, {
-            "latency_ms": (time.perf_counter() - started) * 1000.0,
-            "target_node_count": len(batch["target_node_ids"]),
-            "context_node_count": len(batch["context_node_ids"]),
-            "prompt_chars": len(prompt),
-            "prompt_token_estimate": max(1, round(len(prompt) / 4.0)),
-            "payload_chars": len(json.dumps(batch, ensure_ascii=True, separators=(",", ":"))),
-            "response_chars": len(json.dumps(response, ensure_ascii=True, separators=(",", ":"))),
-        }
-
-    with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
-        futures = [pool.submit(_call_batch, b) for b in batches]
-        batch_call_results = [f.result() for f in futures]
-
-    node_ids = {node.node_id for node in nodes}
-    raw_responses: list[dict[str, Any]] = []
-    debug: list[dict[str, Any]] = []
-    for batch, prompt, response, diagnostics in batch_call_results:
         target_node_ids = list(batch["target_node_ids"])
         context_node_ids = list(batch["context_node_ids"])
         target_node_id_set = set(target_node_ids)
         context_node_id_set = set(context_node_ids)
         sanitized_edges: list[dict[str, Any]] = []
         dropped_edges: list[dict[str, Any]] = []
-        for raw_edge in list(response.get("edges") or []):
-            source_node_id = str(raw_edge.get("source_node_id") or "").strip()
-            target_node_id = str(raw_edge.get("target_node_id") or "").strip()
-            edge_type = str(raw_edge.get("edge_type") or "").strip()
+        for raw_edge in list(parsed.edges):
+            source_node_id = str(raw_edge.source_node_id).strip()
+            target_node_id = str(raw_edge.target_node_id).strip()
+            edge_type = str(raw_edge.edge_type).strip()
             drop_reason: str | None = None
             if source_node_id not in target_node_id_set:
                 drop_reason = "source_outside_target_block"
@@ -131,7 +126,7 @@ def run_local_semantic_edge_batches(
                 dropped_edges.append(
                     {
                         "reason": drop_reason,
-                        "edge": raw_edge,
+                        "edge": raw_edge.model_dump(mode="json"),
                     }
                 )
                 continue
@@ -140,11 +135,11 @@ def run_local_semantic_edge_batches(
                     "source_node_id": source_node_id,
                     "target_node_id": target_node_id,
                     "edge_type": edge_type,
-                    "rationale": raw_edge.get("rationale"),
-                    "confidence": raw_edge.get("confidence"),
+                    "rationale": raw_edge.rationale,
+                    "confidence": raw_edge.confidence,
                 }
             )
-        raw_responses.append(
+        batch_response = LocalSemanticEdgeBatchResponse.model_validate(
             {
                 "batch_id": batch["batch_id"],
                 "target_node_ids": target_node_ids,
@@ -152,18 +147,46 @@ def run_local_semantic_edge_batches(
                 "edges": sanitized_edges,
             }
         )
+        response_dump = batch_response.model_dump(mode="json")
+        return batch_response, prompt, {
+            "latency_ms": (time.perf_counter() - started) * 1000.0,
+            "target_node_count": len(target_node_ids),
+            "context_node_count": len(context_node_ids),
+            "prompt_chars": len(prompt),
+            "prompt_token_estimate": max(1, round(len(prompt) / 4.0)),
+            "payload_chars": len(json.dumps(batch, ensure_ascii=True, separators=(",", ":"))),
+            "response_chars": len(json.dumps(response_dump, ensure_ascii=True, separators=(",", ":"))),
+            "dropped_edges": dropped_edges,
+            "sanitized_edge_count": len(sanitized_edges),
+        }
+
+    with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+        futures = [pool.submit(_call_batch, b) for b in batches]
+        batch_call_results = [f.result() for f in futures]
+
+    parsed_responses: list[LocalSemanticEdgeBatchResponse] = []
+    raw_responses: list[dict[str, Any]] = []
+    debug: list[dict[str, Any]] = []
+    for batch_response, prompt, diagnostics in batch_call_results:
+        target_node_ids = list(batch_response.target_node_ids)
+        context_node_ids = list(batch_response.context_node_ids)
+        raw_responses.append(
+            batch_response.model_dump(mode="json")
+        )
+        parsed_responses.append(batch_response)
+        dropped_edges = list(diagnostics.get("dropped_edges") or [])
         debug.append(
             {
-                "batch_id": batch["batch_id"],
+                "batch_id": batch_response.batch_id,
                 "prompt": prompt,
-                "response": response,
+                "response": batch_response.model_dump(mode="json"),
                 "diagnostics": diagnostics,
-                "sanitized_edge_count": len(sanitized_edges),
+                "sanitized_edge_count": int(diagnostics.get("sanitized_edge_count") or len(batch_response.edges)),
                 "dropped_edge_count": len(dropped_edges),
                 "dropped_edges": dropped_edges,
             }
         )
-    return build_local_semantic_edges(nodes=nodes, llm_responses=raw_responses), debug
+    return build_local_semantic_edges(nodes=nodes, llm_responses=parsed_responses), debug
 
 
 def _build_long_range_pair_shards(
@@ -221,19 +244,22 @@ def run_long_range_edge_adjudication(
         shard_started = time.perf_counter()
         shard_pairs = list(shard["candidate_pairs"])
         prompt = build_long_range_edge_prompt(pair_payload={"candidate_pairs": shard_pairs})
-        response = llm_client.generate_json(
-            prompt=prompt,
-            model=model,
-            temperature=0.0,
-            response_schema=LONG_RANGE_EDGE_SCHEMA,
-            max_output_tokens=max_output_tokens,
+        parsed = LongRangeEdgeResponse.model_validate(
+            llm_client.generate_json(
+                prompt=prompt,
+                model=model,
+                temperature=0.0,
+                response_schema=LONG_RANGE_EDGE_SCHEMA,
+                max_output_tokens=max_output_tokens,
+            )
         )
-        edges = build_long_range_edges(candidate_pairs=shard_pairs, llm_response=response)
+        edges = build_long_range_edges(candidate_pairs=shard_pairs, llm_response=parsed)
+        response_dump = parsed.model_dump(mode="json")
         return {
             "shard_id": shard["shard_id"],
             "candidate_pairs": shard_pairs,
             "prompt": prompt,
-            "response": response,
+            "response": response_dump,
             "edges": edges,
             "diagnostics": {
                 "latency_ms": (time.perf_counter() - shard_started) * 1000.0,
@@ -242,7 +268,7 @@ def run_long_range_edge_adjudication(
                 "prompt_chars": len(prompt),
                 "prompt_token_estimate": max(1, round(len(prompt) / 4.0)),
                 "payload_chars": len(json.dumps({"candidate_pairs": shard_pairs}, ensure_ascii=True, separators=(",", ":"))),
-                "response_chars": len(json.dumps(response, ensure_ascii=True, separators=(",", ":"))),
+                "response_chars": len(json.dumps(response_dump, ensure_ascii=True, separators=(",", ":"))),
             },
         }
 
