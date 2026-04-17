@@ -22,6 +22,17 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > tenant. The flag band and `PYTORCH_CUDA_ALLOC_CONF` hint called out in the
 > co-tenancy entry are no longer in effect.
 
+## 2026-04-16 - GCSStorageClient.get_https_url silently made objects public on signing failure
+
+- **Date/Time (UTC):** 2026-04-16
+- **Subsystem:** `backend/providers/storage.GCSStorageClient.get_https_url`
+- **Environment:** All Phase 1 / Phase 2-4 runtimes that resolve GCS URIs to HTTPS (H200 audio chain, VibeVoice vLLM `build_gcs_uri_url_resolver`, node-media prep, phase24 worker).
+- **Symptom / Error signature:** Silent public-URL fallback on V4 signed-URL generation failure. `get_https_url` caught any `Exception` from `blob.generate_signed_url`, called `blob.make_public()`, and returned `blob.public_url` — so a rotated service-account key, a quota hit, a uniform-bucket-level-access mismatch, or any transient auth error would flip customer audio/video objects to public ACL with no alarm and no audit trail. Discovered during a code-quality pass as finding `R1` in `tmp/code-quality-reports/06-try-except.md`.
+- **Root cause:** Exception-swallowing `try/except` around signed URL generation, paired with a `blob.make_public()` side effect that mutates bucket state. This violates the fail-fast doctrine and confuses a *signing* failure (a credentials/config problem the operator must fix) with a *graceful degradation* path (there is no such thing for object ACLs on a multi-tenant media bucket). Prior incident `2026-04-15 - H200 canonical-audio URL signing failed with user ADC credentials` already documented the real failure mode — ADC creds can't sign — and the fallback was independently broken under uniform bucket-level access, which means in practice the fallback never helped; it only increased blast radius when signing worked against a bucket that *didn't* have uniform access enabled.
+- **Fix applied:** Removed the silent fallback. Introduced domain exception `GcsSigningError(RuntimeError)` in `backend/providers/storage.py` carrying `gcs_uri` and chained via `raise ... from signing_err`. `get_https_url` now (1) generates the V4 signed URL, (2) on any exception raises `GcsSigningError`, and (3) never calls `blob.make_public()` or returns `blob.public_url`. `__all__` updated to export the new exception. No changes to callers were needed — every production caller (`vibevoice_vllm.build_gcs_uri_url_resolver`, phase1/phase24 runtime factories) only consumes the returned URL and benefits from surfacing a hard failure rather than silently leaking an object.
+- **Verification evidence:** `python -m pytest tests/backend/providers/ -q` → `70 passed, 1 skipped`. Targeted `-k storage` → `4 passed`. Import smoke `python -c "from backend.providers.storage import GCSStorageClient, GcsSigningError; print('ok')"` → `ok`. Caller grep (`get_https_url|GCSStorageClient` across `backend/` and `tests/`) confirmed no caller relied on the public-URL fallback; no test asserted `make_public` was invoked. Only remaining `make_public` mention in the tree is the historical 2026-04-15 entry in this file.
+- **Follow-up guardrails:** Do not reintroduce `blob.make_public()` in any storage client path. If a caller ever legitimately needs a public URL (e.g. an explicitly public CDN-backed asset), introduce a separate method (`get_public_url`) with the intent spelled out in its name, and wire ACL provisioning through the bucket provisioner, not at request time. The exception-swallow pattern around external-service calls is a repeating anti-pattern in this codebase (tracked under `tmp/code-quality-reports/06-try-except.md`); future audits should continue to treat "catch Exception → silent compensating side effect" as a fail-fast violation.
+
 ## 2026-04-17 - Phase 2 merge/boundary token cap too high (32768) wasted MTP budget
 
 - **Date/Time (UTC):** 2026-04-17
@@ -141,6 +152,22 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 - **Fix applied:**
 - **Verification evidence:**
 - **Follow-up guardrails:**
+
+---
+
+## 2026-04-16 - Phase 1 factory silently disabled Spanner Phase14 repository on init failure (F0.3)
+
+- **Date/Time (UTC):** 2026-04-16
+- **Subsystem:** `backend/phase1_runtime/factory._build_phase14_repository`
+- **Environment:** Phase 1 local runtime (`run_phase14` / `Phase1JobRunner`), all deploy targets.
+- **Symptom / Error signature:** Silent `None` return from `_build_phase14_repository` on any Spanner init failure. A rotated credential, missing IAM, or DDL regression in `SpannerPhase14Repository.from_settings(...)` / `bootstrap_schema()` would be swallowed by a bare `except Exception`, logged at WARNING, and the Phase 1 runner would proceed with `phase14_repository=None`. Downstream `upsert_run` / `upsert_phase24_job` / `write_phase_metric` calls all no-op when the repository is `None`, so durable persistence vanished while Phase 1 kept burning GPU (NeMo NFA, emotion2vec+, YAMNet, remote VibeVoice ASR), producing nothing durable. Indistinguishable from the intentional opt-out path where Spanner is simply unconfigured.
+- **Root cause:** The `try/except Exception: return None` wrapper conflated two very different cases — "operator deliberately did not configure Spanner" and "Spanner is configured but init failed" — and silently degraded to in-memory-only operation in both. This violated fail-fast: a rotated service-account key or a schema regression should crash at startup so the operator notices immediately, not fifteen minutes into a GPU run.
+- **Fix applied:**
+  - Added `SpannerSettings.is_configured` property in `backend/providers/config.py` (True iff `project`, `instance`, and `database` are all non-empty). This is the single sanctioned "opt-out" predicate.
+  - Rewrote `_build_phase14_repository` in `backend/phase1_runtime/factory.py` to: (a) early-return `None` when `settings.spanner.is_configured` is False (the intentional opt-out), and (b) construct `SpannerPhase14Repository.from_settings(...)` + `bootstrap_schema()` with **no** `try/except`, so init failures propagate with the original traceback.
+  - Updated `tests/backend/phase1_runtime/test_factory.py`: existing bootstrap test now passes a configured spanner stub; added coverage for the unconfigured-opt-out path and for the "init raises → exception propagates" path (the latter is what regressed into silent `None` under the old code).
+- **Verification evidence:** `python -m pytest tests/backend/phase1_runtime -k "factory or spanner or repository"` → 3 passed (factory) plus `tests/backend/repository/test_spanner_phase14_repository.py` → 15 passed. `python -c "from backend.phase1_runtime.factory import _build_phase14_repository; print('ok')"` → ok. `SpannerSettings()` returns `is_configured=False` (default, empty project); `SpannerSettings(project="p")` returns `is_configured=True`; partially-empty configs return False.
+- **Follow-up guardrails:** `_build_phase14_repository` must never grow a broad `except Exception` again; any refactor that needs to catch a specific, well-understood exception (e.g. a transient-deadline-on-bootstrap case we later decide to retry) must catch only that exception class and must not return `None`. The Phase 1 runner's `phase14_repository is None` branches in `backend/phase1_runtime/runner.py` remain only for the genuine unconfigured-Spanner case; do not add silent-degradation paths there. Discovered in code quality audit (`tmp/code-quality-reports/06-try-except.md` finding R4); shipped as PR-C of the F0 fail-fast sweep.
 
 ---
 
