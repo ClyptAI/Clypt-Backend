@@ -346,11 +346,15 @@ def load_provider_settings() -> ProviderSettings:
             f"{phase1_asr.backend!r}; only 'vllm' is supported."
         )
 
+    # VIBEVOICE_VLLM_BASE_URL is intentionally optional here. The H200 never
+    # talks to the VibeVoice vLLM sidecar directly — it goes through the
+    # RemoteAudioChainClient to the RTX audio host, which owns vLLM locally.
+    # On the H200 the deploy script actively BANS this env var (see
+    # scripts/do_phase1_visual/deploy_visual_service.sh). The audio host has
+    # its own loader (``load_audio_host_settings``) that requires it.
     vllm_base_url = _read_env("VIBEVOICE_VLLM_BASE_URL")
-    if not vllm_base_url:
-        raise ValueError("VIBEVOICE_VLLM_BASE_URL is required.")
     vllm_settings = VibeVoiceVLLMSettings(
-        base_url=vllm_base_url,
+        base_url=vllm_base_url or "unused://vibevoice-moved-to-rtx-audio-host",
         model=_read_env("VIBEVOICE_VLLM_MODEL") or "vibevoice",
         timeout_s=float(_read_env("VIBEVOICE_VLLM_TIMEOUT_S") or "7200"),
         healthcheck_path=_read_env("VIBEVOICE_VLLM_HEALTHCHECK_PATH") or "/health",
