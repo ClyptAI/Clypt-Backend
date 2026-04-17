@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha1
-from typing import Any
+from typing import Any, TypeVar, cast, overload
 
 from .models import (
     CandidateSignalLinkRecord,
@@ -44,6 +44,8 @@ except ImportError:  # pragma: no cover
 UTC = timezone.utc
 _MAX_DDL_OPERATION_MESSAGES = ("already exists", "already defined", "duplicate name in schema")
 _STRING_PARAM_TYPE = spanner_param_types.STRING if spanner_param_types is not None else "STRING"
+SpannerRow = Mapping[str, Any] | Sequence[Any]
+T = TypeVar("T", default=Any)
 
 
 def _json_dumps(value: Any | None) -> str | None:
@@ -71,23 +73,41 @@ def _coerce_datetime(value: Any | None) -> datetime | None:
     raise TypeError(f"unsupported datetime value: {value!r}")
 
 
-def _row_get(row: Any, key: str, default: Any = None) -> Any:
+@overload
+def _row_get(row: SpannerRow, key: str, default: None = None) -> Any | None: ...
+
+
+@overload
+def _row_get(row: SpannerRow, key: str, default: T) -> T: ...
+
+
+def _row_get(row: SpannerRow, key: str, default: Any = None) -> Any:
+    row_value = cast(Any, row)
     try:
-        return row[key]
+        return row_value[key]
     except (KeyError, TypeError):
-        if hasattr(row, "get"):
-            return row.get(key, default)
+        if hasattr(row_value, "get"):
+            return row_value.get(key, default)
         return default
 
 
-def _row_value(row: Any, index: int, key: str) -> Any:
+@overload
+def _row_value(row: SpannerRow, index: int, key: str, default: None = None) -> Any | None: ...
+
+
+@overload
+def _row_value(row: SpannerRow, index: int, key: str, default: T) -> T: ...
+
+
+def _row_value(row: SpannerRow, index: int, key: str, default: Any = None) -> Any:
+    row_value = cast(Any, row)
     try:
-        return row[index]
+        return row_value[index]
     except (KeyError, IndexError):
-        return _row_get(row, key)
+        return _row_get(row, key, default)
 
 
-def _row_to_mapping(row: Any, columns: Sequence[str]) -> dict[str, Any]:
+def _row_to_mapping(row: SpannerRow, columns: Sequence[str]) -> dict[str, Any]:
     return {column: _row_value(row, index, column) for index, column in enumerate(columns)}
 
 
