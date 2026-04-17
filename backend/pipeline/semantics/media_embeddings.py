@@ -49,17 +49,20 @@ def extract_node_clip(
             f"Unsupported CLYPT_PHASE24_FFMPEG_DEVICE={ffmpeg_device!r}; expected auto|gpu|cpu."
         )
 
-    # -hwaccel cuda enables NVDEC for decoding; omitting -hwaccel_output_format
-    # cuda avoids "No decoder surfaces left" / filter reinit errors that occur
-    # when combining cuda surface pinning with -ss seek on ffmpeg 4.4.
-    # NVENC still handles encoding via the fixed-function hardware block.
-    # vLLM is capped at --gpu-memory-utilization 0.77 on the RTX 6000 Ada to
-    # leave enough VRAM headroom for cuCtxCreate (NVDEC context init).
+    # Full GPU pipeline: h264_cuvid (NVDEC) decode + h264_nvenc encode.
+    # -c:v h264_cuvid forces NVDEC explicitly; -hwaccel cuda alone falls back
+    # to native (CPU) decode on ffmpeg 4.4 even when VRAM is available.
+    # vLLM is capped at --gpu-memory-utilization 0.77 so ~8 GiB of VRAM
+    # headroom is available for NVDEC contexts. Max concurrent sessions is
+    # capped at 8 (CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY) — 16
+    # concurrent sessions OOM the NVENC input buffers with this footprint.
     gpu_cmd = [
         "ffmpeg",
         "-y",
         "-hwaccel",
         "cuda",
+        "-c:v",
+        "h264_cuvid",
         "-i",
         str(source_video_path),
         "-ss",
