@@ -19,6 +19,7 @@ from .prompts import (
 )
 from .turn_neighborhoods import build_turn_neighborhoods
 from ..contracts import AudioEventTimeline, CanonicalTimeline, SemanticGraphNode, SpeechEmotionTimeline
+from backend.providers.protocols import EmbeddingClient, LLMGenerateJsonClient
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def run_merge_and_classify_batches(
     canonical_timeline: CanonicalTimeline,
     speech_emotion_timeline: SpeechEmotionTimeline | None,
     audio_event_timeline: AudioEventTimeline | None,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     target_turn_count: int = 8,
     halo_turn_count: int = 2,
     merge_max_output_tokens: int = 32768,
@@ -80,7 +81,7 @@ def run_merge_classify_and_reconcile(
     canonical_timeline: CanonicalTimeline,
     speech_emotion_timeline: SpeechEmotionTimeline | None,
     audio_event_timeline: AudioEventTimeline | None,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     target_batch_count: int = 5,
     max_turns_per_batch: int = 25,
     merge_max_output_tokens: int = 32768,
@@ -261,7 +262,7 @@ def run_boundary_reconciliation(
     *,
     left_batch_nodes: list[SemanticGraphNode],
     right_batch_nodes: list[SemanticGraphNode],
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     max_output_tokens: int = 32768,
     model: str | None = None,
 ) -> tuple[list[SemanticGraphNode], dict[str, Any]]:
@@ -302,7 +303,7 @@ def run_boundary_reconciliation(
 def embed_text_semantic_nodes_live(
     *,
     nodes: list[SemanticGraphNode],
-    embedding_client: Any,
+    embedding_client: EmbeddingClient,
 ) -> tuple[list[list[float]], dict[str, Any]]:
     texts = [build_semantic_embedding_payload(node=node) for node in nodes]
     started = time.perf_counter()
@@ -326,7 +327,7 @@ def embed_text_semantic_nodes_live(
 def embed_multimodal_media_live(
     *,
     multimodal_media: list[dict[str, str]],
-    embedding_client: Any,
+    embedding_client: EmbeddingClient,
 ) -> tuple[list[list[float]], dict[str, Any]]:
     started = time.perf_counter()
     embeddings = embedding_client.embed_media_uris(multimodal_media)
@@ -369,7 +370,7 @@ def apply_node_embeddings(
 def embed_semantic_nodes_live(
     *,
     nodes: list[SemanticGraphNode],
-    embedding_client: Any,
+    embedding_client: EmbeddingClient,
     multimodal_media: list[dict[str, str]],
     return_diagnostics: bool = False,
 ) -> list[SemanticGraphNode] | tuple[list[SemanticGraphNode], dict[str, Any]]:

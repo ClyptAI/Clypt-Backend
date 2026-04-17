@@ -6,6 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from backend.providers.protocols import LLMGenerateJsonClient
 from .local_semantic_edges import LOCAL_EDGE_TYPES, build_local_semantic_edges
 from .long_range_edges import build_long_range_edges, shortlist_long_range_pairs
 from .prompts import LOCAL_SEMANTIC_EDGE_SCHEMA, LONG_RANGE_EDGE_SCHEMA, build_local_semantic_edge_prompt, build_long_range_edge_prompt
@@ -66,7 +67,7 @@ def _build_node_batches(
 def run_local_semantic_edge_batches(
     *,
     nodes: list[SemanticGraphNode],
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     target_batch_count: int = 5,
     max_nodes_per_batch: int = 15,
     model: str | None = None,
@@ -184,7 +185,7 @@ def _build_long_range_pair_shards(
 def run_long_range_edge_adjudication(
     *,
     nodes: list[SemanticGraphNode],
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     top_k: int = 3,
     model: str | None = None,
     max_output_tokens: int = 32768,

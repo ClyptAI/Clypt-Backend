@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.pipeline.contracts import ClipCandidate, SemanticGraphNode
+from backend.pipeline.config import SignalConfig
 
 from .contracts import (
     CandidateSignalLink,
@@ -30,7 +31,7 @@ def apply_signal_scoring(
     clusters: list[ExternalSignalCluster],
     node_links: list[NodeSignalLink],
     prompt_specs: list[SignalPromptSpec],
-    cfg: Any,
+    cfg: SignalConfig,
 ) -> SignalScoringResult:
     if not candidates or not clusters or not node_links:
         return SignalScoringResult(candidates=list(candidates), candidate_signal_links=[])
@@ -257,7 +258,7 @@ def _safe_log1p(value: float) -> float:
     return math.log1p(max(0.0, float(value)))
 
 
-def _compute_signal_scores(*, signals: list[ExternalSignal], cfg: Any) -> dict[str, float]:
+def _compute_signal_scores(*, signals: list[ExternalSignal], cfg: SignalConfig) -> dict[str, float]:
     raw_by_id: dict[str, float] = {}
     raw_nonspam: list[float] = []
     for signal in signals:
@@ -289,7 +290,7 @@ def _quality_multiplier(quality: str) -> float:
     return 1.0
 
 
-def _raw_signal_engagement(*, signal: ExternalSignal, cfg: Any, quality_mult: float) -> float:
+def _raw_signal_engagement(*, signal: ExternalSignal, cfg: SignalConfig, quality_mult: float) -> float:
     metadata = signal.metadata or {}
     like_count = max(0.0, float(metadata.get("like_count") or 0.0))
     likes_term = _safe_log1p(like_count)

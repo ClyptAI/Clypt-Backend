@@ -17,6 +17,7 @@ from .prompts import (
 )
 from .review_candidate_pool import review_candidate_pool
 from .review_subgraphs import review_local_subgraph
+from backend.providers.protocols import EmbeddingClient, LLMGenerateJsonClient
 from ..contracts import ClipCandidate, LocalSubgraph, PooledCandidateReviewResponse, SemanticGraphNode, SubgraphReviewResponse
 
 
@@ -109,7 +110,7 @@ def _meta_prompt_target_count(duration_s: float) -> int:
 def generate_meta_prompts_live(
     *,
     nodes: list[SemanticGraphNode],
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str | None = None,
     duration_s: float = 0.0,
     max_output_tokens: int = 32768,
@@ -169,7 +170,7 @@ def generate_meta_prompts_live(
 def embed_prompt_texts_live(
     *,
     prompts: Sequence[str | dict[str, Any] | SignalPromptSpec],
-    embedding_client: Any,
+    embedding_client: EmbeddingClient,
     return_debug: bool = False,
 ) -> list[dict] | tuple[list[dict], dict[str, Any]]:
     normalized_prompts: list[dict[str, Any]] = []
@@ -208,7 +209,7 @@ def embed_prompt_texts_live(
 def run_subgraph_reviews(
     *,
     subgraphs: list[LocalSubgraph],
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str | None = None,
     max_concurrent: int = 5,
     subgraph_provenance_by_id: dict[str, dict[str, Any]] | None = None,
@@ -269,7 +270,7 @@ def run_subgraph_reviews(
 def run_candidate_pool_review(
     *,
     candidates: list[ClipCandidate],
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str | None = None,
     max_output_tokens: int = 32768,
 ) -> PooledCandidateReviewResponse:
@@ -285,7 +286,7 @@ def run_candidate_pool_review(
 def run_candidate_pool_review_with_debug(
     *,
     candidates: list[ClipCandidate],
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str | None = None,
     max_output_tokens: int = 32768,
 ) -> tuple[PooledCandidateReviewResponse, dict[str, Any]]:

@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Any, Callable
 
+from backend.providers.protocols import LLMGenerateJsonClient
 from .contracts import ExternalSignal, ExternalSignalCluster
 
 logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ ATTRIBUTION_EXPLANATION_SCHEMA = {
 
 def _call_json(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     callpoint_id: str,
     prompt: str,
     model: str,
@@ -185,7 +186,7 @@ def _call_json(
 
 def consolidate_thread_with_llm(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     thread_payload: dict[str, Any],
     fail_fast: bool = True,
@@ -210,7 +211,7 @@ def consolidate_thread_with_llm(
 
 def classify_comment_with_llm(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     signal: ExternalSignal,
     fail_fast: bool = True,
@@ -233,7 +234,7 @@ def classify_comment_with_llm(
 
 def classify_comments_with_llm_batch(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     signals: list[ExternalSignal],
     fail_fast: bool = True,
@@ -266,7 +267,7 @@ def classify_comments_with_llm_batch(
 
 def generate_cluster_prompt_with_llm(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     cluster: ExternalSignalCluster,
     fail_fast: bool = True,
@@ -294,7 +295,7 @@ def generate_cluster_prompt_with_llm(
 
 def synthesize_trend_queries_with_llm(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     video_context: dict[str, Any],
     fail_fast: bool = True,
@@ -319,7 +320,7 @@ def synthesize_trend_queries_with_llm(
 
 def adjudicate_trend_relevance_with_llm(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     trend_item: dict[str, Any],
     video_context: dict[str, Any],
@@ -344,7 +345,7 @@ def adjudicate_trend_relevance_with_llm(
 
 def adjudicate_trend_relevance_with_llm_batch(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     trend_items: list[dict[str, Any]],
     video_context: dict[str, Any],
@@ -379,7 +380,7 @@ def adjudicate_trend_relevance_with_llm_batch(
 
 def resolve_cluster_span_with_llm(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     cluster: ExternalSignalCluster,
     neighborhood_payload: dict[str, Any],
@@ -407,7 +408,7 @@ def resolve_cluster_span_with_llm(
 
 def explain_candidate_attribution_with_llm(
     *,
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     evidence_payload: dict[str, Any],
     fail_fast: bool = True,

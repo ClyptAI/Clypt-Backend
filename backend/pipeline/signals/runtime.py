@@ -3,7 +3,9 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable, TypeVar
 
+from backend.pipeline.config import SignalConfig
 from backend.pipeline.contracts import SemanticGraphNode
+from backend.providers.protocols import EmbeddingClient, LLMGenerateJsonClient
 
 from .cluster import cluster_signals
 from .comments_client import (
@@ -36,7 +38,7 @@ def _chunked(items: list[_T], size: int) -> list[list[_T]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def _signal_max_workers(*, cfg: Any, task_count: int) -> int:
+def _signal_max_workers(*, cfg: SignalConfig, task_count: int) -> int:
     if task_count <= 0:
         return 1
     configured = int(getattr(cfg, "max_concurrent", 8) or 8)
@@ -46,9 +48,9 @@ def _signal_max_workers(*, cfg: Any, task_count: int) -> int:
 def start_comments_future(
     *,
     executor: ThreadPoolExecutor,
-    cfg: Any,
-    llm_client: Any,
-    embedding_client: Any,
+    cfg: SignalConfig,
+    llm_client: LLMGenerateJsonClient,
+    embedding_client: EmbeddingClient,
     source_url: str,
     signal_event_logger: Callable[..., None] | None = None,
 ) -> Future[SignalPipelineOutput] | None:
@@ -67,9 +69,9 @@ def start_comments_future(
 def start_trends_future(
     *,
     executor: ThreadPoolExecutor,
-    cfg: Any,
-    llm_client: Any,
-    embedding_client: Any,
+    cfg: SignalConfig,
+    llm_client: LLMGenerateJsonClient,
+    embedding_client: EmbeddingClient,
     nodes: list[SemanticGraphNode],
     source_url: str,
     signal_event_logger: Callable[..., None] | None = None,
@@ -129,9 +131,9 @@ def collect_signal_outputs(
 
 def _build_comments_output(
     *,
-    cfg: Any,
-    llm_client: Any,
-    embedding_client: Any,
+    cfg: SignalConfig,
+    llm_client: LLMGenerateJsonClient,
+    embedding_client: EmbeddingClient,
     source_url: str,
     signal_event_logger: Callable[..., None] | None = None,
 ) -> SignalPipelineOutput:
@@ -317,9 +319,9 @@ def _build_comments_output(
 
 def _build_trends_output(
     *,
-    cfg: Any,
-    llm_client: Any,
-    embedding_client: Any,
+    cfg: SignalConfig,
+    llm_client: LLMGenerateJsonClient,
+    embedding_client: EmbeddingClient,
     nodes: list[SemanticGraphNode],
     source_url: str,
     signal_event_logger: Callable[..., None] | None = None,

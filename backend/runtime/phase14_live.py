@@ -45,6 +45,7 @@ from backend.pipeline.timeline.audio_events import build_audio_event_timeline
 from backend.pipeline.timeline.emotion_events import build_speech_emotion_timeline
 from backend.pipeline.timeline.timeline_builder import build_canonical_timeline
 from backend.pipeline.timeline.tracklets import build_tracklet_artifacts
+from backend.providers.protocols import EmbeddingClient, LLMGenerateJsonClient
 from backend.repository import (
     CandidateSignalLinkRecord,
     ClipCandidateRecord,
@@ -74,8 +75,8 @@ _PHASE4_POOL_CANDIDATES_PER_CALL = 12
 @dataclass(slots=True)
 class V31LivePhase14Runner:
     config: V31Config
-    llm_client: Any
-    embedding_client: Any
+    llm_client: LLMGenerateJsonClient
+    embedding_client: EmbeddingClient
     flash_model: str = "Qwen/Qwen3.6-35B-A3B"
     storage_client: Any | None = None
     node_media_preparer: Any | None = None
@@ -94,8 +95,8 @@ class V31LivePhase14Runner:
     def from_env(
         cls,
         *,
-        llm_client: Any,
-        embedding_client: Any,
+        llm_client: LLMGenerateJsonClient,
+        embedding_client: EmbeddingClient,
         flash_model: str = "Qwen/Qwen3.6-35B-A3B",
         storage_client: Any | None = None,
         node_media_preparer: Any | None = None,

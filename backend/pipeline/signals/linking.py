@@ -10,6 +10,7 @@ from backend.pipeline.candidates.build_local_subgraphs import build_local_subgra
 from backend.pipeline.candidates.seed_retrieval import retrieve_seed_nodes
 from backend.pipeline.config import Phase4SubgraphConfig
 from backend.pipeline.contracts import SemanticGraphEdge, SemanticGraphNode
+from backend.providers.protocols import LLMGenerateJsonClient
 
 from .contracts import ExternalSignalCluster, NodeSignalLink, SignalPromptSpec
 from .llm_runtime import SignalLLMCallError, resolve_cluster_span_with_llm
@@ -22,7 +23,7 @@ def build_node_signal_links(
     prompt_embeddings: dict[str, list[float]],
     nodes: list[SemanticGraphNode],
     edges: list[SemanticGraphEdge],
-    llm_client: Any,
+    llm_client: LLMGenerateJsonClient,
     model: str,
     max_hops: int,
     time_window_ms: int,

@@ -37,6 +37,7 @@ from .vibevoice_vllm import (
 )
 from .vertex import VertexEmbeddingClient, VertexGenerationClient
 from .yamnet import YAMNetProvider
+from .protocols import EmbeddingClient, LLMGenerateJsonClient
 
 __all__ = [
     "AudioHostProcessSettings",
@@ -62,6 +63,8 @@ __all__ = [
     "VertexEmbeddingClient",
     "VertexGenerationClient",
     "VertexSettings",
+    "EmbeddingClient",
+    "LLMGenerateJsonClient",
     "VibeVoiceAsrResponse",
     "VibeVoiceAsrServiceSettings",
     "VibeVoiceSettings",
