@@ -8,6 +8,7 @@ Type=simple
 WorkingDirectory=/opt/clypt-phase1/repo
 Environment=HF_HOME=/opt/clypt-phase1/hf-cache
 Environment=TOKENIZERS_PARALLELISM=false
+Environment=HF_HUB_OFFLINE=1
 # Qwen3.6-35B-A3B uses SGLang's hybrid Mamba/Attention path; speculative decoding
 # combined with radix cache requires the SPEC_V2 engine and extra_buffer mamba strategy.
 Environment=SGLANG_ENABLE_SPEC_V2=1
