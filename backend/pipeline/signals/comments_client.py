@@ -128,7 +128,7 @@ def _published_at(item: dict[str, Any]) -> str | None:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
         return dt.astimezone(UTC).isoformat()
-    except Exception:
+    except (ValueError, TypeError):
         return None
 
 

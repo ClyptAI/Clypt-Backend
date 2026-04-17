@@ -395,7 +395,7 @@ class TensorRTDetector:
         try:
             import torch
             torch.cuda.empty_cache()
-        except Exception:
+        except ImportError:
             pass
         logger.info("TensorRT detector unloaded, VRAM released.")
 

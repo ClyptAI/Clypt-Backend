@@ -74,7 +74,7 @@ def _coerce_datetime(value: Any | None) -> datetime | None:
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
     try:
         return row[key]
-    except Exception:
+    except KeyError:
         if hasattr(row, "get"):
             return row.get(key, default)
         return default
@@ -83,7 +83,7 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
 def _row_value(row: Any, index: int, key: str) -> Any:
     try:
         return row[index]
-    except Exception:
+    except IndexError:
         return _row_get(row, key)
 
 

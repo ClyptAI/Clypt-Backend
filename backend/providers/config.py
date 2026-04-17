@@ -118,7 +118,7 @@ def _discover_gcloud_project() -> str | None:
             capture_output=True,
             text=True,
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
     value = (result.stdout or "").strip()
     if not value or value == "(unset)":

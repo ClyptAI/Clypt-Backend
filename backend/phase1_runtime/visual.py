@@ -131,7 +131,7 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
         _cap2.release()
         if _raw_fps and _raw_fps > 0:
             _fps = float(_raw_fps)
-    except Exception:
+    except ImportError:
         pass
 
     tracker.initialize(frame_rate=_fps)
@@ -146,7 +146,7 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
         _cap = _cv2.VideoCapture(str(video_path))
         total_frames = int(_cap.get(_cv2.CAP_PROP_FRAME_COUNT)) or None
         _cap.release()
-    except Exception:
+    except ImportError:
         pass
 
     _log_interval = max(1, (total_frames or 500) // 20)  # ~20 progress lines per video

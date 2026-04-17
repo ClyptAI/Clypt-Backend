@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
 from backend.runtime.phase24_error_policy import (
     Phase24FailFastError,
     Phase24FailureClass,
@@ -56,7 +58,7 @@ class Phase24LocalWorkerLoop:
             return None
         try:
             return json.loads(self._admission_metrics_path.read_text(encoding="utf-8"))
-        except Exception as exc:
+        except (OSError, json.JSONDecodeError) as exc:
             logger.warning(
                 "phase24 local admission metrics unreadable path=%s: %s",
                 self._admission_metrics_path,
@@ -108,7 +110,7 @@ class Phase24LocalWorkerLoop:
         payload_dict: dict[str, Any] = row["payload"]
         try:
             payload = Phase24TaskPayload.model_validate(payload_dict)
-        except Exception as exc:
+        except PydanticValidationError as exc:
             err_text = f"{exc.__class__.__name__}: {exc}"
             self._queue.mark_failed(job_id, error=err_text, retry=False)
             logger.error(

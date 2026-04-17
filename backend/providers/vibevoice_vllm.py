@@ -14,6 +14,13 @@ from typing import Callable
 from typing import Any
 
 from .config import _normalize_hotwords_context
+from .storage import GcsSigningError
+
+try:
+    from google.cloud.exceptions import NotFound
+except ImportError:  # pragma: no cover - optional dependency guard
+    class NotFound(Exception):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +123,7 @@ class VibeVoiceVLLMProvider:
             raise RuntimeError(
                 f"[vibevoice-vllm] health check failed: HTTP {exc.code} from {url}"
             ) from exc
-        except Exception as exc:
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(
                 f"[vibevoice-vllm] health check failed — cannot reach {url}: {exc}"
             ) from exc
@@ -218,7 +225,7 @@ class VibeVoiceVLLMProvider:
             except RuntimeError:
                 # Contract/parse errors are not transient — don't retry.
                 raise
-            except Exception as exc:
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError) as exc:
                 last_exc = exc
                 logger.warning(
                     "[vibevoice-vllm] request error (attempt %d): %s", attempt + 1, exc
@@ -271,7 +278,7 @@ class VibeVoiceVLLMProvider:
                             raw_completion_tokens = usage.get("completion_tokens")
                             if isinstance(raw_completion_tokens, int):
                                 completion_tokens = raw_completion_tokens
-                    except (json.JSONDecodeError, KeyError, IndexError):
+                    except json.JSONDecodeError:
                         ignored_chunks += 1
         except urllib.error.HTTPError as exc:
             body_snippet = ""
@@ -282,7 +289,7 @@ class VibeVoiceVLLMProvider:
             raise RuntimeError(
                 f"[vibevoice-vllm] HTTP {exc.code} from {url}: {body_snippet}"
             ) from exc
-        except Exception as exc:
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(
                 f"[vibevoice-vllm] request to {url} failed: {exc}"
             ) from exc
@@ -383,7 +390,7 @@ class VibeVoiceVLLMProvider:
             )
         try:
             resolved = self.audio_gcs_url_resolver(audio_gcs_uri)
-        except Exception as exc:
+        except (GcsSigningError, NotFound) as exc:
             raise RuntimeError(
                 f"[vibevoice-vllm] failed to sign canonical audio_gcs_uri={audio_gcs_uri!r}: {exc}"
             ) from exc

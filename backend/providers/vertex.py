@@ -144,7 +144,7 @@ def _build_default_sdk_client(*, settings: VertexSettings, location: str, header
     try:
         from google.genai.types import HttpOptions
         http_options = HttpOptions(headers=headers or {})
-    except Exception:
+    except ImportError:
         http_options = None
     kwargs: dict[str, Any]
     if location == "__developer__":

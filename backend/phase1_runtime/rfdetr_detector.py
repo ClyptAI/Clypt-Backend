@@ -175,7 +175,7 @@ class RFDETRPersonDetector:
             try:
                 import torch
                 torch.cuda.empty_cache()
-            except Exception:
+            except ImportError:
                 pass
             logger.info("RF-DETR detector unloaded, VRAM released.")
 

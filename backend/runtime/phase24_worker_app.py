@@ -449,7 +449,7 @@ class Phase24WorkerService:
             return None
         try:
             payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             return None
         try:
             return int(payload.get("preemption_count") or 0)

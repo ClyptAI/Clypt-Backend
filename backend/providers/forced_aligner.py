@@ -47,7 +47,7 @@ def _ensure_cache_env() -> None:
     ):
         try:
             os.makedirs(path, exist_ok=True)
-        except Exception:
+        except OSError:
             # Best-effort only: if dir creation fails, NeMo/HF paths will still
             # raise explicit errors later that include the actual root cause.
             pass
@@ -60,7 +60,7 @@ def _patch_hf_hub_compat() -> None:
     """
     try:
         import huggingface_hub as hf_hub
-    except Exception:
+    except ImportError:
         return
 
     if not hasattr(hf_hub, "HfFolder"):
@@ -88,7 +88,7 @@ def _patch_numpy_compat() -> None:
     """
     try:
         import numpy as np
-    except Exception:
+    except ImportError:
         return
 
     if hasattr(np, "sctypes"):
@@ -153,7 +153,7 @@ class ForcedAlignmentProvider:
                 )
 
                 self._available = True
-            except Exception as exc:
+            except ImportError as exc:
                 logger.warning(
                     "[forced_aligner] NeMo aligner import failed (%s: %s) — "
                     "word-level timestamps will be empty.",

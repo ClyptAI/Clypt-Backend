@@ -12,8 +12,8 @@ class TrendSpygClient:
 
     def fetch_related(self, *, query: str) -> list[dict[str, Any]]:
         try:
-            from trendspyg import Trends  # type: ignore
-        except Exception as exc:  # pragma: no cover - optional dependency in runtime env
+            from trendspyg import Trends  # type: ignore[import-untyped]
+        except ImportError as exc:  # pragma: no cover - optional dependency in runtime env
             raise RuntimeError(
                 "trendspyg is required when CLYPT_ENABLE_TREND_SIGNALS=1; install trendspyg."
             ) from exc
@@ -85,7 +85,7 @@ def to_external_signals_from_trends(*, query: str, items: list[dict[str, Any]]) 
         value = item.get("value")
         try:
             score = float(value)
-        except Exception:
+        except (TypeError, ValueError):
             score = 0.0
         signal_id = f"trend:{query}:{idx:03d}"
         signals.append(
