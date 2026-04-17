@@ -15,6 +15,11 @@
 # Run on the H200 droplet as root after rsyncing the repo + creating the env file.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/preamble.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/preamble.sh"
+
 REPO_DIR="${REPO_DIR:-/opt/clypt-phase1/repo}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase1/v3_1_phase1.env}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-requirements-do-phase1-visual.txt}"
@@ -26,18 +31,9 @@ PREWARM_RETRIES="${PREWARM_RETRIES:-3}"
 PREWARM_RETRY_BACKOFF_S="${PREWARM_RETRY_BACKOFF_S:-20}"
 PREWARM_TIMEOUT_S="${PREWARM_TIMEOUT_S:-1800}"
 
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "[deploy-visual] ERROR: run as root." >&2
-  exit 1
-fi
-if [[ ! -d "$REPO_DIR" ]]; then
-  echo "[deploy-visual] ERROR: repo dir not found: $REPO_DIR" >&2
-  exit 1
-fi
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "[deploy-visual] ERROR: env file not found: $ENV_FILE" >&2
-  exit 1
-fi
+require_root
+require_dir "$REPO_DIR"
+require_file "$ENV_FILE"
 
 cd "$REPO_DIR"
 
@@ -92,9 +88,7 @@ for banned in VIBEVOICE_BACKEND VIBEVOICE_VLLM_BASE_URL VIBEVOICE_VLLM_MODEL; do
   fi
 done
 
-set -a
-source "$ENV_FILE"
-set +a
+load_env_file "$ENV_FILE"
 
 if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" && ! -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]]; then
   echo "[deploy-visual] ERROR: GOOGLE_APPLICATION_CREDENTIALS points to a missing file: ${GOOGLE_APPLICATION_CREDENTIALS}" >&2

@@ -22,6 +22,11 @@
 #   REPO_DIR=/opt/clypt-audio-host/repo bash scripts/do_phase1_audio/deploy_vllm_service.sh
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/preamble.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/preamble.sh"
+
 REPO_DIR="${REPO_DIR:-/opt/clypt-audio-host/repo}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-audio-host/audio_host.env}"
 VLLM_IMAGE_TAG="${VLLM_IMAGE_TAG:-clypt-vllm-vibevoice:latest}"
@@ -32,18 +37,9 @@ HF_CACHE_DIR="${HF_CACHE_DIR:-/opt/clypt-audio-host/hf-cache}"
 VIBEVOICE_REPO_URL="${VIBEVOICE_REPO_URL:-https://github.com/microsoft/VibeVoice.git}"
 VIBEVOICE_REPO_REF="${VIBEVOICE_REPO_REF:-main}"
 
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "[deploy-vllm-rtx] ERROR: run as root." >&2
-  exit 1
-fi
-if [[ ! -d "$REPO_DIR" ]]; then
-  echo "[deploy-vllm-rtx] ERROR: repo dir not found: $REPO_DIR" >&2
-  exit 1
-fi
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "[deploy-vllm-rtx] ERROR: env file not found: $ENV_FILE" >&2
-  exit 1
-fi
+require_root
+require_dir "$REPO_DIR"
+require_file "$ENV_FILE"
 
 cd "$REPO_DIR"
 

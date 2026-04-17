@@ -13,6 +13,11 @@
 # 2026-04-17. No NFA/emotion/YAMNet prewarm is performed by this script.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/preamble.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/preamble.sh"
+
 REPO_DIR="${REPO_DIR:-/opt/clypt-audio-host/repo}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-audio-host/audio_host.env}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-requirements-do-phase1-audio.txt}"
@@ -20,18 +25,9 @@ VENV_DIR="${VENV_DIR:-/opt/clypt-audio-host/venvs/audio}"
 PHASE1_CACHE_HOME="${PHASE1_CACHE_HOME:-/opt/clypt-audio-host/.cache}"
 PIP_FALLBACK_LEGACY_RESOLVER="${PIP_FALLBACK_LEGACY_RESOLVER:-1}"
 
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "[deploy-vibevoice-asr] ERROR: run as root." >&2
-  exit 1
-fi
-if [[ ! -d "$REPO_DIR" ]]; then
-  echo "[deploy-vibevoice-asr] ERROR: repo dir not found: $REPO_DIR" >&2
-  exit 1
-fi
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "[deploy-vibevoice-asr] ERROR: env file not found: $ENV_FILE" >&2
-  exit 1
-fi
+require_root
+require_dir "$REPO_DIR"
+require_file "$ENV_FILE"
 
 cd "$REPO_DIR"
 
@@ -71,9 +67,7 @@ for banned in \
   fi
 done
 
-set -a
-source "$ENV_FILE"
-set +a
+load_env_file "$ENV_FILE"
 
 if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" && ! -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]]; then
   echo "[deploy-vibevoice-asr] ERROR: GOOGLE_APPLICATION_CREDENTIALS points to a missing file: ${GOOGLE_APPLICATION_CREDENTIALS}" >&2

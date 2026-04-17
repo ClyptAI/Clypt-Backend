@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/preamble.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/preamble.sh"
+
 REPO_DIR="${REPO_DIR:-/opt/clypt-phase1/repo}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase1/v3_1_phase1.env}"
 SGLANG_VENV_DIR="${SGLANG_VENV_DIR:-/opt/clypt-phase1/venvs/sglang}"
@@ -23,27 +28,14 @@ SG_EXTRA_ARGS="${SG_EXTRA_ARGS:-}"
 SG_READY_TIMEOUT_S="${SG_READY_TIMEOUT_S:-1800}"
 SG_SYSTEMD_UNIT="${SG_SYSTEMD_UNIT:-clypt-sglang-qwen.service}"
 
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "[deploy-sglang-qwen] ERROR: run this script as root." >&2
-  exit 1
-fi
-
-if [[ ! -d "$REPO_DIR" ]]; then
-  echo "[deploy-sglang-qwen] ERROR: repo dir not found: $REPO_DIR" >&2
-  exit 1
-fi
-
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "[deploy-sglang-qwen] ERROR: env file not found: $ENV_FILE" >&2
-  exit 1
-fi
+require_root
+require_dir "$REPO_DIR"
+require_file "$ENV_FILE"
 
 cd "$REPO_DIR"
 
 echo "[deploy-sglang-qwen] loading runtime env from ${ENV_FILE} ..."
-set -a
-. "$ENV_FILE"
-set +a
+load_env_file "$ENV_FILE"
 
 echo "[deploy-sglang-qwen] ensuring host prerequisites are installed ..."
 apt-get update
