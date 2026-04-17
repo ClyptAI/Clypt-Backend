@@ -203,7 +203,7 @@ def test_orchestrator_runs_phases_1_to_4_and_writes_artifacts(tmp_path: Path):
                         "keep": True,
                         "pool_rank": 1,
                         "score": 8.6,
-                        "score_breakdown": {"overall_clip_quality": 8.6},
+                        "score_breakdown": {"virality": 8.6, "coherence": 8.6, "engagement": 8.6},
                         "rationale": "Best standalone moment in the run.",
                     }
                 ],

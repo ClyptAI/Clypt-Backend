@@ -150,13 +150,19 @@ def test_build_comments_output_uses_callpoint10_consolidated_text_for_downstream
     monkeypatch.setattr(signal_runtime, "resolve_youtube_video_id", lambda _: "video-1")
     monkeypatch.setattr(signal_runtime, "collapse_same_author_spam", lambda items: items)
     monkeypatch.setattr(signal_runtime, "target_top_threads", lambda **kwargs: 1)
+    from backend.pipeline.signals.responses import (
+        SignalsClusterPromptResponse,
+        SignalsCommentClassificationResponse,
+        SignalsThreadConsolidationResponse,
+    )
+
     monkeypatch.setattr(
         signal_runtime,
         "consolidate_thread_with_llm",
-        lambda **kwargs: {
-            "thread_summary": "summary mentions callback",
-            "moment_hints": ["hint one", "hint two"],
-        },
+        lambda **kwargs: SignalsThreadConsolidationResponse(
+            thread_summary="summary mentions callback",
+            moment_hints=["hint one", "hint two"],
+        ),
     )
     monkeypatch.setattr(
         signal_runtime,
@@ -178,7 +184,10 @@ def test_build_comments_output_uses_callpoint10_consolidated_text_for_downstream
         batch = list(kwargs["signals"])
         for signal in batch:
             seen_texts.append(signal.text)
-        return [{"quality": "high_signal", "reason": "good"} for _ in batch]
+        return [
+            SignalsCommentClassificationResponse(quality="high_signal", reason="good")
+            for _ in batch
+        ]
 
     monkeypatch.setattr(signal_runtime, "classify_comments_with_llm_batch", _classify_batch)
     monkeypatch.setattr(
@@ -196,7 +205,11 @@ def test_build_comments_output_uses_callpoint10_consolidated_text_for_downstream
             )
         ],
     )
-    monkeypatch.setattr(signal_runtime, "generate_cluster_prompt_with_llm", lambda **kwargs: "Find callback")
+    monkeypatch.setattr(
+        signal_runtime,
+        "generate_cluster_prompt_with_llm",
+        lambda **kwargs: SignalsClusterPromptResponse(prompt="Find callback"),
+    )
 
     class _EmbedClient:
         def embed_texts(self, texts, task_type: str):

@@ -1531,7 +1531,7 @@ class V31LivePhase14Runner:
                 )
             )
             enriched = dict(candidate.external_attribution_json)
-            enriched["explanation"] = explanation
+            enriched["explanation"] = explanation.explanation
             final_candidates[idx] = candidate.model_copy(
                 update={"external_attribution_json": enriched}
             )

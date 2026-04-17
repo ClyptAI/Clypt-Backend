@@ -174,7 +174,7 @@ def test_review_candidate_pool_validates_ranked_response_and_generates_temp_ids(
                     "keep": True,
                     "pool_rank": 1,
                     "score": 8.8,
-                    "score_breakdown": {"overall_clip_quality": 8.8},
+                    "score_breakdown": {"virality": 8.8, "coherence": 8.8, "engagement": 8.8},
                     "rationale": "Best standalone clip.",
                 }
             ],
@@ -204,7 +204,7 @@ def test_review_candidate_pool_fails_hard_on_invalid_output():
                         "keep": True,
                         "pool_rank": 2,
                         "score": 8.0,
-                        "score_breakdown": {"overall_clip_quality": 8.0},
+                        "score_breakdown": {"virality": 8.0, "coherence": 8.0, "engagement": 8.0},
                         "rationale": "Winner.",
                     }
                 ],

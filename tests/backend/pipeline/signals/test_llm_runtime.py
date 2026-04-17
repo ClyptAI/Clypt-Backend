@@ -41,7 +41,7 @@ def test_signal_llm_wrappers_use_expected_schema_and_token_limit() -> None:
         llm_client=llm_client,
         model="gemini-3-flash",
         thread_payload={"thread": "payload"},
-    )["thread_summary"] == "summary"
+    ).thread_summary == "summary"
     assert classify_comment_with_llm(
         llm_client=llm_client,
         model="gemini-3.1-flash-lite",
@@ -54,18 +54,18 @@ def test_signal_llm_wrappers_use_expected_schema_and_token_limit() -> None:
             engagement_score=1.0,
             metadata={},
         ),
-    )["quality"] == "high_signal"
+    ).quality == "high_signal"
     assert generate_cluster_prompt_with_llm(
         llm_client=llm_client,
         model="gemini-3-flash",
         cluster=cluster,
-    ) == "Find the exact moment"
+    ).prompt == "Find the exact moment"
     assert resolve_cluster_span_with_llm(
         llm_client=llm_client,
         model="gemini-3-flash",
         cluster=cluster,
         neighborhood_payload={"node_ids": ["node-1", "node-2"]},
-    ) == ["node-1", "node-2"]
+    ).node_ids == ["node-1", "node-2"]
 
     assert len(llm_client.calls) == 4
     for call in llm_client.calls:

@@ -249,7 +249,13 @@ def test_phase14_live_run_phase4_writes_all_signal_tables(monkeypatch, tmp_path:
             ],
         ),
     )
-    monkeypatch.setattr(phase14_live, "explain_candidate_attribution_with_llm", lambda **kwargs: "boosted by comments")
+    from backend.pipeline.signals.responses import SignalsCandidateAttributionResponse
+
+    monkeypatch.setattr(
+        phase14_live,
+        "explain_candidate_attribution_with_llm",
+        lambda **kwargs: SignalsCandidateAttributionResponse(explanation="boosted by comments"),
+    )
 
     summary = runner.run_phase_4(
         run_id="run_001",
