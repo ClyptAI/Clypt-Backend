@@ -5,14 +5,14 @@ from typing import Iterable
 
 from backend.pipeline._embedding_utils import cosine_similarity
 
-from .contracts import ExternalSignal, ExternalSignalCluster
+from .contracts import ClusterType, ExternalSignal, ExternalSignalCluster
 
 
 def cluster_signals(
     *,
     signals: list[ExternalSignal],
     embeddings: list[list[float]],
-    cluster_type: str,
+    cluster_type: ClusterType,
     similarity_threshold: float,
 ) -> list[ExternalSignalCluster]:
     if not signals:
@@ -56,7 +56,7 @@ def cluster_signals(
         clusters.append(
             ExternalSignalCluster(
                 cluster_id=f"{cluster_type}_cluster_{cluster_index:03d}",
-                cluster_type=cluster_type,  # type: ignore[arg-type]
+                cluster_type=cluster_type,
                 summary_text=summary,
                 member_signal_ids=[signal.signal_id for signal in member_signals],
                 cluster_weight=0.0,

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.common.domain_enums import JobStatus, RunStatus
 from backend.phase1_runtime.extract import run_phase1_sidecars
 from backend.phase1_runtime.input_resolver import (
     Phase1InputResolutionError,
@@ -83,7 +84,7 @@ class Phase1JobRunner:
         run_id: str,
         source_url: str | None,
         source_video_gcs_uri: str | None,
-        status: str,
+        status: RunStatus,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         if self.phase14_repository is None:
@@ -110,7 +111,7 @@ class Phase1JobRunner:
         self,
         *,
         run_id: str,
-        status: str,
+        status: JobStatus,
         task_name: str | None,
         metadata: dict[str, Any] | None = None,
     ) -> None:

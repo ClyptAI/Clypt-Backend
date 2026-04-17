@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
+from backend.common.domain_enums import ClusterType, JobStatus, LinkType, PromptSourceType, RunStatus, SignalType, SourcePlatform
 from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, model_validator
 
-RunStatus = Literal["PHASE1_DONE", "PHASE24_QUEUED", "PHASE24_RUNNING", "PHASE24_DONE", "FAILED"]
-JobStatus = Literal["queued", "running", "succeeded", "failed"]
 Phase14RunStatus = RunStatus
-ExternalSignalType = Literal["comment_top", "comment_reply", "trend_topic", "trend_query"]
-SourcePlatform = Literal["youtube", "google_trends"]
-ExternalClusterType = Literal["comment", "trend"]
-SignalLinkType = Literal["direct", "inferred"]
-PromptSourceType = Literal["general", "comment", "trend"]
+ExternalSignalType = SignalType
+ExternalClusterType = ClusterType
+SignalLinkType = LinkType
 
 
 class StrictModel(BaseModel):
@@ -146,7 +143,7 @@ class Phase24JobRecord(StrictModel):
 class ExternalSignalRecord(StrictModel):
     run_id: str
     signal_id: str
-    signal_type: ExternalSignalType
+    signal_type: SignalType
     source_platform: SourcePlatform
     source_id: str
     author_id: str | None = None
@@ -159,7 +156,7 @@ class ExternalSignalRecord(StrictModel):
 class ExternalSignalClusterRecord(StrictModel):
     run_id: str
     cluster_id: str
-    cluster_type: ExternalClusterType
+    cluster_type: ClusterType
     summary_text: str
     member_signal_ids: list[str] = Field(default_factory=list)
     cluster_weight: float
@@ -171,7 +168,7 @@ class NodeSignalLinkRecord(StrictModel):
     run_id: str
     node_id: str
     cluster_id: str
-    link_type: SignalLinkType
+    link_type: LinkType
     hop_distance: int
     time_offset_ms: int
     similarity: float
@@ -183,7 +180,7 @@ class CandidateSignalLinkRecord(StrictModel):
     run_id: str
     clip_id: str
     cluster_id: str
-    cluster_type: ExternalClusterType
+    cluster_type: ClusterType
     aggregated_link_score: float
     coverage_ms: int
     direct_node_count: int
@@ -198,7 +195,7 @@ class PromptSourceLinkRecord(StrictModel):
     prompt_id: str
     prompt_source_type: PromptSourceType
     source_cluster_id: str | None = None
-    source_cluster_type: ExternalClusterType | None = None
+    source_cluster_type: ClusterType | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

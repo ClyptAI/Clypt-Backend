@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
+from backend.common.domain_enums import ClusterType, LinkType, PromptSourceType, SignalType, SourcePlatform
 from pydantic import BaseModel, ConfigDict, Field
-
-
-SignalType = Literal["comment_top", "comment_reply", "trend_topic", "trend_query"]
-SourcePlatform = Literal["youtube", "google_trends"]
-ClusterType = Literal["comment", "trend"]
-PromptSourceType = Literal["general", "comment", "trend"]
-LinkType = Literal["direct", "inferred"]
 
 
 class StrictModel(BaseModel):

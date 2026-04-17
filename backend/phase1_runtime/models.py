@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
+from backend.common.domain_enums import JobStatus
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -28,7 +29,7 @@ class Phase1JobRecord(BaseModel):
     source_url: str | None = None
     source_path: str | None = None
     runtime_controls: dict[str, Any] | None = None
-    status: Literal["queued", "running", "succeeded", "failed"]
+    status: JobStatus
     retries: int = 0
     claim_token: str | None = None
     result: dict[str, Any] | None = None

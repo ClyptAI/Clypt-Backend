@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Sequence
 import json
 import time
 from typing import Any
@@ -167,7 +168,7 @@ def generate_meta_prompts_live(
 
 def embed_prompt_texts_live(
     *,
-    prompts: list[str | dict[str, Any] | SignalPromptSpec],
+    prompts: Sequence[str | dict[str, Any] | SignalPromptSpec],
     embedding_client: Any,
     return_debug: bool = False,
 ) -> list[dict] | tuple[list[dict], dict[str, Any]]:

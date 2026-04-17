@@ -35,7 +35,7 @@ from backend.pipeline.semantics.runtime import (
     prepare_node_media_embeddings,
     run_merge_classify_and_reconcile,
 )
-from backend.pipeline.signals.contracts import SignalPipelineOutput, SignalPromptSpec
+from backend.pipeline.signals.contracts import PromptSourceType, SignalPipelineOutput, SignalPromptSpec
 from backend.pipeline.signals.comments_client import resolve_youtube_video_id
 from backend.pipeline.signals.linking import build_node_signal_links
 from backend.pipeline.signals.llm_runtime import explain_candidate_attribution_with_llm
@@ -2127,9 +2127,9 @@ class V31LivePhase14Runner:
         provenance_records: list[SubgraphProvenanceRecord] = []
         for subgraph in subgraphs:
             seed_prompt_ids = list(getattr(subgraph, "source_prompt_ids", []) or [])
-            source_types: list[str] = []
+            source_types: list[PromptSourceType] = []
             source_cluster_ids: list[str] = []
-            source_type_counts: dict[str, int] = {}
+            source_type_counts: dict[PromptSourceType, int] = {}
             for prompt_id in seed_prompt_ids:
                 prompt = prompt_by_id.get(prompt_id)
                 if prompt is None:
