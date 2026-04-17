@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ._http_retry import retry_with_backoff
 from .config import LocalGenerationSettings
 
 logger = logging.getLogger(__name__)
@@ -184,38 +185,19 @@ class LocalOpenAIQwenClient:
         return self.settings.base_url.rstrip("/") + "/chat/completions"
 
     def _call_with_retry(self, *, operation: str, model: str, fn):
-        for retry_index in range(self._api_max_retries + 1):
-            attempt = retry_index + 1
-            try:
-                return fn()
-            except Exception as exc:
-                if retry_index >= self._api_max_retries or not _is_transient_error(exc):
-                    raise
-                base_delay = min(
-                    self._api_max_backoff_s,
-                    self._api_initial_backoff_s
-                    * (self._api_backoff_multiplier**retry_index),
-                )
-                jitter = (
-                    base_delay * self._api_jitter_ratio * random.random()
-                    if base_delay > 0.0 and self._api_jitter_ratio > 0.0
-                    else 0.0
-                )
-                sleep_s = base_delay + jitter
-                code = getattr(exc, "code", None)
-                logger.warning(
-                    "[local_openai] transient %s error for model=%s attempt=%d/%d code=%s; "
-                    "retrying in %.2fs: %s",
-                    operation,
-                    model,
-                    attempt,
-                    self._api_max_retries + 1,
-                    code,
-                    sleep_s,
-                    exc,
-                )
-                if sleep_s > 0.0:
-                    time.sleep(sleep_s)
+        return retry_with_backoff(
+            fn,
+            max_retries=self._api_max_retries,
+            classify_transient=_is_transient_error,
+            log_prefix="[local_openai]",
+            operation=operation,
+            initial_backoff_s=self._api_initial_backoff_s,
+            max_backoff_s=self._api_max_backoff_s,
+            multiplier=self._api_backoff_multiplier,
+            jitter_ratio=self._api_jitter_ratio,
+            sleep=time.sleep,
+            rng=random.random,
+        )
 
     def _post_chat_completion(self, *, payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
         url = self._chat_completions_url()

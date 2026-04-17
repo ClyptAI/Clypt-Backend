@@ -31,19 +31,18 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from ._http_retry import (
+    RemoteServiceHTTPError,
+    TRANSIENT_HTTP_STATUS,
+    retry_with_backoff,
+)
 from .config import NodeMediaPrepSettings
 
 logger = logging.getLogger(__name__)
 
-_TRANSIENT_HTTP_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
-
-class RemoteNodeMediaPrepError(RuntimeError):
+class RemoteNodeMediaPrepError(RemoteServiceHTTPError):
     """Raised when the node-media-prep endpoint rejects or fails a request."""
-
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -51,9 +50,9 @@ def _is_transient(exc: BaseException) -> bool:
         code = exc.status_code
         if code is None:
             return False
-        return code in _TRANSIENT_HTTP_STATUS
+        return code in TRANSIENT_HTTP_STATUS
     if isinstance(exc, urllib.error.HTTPError):
-        return exc.code in _TRANSIENT_HTTP_STATUS
+        return exc.code in TRANSIENT_HTTP_STATUS
     if isinstance(exc, urllib.error.URLError):
         return True
     if isinstance(exc, TimeoutError):
@@ -222,32 +221,19 @@ class RemoteNodeMediaPrepClient:
                 )
             return parsed
 
-        for retry_index in range(self._max_retries + 1):
-            try:
-                return _do_request()
-            except Exception as exc:
-                is_last = retry_index >= self._max_retries
-                if is_last or not _is_transient(exc):
-                    raise
-                base_delay = min(
-                    self._DEFAULT_MAX_BACKOFF_S,
-                    self._DEFAULT_INITIAL_BACKOFF_S
-                    * (self._DEFAULT_BACKOFF_MULTIPLIER**retry_index),
-                )
-                jitter = base_delay * self._DEFAULT_JITTER_RATIO * random.random()
-                sleep_s = base_delay + jitter
-                logger.warning(
-                    "[node_media_prep_client] transient error on %s attempt=%d/%d; "
-                    "retrying in %.2fs: %s",
-                    path,
-                    retry_index + 1,
-                    self._max_retries + 1,
-                    sleep_s,
-                    exc,
-                )
-                if sleep_s > 0.0:
-                    time.sleep(sleep_s)
-        raise RemoteNodeMediaPrepError(f"node-media-prep {path} retries exhausted")
+        return retry_with_backoff(
+            _do_request,
+            max_retries=self._max_retries,
+            classify_transient=_is_transient,
+            log_prefix="[node_media_prep_client]",
+            operation="node_media_prep",
+            initial_backoff_s=self._DEFAULT_INITIAL_BACKOFF_S,
+            max_backoff_s=self._DEFAULT_MAX_BACKOFF_S,
+            multiplier=self._DEFAULT_BACKOFF_MULTIPLIER,
+            jitter_ratio=self._DEFAULT_JITTER_RATIO,
+            sleep=time.sleep,
+            rng=random.random,
+        )
 
     def __call__(
         self,
