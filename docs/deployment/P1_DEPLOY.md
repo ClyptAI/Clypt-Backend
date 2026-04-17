@@ -3,7 +3,16 @@
 **Status:** Active  
 **Last updated:** 2026-04-17
 
-This runbook is aligned to current code and scripts for single-host deployment:
+This runbook is aligned to current code and scripts for **single-host**
+deployment. The dual-host split onto a dedicated RTX 6000 Ada audio host
+is **in progress** and tracked separately in
+[`docs/deployment/REFACTOR_RTX6000ADA.md`](REFACTOR_RTX6000ADA.md); do not
+use any of those knobs in production until they land in mainline.
+
+Under the current runbook, the entire Phase 1 audio chain (VibeVoice
+vLLM ASR + NFA + emotion2vec+ + YAMNet), the Phase 1 visual chain
+(RF-DETR + ByteTrack), and the Phase 2-4 local worker (including
+node-media prep with ffmpeg) all live on the same DO GPU host:
 
 - Phase 1 ASR: local VibeVoice vLLM (`:8000`) (`CLYPT_PHASE1_ASR_BACKEND=vllm`)
 - Qwen generation on local OpenAI-compatible service (`:8001`) via SGLang helper
@@ -11,6 +20,14 @@ This runbook is aligned to current code and scripts for single-host deployment:
 - Separate Python envs on-host:
   - Phase 1 + Phase 2-4 worker: `/opt/clypt-phase1/venvs/phase1`
   - SGLang Qwen service: `/opt/clypt-phase1/venvs/sglang`
+
+Target topology (post-refactor, not yet shippable from this runbook):
+
+- **RTX 6000 Ada audio host** — VibeVoice vLLM ASR + NFA + emotion2vec+ +
+  YAMNet, plus NVENC/NVDEC ffmpeg for node-media prep.
+- **H200 visual + Phase 2-4 host** — RF-DETR + ByteTrack, SGLang Qwen
+  (`:8001`), and the Phase 2-4 local worker. Calls remote RTX 6000 Ada
+  for ASR, audio sidecars, and node-media prep.
 
 For the exhaustive env inventory behind these profiles, see `docs/runtime/ENV_REFERENCE.md`.
 
@@ -179,7 +196,7 @@ python -m backend.runtime.run_phase1 \
 - Phase 2-4 local worker now defaults to fail-fast on stale leases and known structured-output/backend crash signatures.
 - If a run crashes and queue row remains `running`, resolve manually before restart (expected with current fail-fast policy).
 - The checked-in Phase 2-4 local worker unit now depends on `clypt-sglang-qwen.service` and runs from the Phase 1 venv, not the SGLang env.
-- Node-media prep runs in-process on the Phase 2-4 worker host; ensure the host GPU/ffmpeg supports whatever encode path that worker uses.
+- Node-media prep runs in-process on the Phase 2-4 worker host; ensure the host GPU/ffmpeg supports whatever encode path that worker uses. Under the upcoming RTX 6000 Ada refactor, node-media prep will move off-host onto the audio host because H200 NVENC is not usable for `h264_nvenc` (`unsupported device (2)`).
 - The intended TensorRT visual path on H200 is now GPU resize + GPU preprocess, not full-resolution host decode followed by OpenCV resize.
 - `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; do not leave it in the live env because startup should fail fast when it is present.
 - Current target env surface is explicit per-stage concurrency: `CLYPT_PHASE2_MERGE_MAX_CONCURRENT`, `CLYPT_PHASE2_BOUNDARY_MAX_CONCURRENT`, `CLYPT_SIGNAL_MAX_CONCURRENT`, `CLYPT_PHASE3_LOCAL_MAX_CONCURRENT`, `CLYPT_PHASE3_LONG_RANGE_MAX_CONCURRENT`, and `CLYPT_PHASE4_SUBGRAPH_MAX_CONCURRENT`. All of these are max in-flight LLM request caps per stage, not targets.

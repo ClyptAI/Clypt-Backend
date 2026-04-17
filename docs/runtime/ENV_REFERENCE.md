@@ -17,9 +17,17 @@ These are validated by `load_provider_settings()` for normal runtime startup:
 
 ## 2) Recommended Working Profile
 
+The profiles below describe what mainline code accepts today. The
+planned dual-host RTX 6000 Ada refactor adds new audio-host / media-host
+env knobs; those are tracked in
+[`docs/deployment/REFACTOR_RTX6000ADA.md`](../deployment/REFACTOR_RTX6000ADA.md)
+and will be added to this doc once they land.
+
 ### 2.1 Single-host Phase 1 + Phase 2-4 (current)
 
-Phase 1 ASR runs as local VibeVoice vLLM; Phase 2-4 runs its local worker with
+Phase 1 audio chain (VibeVoice vLLM ASR + NFA + emotion2vec+ + YAMNet)
+and visual chain (RF-DETR + ByteTrack) both run on the same host in the
+same process. Phase 2-4 runs its local worker on that host with
 in-process node-media prep:
 
 ```bash
@@ -163,7 +171,13 @@ The local OpenAI-compatible Qwen path always sends `chat_template_kwargs.enable_
 
 ### 4.2 Node-media prep
 
-Node-media prep runs in-process on the worker host; there is no remote offload.
+Node-media prep runs in-process on the worker host; there is no remote
+offload today. The planned RTX 6000 Ada refactor moves ffmpeg-based
+clip extraction to the dedicated audio/media host (H200 NVENC is not
+usable for `h264_nvenc`), and will introduce
+`CLYPT_PHASE24_NODE_MEDIA_PREP_BACKEND=remote_http` plus companion
+endpoint/token envs — see
+[`docs/deployment/REFACTOR_RTX6000ADA.md`](../deployment/REFACTOR_RTX6000ADA.md).
 
 | Env | Default | Notes |
 |---|---|---|

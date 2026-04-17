@@ -28,12 +28,16 @@ This document records known baseline runs and recent migration test attempts.
 
 ## 3) Current Validation Focus
 
-- Current code paths to validate against these historical baselines:
+- Current code paths to validate against these historical baselines (single-host H200 profile):
   - local SQLite queue + local Phase 2-4 worker
   - SGLang Qwen on `:8001`
-  - Phase 1 ASR: local VibeVoice vLLM on the Phase 1 GPU host
+  - Phase 1 audio chain: VibeVoice vLLM ASR + NFA + emotion2vec+ + YAMNet, in-process on the GPU host
+  - Phase 1 visual chain: RF-DETR + ByteTrack (TensorRT FP16 fast path), in-process on the GPU host
   - node-media prep: in-process on the Phase 2-4 worker host
 - Compare new measurements against Sections 1, 2, and 5, then append the new baseline here.
+- Post-refactor targets (RTX 6000 Ada audio host + H200 visual/Phase 2-4 host)
+  will be captured separately once that topology is live; track the refactor
+  status in [`../deployment/REFACTOR_RTX6000ADA.md`](../deployment/REFACTOR_RTX6000ADA.md).
 
 ## 4) Recorded Phase 2-4 Timing Snapshots
 

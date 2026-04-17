@@ -9,6 +9,11 @@ Operational startup and maintenance guide for coding agents and maintainers.
 - Planned: Phases 5-6
 - Current Phase 1 ASR backend: local vLLM VibeVoice on the Phase 1 GPU host
 - Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint
+- **In progress**: split Phase 1 into an **audio chain** (VibeVoice vLLM + NFA
+  + emotion2vec+ + YAMNet) + node-media prep on a dedicated **RTX 6000 Ada**
+  droplet, with **visual chain** (RF-DETR + ByteTrack) + SGLang Qwen +
+  Phase 2-4 worker remaining on the **H200** droplet. Refactor plan:
+  [docs/deployment/REFACTOR_RTX6000ADA.md](docs/deployment/REFACTOR_RTX6000ADA.md)
 
 ## Read Order (Required - You MUST read these before reporting back to the user.)
 
@@ -96,7 +101,9 @@ python -m backend.runtime.run_phase24_local_worker --worker-id local-worker-1
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
 - Qwen serving target is the SGLang service on `127.0.0.1:8001`.
 - `CLYPT_PHASE1_ASR_BACKEND` only accepts `vllm`. `VIBEVOICE_VLLM_BASE_URL` is required.
-- Node-media prep for Phase 2 runs in-process on the Phase 2-4 worker host; there is no remote media-prep offload.
+- Node-media prep for Phase 2 runs in-process on the Phase 2-4 worker host today; there is no remote media-prep offload yet.
+- Phase 1 is conceptually split into an **audio chain** (VibeVoice vLLM → NFA → emotion2vec+ → YAMNet) and a **visual chain** (RF-DETR + ByteTrack). Both currently run in the same process on one GPU host.
+- Target topology (refactor in progress, not yet shippable): audio chain + node-media prep on an RTX 6000 Ada droplet, visual chain + SGLang Qwen + Phase 2-4 worker on H200. H200 NVENC cannot run `h264_nvenc`, so node-media prep must not default to H200 post-refactor. See `docs/deployment/REFACTOR_RTX6000ADA.md`.
 
 ## Critical Maintenance Rule
 
