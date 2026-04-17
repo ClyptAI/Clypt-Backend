@@ -6,6 +6,9 @@ from typing import Any
 from backend.common.domain_enums import ClusterType, JobStatus, LinkType, PromptSourceType, RunStatus, SignalType, SourcePlatform
 from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, model_validator
 
+# Legacy Phase14RunStatus / ExternalSignalType / ExternalClusterType /
+# SignalLinkType aliases accepted through 2026-05-17 (commit 7c8ee6a).
+# Drop together with the backend.common.domain_enums re-exports.
 Phase14RunStatus = RunStatus
 ExternalSignalType = SignalType
 ExternalClusterType = ClusterType

@@ -107,7 +107,9 @@ class VibeVoiceAsrResponse:
         )
 
 
-# Deprecated alias retained for one release.
+# Legacy PhaseOneAudioResponse alias accepted through 2026-05-17
+# (commit 393abaee). Drop together with the RemoteAudioChainClient /
+# RemoteAudioChainError aliases.
 PhaseOneAudioResponse = VibeVoiceAsrResponse
 
 
@@ -115,7 +117,6 @@ class RemoteVibeVoiceAsrError(RemoteServiceHTTPError):
     """Raised when the VibeVoice ASR host rejects or fails a request."""
 
 
-# Deprecated alias retained for one release.
 RemoteAudioChainError = RemoteVibeVoiceAsrError
 
 
@@ -381,8 +382,6 @@ class RemoteVibeVoiceAsrClient:
         )
         return response
 
-
-# Deprecated alias retained for one release.
 RemoteAudioChainClient = RemoteVibeVoiceAsrClient
 
 

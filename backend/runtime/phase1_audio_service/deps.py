@@ -51,7 +51,9 @@ def _resolve_scratch_root() -> Path:
 
 
 def _resolve_expected_auth_token() -> str:
-    # Accept both the new name and the legacy aliases for one release.
+    # Legacy CLYPT_PHASE1_AUDIO_HOST_* auth-token aliases accepted through
+    # 2026-05-17 (commit 393abaee). Drop together with the AudioHostSettings
+    # alias.
     token = _getenv_with_aliases(
         "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN",
         _VIBEVOICE_ASR_SERVICE_ENV_ALIASES[
@@ -63,7 +65,7 @@ def _resolve_expected_auth_token() -> str:
             "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN must be set on the RTX "
             "VibeVoice ASR host so incoming requests can be authenticated. The legacy "
             "CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN / CLYPT_PHASE1_AUDIO_HOST_TOKEN aliases "
-            "are still accepted for one release."
+            "are accepted through 2026-05-17 (commit 393abaee)."
         )
     return token.strip()
 

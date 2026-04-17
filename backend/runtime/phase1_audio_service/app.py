@@ -12,9 +12,10 @@ Exposes three routes consumed by the H200 orchestrator:
 
 Authentication is a shared bearer token passed in the ``Authorization`` header
 (``Bearer <token>``). The expected token is read from
-``CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN`` (or, for one release, the
-legacy ``CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN`` /
-``CLYPT_PHASE1_AUDIO_HOST_TOKEN`` aliases).
+``CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN``. Legacy
+``CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN`` /
+``CLYPT_PHASE1_AUDIO_HOST_TOKEN`` aliases are accepted through 2026-05-17
+(commit 393abaee). Drop together with the AudioHostSettings alias.
 
 NFA, emotion2vec+ and YAMNet used to run on this host too; they were moved
 back to the H200 because NFA's global-alignment pass needs ~17 GiB of VRAM

@@ -349,11 +349,8 @@ class ProviderSettings:
 
     @property
     def audio_host(self) -> VibeVoiceAsrServiceSettings:
-        """Deprecated alias for ``vibevoice_asr_service``.
-
-        Retained for one release so out-of-tree callers keep working; switch
-        to ``vibevoice_asr_service`` directly. The remote service now runs
-        only VibeVoice ASR; NFA/emotion/YAMNet have moved back to the H200.
+        """Legacy alias for ``vibevoice_asr_service`` accepted through 2026-05-17
+        (commit 393abaee). Drop together with the ``AudioHostSettings`` alias.
         """
         return self.vibevoice_asr_service
 
@@ -435,10 +432,9 @@ def load_provider_settings() -> ProviderSettings:
             f"{embedding_backend!r}; expected 'developer' or 'vertex'."
         )
 
-    # Accept both the new ``CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_*`` names and
-    # the legacy ``CLYPT_PHASE1_AUDIO_HOST_*`` names for one release. The new
-    # names reflect the narrower scope of the RTX service: only VibeVoice ASR
-    # runs there; NFA/emotion/YAMNet are back on the H200.
+    # Legacy CLYPT_PHASE1_AUDIO_HOST_* env aliases accepted through
+    # 2026-05-17 (commit 393abaee). Drop together with the AudioHostSettings
+    # alias.
     vibevoice_asr_url = _getenv_with_aliases(
         "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL",
         _VIBEVOICE_ASR_SERVICE_ENV_ALIASES["CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL"],
@@ -448,8 +444,8 @@ def load_provider_settings() -> ProviderSettings:
             "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL is required. VibeVoice ASR runs "
             "exclusively on the RTX 6000 Ada host; there is no in-process fallback. "
             "Point this at the host's private VPC URL (e.g. http://10.0.0.5:9100). "
-            "The legacy CLYPT_PHASE1_AUDIO_HOST_URL alias is still accepted for one "
-            "release."
+            "The legacy CLYPT_PHASE1_AUDIO_HOST_URL alias is accepted through "
+            "2026-05-17 (commit 393abaee)."
         )
     vibevoice_asr_token = _getenv_with_aliases(
         "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN",
@@ -461,7 +457,8 @@ def load_provider_settings() -> ProviderSettings:
         raise ValueError(
             "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN is required (shared bearer "
             "token with the RTX 6000 Ada VibeVoice ASR host). The legacy "
-            "CLYPT_PHASE1_AUDIO_HOST_TOKEN alias is still accepted for one release."
+            "CLYPT_PHASE1_AUDIO_HOST_TOKEN alias is accepted through 2026-05-17 "
+            "(commit 393abaee)."
         )
     vibevoice_asr_service = VibeVoiceAsrServiceSettings(
         service_url=vibevoice_asr_url.rstrip("/"),
