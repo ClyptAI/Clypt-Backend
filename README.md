@@ -125,5 +125,6 @@ backend/runtime/                           Phase 1 + Phase 2-4 runners, local SQ
 docker/vibevoice-vllm/                     VibeVoice vLLM image (RTX 6000 Ada)
 scripts/do_phase1_visual/                  Deployment scripts + systemd units for the H200
 scripts/do_phase1_audio/                   Deployment scripts + systemd units for the RTX 6000 Ada
+scripts/lib/                               Shared bash helpers sourced by deploy scripts (preamble.sh)
 docs/                                      Runtime, deployment, architecture, specs, outputs
 ```

@@ -223,6 +223,7 @@ Meaning:
 - forwards configured `max_output_tokens` as a real `max_tokens` request cap on structured-output calls
 - warns when the serving backend returns `finish_reason=length`, because that is the strongest signal that a structured JSON reply was token-capped
 - validates parsed response against required/type/enum subset
+- every pipeline call site (`backend/pipeline/{candidates,graph,signals,semantics}/`) additionally wraps the returned dict with a stage-local Pydantic `StrictModel(extra="forbid")` declared in `<stage>/responses.py`; any prompt/response schema drift surfaces as a `ValidationError` at the call boundary rather than as a silent downstream dict-access bug. See `docs/ARCHITECTURE.md` §4.4.
 
 ## 6) Phase 2-4 Concurrency Guidance
 
@@ -285,6 +286,7 @@ On the H200:
 
 ```bash
 systemctl is-active clypt-sglang-qwen clypt-v31-phase1-api clypt-v31-phase1-worker clypt-v31-phase24-local-worker
+test -f /etc/clypt/clypt-phase1-runtime.env && cat /etc/clypt/clypt-phase1-runtime.env
 curl -fsS http://127.0.0.1:8001/health
 curl -fsS http://127.0.0.1:8001/v1/models | python3 -m json.tool
 trtexec --help >/dev/null
