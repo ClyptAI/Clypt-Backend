@@ -150,8 +150,10 @@ in-process VibeVoice or ffmpeg path on the orchestrator host.
 - Generation path in local worker is hard-gated to
   `GENAI_GENERATION_BACKEND=local_openai`.
 - LLM client is `LocalOpenAIQwenClient` (OpenAI-compatible chat
-  completions).
-- Embeddings remain Vertex-backed.
+  completions), typed at every pipeline stage by the
+  `LLMGenerateJsonClient` Protocol in `backend/providers/protocols.py`.
+- Embeddings remain Vertex-backed, typed by the `EmbeddingClient`
+  Protocol at every pipeline stage.
 - Node-media prep always delegates to the RTX host via
   `RemoteNodeMediaPrepClient`. The H200 never touches ffmpeg in the
   hot path; the local file in returned descriptors is empty because
@@ -183,6 +185,14 @@ in-process VibeVoice or ffmpeg path on the orchestrator host.
 - Object schemas are normalized to `additionalProperties=false`.
 - Client performs post-parse schema subset checks.
 - Non-thinking request mode is forced for structured output calls.
+- Every `LLMGenerateJsonClient.generate_json` call site in the
+  pipeline (`backend/pipeline/candidates/`, `graph/`, `signals/`,
+  `semantics/`) wraps the returned dict with a Pydantic `StrictModel`
+  response (`extra="forbid"`) declared in the stage's `responses.py`
+  module. The schema sent to the LLM and the type validated in Python
+  are kept in sync; any drift (e.g. a field rename in `prompts.py` not
+  reflected in `responses.py`) surfaces as a `ValidationError` at the
+  call site rather than as a silent downstream dict-access bug.
 
 ## 5) Queue and Failure Semantics
 
