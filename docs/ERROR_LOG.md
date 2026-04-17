@@ -37,6 +37,28 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
   - Treat `GPUS_ALL_REGIONS=0` as a hard prerequisite to fix before first deploy; document it in P1_DEPLOY.md §3.4.1.
   - The bind mount overlays the baked-in HF cache layer, so first boot on a fresh VM always re-downloads; treat this as expected and rely on the `/var/clypt/hf-cache` host volume for persistence across restarts.
 
+## 2026-04-17 - GCE startup-script failed on nvidia-container-toolkit version skew
+
+- **Date/Time (UTC):** 2026-04-17 02:28
+- **Subsystem:** GCE VM provisioning (`scripts/deploy_l4_gce.sh` startup-script)
+- **Environment:** GCE `clypt-phase1-l4-gce` (`us-central1-a`, external IP `34.59.75.53`), Deep Learning VM image family `common-cu129-ubuntu-2204-nvidia-580`.
+- **Symptom / Error signature:** Startup script failed under `set -e` at `apt-get install -y nvidia-container-toolkit` with:
+  ```
+  The following packages have unmet dependencies:
+   nvidia-container-toolkit : Depends: nvidia-container-toolkit-base (= 1.19.0-1) but 1.17.8-1 is to be installed
+                              Depends: libnvidia-container-tools (= 1.19.0-1) but 1.17.8-1 is to be installed
+  E: Unable to correct problems, you have held broken packages.
+  ```
+  `docker run --gpus all` then failed because `nvidia-ctk runtime configure` was never executed and `docker info` showed no `nvidia` runtime.
+- **Root cause:** The `common-cu129-ubuntu-2204-nvidia-580` DLVM image ships `nvidia-container-toolkit`, `-base`, `libnvidia-container-tools`, and `libnvidia-container1` preinstalled and held at `1.17.8-1`. The startup script unconditionally added the upstream `https://nvidia.github.io/libnvidia-container/stable/deb` repo on top, which offered `nvidia-container-toolkit=1.19.0-1` as the top-level but kept the `-base`/`-tools` held at `1.17.8-1`, producing an unmet-dependency hard-fail. Net effect: the DLVM already had a working toolkit and only needed `nvidia-ctk runtime configure --runtime=docker` + `systemctl restart docker`, but the script forced an apt install anyway.
+- **Fix applied:**
+  1. Manually SSH'd in, removed `/etc/apt/sources.list.d/nvidia-container-toolkit.list`, ran `nvidia-ctk runtime configure --runtime=docker` against the preinstalled 1.17.8 toolkit, restarted docker, then continued with `gcloud auth configure-docker` / `docker pull` / `docker run`. Container came up cleanly with the NVIDIA runtime wired.
+  2. Long-term fix in `scripts/deploy_l4_gce.sh`: the startup script now checks `command -v nvidia-ctk` first. If the toolkit is already present (which it is on every `common-cu*` DLVM image we use), the script skips the repo-add + `apt-get install` entirely and only runs `nvidia-ctk runtime configure` + `systemctl restart docker`. The upstream apt-repo path is retained as a fallback for bare images.
+- **Verification evidence:** After the manual fix `docker info` reported the `nvidia` runtime; `docker pull` succeeded against the Artifact Registry image; `docker ps` showed `clypt-l4-combined` with `--gpus all`; vLLM began its in-container dep install (`librosa`, `scipy`, `vibevoice` editable build) and is currently warming.
+- **Follow-up guardrails:**
+  - Never unconditionally add upstream NVIDIA apt sources on DLVM images. Always gate on `command -v nvidia-ctk`.
+  - Any future version bump of the NVIDIA toolkit on DLVM must go through an explicit `apt-get install -y nvidia-container-toolkit=<VER> nvidia-container-toolkit-base=<VER> libnvidia-container-tools=<VER> libnvidia-container1=<VER>` with a matched quadruplet, not a plain top-level install.
+
 ## 2026-04-16 - GCE startup-script failed on NVIDIA toolkit install (gpg TTY)
 
 - **Date/Time (UTC):** 2026-04-16

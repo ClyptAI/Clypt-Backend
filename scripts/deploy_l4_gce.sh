@@ -118,19 +118,30 @@ fi
 
 if ! docker info --format '{{ json .Runtimes }}' 2>/dev/null | grep -q nvidia; then
   echo "[startup] configuring nvidia runtime"
-  distribution=$(. /etc/os-release; echo "${ID}${VERSION_ID}")
-  # --batch --yes --output is required here: GCE startup scripts have no
-  # controlling TTY, so plain `gpg --dearmor -o ...` fails with
-  # "cannot open '/dev/tty': No such device or address" and aborts the script
-  # under `set -e`. See docs/ERROR_LOG.md 2026-04-16.
-  rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-    | gpg --batch --yes --dearmor --output /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-  curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" | \
-    sed "s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" \
-    > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-  apt-get update
-  apt-get install -y nvidia-container-toolkit
+  # The common-cu* Deep Learning VM image family already ships
+  # nvidia-container-toolkit preinstalled (currently 1.17.8-1). In that case
+  # we just need to wire the runtime into docker and restart; adding the
+  # upstream nvidia repo on top of the preinstalled packages produces a
+  # version skew (e.g. top-level 1.19.0 vs -base/-tools still at 1.17.8)
+  # that hard-fails apt. Only add the repo + install when nvidia-ctk is
+  # genuinely absent. See docs/ERROR_LOG.md 2026-04-17 entry.
+  if ! command -v nvidia-ctk >/dev/null; then
+    echo "[startup] nvidia-ctk missing; installing nvidia-container-toolkit from upstream repo"
+    # --batch --yes --output is required here: GCE startup scripts have no
+    # controlling TTY, so plain `gpg --dearmor -o ...` fails with
+    # "cannot open '/dev/tty': No such device or address" and aborts the
+    # script under `set -e`. See docs/ERROR_LOG.md 2026-04-16.
+    rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+      | gpg --batch --yes --dearmor --output /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" | \
+      sed "s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" \
+      > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    apt-get update
+    apt-get install -y nvidia-container-toolkit
+  else
+    echo "[startup] nvidia-ctk already present ($(nvidia-ctk --version 2>/dev/null | head -1)); skipping apt install"
+  fi
   nvidia-ctk runtime configure --runtime=docker
   systemctl restart docker
 fi
