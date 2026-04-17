@@ -400,7 +400,7 @@ Current effective SGLang flags (DO-speedup-and-OSS-swap baseline):
 - `--chunked-prefill-size 8192`
 - `--grammar-backend xgrammar`
 - `--reasoning-parser qwen3`
-- `HF_HUB_OFFLINE=1` (set in the systemd unit to prevent DNS failures at startup)
+- `HF_HUB_OFFLINE=1` (set in the systemd unit to prevent DNS failures at startup; requires the `Qwen/Qwen3.6-35B-A3B` snapshot to be pre-cached in `HF_HOME=/opt/clypt-phase1/hf-cache` — `bootstrap_h200.sh` handles the initial pull; revision refreshes follow the temporary-unset procedure in `docs/deployment/P1_DEPLOY.md` §3.2)
 - `SGLANG_ENABLE_SPEC_V2=1` (environment variable, set in the systemd unit; required by SGLang 0.5.10 to run speculative decoding + radix cache on the Mamba/Attention hybrid)
 - Effective runtime limits: `max_total_num_tokens=1,739,188`, `max_running_requests=48`
 

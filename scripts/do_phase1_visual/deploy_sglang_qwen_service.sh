@@ -37,6 +37,23 @@ cd "$REPO_DIR"
 echo "[deploy-sglang-qwen] loading runtime env from ${ENV_FILE} ..."
 load_env_file "$ENV_FILE"
 
+# Fail fast: clypt-sglang-qwen.service sets HF_HUB_OFFLINE=1 and
+# HF_HOME=/opt/clypt-phase1/hf-cache. With no snapshot present, SGLang
+# exits before healthy. bootstrap_h200.sh pre-downloads the model; see
+# docs/deployment/P1_DEPLOY.md §3.2. Run this check after load_env_file so
+# SG_MODEL from ${ENV_FILE} is honored.
+SG_MODEL="${SG_MODEL:-Qwen/Qwen3.6-35B-A3B}"
+SG_HF_HOME="${SG_HF_HOME:-/opt/clypt-phase1/hf-cache}"
+SG_MODEL_CACHE_DIR="${SG_HF_HOME}/hub/models--${SG_MODEL/\//--}"
+if [[ ! -d "${SG_MODEL_CACHE_DIR}/snapshots" ]] \
+  || [[ -z "$(find "${SG_MODEL_CACHE_DIR}/snapshots" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)" ]]; then
+  echo "[deploy-sglang-qwen] ERROR: '${SG_MODEL}' is not pre-cached under ${SG_HF_HOME}." >&2
+  echo "[deploy-sglang-qwen] The systemd unit runs with HF_HUB_OFFLINE=1 — huggingface_hub will not download." >&2
+  echo "[deploy-sglang-qwen] Run: bash scripts/do_phase1_visual/bootstrap_h200.sh   (or snapshot_download into HF_HOME=${SG_HF_HOME})" >&2
+  echo "[deploy-sglang-qwen] Then re-run this script. See docs/deployment/P1_DEPLOY.md §3.2." >&2
+  exit 1
+fi
+
 echo "[deploy-sglang-qwen] ensuring host prerequisites are installed ..."
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -165,6 +182,9 @@ PY
 fi
 
 echo "[deploy-sglang-qwen] restarting phase services for fresh config pick-up ..."
+for _svc in clypt-v31-phase1-api.service clypt-v31-phase1-worker.service clypt-v31-phase24-local-worker.service; do
+  require_file "/etc/systemd/system/${_svc}"
+done
 systemctl restart clypt-v31-phase1-api.service
 systemctl restart clypt-v31-phase1-worker.service
 systemctl restart clypt-v31-phase24-local-worker.service

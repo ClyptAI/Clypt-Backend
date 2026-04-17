@@ -89,7 +89,7 @@ Current H200 SGLang (Qwen3.6-35B-A3B) flags:
 - `--mamba-scheduler-strategy extra_buffer` (required by Qwen3.6 hybrid Mamba/Attention when MTP + radix cache are both on)
 - `--schedule-policy lpm`, `--chunked-prefill-size 8192`
 - `--grammar-backend xgrammar`, `--reasoning-parser qwen3`
-- systemd environment: `HF_HUB_OFFLINE=1` (prevents DNS failures on startup) and `SGLANG_ENABLE_SPEC_V2=1` (required by SGLang 0.5.10 for MTP + radix cache on the Mamba hybrid)
+- systemd environment: `HF_HUB_OFFLINE=1` (prevents DNS failures on startup; requires the Qwen snapshot to be resident in `HF_HOME=/opt/clypt-phase1/hf-cache` — `bootstrap_h200.sh` pre-downloads it, and model updates require the temporary-unset procedure documented in `docs/deployment/P1_DEPLOY.md` §3.2) and `SGLANG_ENABLE_SPEC_V2=1` (required by SGLang 0.5.10 for MTP + radix cache on the Mamba hybrid)
 - Effective limits: `max_total_num_tokens=1,739,188`, `max_running_requests=48`
 
 No-fallback rule: `backend/providers/config.py` requires

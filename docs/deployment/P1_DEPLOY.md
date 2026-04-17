@@ -106,6 +106,12 @@ This script:
 bash scripts/do_phase1_visual/deploy_sglang_qwen_service.sh
 ```
 
+The script fails fast if the Qwen snapshot is missing from
+`/opt/clypt-phase1/hf-cache` (the offline-mode footgun) or if §3.1 has not
+been run yet (it requires the three Phase 1 unit files under
+`/etc/systemd/system/` before `systemctl restart`). Keep install order
+**§3.1 then §3.2**.
+
 Installs/starts `clypt-sglang-qwen.service`, isolates SGLang in its own venv,
 and validates `/health` + `/v1/models`. Honors `SG_SCHEDULE_POLICY`,
 `SG_CHUNKED_PREFILL_SIZE`, `SG_MEM_FRACTION_STATIC`, `SG_CONTEXT_LENGTH`, and
@@ -120,6 +126,34 @@ The committed `ExecStart` for the SGLang unit bakes in the current flag set:
 `Environment=SGLANG_ENABLE_SPEC_V2=1`. Both env vars are load-bearing — the
 Qwen3.6 hybrid Mamba/Attention path refuses to start with MTP + radix cache
 unless `SPEC_V2` is on, and the H200 runs in offline cache mode.
+
+> **Prerequisite — Qwen weights must be pre-cached.** `HF_HUB_OFFLINE=1`
+> tells `huggingface_hub` to skip *all* network calls and use only the
+> local cache at `HF_HOME=/opt/clypt-phase1/hf-cache`. If the
+> `Qwen/Qwen3.6-35B-A3B` snapshot is not already resident there when the
+> unit starts, SGLang will crash on first boot with a "local files only"
+> error. `scripts/do_phase1_visual/bootstrap_h200.sh` handles this
+> pre-download automatically (idempotent — skips if already cached; ~72 GB
+> one-time pull). If you are bringing up a host without running
+> `bootstrap_h200.sh`, pre-cache manually before deploying the SGLang unit:
+>
+> ```bash
+> pip3 install --break-system-packages "huggingface_hub>=0.28"
+> HF_HOME=/opt/clypt-phase1/hf-cache \
+>   python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3.6-35B-A3B')"
+> ```
+>
+> **Updating the model revision.** Because the unit runs offline, a
+> `systemctl restart` will *not* pull a newer revision. To refresh:
+> (a) stop the unit, temporarily remove `Environment=HF_HUB_OFFLINE=1`
+> from `clypt-sglang-qwen.service`, `daemon-reload`, start the unit and
+> let SGLang download the new revision, then re-add `HF_HUB_OFFLINE=1`,
+> `daemon-reload`, and restart once more; or (b) delete
+> `/opt/clypt-phase1/hf-cache/hub/models--Qwen--Qwen3.6-35B-A3B` and
+> rerun `bootstrap_h200.sh` (it will re-download, then the normal
+> offline-mode unit will pick up the new snapshot on restart). See
+> `docs/ERROR_LOG.md` (2026-04-17 "SGLang HF_HUB_OFFLINE missing ...")
+> for the incident that motivated this setup.
 
 ## 4) Minimum Environment Contract
 

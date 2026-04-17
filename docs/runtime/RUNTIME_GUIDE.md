@@ -62,6 +62,10 @@ the Phase 2-4 enqueue without waiting for visual join.
   `--reasoning-parser qwen3`, plus environment `HF_HUB_OFFLINE=1` and
   `SGLANG_ENABLE_SPEC_V2=1` (both exported from the systemd unit; the Mamba
   hybrid refuses to start with MTP + radix cache unless SPEC_V2 is on).
+  `HF_HUB_OFFLINE=1` means SGLang never phones home at startup, so the
+  Qwen snapshot must already be resident in `HF_HOME=/opt/clypt-phase1/hf-cache`
+  before the unit is started; `bootstrap_h200.sh` pre-downloads it, and
+  the model-revision refresh procedure lives in `docs/deployment/P1_DEPLOY.md` §3.2.
 - **Phase 2-4 dispatch path:** local SQLite queue + local worker loop.
   `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`; Phase 1 enqueues through
   `Phase24LocalDispatcherClient`.
