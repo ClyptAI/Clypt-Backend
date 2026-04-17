@@ -38,12 +38,46 @@ _REMOVED_VLLM_RUNTIME_ENVS = (
 )
 
 
+_VIBEVOICE_ASR_SERVICE_ENV_ALIASES: dict[str, tuple[str, ...]] = {
+    "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL": ("CLYPT_PHASE1_AUDIO_HOST_URL",),
+    "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN": (
+        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TOKEN",
+        "CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN",
+        "CLYPT_PHASE1_AUDIO_HOST_TOKEN",
+    ),
+    "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TIMEOUT_S": ("CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S",),
+    "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_HEALTHCHECK_PATH": (
+        "CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH",
+    ),
+    "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_SCRATCH_ROOT": (
+        "CLYPT_PHASE1_VIBEVOICE_ASR_SCRATCH_ROOT",
+        "CLYPT_PHASE1_AUDIO_HOST_SCRATCH_ROOT",
+        "CLYPT_PHASE1_AUDIO_SCRATCH_ROOT",
+    ),
+}
+
+
 def _read_env(*names: str) -> str | None:
     for name in names:
         value = os.getenv(name)
         if value is not None and value.strip():
             return value.strip()
     return None
+
+
+def _getenv_with_aliases(canonical: str, aliases: tuple[str, ...] = ()) -> str | None:
+    value = os.getenv(canonical)
+    if value is not None and value.strip():
+        return value.strip()
+    for legacy in aliases:
+        value = os.getenv(legacy)
+        if value is not None and value.strip():
+            return value.strip()
+    return None
+
+
+def _normalize_hotwords_context(raw: str | None) -> str:
+    return raw if raw is not None else _DEFAULT_HOTWORDS
 
 
 def _read_bool_env(*names: str, default: bool = False) -> bool:
@@ -357,7 +391,7 @@ def load_provider_settings() -> ProviderSettings:
     if not gcs_bucket:
         raise ValueError("GCS_BUCKET or CLYPT_GCS_BUCKET is required for Phase 1 storage.")
 
-    hotwords_context = _read_env("VIBEVOICE_HOTWORDS_CONTEXT") or _DEFAULT_HOTWORDS
+    hotwords_context = _normalize_hotwords_context(_read_env("VIBEVOICE_HOTWORDS_CONTEXT"))
     backend = (_read_env("VIBEVOICE_BACKEND") or "vllm").lower()
     if backend != "vllm":
         raise ValueError(
@@ -406,9 +440,9 @@ def load_provider_settings() -> ProviderSettings:
     # the legacy ``CLYPT_PHASE1_AUDIO_HOST_*`` names for one release. The new
     # names reflect the narrower scope of the RTX service: only VibeVoice ASR
     # runs there; NFA/emotion/YAMNet are back on the H200.
-    vibevoice_asr_url = _read_env(
+    vibevoice_asr_url = _getenv_with_aliases(
         "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL",
-        "CLYPT_PHASE1_AUDIO_HOST_URL",
+        _VIBEVOICE_ASR_SERVICE_ENV_ALIASES["CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL"],
     )
     if not vibevoice_asr_url:
         raise ValueError(
@@ -418,11 +452,11 @@ def load_provider_settings() -> ProviderSettings:
             "The legacy CLYPT_PHASE1_AUDIO_HOST_URL alias is still accepted for one "
             "release."
         )
-    vibevoice_asr_token = _read_env(
+    vibevoice_asr_token = _getenv_with_aliases(
         "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN",
-        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TOKEN",
-        "CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN",
-        "CLYPT_PHASE1_AUDIO_HOST_TOKEN",
+        _VIBEVOICE_ASR_SERVICE_ENV_ALIASES[
+            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN"
+        ],
     )
     if not vibevoice_asr_token:
         raise ValueError(
@@ -434,15 +468,19 @@ def load_provider_settings() -> ProviderSettings:
         service_url=vibevoice_asr_url.rstrip("/"),
         auth_token=vibevoice_asr_token,
         timeout_s=float(
-            _read_env(
+            _getenv_with_aliases(
                 "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TIMEOUT_S",
-                "CLYPT_PHASE1_AUDIO_HOST_TIMEOUT_S",
+                _VIBEVOICE_ASR_SERVICE_ENV_ALIASES[
+                    "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TIMEOUT_S"
+                ],
             )
             or "7200"
         ),
-        healthcheck_path=_read_env(
+        healthcheck_path=_getenv_with_aliases(
             "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_HEALTHCHECK_PATH",
-            "CLYPT_PHASE1_AUDIO_HOST_HEALTHCHECK_PATH",
+            _VIBEVOICE_ASR_SERVICE_ENV_ALIASES[
+                "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_HEALTHCHECK_PATH"
+            ],
         )
         or "/health",
     )
@@ -697,7 +735,7 @@ def load_audio_host_settings() -> AudioHostProcessSettings:
             "for Phase 1 asset URL resolution."
         )
 
-    hotwords_context = _read_env("VIBEVOICE_HOTWORDS_CONTEXT") or _DEFAULT_HOTWORDS
+    hotwords_context = _normalize_hotwords_context(_read_env("VIBEVOICE_HOTWORDS_CONTEXT"))
     backend = (_read_env("VIBEVOICE_BACKEND") or "vllm").lower()
     if backend != "vllm":
         raise ValueError(

@@ -37,6 +37,7 @@ from ._http_retry import (
     retry_with_backoff,
 )
 from .config import NodeMediaPrepSettings
+from .storage import _normalize_node_media_object_prefix, parse_gcs_uri
 
 logger = logging.getLogger(__name__)
 
@@ -91,10 +92,12 @@ def _extract_video_gcs_uri(phase1_outputs: Any) -> str:
             "phase1_outputs.phase1_audio['video_gcs_uri'] is required for remote node-media prep "
             "(video must be uploaded to GCS before Phase 2 runs on the H200)."
         )
-    if not uri.startswith("gs://"):
+    try:
+        _bucket, _object_key = parse_gcs_uri(uri)
+    except ValueError as exc:
         raise ValueError(
             f"phase1_outputs.phase1_audio['video_gcs_uri'] must be a gs:// URI, got {uri!r}"
-        )
+        ) from exc
     return uri
 
 
@@ -252,7 +255,11 @@ class RemoteNodeMediaPrepClient:
         payload: dict[str, Any] = {
             "run_id": run_id,
             "video_gcs_uri": video_gcs_uri,
-            "object_prefix": f"phase14/{run_id}/node_media",
+            "object_prefix": _normalize_node_media_object_prefix(
+                "",
+                f"phase14/{run_id}/node_media",
+                job_id=run_id,
+            ),
             "max_concurrency": int(self.settings.max_concurrency),
             "nodes": [spec.to_json() for spec in specs],
         }
@@ -289,10 +296,12 @@ class RemoteNodeMediaPrepClient:
                 raise RemoteNodeMediaPrepError(
                     "node-media-prep media entry missing required node_id/file_uri"
                 )
-            if not file_uri.startswith("gs://"):
+            try:
+                _bucket, _object_key = parse_gcs_uri(file_uri)
+            except ValueError as exc:
                 raise RemoteNodeMediaPrepError(
                     f"node-media-prep file_uri must be a gs:// URI, got {file_uri!r}"
-                )
+                ) from exc
             mime_type = str(item.get("mime_type") or "video/mp4")
             by_node[node_id] = {
                 "node_id": node_id,

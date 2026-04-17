@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.pipeline.semantics.media_embeddings import prepare_node_media_embeddings
+from backend.providers.storage import _normalize_node_media_object_prefix, parse_gcs_uri
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,10 @@ class NodeMediaPrepRequest:
         nodes = payload.get("nodes") or []
         if not run_id:
             raise ValueError("run_id is required")
-        if not video_gcs_uri.startswith("gs://"):
-            raise ValueError("video_gcs_uri must be a gs:// URI")
+        try:
+            _bucket, _object_key = parse_gcs_uri(video_gcs_uri)
+        except ValueError as exc:
+            raise ValueError("video_gcs_uri must be a gs:// URI") from exc
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
         if not isinstance(nodes, list):
@@ -82,7 +85,11 @@ class NodeMediaPrepRequest:
         return cls(
             run_id=run_id,
             video_gcs_uri=video_gcs_uri,
-            object_prefix=object_prefix,
+            object_prefix=_normalize_node_media_object_prefix(
+                "",
+                object_prefix,
+                job_id=run_id,
+            ),
             max_concurrency=max_concurrency,
             nodes=cleaned,
         )
@@ -138,6 +145,12 @@ def run_node_media_prep(
         return {"run_id": request.run_id, "media": []}
 
     semantic_nodes = _as_semantic_nodes(request.nodes)
+    storage_bucket = getattr(getattr(storage_client, "settings", None), "gcs_bucket", "") or ""
+    object_prefix = _normalize_node_media_object_prefix(
+        storage_bucket,
+        request.object_prefix,
+        job_id=request.run_id,
+    )
 
     with tempfile.TemporaryDirectory(
         prefix=f"node-media-prep-{request.run_id}-", dir=str(scratch_root)
@@ -160,7 +173,7 @@ def run_node_media_prep(
             source_video_path=source_video_path,
             clips_dir=clips_dir,
             storage_client=storage_client,
-            object_prefix=request.object_prefix,
+            object_prefix=object_prefix,
             max_concurrent=request.max_concurrency,
         )
 

@@ -12,7 +12,6 @@ See docs/ERROR_LOG.md 2026-04-17.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -23,6 +22,7 @@ from backend.providers import (
     build_gcs_uri_url_resolver,
     load_audio_host_settings,
 )
+from backend.providers.config import _VIBEVOICE_ASR_SERVICE_ENV_ALIASES, _getenv_with_aliases
 from backend.providers.storage import GCSStorageClient
 
 logger = logging.getLogger(__name__)
@@ -39,13 +39,12 @@ class AppDeps:
 
 
 def _resolve_scratch_root() -> Path:
-    root = (
-        os.getenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_SCRATCH_ROOT")
-        or os.getenv("CLYPT_PHASE1_VIBEVOICE_ASR_SCRATCH_ROOT")
-        or os.getenv("CLYPT_PHASE1_AUDIO_HOST_SCRATCH_ROOT")
-        or os.getenv("CLYPT_PHASE1_AUDIO_SCRATCH_ROOT")
-        or "/opt/clypt-phase1/scratch"
-    )
+    root = _getenv_with_aliases(
+        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_SCRATCH_ROOT",
+        _VIBEVOICE_ASR_SERVICE_ENV_ALIASES[
+            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_SCRATCH_ROOT"
+        ],
+    ) or "/opt/clypt-phase1/scratch"
     path = Path(root)
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -53,11 +52,11 @@ def _resolve_scratch_root() -> Path:
 
 def _resolve_expected_auth_token() -> str:
     # Accept both the new name and the legacy aliases for one release.
-    token = (
-        os.getenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN")
-        or os.getenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TOKEN")
-        or os.getenv("CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN")
-        or os.getenv("CLYPT_PHASE1_AUDIO_HOST_TOKEN")
+    token = _getenv_with_aliases(
+        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN",
+        _VIBEVOICE_ASR_SERVICE_ENV_ALIASES[
+            "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN"
+        ],
     )
     if not token:
         raise RuntimeError(

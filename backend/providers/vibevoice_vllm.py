@@ -13,18 +13,9 @@ from pathlib import Path
 from typing import Callable
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from .config import _normalize_hotwords_context
 
-_DEFAULT_HOTWORDS = (
-    "I, you, he, she, it, we, they, me, him, her, us, them, "
-    "my, your, his, hers, its, our, their, mine, yours, ours, theirs, "
-    "this, that, these, those, who, whom, whose, which, what, "
-    "and, but, or, nor, for, so, yet, after, although, as, because, before, if, since, "
-    "that, though, unless, until, when, whenever, where, whereas, while, however, therefore, "
-    "moreover, furthermore, also, additionally, meanwhile, consequently, otherwise, nevertheless, "
-    "for example, in addition, on the other hand, similarly, likewise, in contrast, thus, hence, "
-    "indeed, finally, first, second, third"
-)
+logger = logging.getLogger(__name__)
 
 _VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".webm", ".avi", ".mkv"}
 
@@ -101,9 +92,7 @@ class VibeVoiceVLLMProvider:
             )
         self.audio_mode = normalized_audio_mode
         self.audio_gcs_url_resolver = audio_gcs_url_resolver
-        self.hotwords_context = (
-            hotwords_context if hotwords_context is not None else _DEFAULT_HOTWORDS
-        )
+        self.hotwords_context = _normalize_hotwords_context(hotwords_context)
         self.max_new_tokens = max_new_tokens
         self.do_sample = do_sample
         self.temperature = temperature
