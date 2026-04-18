@@ -94,14 +94,14 @@ flowchart TD
   nodes["Semantic nodes + boundaries"]
   prep["node-media-prep"]
   embed["Embeddings"]
-  graph["Knowledge graph"]
+  knowledgeGraph["Knowledge graph"]
   rank["Candidate review + ranking"]
 
   source --> asr
   source --> visual
   asr --> audio
   audio --> dispatch
-  dispatch --> nodes --> prep --> embed --> graph --> rank
+  dispatch --> nodes --> prep --> embed --> knowledgeGraph --> rank
 ```
 
 One important runtime property: the post-ASR audio chain starts as soon as ASR returns. It does **not** wait for the visual chain to finish.
