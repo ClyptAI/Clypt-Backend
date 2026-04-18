@@ -46,11 +46,13 @@ Required by `load_phase26_host_settings()`:
 
 ### 1.3 Modal node-media-prep
 
-Runtime env depends on the Modal secret/app config, but the service expects at minimum:
+Runtime env depends on the Modal secret/app config. The current deployed app is
+`clypt-node-media-prep`, backed by the Modal secret `clypt-node-media-prep`,
+and the service expects at minimum:
 
 - `GCS_BUCKET`
-- `GOOGLE_APPLICATION_CREDENTIALS` or equivalent Modal secret injection
-- bearer token consumed by the public endpoint wrapper
+- `NODE_MEDIA_PREP_AUTH_TOKEN`
+- `GOOGLE_APPLICATION_CREDENTIALS_JSON`
 
 ## 2) Recommended Working Profiles
 
@@ -67,7 +69,7 @@ CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN=<shared-bearer>
 CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S=3600
 CLYPT_PHASE1_VISUAL_SERVICE_HEALTHCHECK_PATH=/health
 
-CLYPT_PHASE24_DISPATCH_URL=http://<phase26-private-ip>:9300
+CLYPT_PHASE24_DISPATCH_URL=http://192.241.241.118:9300
 CLYPT_PHASE24_DISPATCH_AUTH_TOKEN=<shared-bearer>
 CLYPT_PHASE24_DISPATCH_TIMEOUT_S=30
 
@@ -95,7 +97,7 @@ CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1
 CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.6-35B-A3B
 
 CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite
-CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://<modal-endpoint>/tasks/node-media-prep
+CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://rithviks84--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep
 CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 ```
 
@@ -174,7 +176,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 | `CLYPT_PHASE24_LOCAL_MAX_REQUESTS_PER_WORKER` | `0` | `0` means loop forever. |
 | `CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES` | `0` | Fail-fast default. |
 | `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING` | `1` | Fail-fast default. |
-| `CLYPT_PHASE24_LOCAL_WORKER_ID` | `phase24-local-worker` | Worker identity. |
+| `CLYPT_PHASE24_LOCAL_WORKER_ID` | `phase26-worker-1` | Worker identity. |
 | `CLYPT_PHASE24_WORKER_SERVICE_NAME` | `clypt-phase26-worker` | Metadata. |
 
 ### 4.3 Node-media-prep
@@ -183,7 +185,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 | --- | --- | --- |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` | required | Modal endpoint. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` | required | Shared bearer token. |
-| `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S` | `600` | Request timeout. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S` | `1800` | Request timeout. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` | `16` | Modal L4 concurrency cap. |
 
 ### 4.4 Local OpenAI generation
@@ -218,8 +220,8 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 | `GOOGLE_APPLICATION_CREDENTIALS` | deployment-specific | Service account path or equivalent secret injection. |
 | `VERTEX_EMBEDDING_BACKEND` | `vertex` | Used on Phase26 host. |
 | `VERTEX_EMBEDDING_MODEL` | `gemini-embedding-2-preview` | Current default. |
-| `CLYPT_SPANNER_INSTANCE` | `clypt-phase14` | Persistence target. |
-| `CLYPT_SPANNER_DATABASE` | `clypt_phase14` | Persistence target. |
+| `CLYPT_SPANNER_INSTANCE` | `clypt-spanner-v3` | Persistence target. |
+| `CLYPT_SPANNER_DATABASE` | `clypt-graph-db-v3` | Persistence target. |
 
 ## 6) Host-Level Naming
 

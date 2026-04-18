@@ -731,3 +731,13 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 - **Fix applied:** Replaced the GPU filter-based scaling with decoder-side `h264_cuvid -resize WxH`, using an aspect-preserving even-sized 480p target computed from `ffprobe`; kept the CPU fallback path at explicit 480p scaling.
 - **Verification evidence:** Reproduced the failing `scale_cuda=-2:480` graph inside the Modal L4 image, then verified that `h264_cuvid -resize 854x480 ... -c:v h264_nvenc` succeeds on the same image and preserves the GPU path. Focused media-prep tests passed after patching.
 - **Follow-up guardrails:** For Modal L4 ffmpeg, prefer decoder-side resize for NVDEC/NVENC clip prep; validate any future GPU filter graph changes inside the actual Modal runtime image before shipping.
+
+## 2026-04-18 - Canonical env baselines drifted from the live working Phase1 / Phase26 / Modal setup
+
+- **Date/Time (UTC):** 2026-04-18 19:45-20:05
+- **Subsystem:** Runtime env baselines and deploy docs
+- **Environment:** Live working Phase1 H200 (`clypt-phase1-h200-nyc2`), Phase26 H200 (`clypt-phase26-h200-nyc2`), and Modal app `clypt-node-media-prep`
+- **Symptom / Error signature:** Checked-in env/docs still showed stale placeholders or stale values after the live topology stabilized, including `CLYPT_PHASE24_DISPATCH_URL=http://<phase26-private-ip>:9300`, placeholder Modal endpoint URLs, `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=600` in `ENV_REFERENCE.md`, and stale Spanner defaults `clypt-phase14` / `clypt_phase14`.
+- **Root cause:** Fresh-host fixes and runtime hotfixes were applied live first, but the canonical env files and docs were not fully resynced afterward.
+- **Fix applied:** Synced [`docs/runtime/known-good-phase1-h200.env`](../docs/runtime/known-good-phase1-h200.env) to the current public Phase26 dispatch URL, synced [`docs/runtime/known-good-phase26-h200.env`](../docs/runtime/known-good-phase26-h200.env) to the current Modal endpoint, corrected [`docs/runtime/ENV_REFERENCE.md`](../docs/runtime/ENV_REFERENCE.md) for the Modal secret shape (`GOOGLE_APPLICATION_CREDENTIALS_JSON`), node-media-prep timeout (`1800`), worker id (`phase26-worker-1`), and active Spanner instance/database, and refreshed the Phase1 / Phase26 / Modal deploy runbooks with the current cross-team/public-networking and Modal app/secret details.
+- **Verification evidence:** Captured the live env surfaces from `/etc/clypt-phase1/phase1.env`, `/etc/clypt/clypt-phase1-runtime.env`, `/etc/clypt-phase26/phase26.env`, and `/etc/clypt/clypt-phase26-runtime.env`; verified Modal metadata with `modal secret list` and `modal app list`; and confirmed the current deployed app name `clypt-node-media-prep` and secret name `clypt-node-media-prep`.

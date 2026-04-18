@@ -35,6 +35,14 @@ At minimum, provide:
 - `NODE_MEDIA_PREP_AUTH_TOKEN`
 - `GOOGLE_APPLICATION_CREDENTIALS_JSON`
 
+Current deployed Modal wiring:
+
+- App name: `clypt-node-media-prep`
+- Secret name: `clypt-node-media-prep`
+- Deployed endpoint:
+  `https://rithviks84--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- Working bucket value: `GCS_BUCKET=clypt-storage-v3`
+
 The deployed ASGI app exposes:
 
 - `GET /health`
@@ -47,7 +55,7 @@ the host deploy credential standard.
 
 ## 4) Smoke Checks
 
-The app already verifies codec availability at request time. In addition, validate:
+The app already verifies codec availability at startup. In addition, validate:
 
 ```bash
 modal app list

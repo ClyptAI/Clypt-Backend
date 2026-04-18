@@ -48,8 +48,14 @@ Required values to set:
 
 - service account key path
 - bearer tokens
-- Phase26 private URL
+- Phase26 dispatch URL
 - GCS / Spanner project-specific values
+
+Topology note:
+
+- The current working split runs across two DigitalOcean teams, so Phase1 talks
+  to Phase26 over the public endpoint.
+- The live known-good Phase26 dispatch URL is `http://192.241.241.118:9300`.
 
 Credential requirement:
 

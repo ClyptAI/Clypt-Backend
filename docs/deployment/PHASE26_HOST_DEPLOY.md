@@ -39,6 +39,10 @@ Required values to set:
 - Modal endpoint URL
 - GCS / Spanner project-specific values
 
+Current known-good Modal endpoint:
+
+- `https://rithviks84--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+
 Credential requirement:
 
 - `GOOGLE_APPLICATION_CREDENTIALS` must point to a real service-account JSON key with `type=service_account` and a private key.
