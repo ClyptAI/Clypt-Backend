@@ -1,7 +1,7 @@
 # RUN REFERENCE
 
 **Status:** Active  
-**Last updated:** 2026-04-17
+**Last updated:** 2026-04-18
 
 This document tracks reference runs and migration validation targets.
 
@@ -40,6 +40,25 @@ For every new benchmark, record:
 - Phase 2-4 total wall time
 - node-media-prep wall time on Modal
 - end-to-end total wall time
+
+## 2A) Current Two-H200 + Modal Benchmarks
+
+The entries below were gathered on the current split runtime:
+
+- Phase1 H200:
+  - `clypt-phase1-h200-nyc2`
+  - local VibeVoice service + local visual service
+- Phase26 H200:
+  - `clypt-phase26-h200-nyc2`
+  - local SQLite queue + local worker + SGLang Qwen
+- Modal:
+  - L4 `node-media-prep`
+
+| Context | Video | Nodes | Phase 1 effective | node-media-prep | Multimodal embeddings | Phase 2-4 | Effective total | Notes |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Current fast-path benchmark | `mrbeastflagrant.mp4` | 11 | 34.1s | 29.3s | 13.6s | 53.8s | 87.9s | Successful run after `us-central1` Vertex pin + GPU-compatible 480p media-prep path |
+| Mid-sized reference | `joeroganflagrant.mp4` | 17 | 79.0s | 73.6s | 11.4s | 99.5s | 178.5s | Healthy run; node-media-prep dominated overall Phase 2 cost |
+| Heavy reference | `verticalagentsyc.mp4` | 20 | 126.3s | 267.6s | 14.1s | 370.5s | 496.9s | Healthy run; very heavy clip spans and long Phase 4 windows |
 
 ## 3) Migration Acceptance Targets
 

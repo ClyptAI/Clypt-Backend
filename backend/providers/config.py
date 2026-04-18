@@ -230,8 +230,8 @@ class StorageSettings:
 @dataclass(slots=True)
 class SpannerSettings:
     project: str = ""
-    instance: str = "clypt-phase14"
-    database: str = "clypt_phase14"
+    instance: str = "clypt-spanner-v3"
+    database: str = "clypt-graph-db-v3"
     ddl_operation_timeout_s: float = 600.0
 
     @property
@@ -249,7 +249,7 @@ class SpannerSettings:
 
 @dataclass(slots=True)
 class Phase24WorkerSettings:
-    service_name: str = "clypt-phase24-worker"
+    service_name: str = "clypt-phase26-worker"
     environment: str = "dev"
     query_version: str = "v1"
     concurrency: int = 1
@@ -348,8 +348,8 @@ class NodeMediaPrepSettings:
 
     service_url: str
     auth_token: str
-    timeout_s: float = 3600.0
-    max_concurrency: int = 8
+    timeout_s: float = 1800.0
+    max_concurrency: int = 16
 
 
 @dataclass(slots=True)
@@ -522,7 +522,7 @@ def load_provider_settings(
     node_media_prep = NodeMediaPrepSettings(
         service_url=(node_media_prep_url or "").rstrip("/"),
         auth_token=node_media_prep_token or "",
-        timeout_s=float(_read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S") or "3600"),
+        timeout_s=float(_read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S") or "1800"),
         max_concurrency=max(
             1,
             _read_int_env("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY", default=16),
@@ -723,15 +723,15 @@ def load_provider_settings(
         phase26_dispatch_service=phase26_dispatch_service,
         spanner=SpannerSettings(
             project=_read_env("CLYPT_SPANNER_PROJECT") or vertex_project,
-            instance=_read_env("CLYPT_SPANNER_INSTANCE") or "clypt-phase14",
-            database=_read_env("CLYPT_SPANNER_DATABASE") or "clypt_phase14",
+            instance=_read_env("CLYPT_SPANNER_INSTANCE") or "clypt-spanner-v3",
+            database=_read_env("CLYPT_SPANNER_DATABASE") or "clypt-graph-db-v3",
             ddl_operation_timeout_s=float(
                 _read_env("CLYPT_SPANNER_DDL_OPERATION_TIMEOUT_S") or "600"
             ),
         ),
         phase24_worker=Phase24WorkerSettings(
             service_name=_read_env("CLYPT_PHASE24_WORKER_SERVICE_NAME")
-            or "clypt-phase24-worker",
+            or "clypt-phase26-worker",
             environment=_read_env("CLYPT_PHASE24_ENVIRONMENT") or "dev",
             query_version=_read_env("CLYPT_PHASE24_QUERY_VERSION") or "v1",
             concurrency=int(_read_env("CLYPT_PHASE24_CONCURRENCY") or "1"),

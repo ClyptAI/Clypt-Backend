@@ -9,8 +9,8 @@ def _configured_spanner() -> SimpleNamespace:
     """SimpleNamespace mirroring SpannerSettings with is_configured=True."""
     return SimpleNamespace(
         project="test-project",
-        instance="clypt-phase14",
-        database="clypt_phase14",
+        instance="clypt-spanner-v3",
+        database="clypt-graph-db-v3",
         is_configured=True,
     )
 
@@ -44,8 +44,8 @@ def test_build_phase14_repository_returns_none_when_not_configured() -> None:
 
     unconfigured = SimpleNamespace(
         project="",
-        instance="clypt-phase14",
-        database="clypt_phase14",
+        instance="clypt-spanner-v3",
+        database="clypt-graph-db-v3",
         is_configured=False,
     )
 

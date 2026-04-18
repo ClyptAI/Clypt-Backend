@@ -108,7 +108,7 @@ def test_phase24_worker_service_processes_task_and_updates_repository():
     service = Phase24WorkerService(
         repository=repository,
         runner=runner,
-        service_name="clypt-phase24-worker",
+        service_name="clypt-phase26-worker",
         environment="staging",
         default_query_version="graph-v1",
         max_attempts=3,
@@ -144,7 +144,7 @@ def test_phase24_worker_service_short_circuits_completed_jobs():
         status="succeeded",
         attempt_count=1,
         last_error=None,
-        worker_name="clypt-phase24-worker",
+        worker_name="clypt-phase26-worker",
         task_name="task-001",
         locked_at=None,
         updated_at=datetime(2026, 4, 8, 12, 0, tzinfo=UTC),
@@ -155,7 +155,7 @@ def test_phase24_worker_service_short_circuits_completed_jobs():
     service = Phase24WorkerService(
         repository=repository,
         runner=runner,
-        service_name="clypt-phase24-worker",
+        service_name="clypt-phase26-worker",
         environment="staging",
         default_query_version="graph-v1",
         max_attempts=3,
@@ -181,7 +181,7 @@ def test_phase24_worker_service_short_circuits_running_jobs():
         status="running",
         attempt_count=1,
         last_error=None,
-        worker_name="clypt-phase24-worker",
+        worker_name="clypt-phase26-worker",
         task_name="task-001",
         locked_at=None,
         updated_at=datetime(2026, 4, 8, 12, 0, tzinfo=UTC),
@@ -192,7 +192,7 @@ def test_phase24_worker_service_short_circuits_running_jobs():
     service = Phase24WorkerService(
         repository=repository,
         runner=runner,
-        service_name="clypt-phase24-worker",
+        service_name="clypt-phase26-worker",
         environment="staging",
         default_query_version="graph-v1",
         max_attempts=3,
@@ -219,7 +219,7 @@ def test_phase24_worker_app_marks_non_terminal_failures_as_queued():
     service = Phase24WorkerService(
         repository=repository,
         runner=_FailingRunner(),
-        service_name="clypt-phase24-worker",
+        service_name="clypt-phase26-worker",
         environment="staging",
         default_query_version="graph-v1",
         max_attempts=3,
@@ -249,7 +249,7 @@ def test_phase24_worker_app_marks_non_transient_failures_terminal():
     service = Phase24WorkerService(
         repository=repository,
         runner=_FailingRunner(),
-        service_name="clypt-phase24-worker",
+        service_name="clypt-phase26-worker",
         environment="staging",
         default_query_version="graph-v1",
         max_attempts=3,
@@ -276,7 +276,7 @@ def test_phase24_worker_app_stops_when_attempt_exceeds_max_attempts():
     service = Phase24WorkerService(
         repository=repository,
         runner=runner,
-        service_name="clypt-phase24-worker",
+        service_name="clypt-phase26-worker",
         environment="staging",
         default_query_version="graph-v1",
         max_attempts=2,
@@ -319,7 +319,7 @@ def test_phase24_worker_app_loads_phase1_outputs_from_gcs_pointer(tmp_path):
     service = Phase24WorkerService(
         repository=repository,
         runner=runner,
-        service_name="clypt-phase24-worker",
+        service_name="clypt-phase26-worker",
         environment="staging",
         default_query_version="graph-v1",
         max_attempts=3,
@@ -367,7 +367,7 @@ def test_phase24_worker_app_failfast_on_p95_latency_threshold():
     service = Phase24WorkerService(
         repository=repository,
         runner=_HighLatencyRunner(),
-        service_name="clypt-phase24-worker",
+        service_name="clypt-phase26-worker",
         environment="staging",
         default_query_version="graph-v1",
         max_attempts=3,
@@ -413,7 +413,7 @@ def test_phase24_worker_app_failfast_on_in_run_preemption_threshold(tmp_path):
     service = Phase24WorkerService(
         repository=repository,
         runner=_RunnerWithEvent(),
-        service_name="clypt-phase24-worker",
+        service_name="clypt-phase26-worker",
         environment="staging",
         default_query_version="graph-v1",
         max_attempts=3,
@@ -472,7 +472,7 @@ def test_build_default_phase24_worker_service_uses_local_model_for_flash(monkeyp
         phase24_worker=SimpleNamespace(
             query_version="v1",
             debug_snapshots=False,
-            service_name="clypt-phase24-worker",
+            service_name="clypt-phase26-worker",
             environment="test",
             max_attempts=3,
             fail_fast_p95_latency_ms=0.0,

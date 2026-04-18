@@ -46,6 +46,11 @@ def test_load_provider_settings_uses_env_and_gcloud_fallback(
     assert settings.storage.gcs_bucket == "bucket-a"
     assert settings.vertex.generation_model
     assert settings.vertex.embedding_model
+    assert settings.spanner.instance == "clypt-spanner-v3"
+    assert settings.spanner.database == "clypt-graph-db-v3"
+    assert settings.phase24_worker.service_name == "clypt-phase26-worker"
+    assert settings.node_media_prep.timeout_s == 1800.0
+    assert settings.node_media_prep.max_concurrency == 16
     assert settings.phase1_runtime.run_yamnet_on_gpu is False
 
 

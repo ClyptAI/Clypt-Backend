@@ -597,7 +597,7 @@ def test_spanner_phase14_repository_round_trips_core_records() -> None:
         status="running",
         attempt_count=1,
         last_error=None,
-        worker_name="clypt-phase24-worker",
+        worker_name="clypt-phase26-worker",
         task_name="projects/clypt-v3/locations/us-central1/queues/clypt-phase24/tasks/phase24-run-001",
         locked_at=datetime(2026, 4, 8, 18, 0, tzinfo=UTC),
         updated_at=datetime(2026, 4, 8, 18, 0, tzinfo=UTC),
