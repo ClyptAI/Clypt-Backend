@@ -116,7 +116,7 @@ The H100 backup overlay must not change semantic visual behavior.
   - `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`
 - generation remains local OpenAI-compatible to SGLang
 - embeddings remain Vertex-backed
-- `VERTEX_EMBEDDING_LOCATION` now defaults to `global` for `gemini-embedding-2-preview`; Google documents global support for Gemini Embedding 2 and recommends global to improve availability and reduce `429 RESOURCE_EXHAUSTED` versus a single regional endpoint
+- `VERTEX_EMBEDDING_LOCATION` stays pinned to `us-central1` for `gemini-embedding-2-preview`; the live Clypt project currently receives `404 NOT_FOUND` on `global` even though the locations doc lists global support
 
 ## 6) SGLang Settings
 

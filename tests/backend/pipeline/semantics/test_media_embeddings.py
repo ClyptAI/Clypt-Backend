@@ -172,8 +172,15 @@ def test_extract_node_clip_uses_480p_gpu_scale(
 
     commands: list[list[str]] = []
 
-    def fake_run(cmd, check, stdout, stderr):
+    def fake_run(cmd, check, stdout=None, stderr=None, capture_output=False, text=False):
         commands.append(list(cmd))
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout='{"streams":[{"width":1280,"height":720}]}',
+                stderr="",
+            )
         output_path = Path(cmd[-1])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"clip")
@@ -190,10 +197,10 @@ def test_extract_node_clip_uses_480p_gpu_scale(
     )
 
     assert output_path.exists()
-    assert len(commands) == 1
-    cmd = commands[0]
-    vf_index = cmd.index("-vf")
-    assert cmd[vf_index + 1] == "scale_cuda=-2:480"
+    assert len(commands) == 2
+    cmd = commands[1]
+    resize_index = cmd.index("-resize")
+    assert cmd[resize_index + 1] == "854x480"
 
 
 def test_extract_node_clip_uses_480p_cpu_scale(
@@ -203,8 +210,15 @@ def test_extract_node_clip_uses_480p_cpu_scale(
 
     commands: list[list[str]] = []
 
-    def fake_run(cmd, check, stdout, stderr):
+    def fake_run(cmd, check, stdout=None, stderr=None, capture_output=False, text=False):
         commands.append(list(cmd))
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout='{"streams":[{"width":1280,"height":720}]}',
+                stderr="",
+            )
         output_path = Path(cmd[-1])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"clip")
@@ -221,7 +235,7 @@ def test_extract_node_clip_uses_480p_cpu_scale(
     )
 
     assert output_path.exists()
-    assert len(commands) == 1
-    cmd = commands[0]
+    assert len(commands) == 2
+    cmd = commands[1]
     vf_index = cmd.index("-vf")
-    assert cmd[vf_index + 1] == "scale=-2:480"
+    assert cmd[vf_index + 1] == "scale=854:480"

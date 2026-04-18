@@ -206,7 +206,7 @@ class VertexSettings:
     embedding_backend: str = "vertex"
     gemini_api_key: str | None = None
     generation_location: str = "global"
-    embedding_location: str = "global"
+    embedding_location: str = "us-central1"
     generation_model: str = "Qwen/Qwen3.6-35B-A3B"
     embedding_model: str = "gemini-embedding-2-preview"
     flash_model: str = "Qwen/Qwen3.6-35B-A3B"
@@ -621,7 +621,7 @@ def load_provider_settings(
             generation_location=_read_env("GENAI_GENERATION_LOCATION")
             or _read_env("GOOGLE_CLOUD_LOCATION")
             or "global",
-            embedding_location=_read_env("VERTEX_EMBEDDING_LOCATION") or "global",
+            embedding_location=_read_env("VERTEX_EMBEDDING_LOCATION") or "us-central1",
             generation_model=_read_env("GENAI_GENERATION_MODEL") or "Qwen/Qwen3.6-35B-A3B",
             embedding_model=_read_env("VERTEX_EMBEDDING_MODEL") or "gemini-embedding-2-preview",
             flash_model=_read_env("GENAI_FLASH_MODEL") or "Qwen/Qwen3.6-35B-A3B",

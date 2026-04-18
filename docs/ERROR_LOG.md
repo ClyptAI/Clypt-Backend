@@ -706,6 +706,28 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 - **Environment:** Two-H200 + Modal topology, live replay of `mrbeastflagrant.mp4`, Vertex model `gemini-embedding-2-preview`
 - **Symptom / Error signature:** One replay stalled in post-media-prep multimodal embeddings with repeated transient `429 RESOURCE_EXHAUSTED` and `500 INTERNAL` responses from Vertex while semantic text embeddings on the same run succeeded.
 - **Root cause:** Clypt still defaulted `VERTEX_EMBEDDING_LOCATION` to `us-central1` even though Google now documents `gemini-embedding-2-preview` on the Vertex global endpoint and explicitly recommends the global endpoint to improve availability and reduce `429 RESOURCE_EXHAUSTED` relative to a single regional endpoint.
-- **Fix applied:** Changed the repo default and documented baselines for `VERTEX_EMBEDDING_LOCATION` from `us-central1` to `global`, updated config/test expectations, and flipped the live Phase26 runtime env to `global` before restarting the worker.
-- **Verification evidence:** Official Vertex docs list `Gemini Embedding 2 (gemini-embedding-2-preview)` in the Global endpoint table and note that global can reduce `429` errors; focused provider/runtime tests passed after the patch; the next live replay completed Phase 2-4 successfully with no `429 RESOURCE_EXHAUSTED` responses during multimodal embeddings.
-- **Follow-up guardrails:** Keep `VERTEX_EMBEDDING_LOCATION=global` unless residency constraints require a specific region; if regional routing is reintroduced, expect higher shared-capacity sensitivity and re-benchmark multimodal embedding stability.
+- **Fix applied:** Initially changed the repo default and documented baselines for `VERTEX_EMBEDDING_LOCATION` from `us-central1` to `global`, updated config/test expectations, and flipped the live Phase26 runtime env to `global` before restarting the worker.
+- **Verification evidence:** Official Vertex docs list `Gemini Embedding 2 (gemini-embedding-2-preview)` in the Global endpoint table and note that global can reduce `429` errors; focused provider/runtime tests passed after the patch; one live replay completed Phase 2-4 successfully with no `429 RESOURCE_EXHAUSTED` responses during multimodal embeddings.
+- **Follow-up guardrails:** Treat docs-only global support for preview embedding models as insufficient. Before changing embedding location defaults, validate direct live requests with the production project/service account.
+
+## 2026-04-18 - `gemini-embedding-2-preview` global endpoint returned `404` in the live Clypt project
+
+- **Date/Time (UTC):** 2026-04-18 01:57-02:20
+- **Subsystem:** Phase26 Vertex embeddings (`backend/providers/config.py`, `backend/providers/vertex.py`)
+- **Environment:** Two-H200 + Modal topology, Phase26 host `clypt-phase26-h200-nyc2`, live replay `job_a92796ffee4246a49d0a61af4dd36041`
+- **Symptom / Error signature:** Phase 1 succeeded and Modal node-media-prep completed, then Phase 2 failed immediately with `404 NOT_FOUND ... Publisher Model projects/clypt-v3/locations/global/publishers/google/models/gemini-embedding-2-preview was not found or your project does not have access to it`.
+- **Root cause:** Although Google’s locations doc lists `gemini-embedding-2-preview` under the global endpoint table, direct live requests from the Clypt project/service account reproduced `404` for both `embed_texts()` and `embed_media_uris()` on `global`, while the same calls succeeded on `us-central1`.
+- **Fix applied:** Reverted the repo defaults, env baselines, and live Phase26 runtime env back to `VERTEX_EMBEDDING_LOCATION=us-central1`.
+- **Verification evidence:** Direct host-side probes returned `global TEXT_ERR 404`, `global MEDIA_ERR 404`, `us-central1 TEXT_OK`, and `us-central1 MEDIA_OK`; focused provider/runtime tests passed after reverting the config defaults.
+- **Follow-up guardrails:** Keep `gemini-embedding-2-preview` pinned to `us-central1` until Google’s live control plane actually accepts the project on `global`; do not trust the locations table alone for preview model rollout.
+
+## 2026-04-18 - 480p node-media-prep regression forced CPU fallback on Modal
+
+- **Date/Time (UTC):** 2026-04-18 01:56-02:20
+- **Subsystem:** Modal node-media-prep ffmpeg pipeline (`backend/pipeline/semantics/media_embeddings.py`)
+- **Environment:** Modal L4 `clypt-node-media-prep`, replay `job_a92796ffee4246a49d0a61af4dd36041`
+- **Symptom / Error signature:** After changing node-media-prep clips from source-resolution to 480p, Modal time regressed from ~30.5s to ~48.0s and logs showed repeated `[phase2] GPU ffmpeg unavailable ... falling back to CPU encoder.` for every clip.
+- **Root cause:** The new GPU filter graph `-vf scale_cuda=-2:480` broke ffmpeg format negotiation on the Modal L4 image (`Impossible to convert between the formats supported by the filter 'graph 0 input from stream 0:0' and the filter 'auto_scale_0'`), so every clip silently dropped to the CPU fallback path.
+- **Fix applied:** Replaced the GPU filter-based scaling with decoder-side `h264_cuvid -resize WxH`, using an aspect-preserving even-sized 480p target computed from `ffprobe`; kept the CPU fallback path at explicit 480p scaling.
+- **Verification evidence:** Reproduced the failing `scale_cuda=-2:480` graph inside the Modal L4 image, then verified that `h264_cuvid -resize 854x480 ... -c:v h264_nvenc` succeeds on the same image and preserves the GPU path. Focused media-prep tests passed after patching.
+- **Follow-up guardrails:** For Modal L4 ffmpeg, prefer decoder-side resize for NVDEC/NVENC clip prep; validate any future GPU filter graph changes inside the actual Modal runtime image before shipping.

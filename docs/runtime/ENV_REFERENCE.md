@@ -213,7 +213,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 | --- | --- | --- |
 | `GOOGLE_CLOUD_PROJECT` | required | Required on both hosts. |
 | `GOOGLE_CLOUD_LOCATION` | `global` | Shared default. |
-| `VERTEX_EMBEDDING_LOCATION` | `global` | Phase26 default for `gemini-embedding-2-preview`; global is supported and helps reduce regional `429 RESOURCE_EXHAUSTED` spikes. |
+| `VERTEX_EMBEDDING_LOCATION` | `us-central1` | Active Phase26 baseline. `global` currently returns `404 NOT_FOUND` for `gemini-embedding-2-preview` in the live Clypt project despite the locations doc listing global support. |
 | `GCS_BUCKET` | required | Required on both hosts and Modal. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | deployment-specific | Service account path or equivalent secret injection. |
 | `VERTEX_EMBEDDING_BACKEND` | `vertex` | Used on Phase26 host. |

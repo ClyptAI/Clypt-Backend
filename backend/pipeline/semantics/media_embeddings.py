@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 
 from ..contracts import SemanticGraphNode
 
@@ -14,6 +16,44 @@ _NODE_MEDIA_TARGET_HEIGHT = 480
 
 def _format_seconds(value_ms: int) -> str:
     return f"{max(value_ms, 0) / 1000.0:.3f}"
+
+
+@lru_cache(maxsize=32)
+def _probe_video_dimensions(*, video_path: str) -> tuple[int, int]:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout or "{}")
+    stream = (payload.get("streams") or [{}])[0]
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+    if width < 1 or height < 1:
+        raise RuntimeError(f"Could not probe video dimensions for {video_path}.")
+    return width, height
+
+
+def _nearest_even(value: float) -> int:
+    return max(2, int(round(value / 2.0)) * 2)
+
+
+def _target_dimensions(*, source_video_path: Path) -> tuple[int, int]:
+    source_width, source_height = _probe_video_dimensions(video_path=str(source_video_path))
+    if source_height <= _NODE_MEDIA_TARGET_HEIGHT:
+        return _nearest_even(source_width), _nearest_even(source_height)
+    scale = _NODE_MEDIA_TARGET_HEIGHT / float(source_height)
+    return _nearest_even(source_width * scale), _NODE_MEDIA_TARGET_HEIGHT
 
 
 def _read_max_concurrency(*, node_count: int, max_concurrent: int | None) -> int:
@@ -44,6 +84,7 @@ def extract_node_clip(
 ) -> Path:
     duration_ms = max(end_ms - start_ms, 100)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    target_width, target_height = _target_dimensions(source_video_path=source_video_path)
     ffmpeg_device = (os.getenv("CLYPT_PHASE24_FFMPEG_DEVICE") or "auto").strip().lower()
     if ffmpeg_device not in {"auto", "gpu", "cpu"}:
         raise ValueError(
@@ -56,7 +97,10 @@ def extract_node_clip(
     # Modal L4 is the current node-media-prep baseline, so the default worker
     # cap is 16 concurrent clip jobs unless an env override lowers it.
     # Downscale embedding clips to 480p so Vertex multimodal embeddings do not
-    # pay 1080p prep/upload cost.
+    # pay 1080p prep/upload cost. Use decoder-side resize on the GPU path:
+    # Modal L4 accepted h264_cuvid `-resize WxH`, while the earlier
+    # `scale_cuda=-2:480` graph broke format negotiation and forced CPU
+    # fallback for every clip.
     gpu_cmd = [
         "ffmpeg",
         "-y",
@@ -64,6 +108,8 @@ def extract_node_clip(
         "cuda",
         "-c:v",
         "h264_cuvid",
+        "-resize",
+        f"{target_width}x{target_height}",
         "-i",
         str(source_video_path),
         "-ss",
@@ -72,8 +118,6 @@ def extract_node_clip(
         _format_seconds(duration_ms),
         "-c:v",
         "h264_nvenc",
-        "-vf",
-        f"scale_cuda=-2:{_NODE_MEDIA_TARGET_HEIGHT}",
         "-preset",
         "p4",
         "-cq",
@@ -98,7 +142,7 @@ def extract_node_clip(
         "-c:v",
         "libx264",
         "-vf",
-        f"scale=-2:{_NODE_MEDIA_TARGET_HEIGHT}",
+        f"scale={target_width}:{target_height}",
         "-preset",
         "veryfast",
         "-crf",

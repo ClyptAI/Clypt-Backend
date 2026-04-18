@@ -42,7 +42,7 @@ def test_load_provider_settings_uses_env_and_gcloud_fallback(
     assert settings.vibevoice.repetition_penalty == 1.03
     assert settings.vertex.project == "clypt-v3"
     assert settings.vertex.generation_location == "global"
-    assert settings.vertex.embedding_location == "global"
+    assert settings.vertex.embedding_location == "us-central1"
     assert settings.storage.gcs_bucket == "bucket-a"
     assert settings.vertex.generation_model
     assert settings.vertex.embedding_model
@@ -290,7 +290,7 @@ def test_load_provider_settings_reads_untracked_env_local(
                 "VIBEVOICE_REPETITION_PENALTY=1.03",
                 "GOOGLE_CLOUD_PROJECT=clypt-v3",
                 "GENAI_GENERATION_LOCATION=global",
-                "VERTEX_EMBEDDING_LOCATION=global",
+                "VERTEX_EMBEDDING_LOCATION=us-central1",
                 "GCS_BUCKET=clypt-storage-v3",
             ]
         ),
@@ -308,7 +308,7 @@ def test_load_provider_settings_reads_untracked_env_local(
     assert settings.vibevoice.repetition_penalty == 1.03
     assert settings.vertex.project == "clypt-v3"
     assert settings.vertex.generation_location == "global"
-    assert settings.vertex.embedding_location == "global"
+    assert settings.vertex.embedding_location == "us-central1"
     assert settings.storage.gcs_bucket == "clypt-storage-v3"
     assert settings.phase1_runtime.run_yamnet_on_gpu is False
 

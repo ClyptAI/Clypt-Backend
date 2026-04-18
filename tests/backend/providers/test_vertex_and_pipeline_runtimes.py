@@ -98,7 +98,7 @@ def test_vertex_clients_generate_json_and_embed_texts():
     settings = VertexSettings(
         project="clypt-v3",
         generation_location="global",
-        embedding_location="global",
+        embedding_location="us-central1",
         gemini_api_key="test-key",
     )
 
@@ -202,7 +202,7 @@ def test_vertex_clients_retry_transient_generate_and_embed_errors(monkeypatch: p
     settings = VertexSettings(
         project="clypt-v3",
         generation_location="global",
-        embedding_location="global",
+        embedding_location="us-central1",
         generation_api_max_retries=4,
         generation_api_initial_backoff_s=0.01,
         generation_api_max_backoff_s=0.02,
