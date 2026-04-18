@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 from ..contracts import SpeechEmotionEvent, SpeechEmotionTimeline
+from .payload_utils import payload_to_dict
 
-from ..contracts import SpeechEmotionTimeline
 
-
-def build_speech_emotion_timeline(*, emotion2vec_payload: dict) -> SpeechEmotionTimeline:
+def build_speech_emotion_timeline(*, emotion2vec_payload: Any) -> SpeechEmotionTimeline:
     """Convert turn-level emotion2vec+ outputs into the V3.1 artifact."""
-    raw_segments = emotion2vec_payload.get("segments") or emotion2vec_payload.get("events") or []
+    payload = payload_to_dict(emotion2vec_payload)
+    raw_segments = payload.get("segments") or payload.get("events") or []
     events: list[SpeechEmotionEvent] = []
     for raw_segment in raw_segments:
         labels = raw_segment.get("labels") or []

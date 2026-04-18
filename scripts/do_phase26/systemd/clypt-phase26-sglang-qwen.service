@@ -6,15 +6,15 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/clypt-phase26/repo
+EnvironmentFile=/etc/clypt-phase26/phase26.env
 Environment=HF_HOME=/opt/clypt-phase26/hf-cache
 Environment=TOKENIZERS_PARALLELISM=false
 Environment=HF_HUB_OFFLINE=1
 Environment=SGLANG_ENABLE_SPEC_V2=1
-EnvironmentFile=/etc/clypt-phase26/phase26.env
 Restart=always
 RestartSec=5
 TimeoutStartSec=3600
-ExecStart=/opt/clypt-phase26/venvs/sglang/bin/python -m sglang.launch_server --model-path Qwen/Qwen3.6-35B-A3B --host 127.0.0.1 --port 8001 --reasoning-parser qwen3 --grammar-backend xgrammar --schedule-policy ${SG_SCHEDULE_POLICY} --chunked-prefill-size ${SG_CHUNKED_PREFILL_SIZE} --mem-fraction-static ${SG_MEM_FRACTION_STATIC} --context-length ${SG_CONTEXT_LENGTH} --kv-cache-dtype fp8_e4m3 --mamba-scheduler-strategy extra_buffer --speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 ${SG_EXTRA_ARGS}
+ExecStart=/bin/bash -lc 'exec /opt/clypt-phase26/venvs/sglang/bin/python -m sglang.launch_server --model-path Qwen/Qwen3.6-35B-A3B --host 127.0.0.1 --port 8001 --reasoning-parser qwen3 --grammar-backend xgrammar --schedule-policy "${SG_SCHEDULE_POLICY}" --chunked-prefill-size "${SG_CHUNKED_PREFILL_SIZE}" --mem-fraction-static "${SG_MEM_FRACTION_STATIC}" --context-length "${SG_CONTEXT_LENGTH}" --kv-cache-dtype fp8_e4m3 --mamba-scheduler-strategy extra_buffer --speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 ${SG_EXTRA_ARGS:-}'
 
 [Install]
 WantedBy=multi-user.target

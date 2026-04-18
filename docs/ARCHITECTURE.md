@@ -44,7 +44,7 @@ flowchart TD
 | --- | --- |
 | **Phase1 host (H200 default)** | Phase 1 runner, persistent local VibeVoice service, co-located VibeVoice vLLM, persistent local visual service, RF-DETR + ByteTrack settings preserved, in-process NFA + emotion2vec+ + YAMNet. |
 | **Phase26 host (H200)** | `POST /tasks/phase26-enqueue`, local SQLite queue, current Phase 2-4 worker/runtime, SGLang Qwen on `:8001`, future Phase 5-6 orchestration. |
-| **Modal L4** | `POST /tasks/node-media-prep`, bearer-auth protected, `min_containers=1`, ffmpeg NVDEC/NVENC smoke-checked at startup. Future `render-video` endpoint will live here too. |
+| **Modal L4** | `POST /tasks/node-media-prep`, bearer-auth protected, `min_containers=1`, ffmpeg NVDEC/NVENC smoke-checked at startup, and 480p clip generation for Vertex multimodal embeddings. Future `render-video` endpoint will live here too. |
 
 ### Design rationale
 

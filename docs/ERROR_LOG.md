@@ -7,6 +7,72 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-04-18 - Phase1 vLLM sidecar booted the wrong model because systemd swallowed `MODEL_PATH`
+
+- **Date/Time (UTC):** 2026-04-18 00:40 UTC
+- **Subsystem:** Phase1 VibeVoice vLLM sidecar (`scripts/do_phase1/systemd/clypt-phase1-vllm-vibevoice.service`, `scripts/do_phase1/deploy_phase1_services.sh`)
+- **Environment:** Fresh Rithvik-team H200 droplet (`clypt-phase1-h200-nyc2`) during first bring-up of the new Phase1 host topology
+- **Symptom / Error signature:** All top-level Phase1 services were `active`, and `GET /health` on the local VibeVoice wrapper returned `{"status":"ok","vibevoice_asr_ready":true}`. But `systemctl status clypt-phase1-vllm-vibevoice` showed `MODEL_PATH=` in the final docker command, `generate_tokenizer_files.py: error: argument --output/-o: expected one argument`, and the underlying vLLM server actually booted `Qwen/Qwen3-0.6B` instead of `microsoft/VibeVoice-ASR`.
+- **Root cause:** The systemd unit embedded a long `/bin/bash -lc` docker one-liner that relied on nested `$$` escaping for the `snapshot_download(...)` command substitution. On the fresh droplet, systemd consumed the escape sequence in a way that left bash with `MODEL_PATH=` and an empty positional value for `vllm serve`, so vLLM silently fell back to its default demo model while the outer wrapper still passed health.
+- **Fix applied:** Replaced the fragile inline docker command with a dedicated helper script, [`scripts/do_phase1/run_vllm_vibevoice_container.sh`](../scripts/do_phase1/run_vllm_vibevoice_container.sh), and changed the systemd unit to launch that script directly. The helper resolves the VibeVoice snapshot path in plain bash, hard-fails if it is empty, then starts vLLM with the explicit snapshot path. Also updated [`scripts/do_phase1/deploy_phase1_services.sh`](../scripts/do_phase1/deploy_phase1_services.sh) to prewarm the `microsoft/VibeVoice-ASR` cache into `/opt/clypt-phase1/hf-cache` before the unit starts, reducing fresh-host startup variance.
+- **Verification evidence:** On the live H200, the pre-fix unit consistently showed `MODEL_PATH=` and container logs proved vLLM loaded `Qwen/Qwen3-0.6B`. After installing the helper-script launch path and restarting the sidecar, `GET http://127.0.0.1:8000/v1/models` returned the VibeVoice-served model instead of the Qwen stub, and the local wrapper health remained green.
+- **Follow-up guardrails:** Do not embed multi-layered shell interpolation directly inside systemd `ExecStart` when model selection is load-bearing. Keep the helper script as the single authoritative launch surface, and always verify the inner sidecar with `/v1/models` on fresh hosts instead of trusting only the wrapper `/health`.
+
+## 2026-04-18 - Two-H200 fresh-host run failed because copied ADC creds could not sign and Phase1 deploy no longer installed TensorRT
+
+- **Date/Time (UTC):** 2026-04-18 00:49 UTC
+- **Subsystem:** Phase1/Phase26 host credential setup and Phase1 visual deploy (`scripts/do_phase1/deploy_phase1_services.sh`, `scripts/do_phase26/deploy_phase26_services.sh`)
+- **Environment:** First full Phase 1-4 test attempt on the new Rithvik-team Phase1 H200 plus Ming-team Phase26 H200
+- **Symptom / Error signature:** The Phase1 worker resolved the test-bank mapping and started sidecars, then failed with two parallel errors: `failed to sign canonical audio_gcs_uri=... you need a private key to sign credentials ... <class 'google.oauth2.credentials.Credentials'> just contains a token` from `/tasks/vibevoice-asr`, and `visual extraction failed: tensorrt Python package is required for TensorRT inference. Install the NVIDIA TensorRT runtime.` from `/tasks/visual-extract`.
+- **Root cause:** Two fresh-host regressions. First, both H200s were provisioned with copied `application_default_credentials.json` files (`type=authorized_user`) instead of signing-capable service-account keys, so any code path that needs V4 signed URLs failed mid-run. Second, the new `phase1` deploy script had lost the older TensorRT dependency installation that the visual path requires when `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`.
+- **Fix applied:** Restored fail-fast credential validation in the shared deploy preamble: both host deploy scripts now reject `GOOGLE_APPLICATION_CREDENTIALS` files unless they are real `service_account` JSON keys with a private key. Restored Phase1 TensorRT provisioning by teaching [`scripts/do_phase1/deploy_phase1_services.sh`](../scripts/do_phase1/deploy_phase1_services.sh) to install `libnvinfer-bin` plus `tensorrt-cu13` and verify both `trtexec` and the Python `tensorrt` module whenever the visual backend is TensorRT. Updated Phase1/Phase26/Modal deploy docs to explicitly ban copying `authorized_user` ADC onto hosts.
+- **Verification evidence:** The failing run logs on `clypt-phase1-h200-nyc2` showed both errors deterministically. The host credential files were confirmed to be `authorized_user` JSONs containing only a refresh token, and `pip show tensorrt*` plus `command -v trtexec` confirmed the TensorRT runtime was absent on the fresh Phase1 H200 before the fix.
+- **Follow-up guardrails:** Host deploys must use service-account keys, not local workstation ADC files. Keep TensorRT dependency installation tied to the Phase1 deploy script so the default `tensorrt_fp16` path remains self-contained on fresh H200s.
+
+## 2026-04-18 - First live Phase1 run still tried to cold-download NFA on the H200
+
+- **Date/Time (UTC):** 2026-04-18 00:58 UTC
+- **Subsystem:** Phase1 audio-post chain warmup (`scripts/do_phase1/deploy_phase1_services.sh`, `backend/providers/forced_aligner.py`, `backend/providers/emotion2vec.py`, `backend/providers/yamnet.py`)
+- **Environment:** Fresh Rithvik-team Phase1 H200 during the first full run after the credential/TensorRT fixes
+- **Symptom / Error signature:** The rerun got past ASR and visual startup, then the worker logged `loading NFA model 'stt_en_fastconformer_hybrid_large_pc' on cuda (attempt 1/2) ...` followed by `ValueError: Not able to download url right now, please try again.` while Phase1 was already live. The job log showed forced-alignment stage failure instead of using a preloaded model cache.
+- **Root cause:** The old H200 deploy flow used to prewarm NFA + emotion2vec+ (and effectively YAMNet via first-load) before any services restarted. That warmup step was lost in the `phase1` topology cleanup, so the first live job became responsible for downloading the NeMo aligner model and other audio-post assets on demand.
+- **Fix applied:** Restored explicit audio-post prewarm to [`scripts/do_phase1/deploy_phase1_services.sh`](../scripts/do_phase1/deploy_phase1_services.sh). The deploy now instantiates `ForcedAlignmentProvider`, `Emotion2VecPlusProvider`, and `YAMNetProvider` after dependency install, forcing their model/runtime initialization before services are restarted.
+- **Verification evidence:** The failing job log on `job_e4fc042b193c4e0ca5dd7353bc12a940` showed the forced aligner trying to download from NGC during the live run. Manual reachability check to the NeMo model URL succeeded (`HTTP 200`), confirming the issue was missing prewarm rather than a permanently inaccessible model source.
+- **Follow-up guardrails:** Keep audio-post prewarm in the Phase1 deploy path. The first customer run should never be the thing that warms NFA/emotion2vec+/YAMNet on a fresh host.
+
+## 2026-04-17 - Phase26 fresh-host startup failed before Qwen was cached locally
+
+- **Date/Time (UTC):** 2026-04-17 23:45 UTC
+- **Subsystem:** Phase26 H200 SGLang startup (`scripts/do_phase26/deploy_phase26_services.sh`, `scripts/do_phase26/systemd/clypt-phase26-sglang-qwen.service`)
+- **Environment:** Fresh Ming-team H200 droplet (`clypt-phase26-h200-nyc2`) during first downstream-host bring-up for the two-H200 + Modal topology
+- **Symptom / Error signature:** `clypt-phase26-sglang-qwen.service` entered a restart loop. The first failure was `sglang serve: error: unrecognized arguments:` with nothing after the colon. After fixing that, the service still failed with `OSError: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.` while `HF_HUB_OFFLINE=1` was active.
+- **Root cause:** Two separate fresh-host gaps compounded. First, the unit passed `${SG_EXTRA_ARGS}` directly in `ExecStart`; when the env var was blank, systemd still handed SGLang an empty argument, which argparse rejected. Second, the service intentionally enforced offline Hugging Face mode, but `deploy_phase26_services.sh` never prewarmed the `Qwen/Qwen3.6-35B-A3B` cache on a new droplet before starting SGLang.
+- **Fix applied:** Updated [`scripts/do_phase26/systemd/clypt-phase26-sglang-qwen.service`](../scripts/do_phase26/systemd/clypt-phase26-sglang-qwen.service) to launch through `/bin/bash -lc` and append `SG_EXTRA_ARGS` only when present. Updated [`scripts/do_phase26/deploy_phase26_services.sh`](../scripts/do_phase26/deploy_phase26_services.sh) to prewarm the Qwen snapshot into `/opt/clypt-phase26/hf-cache` with `snapshot_download(...)` before installing/restarting the SGLang unit, preserving `HF_HUB_OFFLINE=1` as the steady-state runtime behavior.
+- **Verification evidence:** On `clypt-phase26-h200-nyc2`, the blank-argument failure disappeared immediately after installing the patched unit. The follow-on failure reproduced deterministically until the Qwen snapshot prewarm was started against the fresh host cache, confirming the missing-cache root cause rather than a launch-flag regression.
+- **Follow-up guardrails:** Keep the SGLang unit authoritative for the launch flags, but never pass optional trailing args directly unless the shell conditionally omits them. Any host that keeps `HF_HUB_OFFLINE=1` must prewarm the exact model revision before service start; otherwise the first boot will fail by design.
+
+## 2026-04-17 - Modal node-media-prep app deployed without the local `backend` package
+
+- **Date/Time (UTC):** 2026-04-17 23:38 UTC
+- **Subsystem:** Modal node-media-prep deployment (`scripts/modal/node_media_prep_app.py`)
+- **Environment:** First deployment of the new L4-backed Modal `node-media-prep` app for the two-H200 + Modal topology
+- **Symptom / Error signature:** Modal app deploy succeeded, but every request to `/health` hung and app logs showed `ModuleNotFoundError: No module named 'backend'` from `/root/node_media_prep_app.py`.
+- **Root cause:** The Modal app file imports `backend.runtime.node_media_prep`, `backend.providers.storage`, and `backend.providers.config`, but Modal 1.x does not implicitly ship unrelated local packages into the container. The image installed Python dependencies but never mounted the repo-local `backend` package.
+- **Fix applied:** Updated [`scripts/modal/node_media_prep_app.py`](../scripts/modal/node_media_prep_app.py) to include `.add_local_python_source("backend")` in the Modal image definition, after the image build steps. This makes the local `backend` package importable inside the container without changing the external API contract.
+- **Verification evidence:** After redeploying the patched app, `curl -i https://rithviks84--clypt-node-media-prep-node-media-prep.modal.run/health` returned `HTTP/2 200` with `{"status":"ok"}`. The focused regression suite for the Modal app also passed locally: `tests/scripts/test_modal_node_media_prep_app.py`, `tests/backend/runtime/test_node_media_prep.py`, and `tests/backend/providers/test_remote_node_media_prep_client.py`.
+- **Follow-up guardrails:** Any Modal app that imports repo-local code outside its own module path must explicitly include that package with `add_local_python_source(...)` or `add_local_dir(...)`. Do not assume deploy success implies the container has all local imports available.
+
+## 2026-04-18 - Fresh droplet deploy inherited repo-root `.env.local` from copied workspace
+
+- **Date/Time (UTC):** 2026-04-18 00:15 UTC
+- **Subsystem:** Host deploy workflow (`scripts/do_phase1/deploy_phase1_services.sh`, `scripts/do_phase26/deploy_phase26_services.sh`, Python dotenv loading in `backend/providers/config.py`)
+- **Environment:** Ming-team Phase26 H200 brought up by copying the local workstation tree directly into `/opt/clypt-phase26/repo`
+- **Symptom / Error signature:** Phase26 services loaded `VIBEVOICE_BACKEND=native` even though `/etc/clypt-phase26/phase26.env` did not set it. Dispatch then failed fast with `Unsupported VIBEVOICE_BACKEND='native'; only 'vllm' is supported on main.`
+- **Root cause:** The copied repo included the workstation's repo-root `.env.local`. `backend/providers/config.py` intentionally loads `.env` / `.env.local` from the current repo root via `dotenv` when present, so the droplet inherited local-development overrides that should never have reached host runtime.
+- **Fix applied:** Added a shared deploy guard in [`scripts/lib/preamble.sh`](../scripts/lib/preamble.sh) and wired it into both host deploy scripts. [`deploy_phase1_services.sh`](../scripts/do_phase1/deploy_phase1_services.sh) and [`deploy_phase26_services.sh`](../scripts/do_phase26/deploy_phase26_services.sh) now fail immediately if the copied repo contains `.env` or `.env.local`, forcing operators to rely only on `/etc/clypt-phase1/phase1.env` or `/etc/clypt-phase26/phase26.env` plus the committed `/etc/clypt/*` runtime env templates. Updated the host deploy runbooks to explicitly require excluding `.env` / `.env.local` during copy/sync.
+- **Verification evidence:** After renaming the copied `/opt/clypt-phase26/repo/.env.local` out of the way on the Ming H200, dispatch and worker booted cleanly and no longer saw `VIBEVOICE_BACKEND=native`. The new guard now prevents the same bad state from recurring on fresh hosts.
+- **Follow-up guardrails:** Keep repo-root `.env` / `.env.local` strictly local-development artifacts. Any droplet sync command should exclude them explicitly, and any future host deploy entrypoint should call the same preamble guard before sourcing host env files.
+
 ## 2026-04-17 - Phase 1 / downstream host coupling blocked the two-H200 + Modal split
 
 - **Date/Time (UTC):** 2026-04-17
@@ -610,3 +676,36 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 - **Fix applied:** Updated deployment guidance to require GPU-ready base image for new droplet provisioning.
 - **Verification evidence:** Failure reproduced in service logs; deployment docs now encode GPU-base-image requirement explicitly.
 - **Follow-up guardrails:** Treat non-GPU-ready base images as invalid for runtime rollout.
+
+## 2026-04-18 - Phase26 timeline adapters assumed dict payloads
+
+- **Date/Time (UTC):** 2026-04-18 01:05-01:08
+- **Subsystem:** Phase26 worker / Phase 1 artifact adaptation (`backend/pipeline/timeline/*`)
+- **Environment:** Two-H200 + Modal topology, live replay of `mrbeastflagrant.mp4`
+- **Symptom / Error signature:** Immediate Phase26 terminal failure after remote enqueue with `AttributeError: 'DiarizationPayload' object has no attribute 'get'`.
+- **Root cause:** `build_canonical_timeline()` still assumed plain dict payloads and called `.get(...)`, but the new Phase 1 -> Phase26 handoff now passes typed Phase 1 Pydantic payload models (`DiarizationPayload`, `Phase1AudioAssets`, `EmotionSegmentsPayload`, `YamnetPayload`, `VisualPayload`).
+- **Fix applied:** Added `backend/pipeline/timeline/payload_utils.py` to normalize dict/Pydantic payloads, updated all four timeline adapters (`timeline_builder.py`, `emotion_events.py`, `audio_events.py`, `tracklets.py`) to accept typed payload models, and added regression coverage in `tests/backend/pipeline/test_timeline_phase1.py`.
+- **Verification evidence:** Local regression suite passed (`29 passed, 1 warning` including timeline + Phase24 worker coverage), and the next live replay advanced past the former enqueue-time crash into Phase 2 merge/boundary/media-prep work.
+- **Follow-up guardrails:** Keep all Phase 1 -> Phase26 adaptation boundaries model-safe; do not assume JSON payloads have already been flattened to dicts.
+
+## 2026-04-18 - Remote node-media-prep client rejected typed `phase1_audio`
+
+- **Date/Time (UTC):** 2026-04-18 01:08-01:13
+- **Subsystem:** Phase26 worker / remote node-media prep client (`backend/providers/node_media_prep_client.py`)
+- **Environment:** Two-H200 + Modal topology, live replay of `mrbeastflagrant.mp4`
+- **Symptom / Error signature:** Phase26 progressed through Phase 2 merge/boundary/semantic embeddings, then failed at media prep with `ValueError: RemoteNodeMediaPrepClient requires phase1_outputs.phase1_audio ... 'video_gcs_uri'`.
+- **Root cause:** `_extract_video_gcs_uri()` still hard-coded a dict expectation for `phase1_outputs.phase1_audio`; the live worker was passing typed/attribute-based Phase 1 payload objects after Pydantic validation/model copies.
+- **Fix applied:** Updated `_extract_video_gcs_uri()` to accept dict, Pydantic-model, and attribute-based payloads; aligned the Phase14 local multimodal fallback path in `backend/runtime/phase14_live.py`; added regression tests in `tests/backend/providers/test_remote_node_media_prep_client.py` for both `Phase1AudioAssets` and attr-only payload objects.
+- **Verification evidence:** Local regression suite passed (`29 passed, 1 warning`), the live Phase26 worker logged `node-media-prep completed ... in 34501.7 ms`, and the same replay advanced into post-media-prep downstream embedding calls instead of failing at the handoff.
+- **Follow-up guardrails:** Treat provider boundaries the same way as timeline adapters: accept typed runtime payload objects directly instead of assuming dict-shaped handoff data.
+
+## 2026-04-18 - Vertex multimodal embeddings were pinned to a single region despite global support
+
+- **Date/Time (UTC):** 2026-04-18 01:45-01:55
+- **Subsystem:** Phase26 Vertex multimodal embeddings (`backend/providers/config.py`, `backend/providers/vertex.py`)
+- **Environment:** Two-H200 + Modal topology, live replay of `mrbeastflagrant.mp4`, Vertex model `gemini-embedding-2-preview`
+- **Symptom / Error signature:** One replay stalled in post-media-prep multimodal embeddings with repeated transient `429 RESOURCE_EXHAUSTED` and `500 INTERNAL` responses from Vertex while semantic text embeddings on the same run succeeded.
+- **Root cause:** Clypt still defaulted `VERTEX_EMBEDDING_LOCATION` to `us-central1` even though Google now documents `gemini-embedding-2-preview` on the Vertex global endpoint and explicitly recommends the global endpoint to improve availability and reduce `429 RESOURCE_EXHAUSTED` relative to a single regional endpoint.
+- **Fix applied:** Changed the repo default and documented baselines for `VERTEX_EMBEDDING_LOCATION` from `us-central1` to `global`, updated config/test expectations, and flipped the live Phase26 runtime env to `global` before restarting the worker.
+- **Verification evidence:** Official Vertex docs list `Gemini Embedding 2 (gemini-embedding-2-preview)` in the Global endpoint table and note that global can reduce `429` errors; focused provider/runtime tests passed after the patch; the next live replay completed Phase 2-4 successfully with no `429 RESOURCE_EXHAUSTED` responses during multimodal embeddings.
+- **Follow-up guardrails:** Keep `VERTEX_EMBEDDING_LOCATION=global` unless residency constraints require a specific region; if regional routing is reintroduced, expect higher shared-capacity sensitivity and re-benchmark multimodal embedding stability.

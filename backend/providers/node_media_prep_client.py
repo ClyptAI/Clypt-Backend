@@ -80,16 +80,16 @@ def _extract_video_gcs_uri(phase1_outputs: Any) -> str:
     phase1_audio = getattr(phase1_outputs, "phase1_audio", None)
     if phase1_audio is None and isinstance(phase1_outputs, dict):
         phase1_audio = phase1_outputs.get("phase1_audio")
-    if not isinstance(phase1_audio, dict):
-        raise ValueError(
-            "RemoteNodeMediaPrepClient requires phase1_outputs.phase1_audio to be a dict "
-            "with a 'video_gcs_uri' entry."
-        )
-    uri = (phase1_audio.get("video_gcs_uri") or "").strip()
+    if hasattr(phase1_audio, "model_dump"):
+        phase1_audio = phase1_audio.model_dump(mode="json")
+    if isinstance(phase1_audio, dict):
+        uri = (phase1_audio.get("video_gcs_uri") or "").strip()
+    else:
+        uri = str(getattr(phase1_audio, "video_gcs_uri", "") or "").strip()
     if not uri:
         raise ValueError(
-            "phase1_outputs.phase1_audio['video_gcs_uri'] is required for remote node-media prep "
-            "(video must be uploaded to GCS before Phase 2 runs on the H200)."
+            "RemoteNodeMediaPrepClient requires phase1_outputs.phase1_audio to expose "
+            "a non-empty 'video_gcs_uri'."
         )
     try:
         _bucket, _object_key = parse_gcs_uri(uri)

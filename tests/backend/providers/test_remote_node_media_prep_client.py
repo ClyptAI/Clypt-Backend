@@ -15,6 +15,7 @@ from urllib.error import HTTPError
 
 import pytest
 
+from backend.phase1_runtime.payloads import Phase1AudioAssets
 from backend.providers.config import NodeMediaPrepSettings
 from backend.providers.node_media_prep_client import (
     RemoteNodeMediaPrepClient,
@@ -51,7 +52,14 @@ class _StubPaths:
 
 @dataclass
 class _StubPhase1Outputs:
-    phase1_audio: dict[str, Any]
+    phase1_audio: Any
+
+
+@dataclass
+class _AttrOnlyPhase1Audio:
+    video_gcs_uri: str
+    audio_gcs_uri: str | None = None
+    local_video_path: str | None = None
 
 
 def _settings() -> NodeMediaPrepSettings:
@@ -137,6 +145,60 @@ def test_call_requires_video_gcs_uri() -> None:
             paths=_StubPaths(run_id="r"),
             phase1_outputs=outputs,
         )
+
+
+def test_call_accepts_phase1_audio_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        return _FakeResponse(
+            json.dumps({"media": [{"node_id": "n_1", "file_uri": "gs://bucket/p/n_1.mp4"}]}).encode(
+                "utf-8"
+            )
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = RemoteNodeMediaPrepClient(settings=_settings(), max_retries=0)
+    outputs = _StubPhase1Outputs(
+        phase1_audio=Phase1AudioAssets(
+            video_gcs_uri="gs://bucket/video.mp4",
+            audio_gcs_uri="gs://bucket/audio.wav",
+            local_video_path="/tmp/source.mp4",
+        )
+    )
+    result = client(
+        nodes=[_StubNode("n_1", 0, 100)],
+        paths=_StubPaths(run_id="run-model"),
+        phase1_outputs=outputs,
+    )
+
+    assert result[0]["file_uri"] == "gs://bucket/p/n_1.mp4"
+
+
+def test_call_accepts_phase1_audio_attr_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        return _FakeResponse(
+            json.dumps({"media": [{"node_id": "n_1", "file_uri": "gs://bucket/p/n_1.mp4"}]}).encode(
+                "utf-8"
+            )
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = RemoteNodeMediaPrepClient(settings=_settings(), max_retries=0)
+    outputs = _StubPhase1Outputs(
+        phase1_audio=_AttrOnlyPhase1Audio(
+            video_gcs_uri="gs://bucket/video.mp4",
+            audio_gcs_uri="gs://bucket/audio.wav",
+            local_video_path="/tmp/source.mp4",
+        )
+    )
+    result = client(
+        nodes=[_StubNode("n_1", 0, 100)],
+        paths=_StubPaths(run_id="run-attr"),
+        phase1_outputs=outputs,
+    )
+
+    assert result[0]["file_uri"] == "gs://bucket/p/n_1.mp4"
 
 
 def test_call_raises_when_server_missing_nodes(monkeypatch: pytest.MonkeyPatch) -> None:

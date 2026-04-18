@@ -34,10 +34,15 @@ Install to:
 
 Required values to set:
 
-- service account path
+- service account key path
 - bearer tokens
 - Modal endpoint URL
 - GCS / Spanner project-specific values
+
+Credential requirement:
+
+- `GOOGLE_APPLICATION_CREDENTIALS` must point to a real service-account JSON key with `type=service_account` and a private key.
+- Do not copy `~/.config/gcloud/application_default_credentials.json` onto the host. Token-only `authorized_user` ADC files are not a supported host credential shape.
 
 ## 3) Deploy Services
 
@@ -45,6 +50,13 @@ Required values to set:
 cd /opt/clypt-phase26/repo
 bash scripts/do_phase26/deploy_phase26_services.sh
 ```
+
+Before running the deploy:
+
+- exclude repo-root `.env` and `.env.local` from the copy/sync step
+- keep host runtime config only in `/etc/clypt-phase26/phase26.env`
+- expect `deploy_phase26_services.sh` to fail fast if `.env` or `.env.local` exists on the droplet
+- expect `deploy_phase26_services.sh` to fail fast if `GOOGLE_APPLICATION_CREDENTIALS` is not a service-account key
 
 This deploys:
 

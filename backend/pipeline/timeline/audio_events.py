@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 from ..contracts import AudioEvent, AudioEventTimeline
+from .payload_utils import payload_to_dict
 
-from ..contracts import AudioEventTimeline
 
-
-def build_audio_event_timeline(*, yamnet_payload: dict) -> AudioEventTimeline:
+def build_audio_event_timeline(*, yamnet_payload: Any) -> AudioEventTimeline:
     """Convert raw YAMNet detections into merged event spans."""
-    raw_events = yamnet_payload.get("events") or yamnet_payload.get("detections") or []
+    payload = payload_to_dict(yamnet_payload)
+    raw_events = payload.get("events") or payload.get("detections") or []
     sorted_events = sorted(
         raw_events,
         key=lambda item: (int(item.get("start_ms", 0)), int(item.get("end_ms", 0))),

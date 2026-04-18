@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..contracts import SemanticGraphNode
 
 logger = logging.getLogger(__name__)
+_NODE_MEDIA_TARGET_HEIGHT = 480
 
 
 def _format_seconds(value_ms: int) -> str:
@@ -22,7 +23,7 @@ def _read_max_concurrency(*, node_count: int, max_concurrent: int | None) -> int
             "CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT; update your env file."
         )
     if max_concurrent is None:
-        raw_value = os.getenv("CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT") or "8"
+        raw_value = os.getenv("CLYPT_PHASE24_NODE_MEDIA_MAX_CONCURRENT") or "16"
         try:
             max_concurrent = int(raw_value)
         except ValueError as exc:
@@ -52,10 +53,10 @@ def extract_node_clip(
     # Full GPU pipeline: h264_cuvid (NVDEC) decode + h264_nvenc encode.
     # -c:v h264_cuvid forces NVDEC explicitly; -hwaccel cuda alone falls back
     # to native (CPU) decode on ffmpeg 4.4 even when VRAM is available.
-    # vLLM is capped at --gpu-memory-utilization 0.77 so ~8 GiB of VRAM
-    # headroom is available for NVDEC contexts. Max concurrent sessions is
-    # capped at 8 (CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY) — 16
-    # concurrent sessions OOM the NVENC input buffers with this footprint.
+    # Modal L4 is the current node-media-prep baseline, so the default worker
+    # cap is 16 concurrent clip jobs unless an env override lowers it.
+    # Downscale embedding clips to 480p so Vertex multimodal embeddings do not
+    # pay 1080p prep/upload cost.
     gpu_cmd = [
         "ffmpeg",
         "-y",
@@ -71,6 +72,8 @@ def extract_node_clip(
         _format_seconds(duration_ms),
         "-c:v",
         "h264_nvenc",
+        "-vf",
+        f"scale_cuda=-2:{_NODE_MEDIA_TARGET_HEIGHT}",
         "-preset",
         "p4",
         "-cq",
@@ -94,6 +97,8 @@ def extract_node_clip(
         _format_seconds(duration_ms),
         "-c:v",
         "libx264",
+        "-vf",
+        f"scale=-2:{_NODE_MEDIA_TARGET_HEIGHT}",
         "-preset",
         "veryfast",
         "-crf",

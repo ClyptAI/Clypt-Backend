@@ -60,6 +60,7 @@ Key behavior:
 - GPU target: `L4`
 - warm pool target: `min_containers=1`
 - request/response contract matches `RemoteNodeMediaPrepClient`
+- clip extraction now downscales to 480p before upload / Vertex multimodal embedding
 
 ## 3) Phase 1 Execution Semantics
 
@@ -115,6 +116,7 @@ The H100 backup overlay must not change semantic visual behavior.
   - `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`
 - generation remains local OpenAI-compatible to SGLang
 - embeddings remain Vertex-backed
+- `VERTEX_EMBEDDING_LOCATION` now defaults to `global` for `gemini-embedding-2-preview`; Google documents global support for Gemini Embedding 2 and recommends global to improve availability and reduce `429 RESOURCE_EXHAUSTED` versus a single regional endpoint
 
 ## 6) SGLang Settings
 
@@ -144,7 +146,7 @@ These now belong to the Phase26 host, not the Phase1 host.
 - Modal must expose working:
   - `h264_nvenc`
   - `h264_cuvid`
-- safe concurrency remains capped by `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY`
+- Modal L4 baseline sets `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=16`
 - `min_containers=1` is the intended warm baseline, not a permanent dedicated VM
 
 ## 8) Canonical Runtime Files

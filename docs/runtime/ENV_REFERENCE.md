@@ -184,7 +184,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` | required | Modal endpoint. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` | required | Shared bearer token. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S` | `600` | Request timeout. |
-| `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` | `8` | Safe concurrency cap. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` | `16` | Modal L4 concurrency cap. |
 
 ### 4.4 Local OpenAI generation
 
@@ -213,6 +213,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 | --- | --- | --- |
 | `GOOGLE_CLOUD_PROJECT` | required | Required on both hosts. |
 | `GOOGLE_CLOUD_LOCATION` | `global` | Shared default. |
+| `VERTEX_EMBEDDING_LOCATION` | `global` | Phase26 default for `gemini-embedding-2-preview`; global is supported and helps reduce regional `429 RESOURCE_EXHAUSTED` spikes. |
 | `GCS_BUCKET` | required | Required on both hosts and Modal. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | deployment-specific | Service account path or equivalent secret injection. |
 | `VERTEX_EMBEDDING_BACKEND` | `vertex` | Used on Phase26 host. |

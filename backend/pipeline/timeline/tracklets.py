@@ -12,13 +12,15 @@ from ..contracts import (
 )
 
 from ..contracts import ShotTrackletIndex, TrackletGeometry
+from .payload_utils import payload_to_dict
 
 
-def build_tracklet_artifacts(*, phase1_visual: dict) -> tuple[ShotTrackletIndex, TrackletGeometry]:
+def build_tracklet_artifacts(*, phase1_visual: Any) -> tuple[ShotTrackletIndex, TrackletGeometry]:
     """Adapt Phase 1 visual ledgers into V3.1 shot/tracklet artifacts."""
-    fps = float((phase1_visual.get("video_metadata") or {}).get("fps") or 30.0)
-    shot_changes = list(phase1_visual.get("shot_changes") or [])
-    tracks = list(phase1_visual.get("tracks") or [])
+    payload = payload_to_dict(phase1_visual)
+    fps = float((payload.get("video_metadata") or {}).get("fps") or 30.0)
+    shot_changes = list(payload.get("shot_changes") or [])
+    tracks = list(payload.get("tracks") or [])
 
     def frame_to_ms(frame_idx: int) -> int:
         return int(round((float(frame_idx) / fps) * 1000.0))

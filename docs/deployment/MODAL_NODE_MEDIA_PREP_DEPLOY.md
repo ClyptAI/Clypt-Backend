@@ -32,8 +32,18 @@ modal deploy scripts/modal/node_media_prep_app.py
 At minimum, provide:
 
 - `GCS_BUCKET`
-- Google credentials for GCS access
-- bearer token used by the public endpoint wrapper
+- `NODE_MEDIA_PREP_AUTH_TOKEN`
+- `GOOGLE_APPLICATION_CREDENTIALS_JSON`
+
+The deployed ASGI app exposes:
+
+- `GET /health`
+- `POST /tasks/node-media-prep`
+
+`GOOGLE_APPLICATION_CREDENTIALS_JSON` should be a real service-account JSON key
+blob. Avoid token-only `authorized_user` ADC documents for production deploys;
+they are less predictable in headless/serverless environments and do not match
+the host deploy credential standard.
 
 ## 4) Smoke Checks
 

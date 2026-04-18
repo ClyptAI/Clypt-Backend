@@ -681,7 +681,12 @@ class V31LivePhase14Runner:
         def _prepare_multimodal_media() -> list[dict[str, str]]:
             if self.node_media_preparer is not None:
                 return self.node_media_preparer(nodes=nodes, paths=paths, phase1_outputs=phase1_outputs)
-            local_video_path = (phase1_outputs.phase1_audio or {}).get("local_video_path")
+            phase1_audio = phase1_outputs.phase1_audio
+            local_video_path = (
+                phase1_audio.get("local_video_path")
+                if isinstance(phase1_audio, dict)
+                else getattr(phase1_audio, "local_video_path", None)
+            )
             if not local_video_path:
                 raise ValueError(
                     "phase1_outputs.phase1_audio.local_video_path is required for live multimodal node embeddings."

@@ -1,23 +1,29 @@
 from __future__ import annotations
 
+from typing import Any
+
 from ..contracts import CanonicalTimeline, CanonicalTurn, TranscriptWord
+from .payload_utils import payload_to_dict
 from .vibevoice_merge import merge_vibevoice_outputs
 
 
 def build_canonical_timeline(
     *,
-    phase1_audio: dict,
-    diarization_payload: dict,
+    phase1_audio: Any,
+    diarization_payload: Any,
 ) -> CanonicalTimeline:
     """Build the canonical transcript/timing backbone for V3.1."""
+    phase1_audio_dict = payload_to_dict(phase1_audio)
+    diarization_payload_dict = payload_to_dict(diarization_payload)
+
     # diarization_payload already contains {words, turns} from extract.py
     # If it arrived directly from the merged output, use it as-is.
     # If it arrived as a raw VibeVoice turns list, merge it (fallback path).
-    if "turns" in diarization_payload and "words" in diarization_payload:
-        merged = diarization_payload
+    if "turns" in diarization_payload_dict and "words" in diarization_payload_dict:
+        merged = diarization_payload_dict
     else:
         # Fallback: treat the whole payload as raw VibeVoice turns with no word alignment
-        raw_turns = diarization_payload.get("vibevoice_turns") or []
+        raw_turns = diarization_payload_dict.get("vibevoice_turns") or []
         merged = merge_vibevoice_outputs(vibevoice_turns=raw_turns, word_alignments=[])
 
     words = [
@@ -46,6 +52,6 @@ def build_canonical_timeline(
     return CanonicalTimeline(
         words=words,
         turns=turns,
-        source_video_url=phase1_audio.get("source_audio"),
-        video_gcs_uri=phase1_audio.get("video_gcs_uri"),
+        source_video_url=phase1_audio_dict.get("source_audio"),
+        video_gcs_uri=phase1_audio_dict.get("video_gcs_uri"),
     )

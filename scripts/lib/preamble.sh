@@ -12,6 +12,7 @@
 #     require_root
 #     require_dir "$REPO_DIR"
 #     require_file "$ENV_FILE"
+#     fail_if_repo_local_env_present "$REPO_DIR" "$ENV_FILE"
 #     load_env_file "$ENV_FILE"
 #
 # All helpers exit 1 on failure (same behavior as the inline checks they
@@ -52,6 +53,32 @@ require_file() {
   fi
 }
 
+# fail_if_repo_local_env_present REPO_DIR ENV_FILE: exit 1 if a copied
+# repo-root .env or .env.local is present. Host deploys must only consume
+# the host-scoped env file under /etc/clypt-* plus the committed runtime env
+# template under /etc/clypt/.
+fail_if_repo_local_env_present() {
+  local repo_dir="${1:-}"
+  local env_file="${2:-<host-env-file>}"
+  if [[ -z "$repo_dir" ]]; then
+    echo "[preamble] ERROR: fail_if_repo_local_env_present called without a repo path." >&2
+    exit 1
+  fi
+  local offenders=()
+  local candidate=""
+  for candidate in "$repo_dir/.env" "$repo_dir/.env.local"; do
+    if [[ -f "$candidate" ]]; then
+      offenders+=("$candidate")
+    fi
+  done
+  if [[ "${#offenders[@]}" -gt 0 ]]; then
+    echo "[preamble] ERROR: repo-local env override files are present on the host:" >&2
+    printf '  - %s\n' "${offenders[@]}" >&2
+    echo "[preamble] ERROR: remove or rename them before deploying; host deploys must use only $env_file plus /etc/clypt/* runtime env files." >&2
+    exit 1
+  fi
+}
+
 # load_env_file PATH: safely source an env file into the current shell
 # with automatic export (set -a), then restore the prior flag state. The
 # file must exist (caller is expected to have validated it) — we still
@@ -70,4 +97,42 @@ load_env_file() {
   # shellcheck disable=SC1090
   source "$path"
   set +a
+}
+
+# require_google_service_account_key PATH: validate that PATH points to a
+# signing-capable service-account JSON key. Token-only ADC files
+# (`authorized_user`) can pass some auth checks but will fail later when the
+# runtime needs V4 signed URLs.
+require_google_service_account_key() {
+  local path="${1:-}"
+  if [[ -z "$path" ]]; then
+    echo "[preamble] ERROR: require_google_service_account_key called without a path argument." >&2
+    exit 1
+  fi
+  require_file "$path"
+  python3 - "$path" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+
+if not isinstance(data, dict):
+    raise SystemExit(f"[preamble] ERROR: credential file is not a JSON object: {path}")
+if data.get("type") != "service_account":
+    raise SystemExit(
+        "[preamble] ERROR: credential file must be a service-account key "
+        f"(type=service_account), not {data.get('type')!r}: {path}"
+    )
+missing = [
+    field for field in ("client_email", "private_key", "private_key_id")
+    if not data.get(field)
+]
+if missing:
+    raise SystemExit(
+        "[preamble] ERROR: service-account key is missing required fields "
+        f"{missing}: {path}"
+    )
+PY
 }

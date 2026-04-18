@@ -46,10 +46,15 @@ Install to:
 
 Required values to set:
 
-- service account path
+- service account key path
 - bearer tokens
 - Phase26 private URL
 - GCS / Spanner project-specific values
+
+Credential requirement:
+
+- `GOOGLE_APPLICATION_CREDENTIALS` must point to a real service-account JSON key with `type=service_account` and a private key.
+- Do not copy `~/.config/gcloud/application_default_credentials.json` onto the host. That file is typically `authorized_user` ADC and will fail when Phase 1 needs to generate signed GCS URLs for VibeVoice.
 
 ## 3) Deploy Services
 
@@ -57,6 +62,13 @@ Required values to set:
 cd /opt/clypt-phase1/repo
 bash scripts/do_phase1/deploy_phase1_services.sh
 ```
+
+Before running the deploy:
+
+- exclude repo-root `.env` and `.env.local` from the copy/sync step
+- keep host runtime config only in `/etc/clypt-phase1/phase1.env`
+- expect `deploy_phase1_services.sh` to fail fast if `.env` or `.env.local` exists on the droplet
+- expect `deploy_phase1_services.sh` to fail fast if `GOOGLE_APPLICATION_CREDENTIALS` is not a signing-capable service-account key
 
 This deploys:
 
@@ -77,6 +89,8 @@ systemctl status clypt-phase1-worker.service --no-pager
 curl -sf http://127.0.0.1:9100/health
 curl -sf http://127.0.0.1:9200/health
 curl -sf http://127.0.0.1:8080/healthz
+curl -sf http://127.0.0.1:8000/health
+curl -sf http://127.0.0.1:8000/v1/models
 ```
 
 ## 5) Notes
@@ -84,3 +98,6 @@ curl -sf http://127.0.0.1:8080/healthz
 - Preserve the RF-DETR / ByteTrack settings in the Phase1 env unless explicitly retuning.
 - The H100 overlay may only change memory-sensitive VibeVoice knobs.
 - Phase1 does not own the downstream SQLite queue anymore.
+- The VibeVoice sidecar must report the downloaded `microsoft/VibeVoice-ASR` snapshot via `/v1/models`; a green outer service health check alone is not enough.
+- If `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`, the deploy script now installs and verifies both `trtexec` and the TensorRT Python package automatically.
+- The deploy script also prewarms NFA, emotion2vec+, and YAMNet so the first live job does not stall on model downloads.

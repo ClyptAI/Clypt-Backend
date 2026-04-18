@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -162,3 +163,65 @@ def test_prepare_node_media_embeddings_fails_fast_with_node_context(
             object_prefix="phase14/run-1/node_media",
             max_concurrent=2,
         )
+
+
+def test_extract_node_clip_uses_480p_gpu_scale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.pipeline.semantics import media_embeddings
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, check, stdout, stderr):
+        commands.append(list(cmd))
+        output_path = Path(cmd[-1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setenv("CLYPT_PHASE24_FFMPEG_DEVICE", "gpu")
+    monkeypatch.setattr(media_embeddings.subprocess, "run", fake_run)
+
+    output_path = media_embeddings.extract_node_clip(
+        source_video_path=tmp_path / "source.mp4",
+        output_path=tmp_path / "clips" / "node.mp4",
+        start_ms=0,
+        end_ms=1000,
+    )
+
+    assert output_path.exists()
+    assert len(commands) == 1
+    cmd = commands[0]
+    vf_index = cmd.index("-vf")
+    assert cmd[vf_index + 1] == "scale_cuda=-2:480"
+
+
+def test_extract_node_clip_uses_480p_cpu_scale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.pipeline.semantics import media_embeddings
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, check, stdout, stderr):
+        commands.append(list(cmd))
+        output_path = Path(cmd[-1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setenv("CLYPT_PHASE24_FFMPEG_DEVICE", "cpu")
+    monkeypatch.setattr(media_embeddings.subprocess, "run", fake_run)
+
+    output_path = media_embeddings.extract_node_clip(
+        source_video_path=tmp_path / "source.mp4",
+        output_path=tmp_path / "clips" / "node.mp4",
+        start_ms=0,
+        end_ms=1000,
+    )
+
+    assert output_path.exists()
+    assert len(commands) == 1
+    cmd = commands[0]
+    vf_index = cmd.index("-vf")
+    assert cmd[vf_index + 1] == "scale=-2:480"
