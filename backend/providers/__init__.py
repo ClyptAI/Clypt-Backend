@@ -13,6 +13,7 @@ from .config import (
     StorageSettings,
     VertexSettings,
     VibeVoiceAsrServiceSettings,
+    VibeVoiceLongFormSettings,
     VibeVoiceSettings,
     VibeVoiceVLLMSettings,
     load_audio_host_settings,
@@ -37,6 +38,7 @@ from .phase26_dispatch_client import (
     RemotePhase26DispatchClient,
     RemotePhase26DispatchError,
 )
+from .speaker_verifier import EcapaTdnnSpeakerVerifier
 from .openai_local import LocalOpenAIQwenClient
 from .forced_aligner import ForcedAlignmentProvider
 from .visual_service_client import (
@@ -85,9 +87,11 @@ __all__ = [
     "LLMGenerateJsonClient",
     "VibeVoiceAsrResponse",
     "VibeVoiceAsrServiceSettings",
+    "VibeVoiceLongFormSettings",
     "VibeVoiceSettings",
     "VibeVoiceVLLMProvider",
     "VibeVoiceVLLMSettings",
+    "EcapaTdnnSpeakerVerifier",
     "YAMNetProvider",
     "build_gcs_uri_url_resolver",
     "load_audio_host_settings",

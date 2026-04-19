@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-04-17
+**Last updated:** 2026-04-19
 
 This is the runtime source of truth for the current repository state.
 
@@ -39,6 +39,8 @@ Key behavior:
 - `RemoteVibeVoiceAsrClient` targets the local service at `POST /tasks/vibevoice-asr`
 - `RemotePhase1VisualClient` targets the local service at `POST /tasks/visual-extract`
 - `RemotePhase26DispatchClient` targets the downstream host at `POST /tasks/phase26-enqueue`
+- the VibeVoice service keeps the existing single-pass path through 60 minutes, splits `>60..90` minute jobs into 2 shards, splits `>90..180` minute jobs into 3 shards, and fails fast above 180 minutes
+- long-form shard requests still target the same local vLLM sidecar and are stitched back into one global speaker space before the HTTP response returns
 - Phase 1 audio-post launches immediately after the VibeVoice response returns
 
 ### 2.2 Phase26 host
@@ -71,7 +73,10 @@ Phase 1 visual chain:
 
 Phase 1 audio chain:
   Phase1 local VibeVoice service (/tasks/vibevoice-asr)
+    -> probe canonical audio duration
+    -> for long-form jobs: split into 2-3 shard WAVs + temporary GCS shard objects
     -> local VibeVoice vLLM sidecar
+    -> cross-shard speaker verification + merged turns
     -> response returns to runner
     -> in-process NFA -> emotion2vec+ -> YAMNet
 
@@ -85,6 +90,7 @@ Critical invariant:
 - the audio-post chain does not wait for RF-DETR to finish
 - Phase 1 remains the owner of ASR, audio-post, and visual extraction
 - the queue boundary lives on the Phase26 host, not the Phase1 host
+- long-form ASR still preserves a one-call outer contract and one merged `turns` payload
 
 ## 4) Visual Fast Path
 

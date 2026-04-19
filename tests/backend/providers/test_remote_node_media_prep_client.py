@@ -1,7 +1,7 @@
 """Unit tests for the Phase 2 remote node-media-prep client.
 
-Phase 2 node-clip extraction runs exclusively on the RTX 6000 Ada box because
-the H200 lacks NVENC. These tests stub the HTTP layer so the client's shape,
+Phase 2 node-clip extraction runs exclusively on the remote media-prep worker.
+These tests stub the HTTP layer so the client's shape,
 retries, and error handling can be verified without a live endpoint.
 """
 
@@ -116,7 +116,7 @@ def test_call_posts_expected_body_and_returns_ordered_media(
         "run_id": "run-abc",
         "video_gcs_uri": "gs://bucket/video.mp4",
         "object_prefix": "phase14/run-abc/node_media",
-        "max_concurrency": 8,
+        "max_concurrency": 16,
         "nodes": [
             {"node_id": "n_1", "start_ms": 0, "end_ms": 1000},
             {"node_id": "n_2", "start_ms": 1000, "end_ms": 2500},

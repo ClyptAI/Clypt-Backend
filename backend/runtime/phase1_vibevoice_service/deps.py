@@ -6,7 +6,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from backend.providers import VibeVoiceVLLMProvider, build_gcs_uri_url_resolver, load_audio_host_settings
+from backend.providers import (
+    EcapaTdnnSpeakerVerifier,
+    VibeVoiceVLLMProvider,
+    build_gcs_uri_url_resolver,
+    load_audio_host_settings,
+)
 from backend.providers.config import _VIBEVOICE_ASR_SERVICE_ENV_ALIASES, _getenv_with_aliases
 from backend.providers.storage import GCSStorageClient
 
@@ -16,7 +21,9 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class AppDeps:
     vibevoice_provider: Any
+    speaker_verifier: Any
     storage_client: Any
+    longform_settings: Any
     scratch_root: Path
     expected_auth_token: str
 
@@ -68,9 +75,25 @@ def get_app_deps() -> AppDeps:
         repetition_penalty=settings.vibevoice.repetition_penalty,
         num_beams=settings.vibevoice.num_beams,
     )
+    longform_settings = settings.vibevoice_longform
+    if longform_settings.verifier_backend != "ecapa_tdnn":
+        raise RuntimeError(
+            f"Unsupported VIBEVOICE_LONGFORM_VERIFIER_BACKEND={longform_settings.verifier_backend!r}; "
+            "expected 'ecapa_tdnn'."
+        )
+    verifier_savedir = None
+    if longform_settings.verifier_cache_dir:
+        verifier_savedir = str(Path(longform_settings.verifier_cache_dir).expanduser())
+    speaker_verifier = EcapaTdnnSpeakerVerifier(
+        model_id=longform_settings.verifier_model_id,
+        device=longform_settings.verifier_device,
+        savedir=verifier_savedir,
+    )
     deps = AppDeps(
         vibevoice_provider=vibevoice_provider,
+        speaker_verifier=speaker_verifier,
         storage_client=storage_client,
+        longform_settings=longform_settings,
         scratch_root=_resolve_scratch_root(),
         expected_auth_token=_resolve_expected_auth_token(),
     )

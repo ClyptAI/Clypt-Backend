@@ -4,6 +4,9 @@ Active specification documents for current and planned backend work.
 
 ## Active Specs
 
+- [2026-04-19_phase1_vibevoice_longform_chunking_spec.md](2026-04-19_phase1_vibevoice_longform_chunking_spec.md)
+  Implemented Phase1 H200 long-form VibeVoice support for 60-180 minute inputs via 2-3 parallel shard ASR requests, global speaker-ID stitching with lightweight speaker verification, and a preserved one-call outer service contract.
+
 - [2026-04-16_qwen36_swap_and_sglang_tuning_spec.md](2026-04-16_qwen36_swap_and_sglang_tuning_spec.md)  
   Current source of truth for the Phase 2-4 generation model (`Qwen/Qwen3.6-35B-A3B` on SGLang ≥ 0.5.10), SGLang launch flags (FP8 KV, NextN MTP, radix cache, `mem-fraction-static=0.78`), strict-JSON sampler defaults, and the full-transition doctrine (no Qwen3.5-27B fallback retained). Supersedes `2026-04-15_qwen_sglang_full_cutover_spec.md` on Qwen serving.
 

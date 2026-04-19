@@ -197,11 +197,11 @@ def test_run_phase1_sidecars_runs_visual_and_remote_asr_concurrently(
     assert outputs.phase1_audio["source_audio"] == "https://youtube.com/watch?v=demo"
     assert outputs.phase1_audio["video_gcs_uri"] == "gs://bucket/source.mp4"
     assert outputs.phase1_audio["audio_gcs_uri"] == "gs://bucket/source.wav"
-    assert outputs.diarization_payload["turns"][0]["speaker_id"] == "SPEAKER_0"
-    assert outputs.diarization_payload["words"][0]["text"] == "hello"
-    assert outputs.phase1_visual["video_metadata"]["fps"] == 10.0
-    assert outputs.emotion2vec_payload == {"segments": []}
-    assert outputs.yamnet_payload == {"events": []}
+    assert outputs.diarization_payload.turns[0]["speaker_id"] == "SPEAKER_0"
+    assert outputs.diarization_payload.words[0]["text"] == "hello"
+    assert outputs.phase1_visual.video_metadata["fps"] == 10.0
+    assert outputs.emotion2vec_payload.segments == []
+    assert outputs.yamnet_payload.events == []
 
     assert set(call_order) == {"visual:source_video.mp4", "vibevoice_asr:run"}
 

@@ -1,7 +1,7 @@
 # ENV REFERENCE
 
 **Status:** Active  
-**Last updated:** 2026-04-17
+**Last updated:** 2026-04-19
 
 This is the code-backed env catalog for the current Phase1 + Phase26 + Modal topology.
 
@@ -76,6 +76,17 @@ CLYPT_PHASE24_DISPATCH_TIMEOUT_S=30
 VIBEVOICE_BACKEND=vllm
 VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
 VIBEVOICE_VLLM_MODEL=vibevoice
+VIBEVOICE_LONGFORM_ENABLED=1
+VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=60
+VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=90
+VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES=180
+VIBEVOICE_LONGFORM_MAX_SHARDS=3
+VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD=0.85
+VIBEVOICE_LONGFORM_REP_CLIP_MIN_SECONDS=15
+VIBEVOICE_LONGFORM_REP_CLIP_MAX_SECONDS=30
+VIBEVOICE_LONGFORM_VERIFIER_BACKEND=ecapa_tdnn
+VIBEVOICE_LONGFORM_VERIFIER_DEVICE=cpu
+VIBEVOICE_LONGFORM_VERIFIER_MODEL_ID=speechbrain/spkrec-ecapa-voxceleb
 ```
 
 ### 2.2 Phase1 H100 overlay
@@ -155,6 +166,29 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 | `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION` | deployment-specific | Host bootstrap/deploy knob. |
 | `VIBEVOICE_VLLM_MAX_NUM_SEQS` | deployment-specific | Host bootstrap/deploy knob. |
 | `VIBEVOICE_VLLM_DTYPE` | `bfloat16` | Host bootstrap/deploy knob. |
+
+### 3.6 Long-form VibeVoice controls
+
+| Env | Default | Notes |
+| --- | --- | --- |
+| `VIBEVOICE_LONGFORM_ENABLED` | `1` | Enables 2-3 shard orchestration for long-form ASR inside the Phase1 VibeVoice service. |
+| `VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES` | `60` | Inputs at or below this duration stay on the existing one-request path. |
+| `VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES` | `90` | Inputs above the single-pass cap and at or below this threshold split into exactly 2 shards. |
+| `VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES` | `180` | Inputs above the two-shard threshold and at or below this threshold split into exactly 3 shards. |
+| `VIBEVOICE_LONGFORM_MAX_SHARDS` | `3` | Hard upper bound on shard fan-out. Values outside `1..3` are rejected at config load. |
+| `VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD` | `0.85` | Cosine-similarity threshold for cross-shard speaker stitching. |
+| `VIBEVOICE_LONGFORM_REP_CLIP_MIN_SECONDS` | `15` | Minimum representative clip length extracted per shard-local speaker. |
+| `VIBEVOICE_LONGFORM_REP_CLIP_MAX_SECONDS` | `30` | Maximum representative clip length extracted per shard-local speaker. |
+| `VIBEVOICE_LONGFORM_VERIFIER_BACKEND` | `ecapa_tdnn` | Current supported verifier backend. |
+| `VIBEVOICE_LONGFORM_VERIFIER_DEVICE` | `cpu` | Device for the speaker verifier; keep on CPU unless explicitly retuning. |
+| `VIBEVOICE_LONGFORM_VERIFIER_MODEL_ID` | `speechbrain/spkrec-ecapa-voxceleb` | Default ECAPA-TDNN model used for speaker verification. |
+| `VIBEVOICE_LONGFORM_VERIFIER_CACHE_DIR` | unset | Optional cache directory for the verifier model. |
+
+Operational notes:
+
+- Inputs longer than `VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES` fail fast.
+- Long-form sharding reuses the existing `/tasks/vibevoice-asr` contract and returns one merged `turns` list.
+- Shard audio is uploaded to temporary GCS objects under a run-scoped prefix so the URL-based VibeVoice path can stay unchanged.
 
 ## 4) Phase26 Settings
 

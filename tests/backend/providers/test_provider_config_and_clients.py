@@ -76,6 +76,45 @@ def test_load_provider_settings_vllm_defaults(tmp_path: Path, monkeypatch: pytes
     assert settings.vibevoice.repetition_penalty == 1.03
 
 
+def test_load_audio_host_settings_reads_vibevoice_longform_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_audio_host_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_ENABLED", "1")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES", "120")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES", "150")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_MAX_SHARDS", "2")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD", "0.9")
+
+    settings = load_audio_host_settings()
+
+    assert settings.vibevoice_longform.enabled is True
+    assert settings.vibevoice_longform.two_shard_max_minutes == 120
+    assert settings.vibevoice_longform.three_shard_max_minutes == 150
+    assert settings.vibevoice_longform.max_shards == 2
+    assert settings.vibevoice_longform.speaker_match_threshold == 0.9
+
+
+def test_load_audio_host_settings_rejects_invalid_vibevoice_longform_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_audio_host_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_MAX_SHARDS", "4")
+
+    with pytest.raises(ValueError, match="VIBEVOICE_LONGFORM_MAX_SHARDS"):
+        load_audio_host_settings()
+
+
 def test_load_provider_settings_rejects_non_vllm_phase1_asr_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

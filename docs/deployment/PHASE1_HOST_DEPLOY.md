@@ -51,6 +51,13 @@ Required values to set:
 - Phase26 dispatch URL
 - GCS / Spanner project-specific values
 
+Long-form ASR defaults already live in the baseline env:
+
+- `<= 60 minutes`: single-pass VibeVoice
+- `> 60 and <= 90 minutes`: 2 shard VibeVoice fan-out
+- `> 90 and <= 180 minutes`: 3 shard VibeVoice fan-out
+- `> 180 minutes`: fail fast
+
 Topology note:
 
 - The current working split runs across two DigitalOcean teams, so Phase1 talks
@@ -84,6 +91,8 @@ This deploys:
 - `clypt-phase1-api.service`
 - `clypt-phase1-worker.service`
 
+The Phase1 Python environment now also needs the ECAPA-TDNN speaker verifier dependency used for cross-shard speaker stitching on long-form jobs. That dependency is installed from `requirements-do-phase1-h200.txt`; do not omit it when rebuilding the host venv.
+
 ## 4) Health Checks
 
 ```bash
@@ -105,5 +114,6 @@ curl -sf http://127.0.0.1:8000/v1/models
 - The H100 overlay may only change memory-sensitive VibeVoice knobs.
 - Phase1 does not own the downstream SQLite queue anymore.
 - The VibeVoice sidecar must report the downloaded `microsoft/VibeVoice-ASR` snapshot via `/v1/models`; a green outer service health check alone is not enough.
+- The VibeVoice service now supports 60-180 minute podcast inputs by splitting canonical audio into 2-3 temporary shard WAVs, uploading them to run-scoped GCS paths, and stitching shard-local speakers back into one global speaker space before Phase1 audio-post begins.
 - If `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`, the deploy script now installs and verifies both `trtexec` and the TensorRT Python package automatically.
 - The deploy script also prewarms NFA, emotion2vec+, and YAMNet so the first live job does not stall on model downloads.

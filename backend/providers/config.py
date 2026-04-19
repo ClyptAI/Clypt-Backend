@@ -110,6 +110,34 @@ def _read_int_env(*names: str, default: int) -> int:
         return int(parsed)
 
 
+def _validate_vibevoice_longform_settings(settings: "VibeVoiceLongFormSettings") -> None:
+    if settings.max_shards < 1 or settings.max_shards > 3:
+        raise ValueError("VIBEVOICE_LONGFORM_MAX_SHARDS must be between 1 and 3.")
+    if settings.single_pass_max_minutes <= 0:
+        raise ValueError("VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES must be positive.")
+    if settings.two_shard_max_minutes < settings.single_pass_max_minutes:
+        raise ValueError(
+            "VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES must be >= "
+            "VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES."
+        )
+    if settings.three_shard_max_minutes < settings.two_shard_max_minutes:
+        raise ValueError(
+            "VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES must be >= "
+            "VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES."
+        )
+    if not 0.0 <= settings.speaker_match_threshold <= 1.0:
+        raise ValueError(
+            "VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD must be between 0.0 and 1.0."
+        )
+    if settings.representative_clip_min_seconds <= 0.0:
+        raise ValueError("VIBEVOICE_LONGFORM_REP_CLIP_MIN_SECONDS must be positive.")
+    if settings.representative_clip_max_seconds < settings.representative_clip_min_seconds:
+        raise ValueError(
+            "VIBEVOICE_LONGFORM_REP_CLIP_MAX_SECONDS must be >= "
+            "VIBEVOICE_LONGFORM_REP_CLIP_MIN_SECONDS."
+        )
+
+
 def _discover_gcloud_project() -> str | None:
     try:
         result = subprocess.run(
@@ -165,6 +193,22 @@ class VibeVoiceSettings:
     top_p: float = 1.0
     repetition_penalty: float = 1.03
     num_beams: int = 1
+
+
+@dataclass(slots=True)
+class VibeVoiceLongFormSettings:
+    enabled: bool = True
+    single_pass_max_minutes: int = 60
+    two_shard_max_minutes: int = 90
+    three_shard_max_minutes: int = 180
+    max_shards: int = 3
+    speaker_match_threshold: float = 0.85
+    representative_clip_min_seconds: float = 15.0
+    representative_clip_max_seconds: float = 30.0
+    verifier_backend: str = "ecapa_tdnn"
+    verifier_device: str = "cpu"
+    verifier_model_id: str = "speechbrain/spkrec-ecapa-voxceleb"
+    verifier_cache_dir: str | None = None
 
 
 @dataclass(slots=True)
@@ -392,6 +436,7 @@ class AudioHostProcessSettings:
     vibevoice: VibeVoiceSettings
     vllm_vibevoice: VibeVoiceVLLMSettings
     storage: StorageSettings
+    vibevoice_longform: VibeVoiceLongFormSettings = field(default_factory=VibeVoiceLongFormSettings)
     phase1_runtime: Phase1RuntimeSettings = field(default_factory=Phase1RuntimeSettings)
 
 
@@ -830,6 +875,40 @@ def load_audio_host_settings() -> AudioHostProcessSettings:
         repetition_penalty=float(_read_env("VIBEVOICE_REPETITION_PENALTY") or "1.03"),
         num_beams=_read_int_env("VIBEVOICE_NUM_BEAMS", default=1),
     )
+    vibevoice_longform_settings = VibeVoiceLongFormSettings(
+        enabled=_read_bool_env("VIBEVOICE_LONGFORM_ENABLED", default=True),
+        single_pass_max_minutes=_read_int_env(
+            "VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES", default=60
+        ),
+        two_shard_max_minutes=_read_int_env(
+            "VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES", default=90
+        ),
+        three_shard_max_minutes=_read_int_env(
+            "VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES", default=180
+        ),
+        max_shards=_read_int_env("VIBEVOICE_LONGFORM_MAX_SHARDS", default=3),
+        speaker_match_threshold=float(
+            _read_env("VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD") or "0.85"
+        ),
+        representative_clip_min_seconds=float(
+            _read_env("VIBEVOICE_LONGFORM_REP_CLIP_MIN_SECONDS") or "15"
+        ),
+        representative_clip_max_seconds=float(
+            _read_env("VIBEVOICE_LONGFORM_REP_CLIP_MAX_SECONDS") or "30"
+        ),
+        verifier_backend=(
+            _read_env("VIBEVOICE_LONGFORM_VERIFIER_BACKEND") or "ecapa_tdnn"
+        ).strip().lower(),
+        verifier_device=(
+            _read_env("VIBEVOICE_LONGFORM_VERIFIER_DEVICE") or "cpu"
+        ).strip().lower(),
+        verifier_model_id=(
+            _read_env("VIBEVOICE_LONGFORM_VERIFIER_MODEL_ID")
+            or "speechbrain/spkrec-ecapa-voxceleb"
+        ).strip(),
+        verifier_cache_dir=_read_env("VIBEVOICE_LONGFORM_VERIFIER_CACHE_DIR"),
+    )
+    _validate_vibevoice_longform_settings(vibevoice_longform_settings)
 
     phase1_runtime = Phase1RuntimeSettings(
         working_root=Path(
@@ -844,6 +923,7 @@ def load_audio_host_settings() -> AudioHostProcessSettings:
 
     return AudioHostProcessSettings(
         vibevoice=vibevoice_settings,
+        vibevoice_longform=vibevoice_longform_settings,
         vllm_vibevoice=vllm_settings,
         storage=StorageSettings(gcs_bucket=gcs_bucket),
         phase1_runtime=phase1_runtime,
@@ -884,6 +964,7 @@ __all__ = [
     "Phase24WorkerSettings",
     "VertexSettings",
     "VibeVoiceAsrServiceSettings",
+    "VibeVoiceLongFormSettings",
     "VibeVoiceSettings",
     "VibeVoiceVLLMSettings",
     "load_audio_host_settings",

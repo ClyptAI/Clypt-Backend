@@ -34,5 +34,23 @@
     "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/openclawyc.wav",
     "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/openclawyc.mp4",
     "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/openclawyc.wav"
+  },
+  "https://www.youtube.com/watch?v=7rzYDM6vMtI": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/petesteinbergted.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/petesteinbergted.wav",
+    "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/petesteinbergted.mp4",
+    "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/petesteinbergted.wav"
+  },
+  "https://www.youtube.com/watch?v=Hrbq66XqtCo": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/dwarkeshjensen.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/dwarkeshjensen.wav",
+    "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/dwarkeshjensen.mp4",
+    "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/dwarkeshjensen.wav"
+  },
+  "https://youtu.be/02YLwsCKUww?si=Z7wEHCCAFJnxG8HX": {
+    "local_video_path": "/opt/clypt-phase1/test-bank-cache/videos/drmaiceo.mp4",
+    "local_audio_path": "/opt/clypt-phase1/test-bank-cache/audio/drmaiceo.wav",
+    "video_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/videos/drmaiceo.mp4",
+    "audio_gcs_uri": "gs://clypt-storage-v3/test-bank/canonical/audio/drmaiceo.wav"
   }
 }

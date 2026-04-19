@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from .deps import AppDeps, get_app_deps
+from .longform import run_longform_vibevoice_asr
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,53 @@ def _require_bearer(request: Request, deps: AppDeps) -> None:
 
 def _run_vibevoice_asr(*, vibevoice_provider: Any, audio_path: Path, audio_gcs_uri: str | None) -> list[dict[str, Any]]:
     return vibevoice_provider.run(audio_path=str(audio_path), audio_gcs_uri=audio_gcs_uri)
+
+
+def _probe_audio_duration_s(audio_path: Path) -> float:
+    out = subprocess.check_output(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(audio_path),
+        ],
+        stderr=subprocess.STDOUT,
+    ).decode("utf-8").strip()
+    return float(out)
+
+
+def _extract_shard_audio(
+    *,
+    source_audio_path: Path,
+    output_audio_path: Path,
+    start_s: float,
+    end_s: float,
+) -> None:
+    duration_s = end_s - start_s
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(start_s),
+            "-t",
+            str(duration_s),
+            "-i",
+            str(source_audio_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            str(output_audio_path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def create_app() -> FastAPI:
@@ -78,12 +127,37 @@ def create_app() -> FastAPI:
 
                 t_asr = time.perf_counter()
                 try:
-                    turns = await asyncio.to_thread(
-                        _run_vibevoice_asr,
-                        vibevoice_provider=deps.vibevoice_provider,
-                        audio_path=audio_path,
-                        audio_gcs_uri=body.audio_gcs_uri,
-                    )
+                    audio_duration_s = _probe_audio_duration_s(audio_path)
+                    longform_settings = deps.longform_settings
+                    single_pass_threshold_s = longform_settings.single_pass_max_minutes * 60
+                    if longform_settings.enabled and audio_duration_s > single_pass_threshold_s:
+                        outputs = await asyncio.to_thread(
+                            run_longform_vibevoice_asr,
+                            audio_path=audio_path,
+                            canonical_audio_gcs_uri=body.audio_gcs_uri,
+                            run_id=body.run_id or "anon",
+                            vibevoice_provider=deps.vibevoice_provider,
+                            storage_client=deps.storage_client,
+                            speaker_verifier=deps.speaker_verifier,
+                            duration_s=audio_duration_s,
+                            single_pass_max_minutes=longform_settings.single_pass_max_minutes,
+                            two_shard_max_minutes=longform_settings.two_shard_max_minutes,
+                            three_shard_max_minutes=longform_settings.three_shard_max_minutes,
+                            max_shards=longform_settings.max_shards,
+                            threshold=longform_settings.speaker_match_threshold,
+                            representative_clip_min_s=longform_settings.representative_clip_min_seconds,
+                            representative_clip_max_s=longform_settings.representative_clip_max_seconds,
+                            extract_shard_audio=_extract_shard_audio,
+                        )
+                        turns = outputs.turns
+                        stage_events.extend(outputs.stage_events)
+                    else:
+                        turns = await asyncio.to_thread(
+                            _run_vibevoice_asr,
+                            vibevoice_provider=deps.vibevoice_provider,
+                            audio_path=audio_path,
+                            audio_gcs_uri=body.audio_gcs_uri,
+                        )
                 except Exception as exc:
                     stage_events.append(
                         {
@@ -107,7 +181,10 @@ def create_app() -> FastAPI:
                         "stage_name": "vibevoice_asr",
                         "status": "succeeded",
                         "duration_ms": (time.perf_counter() - t_asr) * 1000.0,
-                        "metadata": {"turn_count": len(turns)},
+                        "metadata": {
+                            "turn_count": len(turns),
+                            "audio_duration_s": audio_duration_s,
+                        },
                         "error_payload": None,
                     }
                 )

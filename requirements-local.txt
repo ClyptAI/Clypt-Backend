@@ -7,3 +7,4 @@ google-cloud-storage>=2.19.0
 google-cloud-spanner>=3.50.0
 fastapi>=0.116.0
 uvicorn>=0.35.0
+speechbrain>=1.0.0

@@ -36,3 +36,4 @@ tensorflow-hub>=0.16.0
 nemo-toolkit[asr]==1.23.0
 datasets>=2.19.0
 protobuf>=4.21.0,<7,!=5.28.0,!=5.29.0
+speechbrain>=1.0.0
