@@ -111,8 +111,8 @@ def _read_int_env(*names: str, default: int) -> int:
 
 
 def _validate_vibevoice_longform_settings(settings: "VibeVoiceLongFormSettings") -> None:
-    if settings.max_shards < 1 or settings.max_shards > 3:
-        raise ValueError("VIBEVOICE_LONGFORM_MAX_SHARDS must be between 1 and 3.")
+    if settings.max_shards < 1 or settings.max_shards > 4:
+        raise ValueError("VIBEVOICE_LONGFORM_MAX_SHARDS must be between 1 and 4.")
     if settings.single_pass_max_minutes <= 0:
         raise ValueError("VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES must be positive.")
     if settings.two_shard_max_minutes < settings.single_pass_max_minutes:
@@ -120,9 +120,9 @@ def _validate_vibevoice_longform_settings(settings: "VibeVoiceLongFormSettings")
             "VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES must be >= "
             "VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES."
         )
-    if settings.three_shard_max_minutes < settings.two_shard_max_minutes:
+    if settings.four_shard_max_minutes < settings.two_shard_max_minutes:
         raise ValueError(
-            "VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES must be >= "
+            "VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES must be >= "
             "VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES."
         )
     if not 0.0 <= settings.speaker_match_threshold <= 1.0:
@@ -198,10 +198,10 @@ class VibeVoiceSettings:
 @dataclass(slots=True)
 class VibeVoiceLongFormSettings:
     enabled: bool = True
-    single_pass_max_minutes: int = 60
-    two_shard_max_minutes: int = 90
-    three_shard_max_minutes: int = 180
-    max_shards: int = 3
+    single_pass_max_minutes: int = 40
+    two_shard_max_minutes: int = 80
+    four_shard_max_minutes: int = 160
+    max_shards: int = 4
     speaker_match_threshold: float = 0.85
     representative_clip_min_seconds: float = 15.0
     representative_clip_max_seconds: float = 30.0
@@ -878,15 +878,15 @@ def load_audio_host_settings() -> AudioHostProcessSettings:
     vibevoice_longform_settings = VibeVoiceLongFormSettings(
         enabled=_read_bool_env("VIBEVOICE_LONGFORM_ENABLED", default=True),
         single_pass_max_minutes=_read_int_env(
-            "VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES", default=60
+            "VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES", default=40
         ),
         two_shard_max_minutes=_read_int_env(
-            "VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES", default=90
+            "VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES", default=80
         ),
-        three_shard_max_minutes=_read_int_env(
-            "VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES", default=180
+        four_shard_max_minutes=_read_int_env(
+            "VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES", default=160
         ),
-        max_shards=_read_int_env("VIBEVOICE_LONGFORM_MAX_SHARDS", default=3),
+        max_shards=_read_int_env("VIBEVOICE_LONGFORM_MAX_SHARDS", default=4),
         speaker_match_threshold=float(
             _read_env("VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD") or "0.85"
         ),

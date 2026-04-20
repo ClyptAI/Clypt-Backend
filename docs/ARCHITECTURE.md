@@ -78,7 +78,7 @@ flowchart TD
   - endpoint: `POST /tasks/vibevoice-asr`
   - health: `GET /health`
   - co-located with a VibeVoice vLLM sidecar
-  - for `>60` minute inputs, the service shards canonical audio into 2-3 temporary WAVs, fans those requests out to the same local sidecar, then stitches speakers globally before returning one merged transcript
+  - for `>40` minute inputs, the service shards canonical audio into 2-4 temporary WAVs, fans those requests out to the same local sidecar, then stitches speakers globally before returning one merged transcript
 - **Visual service**
   - endpoint: `POST /tasks/visual-extract`
   - health: `GET /health`

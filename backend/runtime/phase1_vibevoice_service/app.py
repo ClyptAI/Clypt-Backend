@@ -142,7 +142,7 @@ def create_app() -> FastAPI:
                             duration_s=audio_duration_s,
                             single_pass_max_minutes=longform_settings.single_pass_max_minutes,
                             two_shard_max_minutes=longform_settings.two_shard_max_minutes,
-                            three_shard_max_minutes=longform_settings.three_shard_max_minutes,
+                            four_shard_max_minutes=longform_settings.four_shard_max_minutes,
                             max_shards=longform_settings.max_shards,
                             threshold=longform_settings.speaker_match_threshold,
                             representative_clip_min_s=longform_settings.representative_clip_min_seconds,

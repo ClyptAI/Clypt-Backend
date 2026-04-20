@@ -86,17 +86,17 @@ def test_load_audio_host_settings_reads_vibevoice_longform_overrides(
     monkeypatch.setenv("GCS_BUCKET", "bucket-a")
     monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("VIBEVOICE_LONGFORM_ENABLED", "1")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES", "120")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES", "150")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_MAX_SHARDS", "2")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES", "70")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES", "150")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_MAX_SHARDS", "4")
     monkeypatch.setenv("VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD", "0.9")
 
     settings = load_audio_host_settings()
 
     assert settings.vibevoice_longform.enabled is True
-    assert settings.vibevoice_longform.two_shard_max_minutes == 120
-    assert settings.vibevoice_longform.three_shard_max_minutes == 150
-    assert settings.vibevoice_longform.max_shards == 2
+    assert settings.vibevoice_longform.two_shard_max_minutes == 70
+    assert settings.vibevoice_longform.four_shard_max_minutes == 150
+    assert settings.vibevoice_longform.max_shards == 4
     assert settings.vibevoice_longform.speaker_match_threshold == 0.9
 
 
@@ -109,7 +109,7 @@ def test_load_audio_host_settings_rejects_invalid_vibevoice_longform_limits(
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
     monkeypatch.setenv("GCS_BUCKET", "bucket-a")
     monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_MAX_SHARDS", "4")
+    monkeypatch.setenv("VIBEVOICE_LONGFORM_MAX_SHARDS", "5")
 
     with pytest.raises(ValueError, match="VIBEVOICE_LONGFORM_MAX_SHARDS"):
         load_audio_host_settings()

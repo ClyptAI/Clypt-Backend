@@ -1,7 +1,7 @@
 # ENV REFERENCE
 
 **Status:** Active  
-**Last updated:** 2026-04-19
+**Last updated:** 2026-04-20
 
 This is the code-backed env catalog for the current Phase1 + Phase26 + Modal topology.
 
@@ -54,6 +54,13 @@ and the service expects at minimum:
 - `NODE_MEDIA_PREP_AUTH_TOKEN`
 - `GOOGLE_APPLICATION_CREDENTIALS_JSON`
 
+Observed live Modal deployment on 2026-04-20:
+
+- app id: `ap-xX4QTM2zo19aGNRKw1fEYM`
+- endpoint: `https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- secret present in `modal secret list`: `clypt-node-media-prep`
+- working non-secret runtime value: `GCS_BUCKET=clypt-storage-v3`
+
 The active HTTP contract is async:
 
 - `POST /tasks/node-media-prep` returns `202 Accepted` with `call_id`
@@ -74,20 +81,20 @@ CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN=<shared-bearer>
 CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S=3600
 CLYPT_PHASE1_VISUAL_SERVICE_HEALTHCHECK_PATH=/health
 
-CLYPT_PHASE24_DISPATCH_URL=http://192.241.241.118:9300
+CLYPT_PHASE24_DISPATCH_URL=http://162.243.208.185:9300
 CLYPT_PHASE24_DISPATCH_AUTH_TOKEN=<shared-bearer>
 CLYPT_PHASE24_DISPATCH_TIMEOUT_S=30
 
 VIBEVOICE_BACKEND=vllm
 VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
 VIBEVOICE_VLLM_MODEL=vibevoice
-VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.65
-VIBEVOICE_VLLM_MAX_NUM_SEQS=3
+VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.60
+VIBEVOICE_VLLM_MAX_NUM_SEQS=4
 VIBEVOICE_LONGFORM_ENABLED=1
-VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=60
-VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=90
-VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES=180
-VIBEVOICE_LONGFORM_MAX_SHARDS=3
+VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=40
+VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=80
+VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES=160
+VIBEVOICE_LONGFORM_MAX_SHARDS=4
 VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD=0.85
 VIBEVOICE_LONGFORM_REP_CLIP_MIN_SECONDS=15
 VIBEVOICE_LONGFORM_REP_CLIP_MAX_SECONDS=30
@@ -121,6 +128,25 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 
 `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` accepts either the Modal base URL or the full task endpoint URL. The current known-good records use the full endpoint URL.
 `RemoteNodeMediaPrepClient` handles the follow-up result polling internally, so Phase26 still receives a final ordered `media` list.
+
+Additional live non-secret values captured from `/etc/clypt-phase26/phase26.env` on 2026-04-20:
+
+```bash
+GOOGLE_CLOUD_PROJECT=clypt-v3
+GOOGLE_CLOUD_LOCATION=global
+GENAI_GENERATION_LOCATION=global
+VERTEX_EMBEDDING_LOCATION=us-central1
+GCS_BUCKET=clypt-storage-v3
+GENAI_GENERATION_MODEL=Qwen/Qwen3.6-35B-A3B
+VERTEX_EMBEDDING_MODEL=gemini-embedding-2-preview
+SG_SCHEDULE_POLICY=lpm
+SG_CHUNKED_PREFILL_SIZE=8192
+SG_MEM_FRACTION_STATIC=0.78
+SG_CONTEXT_LENGTH=65536
+CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=1800
+CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=16
+CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1
+```
 
 ## 3) Phase1 Service Settings
 
@@ -181,11 +207,11 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 
 | Env | Default | Notes |
 | --- | --- | --- |
-| `VIBEVOICE_LONGFORM_ENABLED` | `1` | Enables 2-3 shard orchestration for long-form ASR inside the Phase1 VibeVoice service. |
-| `VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES` | `60` | Inputs at or below this duration stay on the existing one-request path. |
-| `VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES` | `90` | Inputs above the single-pass cap and at or below this threshold split into exactly 2 shards. |
-| `VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES` | `180` | Inputs above the two-shard threshold and at or below this threshold split into exactly 3 shards. |
-| `VIBEVOICE_LONGFORM_MAX_SHARDS` | `3` | Hard upper bound on shard fan-out. Values outside `1..3` are rejected at config load. |
+| `VIBEVOICE_LONGFORM_ENABLED` | `1` | Enables 2-4 shard orchestration for long-form ASR inside the Phase1 VibeVoice service. |
+| `VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES` | `40` | Inputs at or below this duration stay on the existing one-request path. |
+| `VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES` | `80` | Inputs above the single-pass cap and at or below this threshold split into exactly 2 shards. |
+| `VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES` | `160` | Inputs above the two-shard threshold and at or below this threshold split into exactly 4 shards. |
+| `VIBEVOICE_LONGFORM_MAX_SHARDS` | `4` | Hard upper bound on shard fan-out. Values outside `1..4` are rejected at config load. |
 | `VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD` | `0.85` | Cosine-similarity threshold for cross-shard speaker stitching. |
 | `VIBEVOICE_LONGFORM_REP_CLIP_MIN_SECONDS` | `15` | Minimum representative clip length extracted per shard-local speaker. |
 | `VIBEVOICE_LONGFORM_REP_CLIP_MAX_SECONDS` | `30` | Maximum representative clip length extracted per shard-local speaker. |
@@ -196,7 +222,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 
 Operational notes:
 
-- Inputs longer than `VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES` fail fast.
+- Inputs longer than `VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES` fail fast.
 - Long-form sharding reuses the existing `/tasks/vibevoice-asr` contract and returns one merged `turns` list.
 - Shard audio is uploaded to temporary GCS objects under a run-scoped prefix so the URL-based VibeVoice path can stay unchanged.
 

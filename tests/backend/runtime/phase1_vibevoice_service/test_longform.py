@@ -16,40 +16,41 @@ from backend.runtime.phase1_vibevoice_service.speaker_stitch import (
 )
 
 
-def test_plan_audio_shards_returns_single_pass_for_60_minutes() -> None:
-    shards = plan_audio_shards(duration_s=60 * 60)
+def test_plan_audio_shards_returns_single_pass_through_40_minutes() -> None:
+    shards = plan_audio_shards(duration_s=40 * 60)
 
     assert shards == [
-        ShardPlan(index=0, shard_count=1, start_s=0.0, end_s=3600.0),
+        ShardPlan(index=0, shard_count=1, start_s=0.0, end_s=2400.0),
     ]
 
 
-def test_plan_audio_shards_returns_two_equal_shards_through_90_minutes() -> None:
-    shards = plan_audio_shards(duration_s=90 * 60)
+def test_plan_audio_shards_returns_two_equal_shards_through_80_minutes() -> None:
+    shards = plan_audio_shards(duration_s=80 * 60)
 
     assert shards == [
-        ShardPlan(index=0, shard_count=2, start_s=0.0, end_s=2700.0),
-        ShardPlan(index=1, shard_count=2, start_s=2700.0, end_s=5400.0),
+        ShardPlan(index=0, shard_count=2, start_s=0.0, end_s=2400.0),
+        ShardPlan(index=1, shard_count=2, start_s=2400.0, end_s=4800.0),
     ]
 
 
-def test_plan_audio_shards_returns_three_equal_shards_through_180_minutes() -> None:
-    shards = plan_audio_shards(duration_s=150 * 60)
+def test_plan_audio_shards_returns_four_equal_shards_through_160_minutes() -> None:
+    shards = plan_audio_shards(duration_s=120 * 60)
 
     assert shards == [
-        ShardPlan(index=0, shard_count=3, start_s=0.0, end_s=3000.0),
-        ShardPlan(index=1, shard_count=3, start_s=3000.0, end_s=6000.0),
-        ShardPlan(index=2, shard_count=3, start_s=6000.0, end_s=9000.0),
+        ShardPlan(index=0, shard_count=4, start_s=0.0, end_s=1800.0),
+        ShardPlan(index=1, shard_count=4, start_s=1800.0, end_s=3600.0),
+        ShardPlan(index=2, shard_count=4, start_s=3600.0, end_s=5400.0),
+        ShardPlan(index=3, shard_count=4, start_s=5400.0, end_s=7200.0),
     ]
 
 
-def test_plan_audio_shards_rejects_inputs_above_180_minutes() -> None:
-    with pytest.raises(ValueError, match="180 minutes"):
-        plan_audio_shards(duration_s=(180 * 60) + 1)
+def test_plan_audio_shards_rejects_inputs_above_160_minutes() -> None:
+    with pytest.raises(ValueError, match="160 minutes"):
+        plan_audio_shards(duration_s=(160 * 60) + 1)
 
 
 def test_plan_audio_shards_rejects_when_required_shards_exceed_max_shards() -> None:
-    with pytest.raises(ValueError, match="requires 3 shards"):
+    with pytest.raises(ValueError, match="requires 4 shards"):
         plan_audio_shards(duration_s=120 * 60, max_shards=2)
 
 
@@ -167,7 +168,7 @@ def test_run_longform_vibevoice_asr_splits_uploads_and_merges_two_shards(tmp_pat
         vibevoice_provider=provider,
         storage_client=storage,
         speaker_verifier=verifier,
-        duration_s=90 * 60,
+        duration_s=80 * 60,
         extract_shard_audio=_fake_extract_shard_audio,
     )
 
@@ -182,8 +183,8 @@ def test_run_longform_vibevoice_asr_splits_uploads_and_merges_two_shards(tmp_pat
     assert result.turns == [
         {"Speaker": 0, "Start": 10.0, "End": 12.0, "Content": "host intro"},
         {"Speaker": 1, "Start": 20.0, "End": 22.0, "Content": "guest intro"},
-        {"Speaker": 0, "Start": 2705.0, "End": 2707.0, "Content": "host follow-up"},
-        {"Speaker": 1, "Start": 2709.0, "End": 2711.0, "Content": "guest follow-up"},
+        {"Speaker": 0, "Start": 2405.0, "End": 2407.0, "Content": "host follow-up"},
+        {"Speaker": 1, "Start": 2409.0, "End": 2411.0, "Content": "guest follow-up"},
     ]
     assert any(event["stage_name"] == "vibevoice_longform_merge" for event in result.stage_events)
 
@@ -210,10 +211,11 @@ def test_run_longform_vibevoice_asr_respects_custom_shard_thresholds(tmp_path) -
         vibevoice_provider=provider,
         storage_client=storage,
         speaker_verifier=verifier,
-        duration_s=91 * 60,
+        duration_s=81 * 60,
         two_shard_max_minutes=120,
+        four_shard_max_minutes=160,
         extract_shard_audio=_fake_extract_shard_audio,
     )
 
     assert len(provider.calls) == 2
-    assert result.turns[2]["Start"] == 2735.0
+    assert result.turns[2]["Start"] == 2435.0

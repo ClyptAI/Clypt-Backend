@@ -39,6 +39,7 @@ At minimum, provide:
 Current deployed Modal wiring:
 
 - App name: `clypt-node-media-prep`
+- App id from `modal app list`: `ap-xX4QTM2zo19aGNRKw1fEYM`
 - Secret name: `clypt-node-media-prep`
 - Deployed endpoint:
   `https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`

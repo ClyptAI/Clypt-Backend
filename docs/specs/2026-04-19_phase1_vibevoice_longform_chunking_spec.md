@@ -3,21 +3,21 @@
 **Status:** Active (implemented)
 **Date:** 2026-04-19
 **Owner:** Phase1 runtime / VibeVoice ASR
-**Scope:** Extend the Phase1 H200 VibeVoice service to transcribe podcast-style inputs longer than the current safe single-pass window by splitting canonical audio into at most 2-3 shards, issuing shard ASR requests in parallel through the local vLLM sidecar, and reconciling shard-local speaker IDs into one global speaker space before the rest of Phase1 continues.
+**Scope:** Extend the Phase1 H200 VibeVoice service to transcribe podcast-style inputs longer than the current safe single-pass window by splitting canonical audio into at most 2-4 shards, issuing shard ASR requests in parallel through the local vLLM sidecar, and reconciling shard-local speaker IDs into one global speaker space before the rest of Phase1 continues.
 
 ---
 
 ## 1. Locked Decisions
 
-1. **Safe single-pass cap stays 60 minutes.** Upstream VibeVoice documentation still describes the model as handling about 60 minutes of long-form audio in a single request. Clypt will continue to treat 60 minutes as the conservative per-request ceiling rather than trying to raise the bound in-place.
+1. **Safe single-pass cap is now 40 minutes.** The live H200 runtime now intentionally uses a more conservative default split point so Phase1 can preserve enough GPU headroom for downstream forced alignment on the shared card.
 2. **Shard counts are fixed by total duration:**
-   - `<= 60 minutes`: existing single-request path
-   - `> 60 and <= 90 minutes`: exactly 2 shards
-   - `> 90 and <= 180 minutes`: exactly 3 shards
-   - `> 180 minutes`: fail fast with a clear validation/runtime error
+   - `<= 40 minutes`: existing single-request path
+   - `> 40 and <= 80 minutes`: exactly 2 shards
+   - `> 80 and <= 160 minutes`: exactly 4 shards
+   - `> 160 minutes`: fail fast with a clear validation/runtime error
 3. **Chunking happens inside the Phase1 VibeVoice service, not in the runner.** The outer Phase1 runner and `RemoteVibeVoiceAsrClient` contract remain one request per job.
 4. **We split canonical audio, not source video.** The VibeVoice service already downloads `audio_gcs_uri` and only consumes audio for ASR. Visual extraction continues to use the full original video path and is not chunked.
-5. **Parallel shard requests go to the existing local vLLM sidecar.** No new remote surface is introduced. The known-good H200 env caps `VIBEVOICE_VLLM_MAX_NUM_SEQS=3`, so long-form fan-out must stay within the existing 3-shard ceiling and must not assume extra sidecar headroom beyond that cap.
+5. **Parallel shard requests go to the existing local vLLM sidecar.** No new remote surface is introduced. The known-good H200 env now sets `VIBEVOICE_VLLM_MAX_NUM_SEQS=4`, so the 4-shard path can run without an extra queued request under the current default.
 6. **Speaker stitching is additive, not a replacement diarizer.** VibeVoice remains the per-shard source of transcript text, timestamps, and shard-local speaker labels. A lightweight verification layer only reconciles identities across shards.
 7. **Global speaker IDs are deterministic.** Final speaker numbering is assigned by first appearance in the merged transcript after cross-shard reconciliation.
 8. **The Phase1 enqueue boundary remains “merged ASR complete,” not “first shard complete.”** Phase1 may still enqueue downstream before visual finishes, but only after all ASR shards, timestamp offsets, and global speaker stitching are complete.
@@ -34,9 +34,9 @@ The current Phase1 topology is optimized around a single VibeVoice request per j
 - the provider sends one long-form ASR request to the local vLLM sidecar,
 - audio-post work (NFA -> emotion2vec+ -> YAMNet) starts only after that ASR response returns.
 
-That works well for the current single-pass envelope, but it breaks down for long podcasts in the 60-180 minute range:
+That works well for the current single-pass envelope, but it breaks down for long podcasts in the 40-160 minute range:
 
-1. upstream VibeVoice guidance still treats ~60 minutes as the safe single-pass budget,
+1. upstream VibeVoice guidance still treats ~60 minutes as the safe single-pass budget, but the live shared-H200 runtime now uses a more conservative 40-minute split point to protect post-ASR GPU headroom,
 2. Clypt currently has no built-in sharding/orchestration path for longer content,
 3. naive chunking would create independent speaker namespaces per shard (`Speaker 0`, `Speaker 1`, etc.) and would corrupt downstream participation grounding if those local IDs were treated as global truth.
 
@@ -51,9 +51,9 @@ The Phase1 H200 should therefore gain a long-form ASR mode that:
 
 ## 3. Goals
 
-1. Support podcast-style jobs up to 180 minutes without changing the outer Phase1 runner contract.
-2. Keep the existing <=60 minute path unchanged and cheap.
-3. Use the local vLLM sidecar for intra-job parallelism instead of serializing 2-3 long ASR passes.
+1. Support podcast-style jobs up to 160 minutes without changing the outer Phase1 runner contract.
+2. Keep the existing <=40 minute path unchanged and cheap.
+3. Use the local vLLM sidecar for intra-job parallelism instead of serializing 2-4 long ASR passes.
 4. Preserve a single merged `turns` list and `stage_events` response shape from `/tasks/vibevoice-asr`.
 5. Produce one global speaker space across all shards so downstream Phase1/Phase26 artifacts remain coherent.
 6. Preserve the current Phase1 invariant that audio-post begins as soon as final ASR is ready and does not wait for visual completion.
@@ -62,7 +62,7 @@ The Phase1 H200 should therefore gain a long-form ASR mode that:
 
 ## 4. Non-Goals
 
-1. No support for podcasts longer than 180 minutes in this phase.
+1. No support for podcasts longer than 160 minutes in this phase.
 2. No replacement of VibeVoice diarization with a standalone end-to-end diarization stack.
 3. No chunking of the visual pipeline, source video upload path, or Phase26 queue contract.
 4. No streaming partial transcripts to downstream Phases 2-4.
@@ -78,7 +78,7 @@ For long inputs, the Phase1 VibeVoice service will:
 
 1. download the canonical audio object from GCS into service scratch,
 2. probe duration,
-3. choose `1`, `2`, or `3` shards based on §1.2,
+3. choose `1`, `2`, or `4` shards based on §1.2,
 4. split the local audio file into equal-duration shard WAVs,
 5. upload shard WAVs back to ephemeral GCS paths under the current `run_id`,
 6. issue up to 3 parallel VibeVoice requests against those shard GCS URIs,
@@ -100,7 +100,7 @@ This approach keeps the live architecture aligned with current runtime truths:
 ### 5.3 Rejected alternatives
 
 1. **Raise the single-pass cap above 60 minutes and keep one request.** Rejected because it directly fights the upstream model envelope and would create the least predictable failure mode.
-2. **Chunk locally and send shard audio inline as base64.** Rejected as the default because 2-3 hour podcast shards create very large HTTP payloads; Clypt’s current VibeVoice path is intentionally GCS/URL-driven.
+2. **Chunk locally and send shard audio inline as base64.** Rejected as the default because long podcast shards create very large HTTP payloads; Clypt’s current VibeVoice path is intentionally GCS/URL-driven.
 3. **Run a completely separate diarization system for the whole file and discard VibeVoice speakers.** Rejected because the desired change is specifically global speaker reconciliation on top of VibeVoice, not a parallel diarization rewrite.
 
 ---
@@ -111,26 +111,27 @@ This approach keeps the live architecture aligned with current runtime truths:
 
 The service computes `audio_duration_s` from the downloaded canonical audio file and applies:
 
-- `duration <= 3600s` -> `shard_count = 1`
-- `3600s < duration <= 5400s` -> `shard_count = 2`
-- `5400s < duration <= 10800s` -> `shard_count = 3`
-- `duration > 10800s` -> hard failure
+- `duration <= 2400s` -> `shard_count = 1`
+- `2400s < duration <= 4800s` -> `shard_count = 2`
+- `4800s < duration <= 9600s` -> `shard_count = 4`
+- `duration > 9600s` -> hard failure
 
 ## 6.2 Shard boundaries
 
-For `N in {2, 3}`, the service computes equal-length time windows:
+For `N in {2, 4}`, the service computes equal-length time windows:
 
 - shard 0: `[0, shard_len)`
 - shard 1: `[shard_len, 2*shard_len)`
-- shard 2: `[2*shard_len, duration)` if present
+- shard 2: `[2*shard_len, 3*shard_len)` if present
+- shard 3: `[3*shard_len, duration)` if present
 
-The first implementation intentionally uses **non-overlapping** shards to preserve the simple “2 shards through 90 minutes / 3 shards through 180 minutes” contract the product request calls for. Boundary clipping risk is accepted as a known tradeoff for V1 and is tracked in §15.
+The first implementation intentionally uses **non-overlapping** shards to preserve the simple “2 shards through 80 minutes / 4 shards through 160 minutes” contract the product request calls for. Boundary clipping risk is accepted as a known tradeoff for V1 and is tracked in §15.
 
 ## 6.3 Unsupported inputs
 
 The service returns a clear error when:
 
-- the canonical audio exceeds 180 minutes,
+- the canonical audio exceeds 160 minutes,
 - shard extraction fails,
 - the service cannot create shard GCS objects,
 - or shard metadata cannot be reconciled into a complete merged transcript.
@@ -164,12 +165,12 @@ Long-form orchestration belongs in `backend/runtime/phase1_vibevoice_service/`, 
 
 ## 7.3 Service-level serialization
 
-The existing service-level `asr_lock` remains in place. This preserves the current “one active Phase1 ASR job at a time” operational posture while still allowing **intra-job parallelism** across 2-3 shard requests.
+The existing service-level `asr_lock` remains in place. This preserves the current “one active Phase1 ASR job at a time” operational posture while still allowing **intra-job parallelism** across 2-4 shard requests.
 
 This means:
 
 - Clypt does **not** add multi-job concurrency in this change,
-- but a single long-form job can exploit vLLM’s `max-num-seqs` parallel capacity.
+- but a single long-form job can exploit vLLM’s `max-num-seqs` parallel capacity while fan-out is internally planned across up to 4 shards.
 
 ---
 
@@ -223,16 +224,17 @@ The service fans those requests out via a thread pool sized to `shard_count`.
 
 Known-good Phase1 H200 env already sets:
 
-- `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.65`
-- `VIBEVOICE_VLLM_MAX_NUM_SEQS=3`
+- `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.60`
+- `VIBEVOICE_VLLM_MAX_NUM_SEQS=4`
 
 That is sufficient for:
 
 - 1 long-form service job,
-- up to 3 concurrent shard requests,
-- and no assumption of extra queue headroom beyond the 3-shard design maximum.
+- up to 4 concurrently admitted shard requests,
+- the current 4-shard planning ceiling,
+- and no assumption of headroom beyond the current `max_num_seqs=4` sidecar limit.
 
-The spec still requires an explicit canary/benchmark gate in §14 before raising concurrency beyond the 3-shard design maximum.
+The spec still requires an explicit canary/benchmark gate in §14 before raising sidecar concurrency beyond the current `max_num_seqs=4` ceiling.
 
 ## 9.3 Stage telemetry
 
@@ -367,7 +369,7 @@ The internal meaning of the service call changes from:
 
 to:
 
-- “produce one globally stitched ASR result, possibly via 2-3 parallel VibeVoice shard requests.”
+- “produce one globally stitched ASR result, possibly via 2-4 VibeVoice shard requests.”
 
 This is intentionally an internal service detail. Downstream code should not see a contract change.
 
@@ -409,7 +411,7 @@ Add focused helpers under `backend/runtime/phase1_vibevoice_service/`:
 - `docs/runtime/known-good-phase1-h200.env`
   - add the new env defaults
 - `docs/runtime/RUNTIME_GUIDE.md`
-  - mention long-form sharding support and 180-minute cap
+  - mention long-form sharding support and 160-minute cap
 - `docs/deployment/PHASE1_HOST_DEPLOY.md`
   - mention the verifier dependency and canary expectations
 - `docs/ERROR_LOG.md`
@@ -431,10 +433,10 @@ No outer contract change should force downstream rewrites.
 Add Phase1 env knobs with conservative defaults:
 
 - `VIBEVOICE_LONGFORM_ENABLED=1`
-- `VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=60`
-- `VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=90`
-- `VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES=180`
-- `VIBEVOICE_LONGFORM_MAX_SHARDS=3`
+- `VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=40`
+- `VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=80`
+- `VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES=160`
+- `VIBEVOICE_LONGFORM_MAX_SHARDS=4`
 - `VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD=0.85`
 - `VIBEVOICE_LONGFORM_REP_CLIP_MIN_SECONDS=15`
 - `VIBEVOICE_LONGFORM_REP_CLIP_MAX_SECONDS=30`
@@ -456,20 +458,20 @@ Notes:
 Add focused tests for:
 
 - duration -> shard-count planning
-- 2-shard and 3-shard boundary generation
+- 2-shard and 4-shard boundary generation
 - timestamp offset merge correctness
 - deterministic speaker renumbering
 - one-to-one adjacent-shard speaker matching
 - unmatched speaker behavior
-- >180 minute rejection
+- >160 minute rejection
 
 ## 15.2 Service tests
 
 Add runtime tests around `phase1_vibevoice_service` that validate:
 
-1. `<=60 minute` requests still call the provider exactly once,
-2. `61-90 minute` requests fan out exactly 2 shard calls,
-3. `91-180 minute` requests fan out exactly 3 shard calls,
+1. `<=40 minute` requests still call the provider exactly once,
+2. `41-80 minute` requests fan out exactly 2 shard calls,
+3. `81-160 minute` requests fan out exactly 4 shard calls,
 4. the response shape remains unchanged,
 5. shard stage events are present,
 6. merged turns return global timestamps and global speaker IDs.
@@ -489,9 +491,9 @@ python -m pytest tests/backend/providers -q
 
 Long-form canary set should include at minimum:
 
-1. one 70-90 minute input -> 2-shard path
-2. one 100-150 minute input -> 3-shard path
-3. one input near the 180 minute cap
+1. one 50-80 minute input -> 2-shard path
+2. one 100-150 minute input -> 4-shard path
+3. one input near the 160 minute cap
 
 Each canary must confirm:
 
@@ -504,10 +506,10 @@ Each canary must confirm:
 
 ## 16. Acceptance Criteria
 
-1. Inputs up to 60 minutes remain on the existing single-pass code path with no behavior change.
-2. Inputs in `(60, 90]` minutes are transcribed via exactly 2 parallel shard requests.
-3. Inputs in `(90, 180]` minutes are transcribed via exactly 3 parallel shard requests.
-4. Inputs above 180 minutes fail fast with a clear error message.
+1. Inputs up to 40 minutes remain on the existing single-pass code path with no behavior change.
+2. Inputs in `(40, 80]` minutes are transcribed via exactly 2 shard requests.
+3. Inputs in `(80, 160]` minutes are transcribed via exactly 4 shard requests.
+4. Inputs above 160 minutes fail fast with a clear error message.
 5. `/tasks/vibevoice-asr` still returns one merged `turns` list and one `stage_events` list.
 6. The merged output uses global speaker IDs rather than shard-local IDs.
 7. Phase1 audio-post still starts only after the final merged ASR result is ready.
@@ -529,5 +531,5 @@ Each canary must confirm:
 
 1. Add optional shard overlap + deterministic boundary dedupe if no-overlap quality proves insufficient.
 2. Add cleanup/retention policy for ephemeral shard GCS objects.
-3. Add benchmark-driven sidecar tuning if 3-way parallelism needs more than the current `max-num-seqs=4`.
+3. Add benchmark-driven sidecar tuning if 4-way parallelism needs more than the current `max-num-seqs=4`.
 4. Consider averaging multiple representative clips per speaker if one-clip verification is not stable enough in evals.

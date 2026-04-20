@@ -20,16 +20,14 @@ def _make_turn(start_ms: int, end_ms: int, text: str, turn_id: str) -> dict[str,
 def test_alignment_chunk_count_uses_duration_defaults() -> None:
     provider = ForcedAlignmentProvider()
 
-    assert provider._alignment_chunk_count_for_duration_s(30 * 60) == 1
-    assert provider._alignment_chunk_count_for_duration_s(40 * 60) == 1
-    assert provider._alignment_chunk_count_for_duration_s((40 * 60) + 1) == 2
-    assert provider._alignment_chunk_count_for_duration_s(60 * 60) == 2
-    assert provider._alignment_chunk_count_for_duration_s((60 * 60) + 1) == 3
-    assert provider._alignment_chunk_count_for_duration_s(120 * 60) == 3
-    assert provider._alignment_chunk_count_for_duration_s((120 * 60) + 1) == 4
-    assert provider._alignment_chunk_count_for_duration_s(150 * 60) == 4
-    assert provider._alignment_chunk_count_for_duration_s((150 * 60) + 1) == 5
-    assert provider._alignment_chunk_count_for_duration_s(180 * 60) == 5
+    assert provider._alignment_chunk_count_for_duration_s(20 * 60) == 1
+    assert provider._alignment_chunk_count_for_duration_s((20 * 60) + 1) == 2
+    assert provider._alignment_chunk_count_for_duration_s(40 * 60) == 2
+    assert provider._alignment_chunk_count_for_duration_s((40 * 60) + 1) == 4
+    assert provider._alignment_chunk_count_for_duration_s(80 * 60) == 4
+    assert provider._alignment_chunk_count_for_duration_s((80 * 60) + 1) == 8
+    assert provider._alignment_chunk_count_for_duration_s(120 * 60) == 8
+    assert provider._alignment_chunk_count_for_duration_s(160 * 60) == 8
 
 
 def test_run_uses_duration_chunked_alignment_for_long_inputs(monkeypatch, tmp_path: Path) -> None:

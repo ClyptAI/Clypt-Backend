@@ -53,16 +53,16 @@ Required values to set:
 
 Long-form ASR defaults already live in the baseline env:
 
-- `<= 60 minutes`: single-pass VibeVoice
-- `> 60 and <= 90 minutes`: 2 shard VibeVoice fan-out
-- `> 90 and <= 180 minutes`: 3 shard VibeVoice fan-out
-- `> 180 minutes`: fail fast
+- `<= 40 minutes`: single-pass VibeVoice
+- `> 40 and <= 80 minutes`: 2 shard VibeVoice fan-out
+- `> 80 and <= 160 minutes`: 4 shard VibeVoice fan-out
+- `> 160 minutes`: fail fast
 
 Topology note:
 
 - The current working split runs across two DigitalOcean teams, so Phase1 talks
   to Phase26 over the public endpoint.
-- The live known-good Phase26 dispatch URL is `http://192.241.241.118:9300`.
+- The live known-good Phase26 dispatch URL is `http://162.243.208.185:9300`.
 
 Credential requirement:
 
@@ -114,6 +114,6 @@ curl -sf http://127.0.0.1:8000/v1/models
 - The H100 overlay may only change memory-sensitive VibeVoice knobs.
 - Phase1 does not own the downstream SQLite queue anymore.
 - The VibeVoice sidecar must report the downloaded `microsoft/VibeVoice-ASR` snapshot via `/v1/models`; a green outer service health check alone is not enough.
-- The VibeVoice service now supports 60-180 minute podcast inputs by splitting canonical audio into 2-3 temporary shard WAVs, uploading them to run-scoped GCS paths, and stitching shard-local speakers back into one global speaker space before Phase1 audio-post begins.
+- The VibeVoice service now supports 40-160 minute podcast inputs by splitting canonical audio into 2-4 temporary shard WAVs, uploading them to run-scoped GCS paths, and stitching shard-local speakers back into one global speaker space before Phase1 audio-post begins.
 - If `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`, the deploy script now installs and verifies both `trtexec` and the TensorRT Python package automatically.
 - The deploy script also prewarms NFA, emotion2vec+, and YAMNet so the first live job does not stall on model downloads.

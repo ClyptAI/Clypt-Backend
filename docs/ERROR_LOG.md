@@ -7,6 +7,28 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-04-20 - Phase1 long-form routing tightened again for shared-H200 memory headroom
+
+- **Date/Time (UTC):** 2026-04-20 06:30 UTC
+- **Subsystem:** Phase1 VibeVoice long-form planner + forced aligner (`backend/runtime/phase1_vibevoice_service/longform.py`, `backend/providers/forced_aligner.py`, `backend/providers/config.py`)
+- **Environment:** Rithvik-team Phase1 H200 (`clypt-phase1-h200-rithvik-nyc2`) while replaying `dwarkeshjensen.mp4` (`~103.2 min`)
+- **Symptom / Error signature:** Even after lowering `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION` to `0.60`, Phase1 still OOMed in forced alignment on the first global chunk. With the then-current routing (`<=30 -> 1`, `>30..60 -> 2`, `>60..120 -> 4`, `>120..180 -> 6`), the `103.2` minute replay still attempted a `22.62 GiB` NFA allocation while only `13.69 GiB` was free and the VibeVoice sidecar still held about `85.94 GiB`.
+- **Root cause:** The previous runtime defaults were still too coarse for the shared-H200 topology. VibeVoice kept too much work inside a small number of large ASR shards, and NFA still aligned transcript sections that were large enough to trip VRAM pressure once the hot VibeVoice sidecar had expanded under load.
+- **Fix applied:** Tightened both duration planners. VibeVoice long-form defaults are now `<=40 min -> 1 shard`, `>40..80 min -> 2 shards`, `>80..160 min -> 4 shards`, hard-failing above `160 min`. NFA defaults are now `<=20 min -> 1 chunk`, `>20..40 min -> 2`, `>40..80 min -> 4`, `>80..160 min -> 8`, with the existing hard-fail policy preserved if any chunk-level alignment fails. The H200 baseline env, runtime docs, deploy docs, and active long-form spec were updated in the same change so fresh droplets inherit the same thresholds.
+- **Verification evidence:** Focused local suites passed after the routing change: `./.venv/bin/python -m pytest tests/backend/runtime/phase1_vibevoice_service/test_longform.py tests/backend/runtime/phase1_vibevoice_service/test_app.py tests/backend/providers/test_provider_config_and_clients.py tests/backend/providers/test_forced_aligner.py -q`. The code-backed defaults now line up with the H200 baseline env (`VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=40`, `VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=80`, `VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES=160`, `VIBEVOICE_LONGFORM_MAX_SHARDS=4`).
+- **Follow-up guardrails:** Any future routing retune must update all three layers together: planner code, host baseline env/docs, and this log. Do not retune only on the droplet; the point is to make fresh Phase1 H200 hosts inherit the same memory-safe defaults.
+
+## 2026-04-20 - Runtime env records refreshed from live Phase1, Phase26, and Modal surfaces; Phase1 VibeVoice sidecar default moved back to 4 seqs
+
+- **Date/Time (UTC):** 2026-04-20 06:55 UTC
+- **Subsystem:** Runtime env/deploy documentation + Phase1 VibeVoice sidecar launcher (`docs/runtime/*.md`, `docs/deployment/*.md`, `scripts/do_phase1/run_vllm_vibevoice_container.sh`)
+- **Environment:** Live Phase1 H200 `clypt-phase1-h200-rithvik-nyc2`, live Phase26 H200 `clypt-phase26-h200-ming-nyc2`, Modal app `clypt-node-media-prep`
+- **Symptom / Error signature:** The repo’s runtime records had drifted from the actual deployed surfaces in two important ways: the documented Phase1 dispatch target still pointed at the old `192.241.241.118` host instead of the live Phase26 host `162.243.208.185`, and the Phase1 H200 defaults still recorded `VIBEVOICE_VLLM_MAX_NUM_SEQS=3` even though the desired long-form operating point is now 4-way shard fan-out.
+- **Root cause:** Successive live retunes were applied while debugging long-form replays, but the docs/baselines were not fully normalized afterward. That left future fresh droplets at risk of inheriting stale routing or sidecar defaults.
+- **Fix applied:** Captured the live non-secret env surfaces from `/etc/clypt-phase1/phase1.env`, `/usr/local/bin/clypt-phase1-run-vllm-vibevoice`, `/etc/clypt-phase26/phase26.env`, `modal app list`, and `modal secret list`; then updated the H200 baseline envs, env reference, runtime guide, and deploy docs to record the working non-secret values. The Phase1 sidecar launcher default was changed from `VIBEVOICE_VLLM_MAX_NUM_SEQS=3` to `4`, and the documented/live Phase1 dispatch URL was corrected to `http://162.243.208.185:9300`.
+- **Verification evidence:** Live capture showed Phase1 running with `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.60`, long-form `40/80/160`, and `VIBEVOICE_VLLM_MAX_NUM_SEQS=3` before the refresh; Phase26 was serving `Qwen/Qwen3.6-35B-A3B` with `local_sqlite` and the current Modal endpoint; `modal app list` confirmed app id `ap-xX4QTM2zo19aGNRKw1fEYM`; `modal secret list` confirmed secret `clypt-node-media-prep`.
+- **Follow-up guardrails:** Treat `/etc/clypt-phase1/phase1.env`, `/etc/clypt-phase26/phase26.env`, and Modal app/secret metadata as the authoritative live state when reconciling docs. After any live retune, update the repo baselines the same day so fresh droplets do not regress to stale values.
+
 ## 2026-04-20 - Modal webhook redirect loop on long node-media-prep requests fixed by submit-and-poll
 
 - **Date/Time (UTC):** 2026-04-20 04:50 UTC

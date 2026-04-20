@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-04-19
+**Last updated:** 2026-04-20
 
 This is the runtime source of truth for the current repository state.
 
@@ -39,16 +39,27 @@ Key behavior:
 - `RemoteVibeVoiceAsrClient` targets the local service at `POST /tasks/vibevoice-asr`
 - `RemotePhase1VisualClient` targets the local service at `POST /tasks/visual-extract`
 - `RemotePhase26DispatchClient` targets the downstream host at `POST /tasks/phase26-enqueue`
-- the VibeVoice service keeps the existing single-pass path through 60 minutes, splits `>60..90` minute jobs into 2 shards, splits `>90..180` minute jobs into 3 shards, and fails fast above 180 minutes
+- the VibeVoice service keeps the existing single-pass path through 40 minutes, splits `>40..80` minute jobs into 2 shards, splits `>80..160` minute jobs into 4 shards, and fails fast above 160 minutes
 - long-form shard requests still target the same local vLLM sidecar and are stitched back into one global speaker space before the HTTP response returns
 - forced alignment now uses duration-bounded global chunks by default instead of a per-turn fallback:
-  - `<=40 min`: 1 chunk
-  - `>40..60 min`: 2 chunks
-  - `>60..120 min`: 3 chunks
-  - `>120..150 min`: 4 chunks
-  - `>150 min`: 5 chunks
+  - `<=20 min`: 1 chunk
+  - `>20..40 min`: 2 chunks
+  - `>40..80 min`: 4 chunks
+  - `>80..160 min`: 8 chunks
   If any chunk-level alignment fails, Phase 1 hard-fails instead of dropping to per-turn alignment.
 - Phase 1 audio-post launches immediately after the VibeVoice response returns
+
+Current live non-secret Phase1 env snapshot from `clypt-phase1-h200-rithvik-nyc2` on 2026-04-20:
+
+- dispatch URL: `http://162.243.208.185:9300`
+- `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.60`
+- `VIBEVOICE_VLLM_MAX_NUM_SEQS=4`
+- `VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=40`
+- `VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=80`
+- `VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES=160`
+- `VIBEVOICE_LONGFORM_MAX_SHARDS=4`
+- `CLYPT_PHASE1_INPUT_MODE=test_bank`
+- visual fast-path settings remain `tensorrt_fp16`, batch `16`, threshold `0.35`, shape `640`, ByteTrack buffer `30`, ByteTrack match `0.7`, GPU decode
 
 ### 2.2 Phase26 host
 
@@ -63,6 +74,17 @@ Key behavior:
 - the worker still runs current Phase 2-4 business logic
 - node-media-prep is called only after node creation
 
+Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2` on 2026-04-20:
+
+- `GENAI_GENERATION_MODEL=Qwen/Qwen3.6-35B-A3B`
+- `CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1`
+- `VERTEX_EMBEDDING_LOCATION=us-central1`
+- `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
+- `CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1`
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=1800`
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=16`
+
 ### 2.3 Modal node-media-prep
 
 - app path: `scripts/modal/node_media_prep_app.py`
@@ -74,6 +96,14 @@ Key behavior:
 - `RemoteNodeMediaPrepClient` hides this async contract from Phase 2 and still returns the same final `media` list shape to the worker
 - clip extraction now downscales to 480p before upload / Vertex multimodal embedding
 
+Current live non-secret Modal deployment snapshot on 2026-04-20:
+
+- app name: `clypt-node-media-prep`
+- app id: `ap-xX4QTM2zo19aGNRKw1fEYM`
+- secret name present in Modal: `clypt-node-media-prep`
+- endpoint: `https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- required secret-backed envs remain `GCS_BUCKET`, `NODE_MEDIA_PREP_AUTH_TOKEN`, and `GOOGLE_APPLICATION_CREDENTIALS_JSON`
+
 ## 3) Phase 1 Execution Semantics
 
 ```text
@@ -84,7 +114,7 @@ Phase 1 visual chain:
 Phase 1 audio chain:
   Phase1 local VibeVoice service (/tasks/vibevoice-asr)
     -> probe canonical audio duration
-    -> for long-form jobs: split into 2-3 shard WAVs + temporary GCS shard objects
+    -> for long-form jobs: split into 2-4 shard WAVs + temporary GCS shard objects
     -> local VibeVoice vLLM sidecar
     -> cross-shard speaker verification + merged turns
     -> response returns to runner

@@ -388,15 +388,15 @@ class ForcedAlignmentProvider:
 
     def _alignment_chunk_count_for_duration_s(self, duration_s: float) -> int:
         duration_minutes = float(duration_s) / 60.0
-        if duration_minutes <= 40.0:
+        if duration_minutes <= 20.0:
             return 1
-        if duration_minutes <= 60.0:
+        if duration_minutes <= 40.0:
             return 2
-        if duration_minutes <= 120.0:
-            return 3
-        if duration_minutes <= 150.0:
+        if duration_minutes <= 80.0:
             return 4
-        return 5
+        if duration_minutes <= 160.0:
+            return 8
+        return 8
 
     def _build_alignment_chunks(
         self,

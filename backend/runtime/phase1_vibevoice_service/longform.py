@@ -11,9 +11,9 @@ from .models import LongFormAsrOutputs, ShardAsrResult, ShardPlan
 from .speaker_stitch import stitch_global_speakers
 
 
-_DEFAULT_SINGLE_PASS_MAX_MINUTES = 60
-_DEFAULT_TWO_SHARD_MAX_MINUTES = 90
-_DEFAULT_THREE_SHARD_MAX_MINUTES = 180
+_DEFAULT_SINGLE_PASS_MAX_MINUTES = 40
+_DEFAULT_TWO_SHARD_MAX_MINUTES = 80
+_DEFAULT_FOUR_SHARD_MAX_MINUTES = 160
 
 
 def plan_audio_shards(
@@ -21,13 +21,13 @@ def plan_audio_shards(
     duration_s: float,
     single_pass_max_minutes: int = _DEFAULT_SINGLE_PASS_MAX_MINUTES,
     two_shard_max_minutes: int = _DEFAULT_TWO_SHARD_MAX_MINUTES,
-    three_shard_max_minutes: int = _DEFAULT_THREE_SHARD_MAX_MINUTES,
-    max_shards: int = 3,
+    four_shard_max_minutes: int = _DEFAULT_FOUR_SHARD_MAX_MINUTES,
+    max_shards: int = 4,
 ) -> list[ShardPlan]:
     if duration_s <= 0:
         raise ValueError("audio duration must be positive")
-    if max_shards < 1 or max_shards > 3:
-        raise ValueError("VIBEVOICE_LONGFORM_MAX_SHARDS must be between 1 and 3")
+    if max_shards < 1 or max_shards > 4:
+        raise ValueError("VIBEVOICE_LONGFORM_MAX_SHARDS must be between 1 and 4")
     if single_pass_max_minutes <= 0:
         raise ValueError("VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES must be positive")
     if two_shard_max_minutes < single_pass_max_minutes:
@@ -35,9 +35,9 @@ def plan_audio_shards(
             "VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES must be >= "
             "VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES"
         )
-    if three_shard_max_minutes < two_shard_max_minutes:
+    if four_shard_max_minutes < two_shard_max_minutes:
         raise ValueError(
-            "VIBEVOICE_LONGFORM_THREE_SHARD_MAX_MINUTES must be >= "
+            "VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES must be >= "
             "VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES"
         )
 
@@ -50,15 +50,15 @@ def plan_audio_shards(
                 f"VIBEVOICE_LONGFORM_MAX_SHARDS={max_shards}"
             )
         return _equal_shards(duration_s=duration_s, shard_count=2)
-    if duration_s <= three_shard_max_minutes * 60:
-        if max_shards < 3:
+    if duration_s <= four_shard_max_minutes * 60:
+        if max_shards < 4:
             raise ValueError(
-                "audio duration requires 3 shards but "
+                "audio duration requires 4 shards but "
                 f"VIBEVOICE_LONGFORM_MAX_SHARDS={max_shards}"
             )
-        return _equal_shards(duration_s=duration_s, shard_count=3)
+        return _equal_shards(duration_s=duration_s, shard_count=4)
     raise ValueError(
-        f"audio duration exceeds the supported long-form limit of {three_shard_max_minutes} minutes"
+        f"audio duration exceeds the supported long-form limit of {four_shard_max_minutes} minutes"
     )
 
 
@@ -120,8 +120,8 @@ def run_longform_vibevoice_asr(
     duration_s: float,
     single_pass_max_minutes: int = _DEFAULT_SINGLE_PASS_MAX_MINUTES,
     two_shard_max_minutes: int = _DEFAULT_TWO_SHARD_MAX_MINUTES,
-    three_shard_max_minutes: int = _DEFAULT_THREE_SHARD_MAX_MINUTES,
-    max_shards: int = 3,
+    four_shard_max_minutes: int = _DEFAULT_FOUR_SHARD_MAX_MINUTES,
+    max_shards: int = 4,
     threshold: float = 0.85,
     representative_clip_min_s: float = 15.0,
     representative_clip_max_s: float = 30.0,
@@ -132,7 +132,7 @@ def run_longform_vibevoice_asr(
         duration_s=duration_s,
         single_pass_max_minutes=single_pass_max_minutes,
         two_shard_max_minutes=two_shard_max_minutes,
-        three_shard_max_minutes=three_shard_max_minutes,
+        four_shard_max_minutes=four_shard_max_minutes,
         max_shards=max_shards,
     )
     if len(shards) <= 1:

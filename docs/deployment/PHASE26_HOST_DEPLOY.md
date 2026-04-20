@@ -43,6 +43,14 @@ Current known-good Modal endpoint:
 
 - `https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 
+Observed live non-secret Phase26 values on 2026-04-20:
+
+- host: `clypt-phase26-h200-ming-nyc2` (`162.243.208.185`)
+- `GENAI_GENERATION_MODEL=Qwen/Qwen3.6-35B-A3B`
+- `CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1`
+- `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
+- `CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1`
+
 `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` may be set to either the Modal base URL or the full task endpoint URL. The current known-good env uses the full endpoint URL.
 
 The Phase26 worker now uses a submit-and-poll contract against Modal:

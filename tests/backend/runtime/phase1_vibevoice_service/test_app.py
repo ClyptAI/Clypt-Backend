@@ -48,10 +48,10 @@ class _FakeVerifier:
 
 class _FakeLongFormSettings:
     enabled = True
-    single_pass_max_minutes = 60
-    two_shard_max_minutes = 120
-    three_shard_max_minutes = 180
-    max_shards = 3
+    single_pass_max_minutes = 40
+    two_shard_max_minutes = 80
+    four_shard_max_minutes = 160
+    max_shards = 4
     speaker_match_threshold = 0.85
     representative_clip_min_seconds = 15.0
     representative_clip_max_seconds = 30.0
@@ -85,7 +85,7 @@ def test_phase1_vibevoice_asr_longform_merges_two_shards(monkeypatch, tmp_path: 
 
     deps = _FakeDeps(tmp_path)
     monkeypatch.setattr(app_module, "get_app_deps", lambda: deps)
-    monkeypatch.setattr(app_module, "_probe_audio_duration_s", lambda path: 91 * 60, raising=False)
+    monkeypatch.setattr(app_module, "_probe_audio_duration_s", lambda path: 79 * 60, raising=False)
     monkeypatch.setattr(
         app_module,
         "_extract_shard_audio",
@@ -108,8 +108,8 @@ def test_phase1_vibevoice_asr_longform_merges_two_shards(monkeypatch, tmp_path: 
     assert body["turns"] == [
         {"Speaker": 0, "Start": 10.0, "End": 12.0, "Content": "host intro"},
         {"Speaker": 1, "Start": 20.0, "End": 22.0, "Content": "guest intro"},
-        {"Speaker": 0, "Start": 2735.0, "End": 2737.0, "Content": "host follow-up"},
-        {"Speaker": 1, "Start": 2739.0, "End": 2741.0, "Content": "guest follow-up"},
+        {"Speaker": 0, "Start": 2375.0, "End": 2377.0, "Content": "host follow-up"},
+        {"Speaker": 1, "Start": 2379.0, "End": 2381.0, "Content": "guest follow-up"},
     ]
     assert len(deps.vibevoice_provider.calls) == 2
     assert len(deps.storage_client.uploads) == 2
