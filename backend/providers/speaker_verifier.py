@@ -30,12 +30,16 @@ class EcapaTdnnSpeakerVerifier:
 
     def _embedding_for_path(self, audio_path: Path) -> list[float]:
         classifier = self._load_classifier()
-        embedding = classifier.encode_batch(str(audio_path))
 
         try:
             import torch
         except ImportError as exc:  # pragma: no cover - runtime dependency
             raise RuntimeError("torch is required for ECAPA speaker verification.") from exc
+
+        waveform = classifier.load_audio(str(audio_path))
+        batch = waveform.unsqueeze(0)
+        relative_lengths = torch.tensor([1.0], device=classifier.device)
+        embedding = classifier.encode_batch(batch, relative_lengths)
 
         if isinstance(embedding, torch.Tensor):
             embedding = embedding.detach().cpu().reshape(-1).tolist()

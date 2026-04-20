@@ -54,6 +54,11 @@ and the service expects at minimum:
 - `NODE_MEDIA_PREP_AUTH_TOKEN`
 - `GOOGLE_APPLICATION_CREDENTIALS_JSON`
 
+The active HTTP contract is async:
+
+- `POST /tasks/node-media-prep` returns `202 Accepted` with `call_id`
+- `GET /tasks/node-media-prep/result/{call_id}` returns `202` while pending, `200` on completion
+
 ## 2) Recommended Working Profiles
 
 ### 2.1 Phase1 H200 default
@@ -76,6 +81,8 @@ CLYPT_PHASE24_DISPATCH_TIMEOUT_S=30
 VIBEVOICE_BACKEND=vllm
 VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
 VIBEVOICE_VLLM_MODEL=vibevoice
+VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.65
+VIBEVOICE_VLLM_MAX_NUM_SEQS=3
 VIBEVOICE_LONGFORM_ENABLED=1
 VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=60
 VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=90
@@ -108,9 +115,12 @@ CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1
 CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.6-35B-A3B
 
 CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite
-CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://rithviks84--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep
+CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep
 CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 ```
+
+`CLYPT_PHASE24_NODE_MEDIA_PREP_URL` accepts either the Modal base URL or the full task endpoint URL. The current known-good records use the full endpoint URL.
+`RemoteNodeMediaPrepClient` handles the follow-up result polling internally, so Phase26 still receives a final ordered `media` list.
 
 ## 3) Phase1 Service Settings
 
@@ -217,9 +227,9 @@ Operational notes:
 
 | Env | Default | Notes |
 | --- | --- | --- |
-| `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` | required | Modal endpoint. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` | required | Modal submit endpoint base or full task URL. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` | required | Shared bearer token. |
-| `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S` | `1800` | Request timeout. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S` | `1800` | Total submit+poll wait budget on the Phase26 side. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` | `16` | Modal L4 concurrency cap. |
 
 ### 4.4 Local OpenAI generation

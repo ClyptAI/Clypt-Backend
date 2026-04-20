@@ -147,6 +147,7 @@ class RemoteNodeMediaPrepClient:
     _DEFAULT_MAX_BACKOFF_S = 8.0
     _DEFAULT_BACKOFF_MULTIPLIER = 2.0
     _DEFAULT_JITTER_RATIO = 0.25
+    _DEFAULT_POLL_INTERVAL_S = 1.0
 
     def __init__(
         self,
@@ -162,7 +163,13 @@ class RemoteNodeMediaPrepClient:
         )
 
     def _endpoint(self, path: str) -> str:
-        return self.settings.service_url.rstrip("/") + path
+        service_url = self.settings.service_url.rstrip("/")
+        canonical_task_path = "/tasks/node-media-prep"
+        if service_url.endswith(path):
+            return service_url
+        if service_url.endswith(canonical_task_path):
+            service_url = service_url[: -len(canonical_task_path)]
+        return service_url + path
 
     def _auth_headers(self) -> dict[str, str]:
         return {
@@ -171,22 +178,27 @@ class RemoteNodeMediaPrepClient:
             "Accept": "application/json",
         }
 
-    def _post_json(
+    def _request_json(
         self,
         *,
         path: str,
-        payload: dict[str, Any],
+        method: str,
+        payload: dict[str, Any] | None,
         timeout_s: float,
     ) -> dict[str, Any]:
         url = self._endpoint(path)
-        body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        body = (
+            json.dumps(payload, ensure_ascii=True).encode("utf-8")
+            if payload is not None
+            else None
+        )
         headers = self._auth_headers()
 
         def _do_request() -> dict[str, Any]:
             req = urllib.request.Request(
                 url,
                 data=body,
-                method="POST",
+                method=method,
                 headers=headers,
             )
             try:
@@ -237,6 +249,47 @@ class RemoteNodeMediaPrepClient:
             rng=random.random,
         )
 
+    def _submit_job(self, *, payload: dict[str, Any], timeout_s: float) -> str:
+        raw = self._request_json(
+            path="/tasks/node-media-prep",
+            method="POST",
+            payload=payload,
+            timeout_s=timeout_s,
+        )
+        call_id = str(raw.get("call_id") or "").strip()
+        if not call_id:
+            raise RemoteNodeMediaPrepError(
+                "node-media-prep submit response missing required call_id"
+            )
+        return call_id
+
+    def _poll_result(self, *, call_id: str, timeout_s: float) -> dict[str, Any]:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        poll_path = f"/tasks/node-media-prep/result/{call_id}"
+        while True:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s < 0.0:
+                raise RemoteNodeMediaPrepError(
+                    f"node-media-prep timed out while polling call_id={call_id}",
+                )
+            raw = self._request_json(
+                path=poll_path,
+                method="GET",
+                payload=None,
+                timeout_s=max(1.0, min(30.0, remaining_s or 0.0)),
+            )
+            status = str(raw.get("status") or "").strip().lower()
+            if status in {"", "succeeded", "success", "completed"}:
+                return raw
+            if status in {"pending", "running", "submitted"}:
+                sleep_s = min(self._DEFAULT_POLL_INTERVAL_S, max(0.0, remaining_s))
+                if sleep_s > 0.0:
+                    time.sleep(sleep_s)
+                continue
+            raise RemoteNodeMediaPrepError(
+                f"node-media-prep poll for call_id={call_id} returned terminal status {status!r}"
+            )
+
     def __call__(
         self,
         *,
@@ -270,11 +323,8 @@ class RemoteNodeMediaPrepClient:
             len(specs),
             video_gcs_uri,
         )
-        raw = self._post_json(
-            path="/tasks/node-media-prep",
-            payload=payload,
-            timeout_s=float(self.settings.timeout_s),
-        )
+        call_id = self._submit_job(payload=payload, timeout_s=float(self.settings.timeout_s))
+        raw = self._poll_result(call_id=call_id, timeout_s=float(self.settings.timeout_s))
 
         media = raw.get("media")
         if not isinstance(media, list):

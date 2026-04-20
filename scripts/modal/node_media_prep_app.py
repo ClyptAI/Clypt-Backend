@@ -96,6 +96,54 @@ def node_media_prep_route(
 ):
     _require_auth_header(authorization)
     request = NodeMediaPrepRequest.from_payload(payload)
+    call = node_media_prep_job.spawn(request.to_payload())
+    return fastapi.responses.JSONResponse(
+        status_code=202,
+        content={
+            "call_id": call.object_id,
+            "status": "submitted",
+            "result_path": f"/tasks/node-media-prep/result/{call.object_id}",
+        },
+    )
+
+
+@web_app.get("/tasks/node-media-prep/result/{call_id}")
+def node_media_prep_result_route(
+    call_id: str,
+    authorization: str | None = fastapi.Header(default=None),
+):
+    _require_auth_header(authorization)
+    function_call = modal.FunctionCall.from_id(call_id)
+    try:
+        result = function_call.get(timeout=0)
+    except TimeoutError:
+        return fastapi.responses.JSONResponse(
+            status_code=202,
+            content={"call_id": call_id, "status": "pending"},
+        )
+    except (modal.exception.OutputExpiredError, modal.exception.NotFoundError):
+        raise fastapi.HTTPException(status_code=404, detail="unknown or expired call_id")
+
+    if not isinstance(result, dict):
+        raise fastapi.HTTPException(
+            status_code=500,
+            detail=f"node_media_prep_job returned non-object result: {type(result).__name__}",
+        )
+    response = dict(result)
+    response.setdefault("call_id", call_id)
+    response.setdefault("status", "succeeded")
+    return response
+
+
+@app.function(
+    image=image,
+    gpu="L4",
+    min_containers=1,
+    timeout=60 * 60,
+    secrets=[modal.Secret.from_name("clypt-node-media-prep")],
+)
+def node_media_prep_job(payload: dict) -> dict:
+    request = NodeMediaPrepRequest.from_payload(payload)
     scratch_root = Path(tempfile.mkdtemp(prefix="clypt-modal-node-media-"))
     return run_node_media_prep(
         request=request,

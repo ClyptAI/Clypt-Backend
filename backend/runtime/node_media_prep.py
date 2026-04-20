@@ -39,6 +39,15 @@ class NodeMediaPrepRequest:
     max_concurrency: int
     nodes: list[dict[str, Any]]
 
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "video_gcs_uri": self.video_gcs_uri,
+            "object_prefix": self.object_prefix,
+            "max_concurrency": int(self.max_concurrency),
+            "nodes": [dict(node) for node in self.nodes],
+        }
+
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "NodeMediaPrepRequest":
         run_id = str(payload.get("run_id") or "").strip()

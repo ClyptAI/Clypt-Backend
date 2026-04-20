@@ -43,10 +43,30 @@ def _load_app_module():
 
             return _decorator
 
+    class _FakeFunctionCall:
+        def __init__(self, object_id: str):
+            self.object_id = object_id
+
+        @classmethod
+        def from_id(cls, object_id: str):
+            return cls(object_id)
+
+        def get(self, timeout=0):  # noqa: ARG002
+            raise TimeoutError
+
+    class _FakeExceptionModule:
+        class OutputExpiredError(Exception):
+            pass
+
+        class NotFoundError(Exception):
+            pass
+
     fake_modal = types.SimpleNamespace(
         App=_FakeApp,
         Image=_FakeImage,
         Secret=_FakeSecret,
+        FunctionCall=_FakeFunctionCall,
+        exception=_FakeExceptionModule,
         asgi_app=lambda: (lambda fn: fn),
     )
     sys.modules["modal"] = fake_modal
@@ -84,25 +104,23 @@ def test_node_media_prep_requires_bearer_token(monkeypatch) -> None:
     assert response.status_code == 401
 
 
-def test_node_media_prep_runs_with_authorized_request(monkeypatch) -> None:
+def test_node_media_prep_submit_returns_call_id(monkeypatch) -> None:
     node_media_prep_app = _load_app_module()
     monkeypatch.setattr(node_media_prep_app, "_require_codec", lambda *_args: None)
     monkeypatch.setenv("NODE_MEDIA_PREP_AUTH_TOKEN", "secret-token")
 
     captured: dict[str, object] = {}
 
-    def fake_build_storage_client():
-        captured["storage_client"] = "built"
-        return object()
+    class _FakeSpawnedCall:
+        object_id = "fc-123"
 
-    def fake_run_node_media_prep(*, request, storage_client, scratch_root):
-        captured["request"] = request
-        captured["storage_client"] = storage_client
-        captured["scratch_root"] = scratch_root
-        return {"media": [{"node_id": "n_1", "file_uri": "gs://bucket/n_1.mp4"}]}
+    class _FakeJob:
+        @staticmethod
+        def spawn(payload):
+            captured["payload"] = payload
+            return _FakeSpawnedCall()
 
-    monkeypatch.setattr(node_media_prep_app, "_build_storage_client", fake_build_storage_client)
-    monkeypatch.setattr(node_media_prep_app, "run_node_media_prep", fake_run_node_media_prep)
+    monkeypatch.setattr(node_media_prep_app, "node_media_prep_job", _FakeJob)
 
     client = TestClient(node_media_prep_app.web_app)
     response = client.post(
@@ -111,9 +129,74 @@ def test_node_media_prep_runs_with_authorized_request(monkeypatch) -> None:
         headers={"Authorization": "Bearer secret-token"},
     )
 
+    assert response.status_code == 202
+    assert response.json() == {
+        "call_id": "fc-123",
+        "status": "submitted",
+        "result_path": "/tasks/node-media-prep/result/fc-123",
+    }
+    assert captured["payload"]["run_id"] == "run-123"
+
+
+def test_node_media_prep_result_returns_pending(monkeypatch) -> None:
+    node_media_prep_app = _load_app_module()
+    monkeypatch.setattr(node_media_prep_app, "_require_codec", lambda *_args: None)
+    monkeypatch.setenv("NODE_MEDIA_PREP_AUTH_TOKEN", "secret-token")
+
+    class _PendingCall:
+        def __init__(self, object_id: str):
+            self.object_id = object_id
+
+        def get(self, timeout=0):  # noqa: ARG002
+            raise TimeoutError
+
+    monkeypatch.setattr(
+        node_media_prep_app.modal.FunctionCall,
+        "from_id",
+        classmethod(lambda cls, object_id: _PendingCall(object_id)),
+    )
+
+    client = TestClient(node_media_prep_app.web_app)
+    response = client.get(
+        "/tasks/node-media-prep/result/fc-123",
+        headers={"Authorization": "Bearer secret-token"},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"call_id": "fc-123", "status": "pending"}
+
+
+def test_node_media_prep_result_returns_completed_payload(monkeypatch) -> None:
+    node_media_prep_app = _load_app_module()
+    monkeypatch.setattr(node_media_prep_app, "_require_codec", lambda *_args: None)
+    monkeypatch.setenv("NODE_MEDIA_PREP_AUTH_TOKEN", "secret-token")
+
+    class _CompleteCall:
+        def __init__(self, object_id: str):
+            self.object_id = object_id
+
+        def get(self, timeout=0):  # noqa: ARG002
+            return {"run_id": "run-123", "media": [{"node_id": "n_1", "file_uri": "gs://bucket/n_1.mp4"}]}
+
+    monkeypatch.setattr(
+        node_media_prep_app.modal.FunctionCall,
+        "from_id",
+        classmethod(lambda cls, object_id: _CompleteCall(object_id)),
+    )
+
+    client = TestClient(node_media_prep_app.web_app)
+    response = client.get(
+        "/tasks/node-media-prep/result/fc-123",
+        headers={"Authorization": "Bearer secret-token"},
+    )
+
     assert response.status_code == 200
-    assert response.json() == {"media": [{"node_id": "n_1", "file_uri": "gs://bucket/n_1.mp4"}]}
-    assert getattr(captured["request"], "run_id") == "run-123"
+    assert response.json() == {
+        "run_id": "run-123",
+        "media": [{"node_id": "n_1", "file_uri": "gs://bucket/n_1.mp4"}],
+        "call_id": "fc-123",
+        "status": "succeeded",
+    }
 
 
 def test_build_storage_client_supports_json_credentials(monkeypatch) -> None:

@@ -37,6 +37,7 @@ When in doubt, read documentation before making changes or running operational c
 - Treat docs as the source of truth for runtime/deploy behavior unless code has clearly diverged.
 - If behavior is unclear, re-check `RUNTIME_GUIDE.md`, `PHASE1_HOST_DEPLOY.md`, and `PHASE26_HOST_DEPLOY.md` before proceeding.
 - If you discover a docs/code mismatch, call it out and tell the user immediately.
+- If you fix a deploy/runtime issue on a live host or remote worker, you must also fix the local source of truth in this repo during the same task (code, scripts, env records, docs, or tests as needed) so a fresh droplet does not hit the same failure again.
 
 ## Resolver-First Rule (Required)
 
@@ -144,7 +145,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (3560 symbols, 8959 relationships, 218 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (3784 symbols, 9331 relationships, 218 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

@@ -4,6 +4,9 @@ Active specification documents for current and planned backend work.
 
 ## Active Specs
 
+- [2026-04-19_phase6_captions_metadata_render_spec.md](2026-04-19_phase6_captions_metadata_render_spec.md)
+  Planned Phase 6 supplement for retention-oriented burned-in captions, caption presets/placement rules, lightweight publish metadata generation, and deterministic render packaging from Phase 1-5 artifacts.
+
 - [2026-04-19_phase1_vibevoice_longform_chunking_spec.md](2026-04-19_phase1_vibevoice_longform_chunking_spec.md)
   Implemented Phase1 H200 long-form VibeVoice support for 60-180 minute inputs via 2-3 parallel shard ASR requests, global speaker-ID stitching with lightweight speaker verification, and a preserved one-call outer service contract.
 

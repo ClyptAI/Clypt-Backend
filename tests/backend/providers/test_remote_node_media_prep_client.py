@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError
@@ -82,19 +83,26 @@ def _phase1_outputs() -> _StubPhase1Outputs:
 def test_call_posts_expected_body_and_returns_ordered_media(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, Any] = {}
+    captured: dict[str, Any] = {"requests": []}
 
     def fake_urlopen(req, timeout):  # noqa: ARG001
-        captured["url"] = req.full_url
-        captured["method"] = req.get_method()
-        captured["body"] = json.loads(req.data.decode("utf-8"))
-        captured["headers"] = dict(req.header_items())
+        call = {
+            "url": req.full_url,
+            "method": req.get_method(),
+            "headers": dict(req.header_items()),
+        }
+        if req.data is not None:
+            call["body"] = json.loads(req.data.decode("utf-8"))
+        captured["requests"].append(call)
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-123"}).encode("utf-8"), status=202)
         server_response = {
+            "status": "succeeded",
             "media": [
                 # Intentionally out-of-order so we prove client reorders.
                 {"node_id": "n_2", "file_uri": "gs://bucket/p/n_2.mp4"},
                 {"node_id": "n_1", "file_uri": "gs://bucket/p/n_1.mp4"},
-            ]
+            ],
         }
         return _FakeResponse(json.dumps(server_response).encode("utf-8"))
 
@@ -110,9 +118,12 @@ def test_call_posts_expected_body_and_returns_ordered_media(
         phase1_outputs=_phase1_outputs(),
     )
 
-    assert captured["url"] == "http://rtx-box:9100/tasks/node-media-prep"
-    assert captured["method"] == "POST"
-    assert captured["body"] == {
+    assert len(captured["requests"]) == 2
+    submit = captured["requests"][0]
+    poll = captured["requests"][1]
+    assert submit["url"] == "http://rtx-box:9100/tasks/node-media-prep"
+    assert submit["method"] == "POST"
+    assert submit["body"] == {
         "run_id": "run-abc",
         "video_gcs_uri": "gs://bucket/video.mp4",
         "object_prefix": "phase14/run-abc/node_media",
@@ -122,13 +133,51 @@ def test_call_posts_expected_body_and_returns_ordered_media(
             {"node_id": "n_2", "start_ms": 1000, "end_ms": 2500},
         ],
     }
-    header_dict = {k.lower(): v for k, v in captured["headers"].items()}
+    header_dict = {k.lower(): v for k, v in submit["headers"].items()}
     assert header_dict["authorization"] == "Bearer prep-token"
+    assert poll["url"] == "http://rtx-box:9100/tasks/node-media-prep/result/fc-123"
+    assert poll["method"] == "GET"
 
     assert [item["node_id"] for item in result] == ["n_1", "n_2"]
     assert result[0]["file_uri"] == "gs://bucket/p/n_1.mp4"
     assert result[0]["mime_type"] == "video/mp4"
     assert result[0]["local_path"] == ""
+
+
+def test_call_accepts_full_task_endpoint_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        captured.setdefault("urls", []).append(req.full_url)
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-123"}).encode("utf-8"), status=202)
+        return _FakeResponse(
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "media": [{"node_id": "n_1", "file_uri": "gs://bucket/p/n_1.mp4"}],
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    settings = NodeMediaPrepSettings(
+        service_url="https://modal.run/tasks/node-media-prep",
+        auth_token="prep-token",
+    )
+    client = RemoteNodeMediaPrepClient(settings=settings, max_retries=0)
+    result = client(
+        nodes=[_StubNode(node_id="n_1", start_ms=0, end_ms=1000)],
+        paths=_StubPaths(run_id="run-full-url"),
+        phase1_outputs=_phase1_outputs(),
+    )
+
+    assert captured["urls"] == [
+        "https://modal.run/tasks/node-media-prep",
+        "https://modal.run/tasks/node-media-prep/result/fc-123",
+    ]
+    assert result[0]["file_uri"] == "gs://bucket/p/n_1.mp4"
 
 
 def test_call_with_empty_nodes_returns_empty_list() -> None:
@@ -149,10 +198,15 @@ def test_call_requires_video_gcs_uri() -> None:
 
 def test_call_accepts_phase1_audio_model(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_urlopen(req, timeout):  # noqa: ARG001
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-123"}).encode("utf-8"), status=202)
         return _FakeResponse(
-            json.dumps({"media": [{"node_id": "n_1", "file_uri": "gs://bucket/p/n_1.mp4"}]}).encode(
-                "utf-8"
-            )
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "media": [{"node_id": "n_1", "file_uri": "gs://bucket/p/n_1.mp4"}],
+                }
+            ).encode("utf-8")
         )
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -176,10 +230,15 @@ def test_call_accepts_phase1_audio_model(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_call_accepts_phase1_audio_attr_object(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_urlopen(req, timeout):  # noqa: ARG001
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-123"}).encode("utf-8"), status=202)
         return _FakeResponse(
-            json.dumps({"media": [{"node_id": "n_1", "file_uri": "gs://bucket/p/n_1.mp4"}]}).encode(
-                "utf-8"
-            )
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "media": [{"node_id": "n_1", "file_uri": "gs://bucket/p/n_1.mp4"}],
+                }
+            ).encode("utf-8")
         )
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -203,10 +262,15 @@ def test_call_accepts_phase1_audio_attr_object(monkeypatch: pytest.MonkeyPatch) 
 
 def test_call_raises_when_server_missing_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_urlopen(req, timeout):  # noqa: ARG001
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-123"}).encode("utf-8"), status=202)
         return _FakeResponse(
-            json.dumps({"media": [{"node_id": "n_1", "file_uri": "gs://b/n_1.mp4"}]}).encode(
-                "utf-8"
-            )
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "media": [{"node_id": "n_1", "file_uri": "gs://b/n_1.mp4"}],
+                }
+            ).encode("utf-8")
         )
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -222,10 +286,15 @@ def test_call_raises_when_server_missing_nodes(monkeypatch: pytest.MonkeyPatch) 
 
 def test_call_validates_gs_file_uri(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_urlopen(req, timeout):  # noqa: ARG001
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-123"}).encode("utf-8"), status=202)
         return _FakeResponse(
-            json.dumps({"media": [{"node_id": "n_1", "file_uri": "https://bad"}]}).encode(
-                "utf-8"
-            )
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "media": [{"node_id": "n_1", "file_uri": "https://bad"}],
+                }
+            ).encode("utf-8")
         )
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -252,10 +321,15 @@ def test_call_retries_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
                 hdrs=None,
                 fp=io.BytesIO(b""),
             )
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-123"}).encode("utf-8"), status=202)
         return _FakeResponse(
-            json.dumps({"media": [{"node_id": "n_1", "file_uri": "gs://b/n_1.mp4"}]}).encode(
-                "utf-8"
-            )
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "media": [{"node_id": "n_1", "file_uri": "gs://b/n_1.mp4"}],
+                }
+            ).encode("utf-8")
         )
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -269,8 +343,74 @@ def test_call_retries_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
         paths=_StubPaths(run_id="r"),
         phase1_outputs=_phase1_outputs(),
     )
-    assert calls["n"] == 2
+    assert calls["n"] == 3
     assert result[0]["file_uri"] == "gs://b/n_1.mp4"
+
+
+def test_call_polls_until_media_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str]] = []
+    sleeps: list[float] = []
+
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        calls.append((req.get_method(), req.full_url))
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-poll"}).encode("utf-8"), status=202)
+        if len(calls) == 2:
+            return _FakeResponse(json.dumps({"status": "pending"}).encode("utf-8"), status=202)
+        return _FakeResponse(
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "media": [{"node_id": "n_1", "file_uri": "gs://b/n_1.mp4"}],
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("backend.providers.node_media_prep_client.time.sleep", sleeps.append)
+
+    client = RemoteNodeMediaPrepClient(settings=_settings(), max_retries=0)
+    result = client(
+        nodes=[_StubNode("n_1", 0, 100)],
+        paths=_StubPaths(run_id="r"),
+        phase1_outputs=_phase1_outputs(),
+    )
+
+    assert calls == [
+        ("POST", "http://rtx-box:9100/tasks/node-media-prep"),
+        ("GET", "http://rtx-box:9100/tasks/node-media-prep/result/fc-poll"),
+        ("GET", "http://rtx-box:9100/tasks/node-media-prep/result/fc-poll"),
+    ]
+    assert sleeps == [1.0]
+    assert result[0]["file_uri"] == "gs://b/n_1.mp4"
+
+
+def test_call_times_out_while_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-poll"}).encode("utf-8"), status=202)
+        return _FakeResponse(json.dumps({"status": "pending"}).encode("utf-8"), status=202)
+
+    times = iter([100.0, 100.2, 100.7, 101.2, 101.7])
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("backend.providers.node_media_prep_client.time.sleep", lambda _s: None)
+    monkeypatch.setattr("backend.providers.node_media_prep_client.time.monotonic", lambda: next(times))
+
+    client = RemoteNodeMediaPrepClient(
+        settings=NodeMediaPrepSettings(
+            service_url="http://rtx-box:9100",
+            auth_token="prep-token",
+            timeout_s=1.0,
+        ),
+        max_retries=0,
+    )
+
+    with pytest.raises(RemoteNodeMediaPrepError, match="timed out while polling"):
+        client(
+            nodes=[_StubNode("n_1", 0, 100)],
+            paths=_StubPaths(run_id="r"),
+            phase1_outputs=_phase1_outputs(),
+        )
 
 
 def test_call_rejects_bad_node_shape() -> None:

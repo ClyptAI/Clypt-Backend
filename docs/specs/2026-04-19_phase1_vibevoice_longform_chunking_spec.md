@@ -17,7 +17,7 @@
    - `> 180 minutes`: fail fast with a clear validation/runtime error
 3. **Chunking happens inside the Phase1 VibeVoice service, not in the runner.** The outer Phase1 runner and `RemoteVibeVoiceAsrClient` contract remain one request per job.
 4. **We split canonical audio, not source video.** The VibeVoice service already downloads `audio_gcs_uri` and only consumes audio for ASR. Visual extraction continues to use the full original video path and is not chunked.
-5. **Parallel shard requests go to the existing local vLLM sidecar.** No new remote surface is introduced. The known-good H200 env already sets `VIBEVOICE_VLLM_MAX_NUM_SEQS=4`, which is sufficient for up to 3 parallel shard requests plus service overhead.
+5. **Parallel shard requests go to the existing local vLLM sidecar.** No new remote surface is introduced. The known-good H200 env caps `VIBEVOICE_VLLM_MAX_NUM_SEQS=3`, so long-form fan-out must stay within the existing 3-shard ceiling and must not assume extra sidecar headroom beyond that cap.
 6. **Speaker stitching is additive, not a replacement diarizer.** VibeVoice remains the per-shard source of transcript text, timestamps, and shard-local speaker labels. A lightweight verification layer only reconciles identities across shards.
 7. **Global speaker IDs are deterministic.** Final speaker numbering is assigned by first appearance in the merged transcript after cross-shard reconciliation.
 8. **The Phase1 enqueue boundary remains “merged ASR complete,” not “first shard complete.”** Phase1 may still enqueue downstream before visual finishes, but only after all ASR shards, timestamp offsets, and global speaker stitching are complete.
@@ -223,14 +223,14 @@ The service fans those requests out via a thread pool sized to `shard_count`.
 
 Known-good Phase1 H200 env already sets:
 
-- `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.82`
-- `VIBEVOICE_VLLM_MAX_NUM_SEQS=4`
+- `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.65`
+- `VIBEVOICE_VLLM_MAX_NUM_SEQS=3`
 
 That is sufficient for:
 
 - 1 long-form service job,
 - up to 3 concurrent shard requests,
-- and no additional sidecar tuning in the first rollout.
+- and no assumption of extra queue headroom beyond the 3-shard design maximum.
 
 The spec still requires an explicit canary/benchmark gate in §14 before raising concurrency beyond the 3-shard design maximum.
 

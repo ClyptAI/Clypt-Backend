@@ -41,6 +41,13 @@ Key behavior:
 - `RemotePhase26DispatchClient` targets the downstream host at `POST /tasks/phase26-enqueue`
 - the VibeVoice service keeps the existing single-pass path through 60 minutes, splits `>60..90` minute jobs into 2 shards, splits `>90..180` minute jobs into 3 shards, and fails fast above 180 minutes
 - long-form shard requests still target the same local vLLM sidecar and are stitched back into one global speaker space before the HTTP response returns
+- forced alignment now uses duration-bounded global chunks by default instead of a per-turn fallback:
+  - `<=40 min`: 1 chunk
+  - `>40..60 min`: 2 chunks
+  - `>60..120 min`: 3 chunks
+  - `>120..150 min`: 4 chunks
+  - `>150 min`: 5 chunks
+  If any chunk-level alignment fails, Phase 1 hard-fails instead of dropping to per-turn alignment.
 - Phase 1 audio-post launches immediately after the VibeVoice response returns
 
 ### 2.2 Phase26 host
@@ -61,7 +68,10 @@ Key behavior:
 - app path: `scripts/modal/node_media_prep_app.py`
 - GPU target: `L4`
 - warm pool target: `min_containers=1`
-- request/response contract matches `RemoteNodeMediaPrepClient`
+- submit/poll contract:
+  - `POST /tasks/node-media-prep` -> `202 Accepted` + `call_id`
+  - `GET /tasks/node-media-prep/result/{call_id}` -> `202 pending` or `200` final result
+- `RemoteNodeMediaPrepClient` hides this async contract from Phase 2 and still returns the same final `media` list shape to the worker
 - clip extraction now downscales to 480p before upload / Vertex multimodal embedding
 
 ## 3) Phase 1 Execution Semantics
@@ -149,6 +159,7 @@ These now belong to the Phase26 host, not the Phase1 host.
 ## 7) Modal Media-Prep Expectations
 
 - `RemoteNodeMediaPrepClient` continues to own the JSON contract
+- Modal web requests must stay short; long-running clip extraction happens in a spawned Modal function call that the Phase26 client polls
 - Modal must expose working:
   - `h264_nvenc`
   - `h264_cuvid`

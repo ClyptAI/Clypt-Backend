@@ -41,7 +41,14 @@ Required values to set:
 
 Current known-good Modal endpoint:
 
-- `https://rithviks84--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- `https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+
+`CLYPT_PHASE24_NODE_MEDIA_PREP_URL` may be set to either the Modal base URL or the full task endpoint URL. The current known-good env uses the full endpoint URL.
+
+The Phase26 worker now uses a submit-and-poll contract against Modal:
+
+- `POST /tasks/node-media-prep` returns a `call_id`
+- `GET /tasks/node-media-prep/result/{call_id}` is polled until completion
 
 Credential requirement:
 

@@ -381,108 +381,187 @@ class ForcedAlignmentProvider:
             )
         return normalized
 
-    def _align_per_turn_fallback(
-        self, *, audio_path: Path, turns: list[dict[str, Any]], device: str
+    def _audio_duration_s(self, audio_path: Path) -> float:
+        import soundfile as sf
+
+        return float(sf.info(str(audio_path)).duration)
+
+    def _alignment_chunk_count_for_duration_s(self, duration_s: float) -> int:
+        duration_minutes = float(duration_s) / 60.0
+        if duration_minutes <= 40.0:
+            return 1
+        if duration_minutes <= 60.0:
+            return 2
+        if duration_minutes <= 120.0:
+            return 3
+        if duration_minutes <= 150.0:
+            return 4
+        return 5
+
+    def _build_alignment_chunks(
+        self,
+        *,
+        turns: list[dict[str, Any]],
+        duration_s: float,
+        chunk_count: int,
     ) -> list[dict[str, Any]]:
-        import torch
-        import torchaudio
-        _patch_numpy_compat()
-        from backend.providers.nfa_viterbi import (
-            add_t_start_end_to_utt_obj,
-            get_single_sample_batch_variables,
-            viterbi_decoding,
+        alignable_turns = [
+            turn
+            for turn in sorted(turns, key=lambda item: int(item.get("start_ms") or 0))
+            if int(turn.get("end_ms") or 0) > int(turn.get("start_ms") or 0)
+            and str(turn.get("transcript_text") or "").strip()
+        ]
+        if not alignable_turns:
+            return []
+
+        target_chunk_count = max(1, min(int(chunk_count), len(alignable_turns)))
+        if target_chunk_count == 1:
+            return [
+                {
+                    "index": 0,
+                    "start_ms": int(alignable_turns[0]["start_ms"]),
+                    "end_ms": int(alignable_turns[-1]["end_ms"]),
+                    "turns": alignable_turns,
+                }
+            ]
+
+        target_span_ms = max(1.0, (float(duration_s) * 1000.0) / float(target_chunk_count))
+        next_boundary_ms = target_span_ms
+        chunks: list[dict[str, Any]] = []
+        current_turns: list[dict[str, Any]] = []
+
+        for idx, turn in enumerate(alignable_turns):
+            turns_remaining_including_current = len(alignable_turns) - idx
+            chunks_remaining = target_chunk_count - len(chunks) - 1
+            turn_start_ms = int(turn["start_ms"])
+            if (
+                current_turns
+                and chunks_remaining > 0
+                and turn_start_ms >= next_boundary_ms
+                and turns_remaining_including_current >= chunks_remaining
+            ):
+                chunks.append(
+                    {
+                        "index": len(chunks),
+                        "start_ms": int(current_turns[0]["start_ms"]),
+                        "end_ms": int(current_turns[-1]["end_ms"]),
+                        "turns": list(current_turns),
+                    }
+                )
+                current_turns = []
+                next_boundary_ms += target_span_ms
+            current_turns.append(turn)
+
+        if current_turns:
+            chunks.append(
+                {
+                    "index": len(chunks),
+                    "start_ms": int(current_turns[0]["start_ms"]),
+                    "end_ms": int(current_turns[-1]["end_ms"]),
+                    "turns": list(current_turns),
+                }
+            )
+
+        return chunks
+
+    def _slice_audio_window(
+        self,
+        *,
+        audio_path: Path,
+        start_ms: int,
+        end_ms: int,
+        tmpdir: str,
+        chunk_index: int,
+    ) -> Path:
+        import soundfile as sf
+
+        info = sf.info(str(audio_path))
+        sample_rate = int(info.samplerate)
+        start_frame = max(0, int(round((start_ms / 1000.0) * sample_rate)))
+        end_frame = max(start_frame + 1, int(round((end_ms / 1000.0) * sample_rate)))
+        audio, _ = sf.read(str(audio_path), start=start_frame, stop=end_frame, always_2d=False)
+
+        slice_path = Path(tmpdir) / f"chunk_{chunk_index:02d}.wav"
+        sf.write(str(slice_path), audio, sample_rate)
+        return slice_path
+
+    def _align_chunked_transcript(
+        self,
+        *,
+        audio_path: Path,
+        turns: list[dict[str, Any]],
+        device: str,
+        duration_s: float,
+        chunk_count: int,
+    ) -> list[dict[str, Any]]:
+        chunks = self._build_alignment_chunks(
+            turns=turns,
+            duration_s=duration_s,
+            chunk_count=chunk_count,
+        )
+        logger.info(
+            "[forced_aligner] chunked alignment mode: %d turns across %d chunks (audio %.1f min)",
+            len(turns),
+            len(chunks),
+            duration_s / 60.0,
         )
 
-        waveform, sr = torchaudio.load(str(audio_path))
-        if sr != 16000:
-            waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
-            sr = 16000
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-
-        all_words: list[dict[str, Any]] = []
-        output_timestep_duration: float | None = None
-        word_idx = 1
-        tmpdir = tempfile.mkdtemp(prefix="nfa_slices_")
+        merged_words: list[dict[str, Any]] = []
+        tmpdir = tempfile.mkdtemp(prefix="nfa_chunks_")
         try:
-            total_turns = len(turns)
-            _log_every = max(1, total_turns // 10)
-            for turn_idx, turn in enumerate(turns, start=1):
-                turn_id = turn.get("turn_id", "")
-                speaker_id = str(turn.get("speaker_id") or "UNKNOWN")
-                start_ms = int(turn.get("start_ms") or 0)
-                end_ms = int(turn.get("end_ms") or 0)
-                text = str(turn.get("transcript_text") or "").strip()
-
-                if text and end_ms > start_ms:
-                    try:
-                        start_sample = int(start_ms / 1000 * sr)
-                        end_sample = int(end_ms / 1000 * sr)
-                        segment_wav = waveform[:, start_sample:end_sample]
-                        if segment_wav.shape[1] >= 400:
-                            slice_path = os.path.join(tmpdir, f"{turn_id}.wav")
-                            torchaudio.save(slice_path, segment_wav, sr)
-
-                            (
-                                log_probs_batch,
-                                y_batch,
-                                T_batch,
-                                U_batch,
-                                utt_obj_batch,
-                                output_timestep_duration,
-                            ) = get_single_sample_batch_variables(
-                                audio_filepath=slice_path,
-                                text=text,
-                                model=self._model,
-                                output_timestep_duration=output_timestep_duration,
-                            )
-                            alignments_batch = viterbi_decoding(
-                                log_probs_batch,
-                                y_batch,
-                                T_batch,
-                                U_batch,
-                                viterbi_device=torch.device(device),
-                            )
-                            utt_obj = add_t_start_end_to_utt_obj(
-                                utt_obj_batch[0],
-                                alignments_batch[0],
-                                output_timestep_duration,
-                            )
-                            for word in self._iter_utt_words(utt_obj, base_start_ms=start_ms):
-                                all_words.append(
-                                    {
-                                        "word_id": f"w_{word_idx:06d}",
-                                        "text": str(word.get("text") or "").strip(),
-                                        "start_ms": int(word.get("start_ms") or 0),
-                                        "end_ms": int(word.get("end_ms") or 0),
-                                        "speaker_id": speaker_id,
-                                    }
-                                )
-                                word_idx += 1
-                            try:
-                                os.unlink(slice_path)
-                            except OSError:
-                                pass
-                    except Exception as exc:
-                        logger.warning(
-                            "[forced_aligner] fallback failed for turn %s ('%s...'): %s",
-                            turn_id,
-                            text[:40],
-                            exc,
-                        )
-                if turn_idx == 1 or turn_idx % _log_every == 0 or turn_idx == total_turns:
-                    logger.info(
-                        "[forced_aligner] fallback %d/%d turns (%d words so far)",
-                        turn_idx,
-                        total_turns,
-                        len(all_words),
+            for chunk in chunks:
+                chunk_start_ms = int(chunk["start_ms"])
+                chunk_end_ms = int(chunk["end_ms"])
+                slice_path = self._slice_audio_window(
+                    audio_path=audio_path,
+                    start_ms=chunk_start_ms,
+                    end_ms=chunk_end_ms,
+                    tmpdir=tmpdir,
+                    chunk_index=int(chunk["index"]),
+                )
+                shifted_turns = []
+                for turn in chunk["turns"]:
+                    shifted_turns.append(
+                        {
+                            **turn,
+                            "start_ms": int(turn["start_ms"]) - chunk_start_ms,
+                            "end_ms": int(turn["end_ms"]) - chunk_start_ms,
+                        }
+                    )
+                chunk_words = self._align_global_transcript(
+                    audio_path=slice_path,
+                    turns=shifted_turns,
+                    device=device,
+                )
+                if not chunk_words:
+                    raise RuntimeError(
+                        f"chunked forced alignment returned 0 words for chunk {int(chunk['index'])}"
+                    )
+                for word in chunk_words:
+                    merged_words.append(
+                        {
+                            "word_id": "",
+                            "text": str(word.get("text") or "").strip(),
+                            "start_ms": int(word.get("start_ms") or 0) + chunk_start_ms,
+                            "end_ms": int(word.get("end_ms") or 0) + chunk_start_ms,
+                            "speaker_id": str(word.get("speaker_id") or "UNKNOWN"),
+                        }
                     )
         finally:
+            for path in Path(tmpdir).glob("*.wav"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
             try:
                 os.rmdir(tmpdir)
             except OSError:
                 pass
-        return all_words
+
+        merged_words.sort(key=lambda word: (int(word["start_ms"]), int(word["end_ms"])))
+        for idx, word in enumerate(merged_words, start=1):
+            word["word_id"] = f"w_{idx:06d}"
+        return merged_words
 
     def run(
         self,
@@ -510,6 +589,8 @@ class ForcedAlignmentProvider:
         _ensure_cache_env()
         audio_path = Path(audio_path)
         device = self._resolve_device()
+        duration_s = self._audio_duration_s(audio_path)
+        chunk_count = self._alignment_chunk_count_for_duration_s(duration_s)
 
         logger.info(
             "[forced_aligner] aligning %d turns on %s (model=%s) ...",
@@ -521,7 +602,7 @@ class ForcedAlignmentProvider:
 
         self._ensure_model(device)
 
-        try:
+        if chunk_count == 1:
             all_words = self._align_global_transcript(
                 audio_path=audio_path,
                 turns=turns,
@@ -532,28 +613,16 @@ class ForcedAlignmentProvider:
                     "[forced_aligner] global alignment succeeded — %d words",
                     len(all_words),
                 )
-                logger.info(
-                    "[forced_aligner] alignment done in %.1f s — %d words across %d turns",
-                    time.perf_counter() - t0,
-                    len(all_words),
-                    len(turns),
-                )
-                return all_words
-            logger.warning(
-                "[forced_aligner] global alignment returned 0 words; falling back to per-turn alignment."
+            else:
+                raise RuntimeError("global forced alignment returned 0 words")
+        else:
+            all_words = self._align_chunked_transcript(
+                audio_path=audio_path,
+                turns=turns,
+                device=device,
+                duration_s=duration_s,
+                chunk_count=chunk_count,
             )
-        except Exception as exc:
-            logger.warning(
-                "[forced_aligner] global alignment failed (%s: %s); falling back to per-turn alignment.",
-                type(exc).__name__,
-                exc,
-            )
-
-        all_words = self._align_per_turn_fallback(
-            audio_path=audio_path,
-            turns=turns,
-            device=device,
-        )
 
         logger.info(
             "[forced_aligner] alignment done in %.1f s — %d words across %d turns",
