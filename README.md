@@ -39,9 +39,9 @@ The backend is currently designed around two DigitalOcean GPU hosts plus one ser
 ```mermaid
 flowchart LR
   source["Long-form video"]
-  phase1["Phase 1 host<br/>DigitalOcean H200"]
-  phase26["Phase26 host<br/>DigitalOcean H200"]
-  modal["Modal L40S<br/>node-media-prep"]
+  phase1["Phase 1 host - DigitalOcean H200"]
+  phase26["Phase26 host - DigitalOcean H200"]
+  modal["Modal L40S - node media prep"]
   vertex["Vertex embeddings"]
   out["Ranked clip candidates"]
 
@@ -88,14 +88,14 @@ Modal currently handles the stateless media-prep step:
 flowchart TD
   source["Source URL or local asset"]
   asr["VibeVoice ASR"]
-  audio["NFA -> emotion2vec+ -> YAMNet"]
-  visual["RF-DETR + ByteTrack"]
+  audio["NFA to emotion2vec plus to YAMNet"]
+  visual["RF-DETR and ByteTrack"]
   dispatch["Phase26 enqueue"]
   nodes["Semantic nodes + boundaries"]
-  prep["node-media-prep"]
+  prep["Node media prep"]
   embed["Embeddings"]
   knowledgeGraph["Knowledge graph"]
-  rank["Candidate review + ranking"]
+  rank["Candidate review and ranking"]
 
   source --> asr
   source --> visual
@@ -194,9 +194,3 @@ Start here if you want the operational details:
 - Implemented and actively exercised: **Phases 1-4**
 - Planned next: **Phases 5-6**
 - Current validated architecture: **DigitalOcean H200 + H200 + Modal L40S**
-
-## For Maintainers
-
-This README is intentionally public-facing.
-
-Operational rules for coding agents and maintainers live in [AGENTS.md](AGENTS.md).
