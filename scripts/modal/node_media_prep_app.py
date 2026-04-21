@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -95,7 +96,9 @@ def node_media_prep_route(
     authorization: str | None = fastapi.Header(default=None),
 ):
     _require_auth_header(authorization)
-    request = NodeMediaPrepRequest.from_payload(payload)
+    request = NodeMediaPrepRequest.from_payload(
+        {**payload, "submitted_at_ms": time.time() * 1000.0}
+    )
     call = node_media_prep_job.spawn(request.to_payload())
     return fastapi.responses.JSONResponse(
         status_code=202,

@@ -45,6 +45,9 @@ def test_emotion2vec_plus_provider_clips_turns_and_normalizes_segments(tmp_path:
     assert payload["segments"][0]["turn_id"] == "t_000001"
     assert payload["segments"][0]["labels"] == ["neutral"]
     assert payload["segments"][1]["scores"] == [0.91]
+    assert provider.last_run_metrics["turn_count"] == 2
+    assert provider.last_run_metrics["clip_extract_ms"] >= 0.0
+    assert provider.last_run_metrics["infer_ms"] >= 0.0
 
 
 def test_emotion2vec_default_model_uses_hf_hub(monkeypatch):

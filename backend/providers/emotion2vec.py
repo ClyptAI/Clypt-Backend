@@ -4,7 +4,6 @@ import logging
 import os
 import time
 from pathlib import Path
-import subprocess
 import tempfile
 from typing import Any
 
@@ -27,30 +26,28 @@ def _resolve_funasr_hub() -> str:
     return "hf"
 
 
-def _default_turn_clipper(*, audio_path: Path, start_ms: int, end_ms: int) -> Path:
-    temp_dir = Path(tempfile.mkdtemp(prefix="clypt-emotion2vec-"))
-    clip_path = temp_dir / f"{start_ms}_{end_ms}.wav"
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(audio_path),
-            "-ss",
-            f"{start_ms / 1000.0:.3f}",
-            "-to",
-            f"{end_ms / 1000.0:.3f}",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            str(clip_path),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+def _write_turn_clip(
+    *,
+    audio_path: Path,
+    start_ms: int,
+    end_ms: int,
+    output_path: Path,
+) -> Path:
+    import soundfile as sf
+
+    info = sf.info(str(audio_path))
+    sample_rate = int(info.samplerate)
+    start_frame = max(0, int(round((max(0, start_ms) / 1000.0) * sample_rate)))
+    end_frame = max(start_frame + 1, int(round((max(start_ms + 1, end_ms) / 1000.0) * sample_rate)))
+    audio, _ = sf.read(
+        str(audio_path),
+        start=start_frame,
+        stop=end_frame,
+        always_2d=False,
     )
-    return clip_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(output_path), audio, sample_rate)
+    return output_path
 
 
 def _build_default_model():
@@ -123,7 +120,12 @@ def _top_label_score(
 class Emotion2VecPlusProvider:
     def __init__(self, *, model: Any | None = None, clipper=None) -> None:
         self._model = model
-        self._clipper = clipper or _default_turn_clipper
+        self._clipper = clipper
+        self._last_run_metrics: dict[str, float | int] = {}
+
+    @property
+    def last_run_metrics(self) -> dict[str, float | int]:
+        return dict(self._last_run_metrics)
 
     def _ensure_model(self):
         if self._model is None:
@@ -136,39 +138,63 @@ class Emotion2VecPlusProvider:
         total = len(turns)
         _log_every = max(1, total // 10)  # log ~every 10% of turns
         t_run = time.perf_counter()
-        for i, turn in enumerate(turns):
-            clip_path = self._clipper(
-                audio_path=audio_path,
-                start_ms=int(turn["start_ms"]),
-                end_ms=int(turn["end_ms"]),
-            )
-            raw_result = model.generate(input=str(clip_path), granularity="utterance")
-            labels, scores, per_class_scores = _normalize_emotion_result(raw_result)
-            segments.append(
-                {
-                    "turn_id": str(turn["turn_id"]),
-                    "labels": labels,
-                    "scores": scores,
-                    "per_class_scores": per_class_scores,
-                }
-            )
-            done = i + 1
-            if done == 1 or done % _log_every == 0 or done == total:
-                top_label, top_score = _top_label_score(
-                    labels=labels,
-                    scores=scores,
-                    per_class_scores=per_class_scores,
+        clip_extract_ms = 0.0
+        infer_ms = 0.0
+        with tempfile.TemporaryDirectory(prefix="clypt-emotion2vec-") as temp_dir_str:
+            temp_dir = Path(temp_dir_str)
+            for i, turn in enumerate(turns):
+                turn_start_ms = int(turn["start_ms"])
+                turn_end_ms = int(turn["end_ms"])
+                clip_started = time.perf_counter()
+                if self._clipper is not None:
+                    clip_path = self._clipper(
+                        audio_path=audio_path,
+                        start_ms=turn_start_ms,
+                        end_ms=turn_end_ms,
+                    )
+                else:
+                    clip_path = _write_turn_clip(
+                        audio_path=audio_path,
+                        start_ms=turn_start_ms,
+                        end_ms=turn_end_ms,
+                        output_path=temp_dir / f"{turn_start_ms}_{turn_end_ms}_{i:06d}.wav",
+                    )
+                clip_extract_ms += (time.perf_counter() - clip_started) * 1000.0
+                infer_started = time.perf_counter()
+                raw_result = model.generate(input=str(clip_path), granularity="utterance")
+                infer_ms += (time.perf_counter() - infer_started) * 1000.0
+                labels, scores, per_class_scores = _normalize_emotion_result(raw_result)
+                segments.append(
+                    {
+                        "turn_id": str(turn["turn_id"]),
+                        "labels": labels,
+                        "scores": scores,
+                        "per_class_scores": per_class_scores,
+                    }
                 )
-                logger.info(
-                    "[emotion2vec] %d/%d turns  (top: %s %.2f)",
-                    done, total,
-                    top_label,
-                    top_score,
-                )
+                done = i + 1
+                if done == 1 or done % _log_every == 0 or done == total:
+                    top_label, top_score = _top_label_score(
+                        labels=labels,
+                        scores=scores,
+                        per_class_scores=per_class_scores,
+                    )
+                    logger.info(
+                        "[emotion2vec] %d/%d turns  (top: %s %.2f)",
+                        done, total,
+                        top_label,
+                        top_score,
+                    )
         logger.info(
             "[emotion2vec] all %d turns done in %.1f s",
             total, time.perf_counter() - t_run,
         )
+        self._last_run_metrics = {
+            "turn_count": total,
+            "clip_extract_ms": clip_extract_ms,
+            "infer_ms": infer_ms,
+            "total_ms": (time.perf_counter() - t_run) * 1000.0,
+        }
         return {"segments": segments}
 
 

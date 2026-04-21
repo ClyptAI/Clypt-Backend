@@ -84,6 +84,12 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=1800`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=12`
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES=3`
+- `CLYPT_PHASE24_NODE_MEDIA_BATCH_GAP_MS=2000`
+- `CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_NODES=8`
+- `CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_SPAN_MS=120000`
+- `CLYPT_PHASE24_NODE_MEDIA_BATCH_PAD_MS=2000`
+- `CLYPT_PHASE24_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS=10000`
 
 ### 2.3 Modal node-media-prep
 
@@ -95,6 +101,7 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
   - `GET /tasks/node-media-prep/result/{call_id}` -> `202 pending` or `200` final result
 - `RemoteNodeMediaPrepClient` hides this async contract from Phase 2 and still returns the same final `media` list shape to the worker
 - node-media-prep requests are now timeline-local batches, not the full node set
+- batch planning and worker fan-out are env-tunable on the Phase26 side via the `CLYPT_PHASE24_NODE_MEDIA_BATCH_*` knobs and `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES`
 - clip extraction now downscales to 480p before upload / Vertex multimodal embedding
 - Phase26 starts multimodal embedding batch-by-batch as node-media-prep results arrive instead of waiting for all media first
 

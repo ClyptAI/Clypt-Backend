@@ -56,6 +56,28 @@ def test_plan_node_media_batches_splits_sparse_nodes_and_caps_span_and_count() -
     assert [node.node_id for node in batches[2].nodes] == ["node_far"]
 
 
+def test_plan_node_media_batches_reads_env_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.pipeline.semantics.media_embeddings import plan_node_media_batches
+
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_BATCH_GAP_MS", "500")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_NODES", "2")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_SPAN_MS", "1500")
+
+    batches = plan_node_media_batches(
+        nodes=[
+            _make_node("node_a", 0, 400),
+            _make_node("node_b", 700, 1100),
+            _make_node("node_c", 1400, 1800),
+        ]
+    )
+
+    assert [batch.batch_id for batch in batches] == ["batch_0000", "batch_0001"]
+    assert [node.node_id for node in batches[0].nodes] == ["node_a", "node_b"]
+    assert [node.node_id for node in batches[1].nodes] == ["node_c"]
+
+
 def test_prepare_node_media_embeddings_preserves_input_order_and_uploads_all_nodes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -134,6 +156,7 @@ def test_prepare_node_media_embeddings_preserves_input_order_and_uploads_all_nod
     assert diagnostics["batch_start_ms"] == 12000
     assert diagnostics["batch_end_ms"] == 21000
     assert diagnostics["coarse_start_ms"] == 0
+    assert diagnostics["upload_bytes"] == len(b"clip") * 3
 
 
 def test_prepare_node_media_embeddings_uses_configured_concurrency_bound(

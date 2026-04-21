@@ -4,6 +4,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_c
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import logging
+import os
 from pathlib import Path
 import re
 import time
@@ -76,7 +77,22 @@ _PHASE4_PROMPT_SOURCE_PRIORITY = {
     "trend": 2,
 }
 _PHASE4_POOL_CANDIDATES_PER_CALL = 12
-_PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES = 3
+_DEFAULT_PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES = 3
+
+
+def _read_phase2_node_media_max_inflight_batches() -> int:
+    raw_value = os.getenv("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES") or str(
+        _DEFAULT_PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES
+    )
+    try:
+        parsed = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            "CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES must be a positive integer."
+        ) from exc
+    if parsed < 1:
+        raise ValueError("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES must be >= 1.")
+    return parsed
 
 
 @dataclass(slots=True)
@@ -232,6 +248,7 @@ class V31LivePhase14Runner:
                 phase1_outputs=phase1_outputs,
             )
 
+        inflight_limit = _read_phase2_node_media_max_inflight_batches()
         batches = plan_node_media_batches(nodes=nodes)
         prep_started_at = datetime.now(UTC)
         prep_started = time.perf_counter()
@@ -251,8 +268,8 @@ class V31LivePhase14Runner:
                 object_prefix=f"phase14/{paths.run_id}/node_media/batches/{batch.batch_id}",
             )
 
-        with ThreadPoolExecutor(max_workers=_PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES) as batch_pool, ThreadPoolExecutor(
-            max_workers=_PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES
+        with ThreadPoolExecutor(max_workers=inflight_limit) as batch_pool, ThreadPoolExecutor(
+            max_workers=inflight_limit
         ) as embed_pool:
             pending_batches: dict[Future[Any], Any] = {}
             pending_embeddings: dict[Future[Any], Any] = {}
@@ -261,7 +278,7 @@ class V31LivePhase14Runner:
                 nonlocal next_batch_index
                 while (
                     next_batch_index < len(batches)
-                    and len(pending_batches) < _PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES
+                    and len(pending_batches) < inflight_limit
                 ):
                     batch = batches[next_batch_index]
                     next_batch_index += 1
@@ -326,7 +343,7 @@ class V31LivePhase14Runner:
                 "node_count": len(nodes),
                 "prepared_media_count": len(ordered_media),
                 "batch_count": len(batches),
-                "inflight_limit": _PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES,
+                "inflight_limit": inflight_limit,
                 "batch_mode": "pipelined_remote_batches",
                 "batches": batch_debug,
             },

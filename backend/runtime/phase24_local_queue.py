@@ -48,6 +48,21 @@ class Phase24LocalQueue:
             )
             conn.commit()
 
+    @staticmethod
+    def _queue_counts(conn: sqlite3.Connection) -> dict[str, int]:
+        row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
+                SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count
+            FROM phase24_jobs
+            """
+        ).fetchone()
+        return {
+            "queue_depth": int(row["queued_count"] or 0) if row is not None else 0,
+            "running_count": int(row["running_count"] or 0) if row is not None else 0,
+        }
+
     def enqueue(self, run_id: str, payload: dict[str, Any]) -> str:
         """Insert a queued job, or return the existing job_id for run_id."""
         now = time.time()
@@ -154,6 +169,13 @@ class Phase24LocalQueue:
                 return None
             out = dict(row)
             out["payload"] = json.loads(out.pop("payload_json"))
+            out["queue_metrics"] = {
+                **self._queue_counts(conn),
+                "enqueue_to_claim_ms": max(
+                    0.0,
+                    (now - float(out.get("created_at") or now)) * 1000.0,
+                ),
+            }
             return out
 
     def count_expired_running(self, lease_timeout_s: int) -> int:

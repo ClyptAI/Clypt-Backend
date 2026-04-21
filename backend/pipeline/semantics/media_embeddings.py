@@ -15,11 +15,11 @@ from ..contracts import SemanticGraphNode
 
 logger = logging.getLogger(__name__)
 _NODE_MEDIA_TARGET_HEIGHT = 480
-_NODE_MEDIA_BATCH_GAP_MS = 2000
-_NODE_MEDIA_BATCH_MAX_NODES = 8
-_NODE_MEDIA_BATCH_MAX_SPAN_MS = 120000
-_NODE_MEDIA_BATCH_PAD_MS = 2000
-_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS = 10000
+_DEFAULT_NODE_MEDIA_BATCH_GAP_MS = 2000
+_DEFAULT_NODE_MEDIA_BATCH_MAX_NODES = 8
+_DEFAULT_NODE_MEDIA_BATCH_MAX_SPAN_MS = 120000
+_DEFAULT_NODE_MEDIA_BATCH_PAD_MS = 2000
+_DEFAULT_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS = 10000
 
 
 @dataclass(slots=True)
@@ -104,15 +104,66 @@ def _read_max_concurrency(*, node_count: int, max_concurrent: int | None) -> int
     return min(max_concurrent, node_count) if node_count > 0 else 1
 
 
+def _read_positive_int_env(name: str, *, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer.") from exc
+    if parsed < 1:
+        raise ValueError(f"{name} must be >= 1.")
+    return parsed
+
+
+def _read_batch_gap_ms() -> int:
+    return _read_positive_int_env(
+        "CLYPT_PHASE24_NODE_MEDIA_BATCH_GAP_MS",
+        default=_DEFAULT_NODE_MEDIA_BATCH_GAP_MS,
+    )
+
+
+def _read_batch_max_nodes() -> int:
+    return _read_positive_int_env(
+        "CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_NODES",
+        default=_DEFAULT_NODE_MEDIA_BATCH_MAX_NODES,
+    )
+
+
+def _read_batch_max_span_ms() -> int:
+    return _read_positive_int_env(
+        "CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_SPAN_MS",
+        default=_DEFAULT_NODE_MEDIA_BATCH_MAX_SPAN_MS,
+    )
+
+
+def _read_batch_pad_ms() -> int:
+    return _read_positive_int_env(
+        "CLYPT_PHASE24_NODE_MEDIA_BATCH_PAD_MS",
+        default=_DEFAULT_NODE_MEDIA_BATCH_PAD_MS,
+    )
+
+
+def _read_batch_coarse_seek_pad_ms() -> int:
+    return _read_positive_int_env(
+        "CLYPT_PHASE24_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS",
+        default=_DEFAULT_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS,
+    )
+
+
 def plan_node_media_batches(
     *,
     nodes: list[Any],
-    gap_ms: int = _NODE_MEDIA_BATCH_GAP_MS,
-    max_nodes: int = _NODE_MEDIA_BATCH_MAX_NODES,
-    max_span_ms: int = _NODE_MEDIA_BATCH_MAX_SPAN_MS,
+    gap_ms: int | None = None,
+    max_nodes: int | None = None,
+    max_span_ms: int | None = None,
 ) -> list[NodeMediaBatchPlan]:
     if not nodes:
         return []
+    gap_ms = _read_batch_gap_ms() if gap_ms is None else int(gap_ms)
+    max_nodes = _read_batch_max_nodes() if max_nodes is None else int(max_nodes)
+    max_span_ms = _read_batch_max_span_ms() if max_span_ms is None else int(max_span_ms)
 
     sorted_nodes = sorted(
         nodes,
@@ -412,9 +463,11 @@ def prepare_node_media_embeddings(
     source_duration_ms = _source_duration_ms(source_video_path=source_video_path)
     batch_start_ms = min(int(node.start_ms) for node in nodes)
     batch_end_ms = max(int(node.end_ms) for node in nodes)
-    padded_start_ms = max(0, batch_start_ms - _NODE_MEDIA_BATCH_PAD_MS)
-    padded_end_ms = min(source_duration_ms, batch_end_ms + _NODE_MEDIA_BATCH_PAD_MS)
-    coarse_start_ms = max(0, padded_start_ms - _NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS)
+    batch_pad_ms = _read_batch_pad_ms()
+    coarse_seek_pad_ms = _read_batch_coarse_seek_pad_ms()
+    padded_start_ms = max(0, batch_start_ms - batch_pad_ms)
+    padded_end_ms = min(source_duration_ms, batch_end_ms + batch_pad_ms)
+    coarse_start_ms = max(0, padded_start_ms - coarse_seek_pad_ms)
     batch_window_path = clips_dir / "_batch" / "window.mp4"
 
     extract_started = time.perf_counter()
@@ -426,6 +479,7 @@ def prepare_node_media_embeddings(
     )
 
     upload_ms_total = 0.0
+    upload_bytes_total = 0
 
     def _prepare_node_media(node: SemanticGraphNode) -> tuple[dict[str, str], float]:
         node_start_ms = int(node.start_ms)
@@ -436,6 +490,7 @@ def prepare_node_media_embeddings(
             local_start_ms=max(0, node_start_ms - coarse_start_ms),
             local_end_ms=max(0, node_end_ms - coarse_start_ms),
         )
+        clip_size_bytes = clip_path.stat().st_size if clip_path.exists() else 0
         upload_started = time.perf_counter()
         file_uri = storage_client.upload_file(
             local_path=clip_path,
@@ -450,6 +505,7 @@ def prepare_node_media_embeddings(
                 "local_path": str(clip_path),
             },
             upload_ms,
+            clip_size_bytes,
         )
 
     descriptors: list[dict[str, str] | None] = [None] * len(nodes)
@@ -461,9 +517,10 @@ def prepare_node_media_embeddings(
         for future in as_completed(futures):
             index, node = futures[future]
             try:
-                descriptor, upload_ms = future.result()
+                descriptor, upload_ms, upload_bytes = future.result()
                 descriptors[index] = descriptor
                 upload_ms_total += upload_ms
+                upload_bytes_total += int(upload_bytes)
             except Exception as exc:
                 for pending_future in futures:
                     pending_future.cancel()
@@ -484,8 +541,14 @@ def prepare_node_media_embeddings(
         "padded_start_ms": padded_start_ms,
         "padded_end_ms": padded_end_ms,
         "coarse_start_ms": coarse_start_ms,
+        "batch_gap_ms": _read_batch_gap_ms(),
+        "batch_max_nodes": _read_batch_max_nodes(),
+        "batch_max_span_ms": _read_batch_max_span_ms(),
+        "batch_pad_ms": batch_pad_ms,
+        "batch_coarse_seek_pad_ms": coarse_seek_pad_ms,
         "extract_ms": max(0.0, extract_duration_ms),
         "upload_ms": upload_ms_total,
+        "upload_bytes": upload_bytes_total,
         "total_ms": total_duration_ms,
     }
     ordered = [descriptor for descriptor in descriptors if descriptor is not None]

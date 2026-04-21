@@ -211,6 +211,14 @@ def test_run_phase1_sidecars_runs_visual_and_remote_asr_concurrently(
     assert "emotion2vec" in stage_names
     assert "yamnet" in stage_names
     assert "visual_extraction" in stage_names
+    forced_alignment_event = next(event for event in stage_events if event["stage_name"] == "forced_alignment")
+    emotion_event = next(event for event in stage_events if event["stage_name"] == "emotion2vec")
+    yamnet_event = next(event for event in stage_events if event["stage_name"] == "yamnet")
+    assert forced_alignment_event["metadata"]["forced_alignment_ms"] >= 0.0
+    assert forced_alignment_event["metadata"]["forced_alignment_chunk_count"] == 0
+    assert emotion_event["metadata"]["emotion_clip_extract_ms"] == 0.0
+    assert emotion_event["metadata"]["emotion_infer_ms"] == 0.0
+    assert yamnet_event["metadata"]["yamnet_ms"] >= 0.0
 
 
 def test_run_phase1_sidecars_propagates_vibevoice_asr_failure_and_emits_failed_event(

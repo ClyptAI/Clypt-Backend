@@ -6,8 +6,10 @@ from Spanner, rebuilds a fresh run_id under it, and runs
 phase_metrics/substeps breakdown for latency analysis.
 
 Intended for ad-hoc benchmarking on the Phase 2-4 host (currently the H200
-droplet). Node-media prep runs in-process on the same host — Phase 2-4 is a
-single-host workload.
+droplet). Node-media prep now runs through the remote Modal worker using the
+submit/poll client, so this script captures the persisted phase metrics and
+substep metadata needed to analyze queue wait, per-batch prep timings, and
+overall Phase 2-4 wall time.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 import uuid
@@ -87,6 +90,42 @@ def _format_substep(rec: Any) -> str:
     return f"    {rec.phase_name}/{rec.step_name}/{rec.step_key:<30} {rec.status:<10} {dur_s:>10}"
 
 
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_ready(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value
+
+
+def _metric_to_json(rec: Any) -> dict[str, Any]:
+    return {
+        "phase_name": rec.phase_name,
+        "status": rec.status,
+        "started_at": _json_ready(rec.started_at),
+        "ended_at": _json_ready(rec.ended_at),
+        "duration_ms": rec.duration_ms,
+        "metadata": _json_ready(rec.metadata),
+        "error_payload": _json_ready(rec.error_payload),
+    }
+
+
+def _substep_to_json(rec: Any) -> dict[str, Any]:
+    return {
+        "phase_name": rec.phase_name,
+        "step_name": rec.step_name,
+        "step_key": rec.step_key,
+        "status": rec.status,
+        "started_at": _json_ready(rec.started_at),
+        "ended_at": _json_ready(rec.ended_at),
+        "duration_ms": rec.duration_ms,
+        "metadata": _json_ready(rec.metadata),
+        "error_payload": _json_ready(rec.error_payload),
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -104,6 +143,11 @@ def main() -> int:
         type=int,
         default=None,
         help="Override runtime control. Defaults to env.",
+    )
+    ap.add_argument(
+        "--json-output",
+        default=None,
+        help="Optional path to write a machine-readable JSON summary.",
     )
     args = ap.parse_args()
 
@@ -160,6 +204,34 @@ def main() -> int:
 
     metrics = service.repository.list_phase_metrics(run_id=bench_run_id)
     substeps = service.repository.list_phase_substeps(run_id=bench_run_id)
+    phase_metrics_json = [_metric_to_json(metric) for metric in metrics]
+    phase_substeps_json = [_substep_to_json(substep) for substep in substeps]
+    media_prep_substep = next(
+        (
+            substep
+            for substep in phase_substeps_json
+            if substep["phase_name"] == "phase2" and substep["step_key"] == "node_media"
+        ),
+        None,
+    )
+    node_media_batches = list(((media_prep_substep or {}).get("metadata") or {}).get("batches") or [])
+    queue_wait_ms = sum(float(batch.get("queue_wait_ms") or 0.0) for batch in node_media_batches)
+    summary_json = {
+        "source_run_id": args.source_run_id,
+        "bench_run_id": bench_run_id,
+        "job_id": job_id,
+        "status": result.get("status"),
+        "final": final_status,
+        "error": err_msg,
+        "wall_ms": wall_ms,
+        "wall_started_at": _json_ready(wall_start),
+        "wall_ended_at": _json_ready(wall_end),
+        "phase_metrics": phase_metrics_json,
+        "phase_substeps": phase_substeps_json,
+        "node_media_batch_count": len(node_media_batches),
+        "node_media_batches": _json_ready(node_media_batches),
+        "node_media_queue_wait_ms": queue_wait_ms,
+    }
 
     print()
     print("=" * 80)
@@ -188,6 +260,14 @@ def main() -> int:
     if isinstance(meta, dict):
         print("\nSummary metadata (truncated):")
         print(json.dumps({k: v for k, v in meta.items() if k != "full_debug"}, indent=2, default=str)[:4000])
+
+    if args.json_output:
+        with open(args.json_output, "w", encoding="utf-8") as handle:
+            json.dump(summary_json, handle, indent=2, default=str)
+        print(f"\nMachine-readable summary written to: {args.json_output}")
+    else:
+        print("\nMachine-readable summary:")
+        print(json.dumps(summary_json, indent=2, default=str))
 
     return 0 if final_status == "ok" and result.get("status") not in {"exception", "max_attempts_exceeded"} else 1
 

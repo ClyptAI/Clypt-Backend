@@ -50,6 +50,9 @@ def test_phase24_local_queue_claim_mark_succeeded(tmp_path: Path) -> None:
     assert row["job_id"] == job_id
     assert row["attempt_count"] == 1
     assert row["payload"]["run_id"] == "run-b"
+    assert row["queue_metrics"]["queue_depth"] == 0
+    assert row["queue_metrics"]["running_count"] == 1
+    assert row["queue_metrics"]["enqueue_to_claim_ms"] >= 0.0
     queue.mark_succeeded(job_id)
     assert queue.get_job(job_id)["status"] == "succeeded"
 

@@ -258,6 +258,12 @@ Operational notes:
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` | required | Shared bearer token. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S` | `1800` | Total submit+poll wait budget on the Phase26 side. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` | `12` | Modal L40S starting concurrency cap for timeline-batched node-media-prep. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES` | `3` | Max concurrent batch submit/poll jobs Phase26 keeps in flight per run. |
+| `CLYPT_PHASE24_NODE_MEDIA_BATCH_GAP_MS` | `2000` | Start a new timeline batch when the next node starts more than this gap after the current batch end. |
+| `CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_NODES` | `8` | Hard cap on nodes per timeline batch. |
+| `CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_SPAN_MS` | `120000` | Hard cap on total timeline span per batch. |
+| `CLYPT_PHASE24_NODE_MEDIA_BATCH_PAD_MS` | `2000` | Pre/post pad added around each extracted batch window on the Modal worker. |
+| `CLYPT_PHASE24_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS` | `10000` | Extra pre-roll used for hybrid fast-seek + precise trim extraction. |
 
 ### 4.4 Local OpenAI generation
 

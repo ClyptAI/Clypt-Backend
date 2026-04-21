@@ -123,6 +123,7 @@ def test_run_node_media_prep_returns_batch_metadata(
                 "ffmpeg_mode": "hybrid_batch_gpu",
                 "extract_ms": 25.0,
                 "upload_ms": 15.0,
+                "upload_bytes": 4096,
             },
         )
 
@@ -138,6 +139,7 @@ def test_run_node_media_prep_returns_batch_metadata(
             "video_gcs_uri": "gs://bucket/source.mp4",
             "object_prefix": "phase14/run_001/node_media/batches/batch_0000",
             "max_concurrency": 2,
+            "submitted_at_ms": 0.0,
             "nodes": [
                 {"node_id": "n1", "start_ms": 0, "end_ms": 1000},
                 {"node_id": "n2", "start_ms": 2000, "end_ms": 3000},
@@ -156,9 +158,12 @@ def test_run_node_media_prep_returns_batch_metadata(
     assert result["batch_end_ms"] == 3000
     assert result["node_count"] == 2
     assert result["ffmpeg_mode"] == "hybrid_batch_gpu"
+    assert result["queue_wait_ms"] is not None
     assert result["download_ms"] >= 0.0
+    assert result["download_bytes"] == len(b"video-bytes")
     assert result["extract_ms"] == 25.0
     assert result["upload_ms"] == 15.0
+    assert result["upload_bytes"] == 4096
     assert result["total_ms"] >= 0.0
     assert [item["node_id"] for item in result["media"]] == ["n1", "n2"]
     assert len(storage.downloads) == 1

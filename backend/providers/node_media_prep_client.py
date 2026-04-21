@@ -81,6 +81,7 @@ class NodeMediaPrepBatchHandle:
     batch_id: str
     call_id: str
     specs: list[_NodeSpec]
+    submit_ms: float
 
 
 @dataclass(slots=True)
@@ -199,7 +200,7 @@ class RemoteNodeMediaPrepClient:
         method: str,
         payload: dict[str, Any] | None,
         timeout_s: float,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], int, float]:
         url = self._endpoint(path)
         body = (
             json.dumps(payload, ensure_ascii=True).encode("utf-8")
@@ -208,7 +209,8 @@ class RemoteNodeMediaPrepClient:
         )
         headers = self._auth_headers()
 
-        def _do_request() -> dict[str, Any]:
+        def _do_request() -> tuple[dict[str, Any], int, float]:
+            request_started = time.perf_counter()
             req = urllib.request.Request(
                 url,
                 data=body,
@@ -247,7 +249,11 @@ class RemoteNodeMediaPrepClient:
                     f"node-media-prep {path} response must be an object, got "
                     f"{type(parsed).__name__}"
                 )
-            return parsed
+            return (
+                parsed,
+                len(raw.encode("utf-8")),
+                (time.perf_counter() - request_started) * 1000.0,
+            )
 
         return retry_with_backoff(
             _do_request,
@@ -263,8 +269,8 @@ class RemoteNodeMediaPrepClient:
             rng=random.random,
         )
 
-    def _submit_job(self, *, payload: dict[str, Any], timeout_s: float) -> str:
-        raw = self._request_json(
+    def _submit_job(self, *, payload: dict[str, Any], timeout_s: float) -> tuple[str, float]:
+        raw, _body_bytes, submit_ms = self._request_json(
             path="/tasks/node-media-prep",
             method="POST",
             payload=payload,
@@ -275,7 +281,7 @@ class RemoteNodeMediaPrepClient:
             raise RemoteNodeMediaPrepError(
                 "node-media-prep submit response missing required call_id"
             )
-        return call_id
+        return call_id, submit_ms
 
     def _parse_media_result(
         self,
@@ -283,6 +289,7 @@ class RemoteNodeMediaPrepClient:
         raw: dict[str, Any],
         specs: list[_NodeSpec],
         batch_id: str,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> NodeMediaPrepBatchResult:
         media = raw.get("media")
         if not isinstance(media, list):
@@ -333,13 +340,24 @@ class RemoteNodeMediaPrepClient:
                 "batch_end_ms",
                 "node_count",
                 "ffmpeg_mode",
+                "queue_wait_ms",
                 "download_ms",
+                "download_bytes",
                 "extract_ms",
                 "upload_ms",
+                "upload_bytes",
                 "total_ms",
             )
             if raw.get(key) is not None
         }
+        if extra_metadata:
+            metadata.update(
+                {
+                    key: value
+                    for key, value in extra_metadata.items()
+                    if value is not None
+                }
+            )
         metadata.setdefault("batch_id", batch_id)
         metadata.setdefault("batch_start_ms", min(spec.start_ms for spec in specs))
         metadata.setdefault("batch_end_ms", max(spec.end_ms for spec in specs))
@@ -350,24 +368,26 @@ class RemoteNodeMediaPrepClient:
             metadata=metadata,
         )
 
-    def _poll_result(self, *, call_id: str, timeout_s: float) -> dict[str, Any]:
+    def _poll_result(self, *, call_id: str, timeout_s: float) -> tuple[dict[str, Any], int, int]:
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         poll_path = f"/tasks/node-media-prep/result/{call_id}"
+        poll_count = 0
         while True:
             remaining_s = deadline - time.monotonic()
             if remaining_s < 0.0:
                 raise RemoteNodeMediaPrepError(
                     f"node-media-prep timed out while polling call_id={call_id}",
                 )
-            raw = self._request_json(
+            raw, response_bytes, _request_ms = self._request_json(
                 path=poll_path,
                 method="GET",
                 payload=None,
                 timeout_s=max(1.0, min(30.0, remaining_s or 0.0)),
             )
+            poll_count += 1
             status = str(raw.get("status") or "").strip().lower()
             if status in {"", "succeeded", "success", "completed"}:
-                return raw
+                return raw, poll_count, response_bytes
             if status in {"pending", "running", "submitted"}:
                 sleep_s = min(self._DEFAULT_POLL_INTERVAL_S, max(0.0, remaining_s))
                 if sleep_s > 0.0:
@@ -415,11 +435,19 @@ class RemoteNodeMediaPrepClient:
                 job_id=run_id,
             ),
         )
-        call_id = self._submit_job(payload=payload, timeout_s=float(self.settings.timeout_s))
-        return NodeMediaPrepBatchHandle(batch_id=batch_id, call_id=call_id, specs=specs)
+        call_id, submit_ms = self._submit_job(
+            payload=payload,
+            timeout_s=float(self.settings.timeout_s),
+        )
+        return NodeMediaPrepBatchHandle(
+            batch_id=batch_id,
+            call_id=call_id,
+            specs=specs,
+            submit_ms=submit_ms,
+        )
 
     def wait_for_batch(self, *, handle: NodeMediaPrepBatchHandle) -> NodeMediaPrepBatchResult:
-        raw = self._poll_result(
+        raw, poll_count, result_payload_bytes = self._poll_result(
             call_id=handle.call_id,
             timeout_s=float(self.settings.timeout_s),
         )
@@ -427,6 +455,11 @@ class RemoteNodeMediaPrepClient:
             raw=raw,
             specs=handle.specs,
             batch_id=handle.batch_id,
+            extra_metadata={
+                "submit_ms": handle.submit_ms,
+                "poll_count": poll_count,
+                "result_payload_bytes": result_payload_bytes,
+            },
         )
 
     def prepare_batch(

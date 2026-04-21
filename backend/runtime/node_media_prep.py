@@ -38,6 +38,7 @@ class NodeMediaPrepRequest:
     object_prefix: str
     max_concurrency: int
     nodes: list[dict[str, Any]]
+    submitted_at_ms: float | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -46,6 +47,7 @@ class NodeMediaPrepRequest:
             "object_prefix": self.object_prefix,
             "max_concurrency": int(self.max_concurrency),
             "nodes": [dict(node) for node in self.nodes],
+            "submitted_at_ms": self.submitted_at_ms,
         }
 
     @classmethod
@@ -101,6 +103,11 @@ class NodeMediaPrepRequest:
             ),
             max_concurrency=max_concurrency,
             nodes=cleaned,
+            submitted_at_ms=(
+                float(payload.get("submitted_at_ms"))
+                if payload.get("submitted_at_ms") is not None
+                else None
+            ),
         )
 
 
@@ -163,6 +170,7 @@ def run_node_media_prep(
     )
 
     request_started = time.perf_counter()
+    request_started_ms = time.time() * 1000.0
     batch_start_ms = min(node.start_ms for node in semantic_nodes)
     batch_end_ms = max(node.end_ms for node in semantic_nodes)
     batch_id = request.object_prefix.rstrip("/").split("/")[-1] or "batch"
@@ -183,6 +191,7 @@ def run_node_media_prep(
             local_path=source_video_path,
         )
         download_ms = (time.perf_counter() - download_started) * 1000.0
+        download_bytes = source_video_path.stat().st_size if source_video_path.exists() else 0
 
         clips_dir = tmp_root / "clips"
         descriptors, diagnostics = prepare_node_media_embeddings(
@@ -213,9 +222,16 @@ def run_node_media_prep(
         "batch_end_ms": batch_end_ms,
         "node_count": len(semantic_nodes),
         "ffmpeg_mode": diagnostics.get("ffmpeg_mode", "hybrid_batch_gpu"),
+        "queue_wait_ms": (
+            max(0.0, request_started_ms - float(request.submitted_at_ms))
+            if request.submitted_at_ms is not None
+            else None
+        ),
         "download_ms": download_ms,
+        "download_bytes": int(download_bytes),
         "extract_ms": float(diagnostics.get("extract_ms") or 0.0),
         "upload_ms": float(diagnostics.get("upload_ms") or 0.0),
+        "upload_bytes": int(diagnostics.get("upload_bytes") or 0),
         "total_ms": (time.perf_counter() - request_started) * 1000.0,
     }
 

@@ -128,9 +128,15 @@ def _run_audio_chain(
             error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
         )
         raise
+    forced_alignment_ms = (time.perf_counter() - t_fa) * 1000.0
+    forced_alignment_metrics = (
+        getattr(forced_aligner, "last_run_metrics", {})
+        if getattr(forced_aligner, "last_run_metrics", None) is not None
+        else {}
+    )
     logger.info(
         "[extract] forced-alignment done in %.1f s — %d words",
-        time.perf_counter() - t_fa,
+        forced_alignment_ms / 1000.0,
         len(word_alignments),
     )
     alignable_turns = [
@@ -149,8 +155,15 @@ def _run_audio_chain(
                 stage_event_logger,
                 stage_name="forced_alignment",
                 status="failed",
-                duration_ms=(time.perf_counter() - t_fa) * 1000.0,
-                metadata={"turn_count": len(prelim_turns), "word_count": len(word_alignments)},
+                duration_ms=forced_alignment_ms,
+                metadata={
+                    "turn_count": len(prelim_turns),
+                    "word_count": len(word_alignments),
+                    "forced_alignment_ms": forced_alignment_ms,
+                    "forced_alignment_chunk_count": int(
+                        forced_alignment_metrics.get("chunk_count") or 0
+                    ),
+                },
                 error_payload={"code": "RuntimeError", "message": msg[:2048]},
             )
             raise RuntimeError(
@@ -162,8 +175,13 @@ def _run_audio_chain(
         stage_event_logger,
         stage_name="forced_alignment",
         status="succeeded",
-        duration_ms=(time.perf_counter() - t_fa) * 1000.0,
-        metadata={"turn_count": len(prelim_turns), "word_count": len(word_alignments)},
+        duration_ms=forced_alignment_ms,
+        metadata={
+            "turn_count": len(prelim_turns),
+            "word_count": len(word_alignments),
+            "forced_alignment_ms": forced_alignment_ms,
+            "forced_alignment_chunk_count": int(forced_alignment_metrics.get("chunk_count") or 0),
+        },
     )
 
     merged = merge_vibevoice_outputs(
@@ -207,14 +225,25 @@ def _run_audio_chain(
             error_payload={"code": exc.__class__.__name__, "message": str(exc)[:2048]},
         )
         raise
-    logger.info("[extract] emotion2vec+ done in %.1f s", time.perf_counter() - t_emotion)
+    emotion_ms = (time.perf_counter() - t_emotion) * 1000.0
+    emotion_metrics = (
+        getattr(emotion_provider, "last_run_metrics", {})
+        if getattr(emotion_provider, "last_run_metrics", None) is not None
+        else {}
+    )
+    logger.info("[extract] emotion2vec+ done in %.1f s", emotion_ms / 1000.0)
     emotion_segments = len(emotion2vec_payload.segments)
     _emit_stage_event(
         stage_event_logger,
         stage_name="emotion2vec",
         status="succeeded",
-        duration_ms=(time.perf_counter() - t_emotion) * 1000.0,
-        metadata={"turn_count": len(turns), "segment_count": emotion_segments},
+        duration_ms=emotion_ms,
+        metadata={
+            "turn_count": len(turns),
+            "segment_count": emotion_segments,
+            "emotion_clip_extract_ms": float(emotion_metrics.get("clip_extract_ms") or 0.0),
+            "emotion_infer_ms": float(emotion_metrics.get("infer_ms") or 0.0),
+        },
     )
 
     logger.info("[extract] starting YAMNet ...")
@@ -232,17 +261,18 @@ def _run_audio_chain(
         )
         raise
     yamnet_event_count = len(yamnet_payload.events)
+    yamnet_ms = (time.perf_counter() - t_yamnet) * 1000.0
     logger.info(
         "[extract] YAMNet done in %.1f s — %d events",
-        time.perf_counter() - t_yamnet,
+        yamnet_ms / 1000.0,
         yamnet_event_count,
     )
     _emit_stage_event(
         stage_event_logger,
         stage_name="yamnet",
         status="succeeded",
-        duration_ms=(time.perf_counter() - t_yamnet) * 1000.0,
-        metadata={"event_count": yamnet_event_count},
+        duration_ms=yamnet_ms,
+        metadata={"event_count": yamnet_event_count, "yamnet_ms": yamnet_ms},
     )
 
     return diarization_payload, emotion2vec_payload, yamnet_payload

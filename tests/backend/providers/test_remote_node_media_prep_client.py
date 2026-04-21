@@ -157,9 +157,12 @@ def test_prepare_batch_returns_optional_metadata(monkeypatch: pytest.MonkeyPatch
                     "batch_end_ms": 2500,
                     "node_count": 2,
                     "ffmpeg_mode": "hybrid_batch_gpu",
+                    "queue_wait_ms": 5.0,
                     "download_ms": 10.0,
+                    "download_bytes": 1024,
                     "extract_ms": 20.0,
                     "upload_ms": 30.0,
+                    "upload_bytes": 2048,
                     "total_ms": 60.0,
                     "media": [
                         {"node_id": "n_2", "file_uri": "gs://bucket/p/n_2.mp4"},
@@ -183,17 +186,21 @@ def test_prepare_batch_returns_optional_metadata(monkeypatch: pytest.MonkeyPatch
     )
 
     assert [item["node_id"] for item in result.media] == ["n_1", "n_2"]
-    assert result.metadata == {
-        "batch_id": "batch_0000",
-        "batch_start_ms": 0,
-        "batch_end_ms": 2500,
-        "node_count": 2,
-        "ffmpeg_mode": "hybrid_batch_gpu",
-        "download_ms": 10.0,
-        "extract_ms": 20.0,
-        "upload_ms": 30.0,
-        "total_ms": 60.0,
-    }
+    assert result.metadata["batch_id"] == "batch_0000"
+    assert result.metadata["batch_start_ms"] == 0
+    assert result.metadata["batch_end_ms"] == 2500
+    assert result.metadata["node_count"] == 2
+    assert result.metadata["ffmpeg_mode"] == "hybrid_batch_gpu"
+    assert result.metadata["queue_wait_ms"] == 5.0
+    assert result.metadata["download_ms"] == 10.0
+    assert result.metadata["download_bytes"] == 1024
+    assert result.metadata["extract_ms"] == 20.0
+    assert result.metadata["upload_ms"] == 30.0
+    assert result.metadata["upload_bytes"] == 2048
+    assert result.metadata["total_ms"] == 60.0
+    assert result.metadata["poll_count"] == 1
+    assert result.metadata["submit_ms"] >= 0.0
+    assert result.metadata["result_payload_bytes"] > 0
 
 
 def test_submit_batch_uses_batch_specific_object_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -458,6 +465,39 @@ def test_call_polls_until_media_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
     assert sleeps == [1.0]
     assert result[0]["file_uri"] == "gs://b/n_1.mp4"
+
+
+def test_wait_for_batch_records_poll_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-poll"}).encode("utf-8"), status=202)
+        if fake_urlopen.polls == 0:
+            fake_urlopen.polls += 1
+            return _FakeResponse(json.dumps({"status": "pending"}).encode("utf-8"), status=202)
+        return _FakeResponse(
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "media": [{"node_id": "n_1", "file_uri": "gs://b/n_1.mp4"}],
+                }
+            ).encode("utf-8")
+        )
+
+    fake_urlopen.polls = 0
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("backend.providers.node_media_prep_client.time.sleep", lambda _s: None)
+
+    client = RemoteNodeMediaPrepClient(settings=_settings(), max_retries=0)
+    result = client.prepare_batch(
+        nodes=[_StubNode(node_id="n_1", start_ms=0, end_ms=1000)],
+        paths=_StubPaths(run_id="run-abc"),
+        phase1_outputs=_phase1_outputs(),
+        batch_id="batch_0000",
+    )
+
+    assert result.metadata["poll_count"] == 2
+    assert result.metadata["result_payload_bytes"] > 0
+    assert result.metadata["submit_ms"] >= 0.0
 
 
 def test_call_times_out_while_polling(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -50,6 +50,12 @@ class Phase24LocalWorkerLoop:
         self._admission_metrics_path = Path(admission_metrics_path) if admission_metrics_path else None
         self._block_on_phase1_active = bool(block_on_phase1_active)
         self._processed_count = 0
+        self._idle_started_monotonic: float | None = time.perf_counter()
+        self._last_run_metrics: dict[str, Any] = {}
+
+    @property
+    def last_run_metrics(self) -> dict[str, Any]:
+        return dict(self._last_run_metrics)
 
     def _read_admission_metrics(self) -> dict[str, Any] | None:
         if self._admission_metrics_path is None:
@@ -104,10 +110,21 @@ class Phase24LocalWorkerLoop:
             reclaim_expired_leases=self._reclaim_expired_leases,
         )
         if row is None:
+            if self._idle_started_monotonic is None:
+                self._idle_started_monotonic = time.perf_counter()
             return False
+        claimed_at_monotonic = time.perf_counter()
+        worker_idle_ms = (
+            max(0.0, (claimed_at_monotonic - self._idle_started_monotonic) * 1000.0)
+            if self._idle_started_monotonic is not None
+            else 0.0
+        )
+        self._idle_started_monotonic = None
         job_id = str(row["job_id"])
         attempt = int(row["attempt_count"])
         payload_dict: dict[str, Any] = row["payload"]
+        queue_metrics = dict(row.get("queue_metrics") or {})
+        queue_metrics["worker_idle_ms"] = worker_idle_ms
         try:
             payload = Phase24TaskPayload.model_validate(payload_dict)
         except PydanticValidationError as exc:
@@ -119,6 +136,12 @@ class Phase24LocalWorkerLoop:
                 attempt,
                 err_text,
             )
+            self._last_run_metrics = {
+                "job_id": job_id,
+                "attempt": attempt,
+                "status": "payload_validation_failed",
+                **queue_metrics,
+            }
             self._processed_count += 1
             return True
         try:
@@ -144,6 +167,13 @@ class Phase24LocalWorkerLoop:
                 retry=retry,
                 retry_delay_s=0.0,
             )
+            self._last_run_metrics = {
+                "job_id": job_id,
+                "attempt": attempt,
+                "status": "failed",
+                "retry": retry,
+                **queue_metrics,
+            }
             self._processed_count += 1
             if failure_class == Phase24FailureClass.FAIL_FAST:
                 raise Phase24FailFastError(
@@ -155,6 +185,12 @@ class Phase24LocalWorkerLoop:
             self._queue.mark_failed(job_id, error="max_attempts_exceeded", retry=False)
         else:
             self._queue.mark_succeeded(job_id)
+        self._last_run_metrics = {
+            "job_id": job_id,
+            "attempt": attempt,
+            "status": "max_attempts_exceeded" if terminal else "succeeded",
+            **queue_metrics,
+        }
         self._processed_count += 1
         return True
 

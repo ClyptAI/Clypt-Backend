@@ -132,6 +132,11 @@ class ForcedAlignmentProvider:
         self._available: bool | None = None
         self._model_load_retries = max(1, int(model_load_retries))
         self._model_load_retry_backoff_s = max(0.0, float(model_load_retry_backoff_s))
+        self._last_run_metrics: dict[str, Any] = {}
+
+    @property
+    def last_run_metrics(self) -> dict[str, Any]:
+        return dict(self._last_run_metrics)
 
     def _check_available(self) -> bool:
         if self._available is None:
@@ -630,6 +635,13 @@ class ForcedAlignmentProvider:
             len(all_words),
             len(turns),
         )
+        self._last_run_metrics = {
+            "duration_s": duration_s,
+            "chunk_count": chunk_count,
+            "word_count": len(all_words),
+            "turn_count": len(turns),
+            "duration_ms": (time.perf_counter() - t0) * 1000.0,
+        }
         return all_words
 
 

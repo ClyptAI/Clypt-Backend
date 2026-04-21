@@ -59,10 +59,16 @@ def test_phase24_local_worker_loop_retries_then_succeeds(tmp_path: Path) -> None
     assert loop.run_once() is True
     assert queue.get_job(job_id)["status"] == "queued"
     assert service.calls == [(job_id, 1)]
+    assert loop.last_run_metrics["status"] == "failed"
+    assert loop.last_run_metrics["retry"] is True
+    assert loop.last_run_metrics["enqueue_to_claim_ms"] >= 0.0
+    assert loop.last_run_metrics["worker_idle_ms"] >= 0.0
 
     assert loop.run_once() is True
     assert queue.get_job(job_id)["status"] == "succeeded"
     assert service.calls == [(job_id, 1), (job_id, 2)]
+    assert loop.last_run_metrics["status"] == "succeeded"
+    assert loop.last_run_metrics["running_count"] == 1
 
 
 class _TerminalService:
@@ -84,6 +90,7 @@ def test_phase24_local_worker_marks_queue_failed_on_max_attempts_response(tmp_pa
     )
     assert loop.run_once() is True
     assert queue.get_job(job_id)["status"] == "failed"
+    assert loop.last_run_metrics["status"] == "max_attempts_exceeded"
 
 
 def test_phase24_local_worker_marks_failed_on_invalid_payload(tmp_path: Path) -> None:
@@ -98,6 +105,7 @@ def test_phase24_local_worker_marks_failed_on_invalid_payload(tmp_path: Path) ->
     )
     assert loop.run_once() is True
     assert queue.get_job(job_id)["status"] == "failed"
+    assert loop.last_run_metrics["status"] == "payload_validation_failed"
 
 
 class _NoopService:
