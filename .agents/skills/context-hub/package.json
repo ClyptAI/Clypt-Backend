@@ -1,0 +1,8 @@
+{
+  "name": "context-hub",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "cli"
+  ]
+}

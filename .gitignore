@@ -2,8 +2,6 @@
 .DS_Store
 
 # Local tooling/editor state
-.claude/
-.agents/
 .tmp/
 .gitnexus/
 

@@ -1,0 +1,14 @@
+import { parse as parseYaml } from 'yaml';
+
+/**
+ * Parse YAML frontmatter from markdown content.
+ * Returns { attributes, body } where attributes is the parsed YAML object.
+ */
+export function parseFrontmatter(content) {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { attributes: {}, body: content };
+  return {
+    attributes: parseYaml(match[1]) || {},
+    body: match[2],
+  };
+}

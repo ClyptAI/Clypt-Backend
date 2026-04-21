@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "skills": {
+    "context-hub": {
+      "source": "andrewyng/context-hub",
+      "sourceType": "github",
+      "computedHash": "c705b6d605280f004a731338e91c5df7a689c52f89a9485cbfbcb8e16d22ceed"
+    },
+    "do-app-platform-skills": {
+      "source": "digitalocean-labs/do-app-platform-skills",
+      "sourceType": "github",
+      "computedHash": "867777b7a4028f36adade302ba8297ed4722e25533c7f5fc401d187c3ebe0bdd"
+    },
+    "gemini-skills": {
+      "source": "google-gemini/gemini-skills",
+      "sourceType": "github",
+      "computedHash": "da4e4139062b382b8dca30b13afaa919ebde8af3046cfb6a2e2db3eee18a8013"
+    },
+    "gitnexus": {
+      "source": ".agents/skills/gitnexus",
+      "sourceType": "local",
+      "computedHash": "86c17059c42e296ae0c01335839e62a09ad79306f4b1fed0d7db165cd927ecb7"
+    },
+    "gstack": {
+      "source": "garrytan/gstack",
+      "sourceType": "github",
+      "computedHash": "fa9e058828bb65fe87cb0b9d7cc880a34dee0538ec0bb3869283b3f98300ec81"
+    },
+    "hf-skills": {
+      "source": "huggingface/skills",
+      "sourceType": "github",
+      "computedHash": "b873ff9ff01467c301f6e00c4477006a82f1211d1050458a1e419cdb6608e24f"
+    },
+    "superpowers": {
+      "source": "obra/superpowers",
+      "sourceType": "github",
+      "computedHash": "37f7de6ffcfe268e5076bdaebe217fdd2f41e779c709993aa28f00b8f91e3918"
+    }
+  }
+}

@@ -1,0 +1,133 @@
+{
+  "generated_at": "2026-04-05T05:03:04.942710+00:00",
+  "summary": {
+    "total_views": 495,
+    "unique_visitors": 230,
+    "total_clones": 164,
+    "unique_cloners": 100,
+    "popular_paths_count": 10,
+    "referrers_count": 8
+  },
+  "top_content": [
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills",
+      "title": "Overview",
+      "count": 123,
+      "uniques": 90,
+      "date": "2026-04-05"
+    },
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills/tree/main/skills",
+      "title": "/tree/main/skills",
+      "count": 118,
+      "uniques": 81,
+      "date": "2026-04-05"
+    },
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills/tree/main",
+      "title": "/tree/main",
+      "count": 28,
+      "uniques": 17,
+      "date": "2026-04-05"
+    },
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills/tree/main/skills/deployment",
+      "title": "/tree/main/skills/deployment",
+      "count": 16,
+      "uniques": 13,
+      "date": "2026-04-05"
+    },
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills/blob/main/skills/postgres/SKILL.md",
+      "title": "/blob/main/skills/postgres/SKILL.md",
+      "count": 15,
+      "uniques": 13,
+      "date": "2026-04-05"
+    },
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills/tree/main/skills/ai-services",
+      "title": "/tree/main/skills/ai-services",
+      "count": 14,
+      "uniques": 12,
+      "date": "2026-04-05"
+    },
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills/tree/main/skills/planner",
+      "title": "/tree/main/skills/planner",
+      "count": 11,
+      "uniques": 5,
+      "date": "2026-04-05"
+    },
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills/tree/main/skills/spaces",
+      "title": "/tree/main/skills/spaces",
+      "count": 7,
+      "uniques": 4,
+      "date": "2026-04-05"
+    },
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills/blob/main/skills/deployment/SKILL.md",
+      "title": "/blob/main/skills/deployment/SKILL.md",
+      "count": 6,
+      "uniques": 5,
+      "date": "2026-04-05"
+    },
+    {
+      "path": "/digitalocean-labs/do-app-platform-skills/tree/main/skills/migration",
+      "title": "/tree/main/skills/migration",
+      "count": 5,
+      "uniques": 4,
+      "date": "2026-04-05"
+    }
+  ],
+  "top_referrers": [
+    {
+      "referrer": "waves.digitalocean.com",
+      "count": 208,
+      "uniques": 76,
+      "date": "2026-04-05"
+    },
+    {
+      "referrer": "github.com",
+      "count": 68,
+      "uniques": 14,
+      "date": "2026-04-05"
+    },
+    {
+      "referrer": "digitalocean.com",
+      "count": 48,
+      "uniques": 7,
+      "date": "2026-04-05"
+    },
+    {
+      "referrer": "Google",
+      "count": 43,
+      "uniques": 25,
+      "date": "2026-04-05"
+    },
+    {
+      "referrer": "statics.teams.cdn.office.net",
+      "count": 3,
+      "uniques": 2,
+      "date": "2026-04-05"
+    },
+    {
+      "referrer": "DuckDuckGo",
+      "count": 2,
+      "uniques": 1,
+      "date": "2026-04-05"
+    },
+    {
+      "referrer": "Bing",
+      "count": 1,
+      "uniques": 1,
+      "date": "2026-04-05"
+    },
+    {
+      "referrer": "search.brave.com",
+      "count": 1,
+      "uniques": 1,
+      "date": "2026-04-05"
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 
 Operational startup and maintenance guide for coding agents.
 
-## Project Snapshot
+## Project Overview
 
 - Product: Clypt V3.1 backend
 - Implemented: Phases 1-4
@@ -32,7 +32,6 @@ When in doubt, read documentation before making changes or running operational c
 - Start with the required read order above.
 - Always use GitNexus for codebase retrieval/search before falling back to ad-hoc file scanning.
 - If this is a brand new agent session, run `npx gitnexus analyze` as soon as you finish reading this doc.
-- IF YOU ARE OPENAI CODEX, you may NOT at any cost do "invocation": { "server": "codebase-retrieval", "tool": "codebase-retrieval" }. Use GitNexus for retrieval ALWAYS.
 - Always double-check `.gitignore` coverage before committing to avoid accidental local artifact commits.
 - Treat docs as the source of truth for runtime/deploy behavior unless code has clearly diverged.
 - If behavior is unclear, re-check `RUNTIME_GUIDE.md`, `PHASE1_HOST_DEPLOY.md`, and `PHASE26_HOST_DEPLOY.md` before proceeding.
@@ -145,7 +144,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (3941 symbols, 9757 relationships, 229 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (3940 symbols, 9755 relationships, 229 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
