@@ -1,6 +1,9 @@
 """FastAPI application factory for the Clypt V1 API server.
 
 Usage:
+    # Local dev mode (in-memory repo with sample data, no GCP needed):
+    python -m backend.api.v1.app --dev
+
     # With Spanner (production):
     python -m backend.api.v1.app
 
@@ -91,12 +94,24 @@ def _build_repo():
 
 
 def main():
+    import argparse
     import uvicorn
 
-    port = int(os.getenv("CLYPT_API_PORT", "8000"))
-    repo = _build_repo()
-    app = create_app(repo=repo)
+    parser = argparse.ArgumentParser(description="Clypt V3.1 API server")
+    parser.add_argument("--dev", action="store_true", help="Run with in-memory dev repo (no GCP needed)")
+    parser.add_argument("--port", type=int, default=None, help="Server port (default: 8000)")
+    args = parser.parse_args()
 
+    port = args.port or int(os.getenv("CLYPT_API_PORT", "8000"))
+
+    if args.dev:
+        from backend.api.v1.dev_repo import build_seeded_dev_repo
+        repo = build_seeded_dev_repo()
+        print(f"[dev] In-memory repo seeded with {len(repo.list_runs())} runs")
+    else:
+        repo = _build_repo()
+
+    app = create_app(repo=repo)
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 

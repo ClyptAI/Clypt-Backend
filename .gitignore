@@ -16,6 +16,7 @@ __pycache__/
 .venv/
 .pytest-venv/
 .pytest_cache/
+.pytest_tmp/
 
 # Local outputs/artifacts
 backend/outputs/
