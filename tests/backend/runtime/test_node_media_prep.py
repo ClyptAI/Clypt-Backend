@@ -71,7 +71,7 @@ def test_from_payload_defaults_object_prefix() -> None:
         }
     )
     assert req.object_prefix == "phase14/run_123/node_media"
-    assert req.max_concurrency == 8
+    assert req.max_concurrency == 12
 
 
 def test_run_node_media_prep_returns_empty_for_empty_nodes(tmp_path: Path) -> None:
@@ -90,33 +90,45 @@ def test_run_node_media_prep_returns_empty_for_empty_nodes(tmp_path: Path) -> No
     assert result == {"run_id": "run_empty", "media": []}
 
 
-def test_run_node_media_prep_invokes_ffmpeg_for_each_node(
+def test_run_node_media_prep_returns_batch_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[dict[str, Any]] = []
-
-    def _fake_extract_node_clip(
+    def fake_prepare_node_media_embeddings(
         *,
-        source_video_path: Path,
-        output_path: Path,
-        start_ms: int,
-        end_ms: int,
-    ) -> Path:
-        calls.append(
+        nodes,
+        source_video_path,
+        clips_dir,
+        storage_client,
+        object_prefix,
+        max_concurrent,
+        return_diagnostics,
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        assert return_diagnostics is True
+        return (
+            [
+                {
+                    "node_id": "n1",
+                    "file_uri": "gs://bucket/phase14/run_001/node_media/batches/batch_0000/n1.mp4",
+                    "mime_type": "video/mp4",
+                    "local_path": str(clips_dir / "n1.mp4"),
+                },
+                {
+                    "node_id": "n2",
+                    "file_uri": "gs://bucket/phase14/run_001/node_media/batches/batch_0000/n2.mp4",
+                    "mime_type": "video/mp4",
+                    "local_path": str(clips_dir / "n2.mp4"),
+                },
+            ],
             {
-                "source_video_path": source_video_path,
-                "output_path": output_path,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-            }
+                "ffmpeg_mode": "hybrid_batch_gpu",
+                "extract_ms": 25.0,
+                "upload_ms": 15.0,
+            },
         )
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(b"clip-bytes")
-        return output_path
 
     monkeypatch.setattr(
-        "backend.pipeline.semantics.media_embeddings.extract_node_clip",
-        _fake_extract_node_clip,
+        "backend.runtime.node_media_prep.prepare_node_media_embeddings",
+        fake_prepare_node_media_embeddings,
     )
 
     storage = _FakeStorage()
@@ -124,7 +136,7 @@ def test_run_node_media_prep_invokes_ffmpeg_for_each_node(
         {
             "run_id": "run_001",
             "video_gcs_uri": "gs://bucket/source.mp4",
-            "object_prefix": "phase14/run_001/node_media",
+            "object_prefix": "phase14/run_001/node_media/batches/batch_0000",
             "max_concurrency": 2,
             "nodes": [
                 {"node_id": "n1", "start_ms": 0, "end_ms": 1000},
@@ -137,15 +149,16 @@ def test_run_node_media_prep_invokes_ffmpeg_for_each_node(
         storage_client=storage,
         scratch_root=tmp_path,
     )
+
     assert result["run_id"] == "run_001"
-    media = result["media"]
-    assert [m["node_id"] for m in media] == ["n1", "n2"]
-    assert all(m["file_uri"].startswith("gs://bucket/phase14/run_001/node_media/") for m in media)
-    assert all(m["mime_type"] == "video/mp4" for m in media)
-    # local_path should NOT be surfaced to the caller (clips are ephemeral on the media-prep worker).
-    assert all("local_path" not in m for m in media)
-    assert len(calls) == 2
-    assert {c["start_ms"] for c in calls} == {0, 2000}
+    assert result["batch_id"] == "batch_0000"
+    assert result["batch_start_ms"] == 0
+    assert result["batch_end_ms"] == 3000
+    assert result["node_count"] == 2
+    assert result["ffmpeg_mode"] == "hybrid_batch_gpu"
+    assert result["download_ms"] >= 0.0
+    assert result["extract_ms"] == 25.0
+    assert result["upload_ms"] == 15.0
+    assert result["total_ms"] >= 0.0
+    assert [item["node_id"] for item in result["media"]] == ["n1", "n2"]
     assert len(storage.downloads) == 1
-    assert storage.downloads[0][0] == "gs://bucket/source.mp4"
-    assert len(storage.uploads) == 2

@@ -3,7 +3,7 @@
 **Status:** Active (implemented Phases 1-4, planned Phases 5-6)  
 **Last updated:** 2026-04-19
 
-This document describes the current code-backed topology: a **Phase 1 H200**, a **Phase26 H200**, and a **Modal L4 media-prep service**.
+This document describes the current code-backed topology: a **Phase 1 H200**, a **Phase26 H200**, and a **Modal L40S media-prep service**.
 
 ## 1) End-to-End Flow
 
@@ -20,7 +20,7 @@ flowchart TD
   q["SQLite queue (Phase26 H200)"]
   worker["Phase26 local worker"]
   llm["SGLang Qwen (:8001)"]
-  modal["POST /tasks/node-media-prep (Modal L4)"]
+  modal["POST /tasks/node-media-prep (Modal L40S)"]
   emb["Vertex embeddings"]
   sp["Spanner persistence"]
   out["Artifacts + terminal state"]
@@ -44,7 +44,7 @@ flowchart TD
 | --- | --- |
 | **Phase1 host (H200 default)** | Phase 1 runner, persistent local VibeVoice service, co-located VibeVoice vLLM, persistent local visual service, RF-DETR + ByteTrack settings preserved, in-process NFA + emotion2vec+ + YAMNet. |
 | **Phase26 host (H200)** | `POST /tasks/phase26-enqueue`, local SQLite queue, current Phase 2-4 worker/runtime, SGLang Qwen on `:8001`, future Phase 5-6 orchestration. |
-| **Modal L4** | `POST /tasks/node-media-prep`, bearer-auth protected, `min_containers=1`, ffmpeg NVDEC/NVENC smoke-checked at startup, and 480p clip generation for Vertex multimodal embeddings. Future `render-video` endpoint will live here too. |
+| **Modal L40S** | `POST /tasks/node-media-prep`, bearer-auth protected, `min_containers=1`, ffmpeg NVDEC/NVENC smoke-checked at startup, timeline-batched hybrid seek/trim extraction, and 480p clip generation for Vertex multimodal embeddings. Future `render-video` endpoint will live here too. |
 
 ### Design rationale
 
@@ -60,6 +60,7 @@ flowchart TD
 - NFA, emotion2vec+, and YAMNet stay in-process because they already benefit from long-lived provider singletons without requiring more RPC boundaries.
 - Phase26 becomes the clean downstream execution boundary. The queue remains local to that host, but Phase 1 no longer reaches into SQLite directly.
 - Node-media-prep moves to Modal because it is naturally stateless, and it sits after node creation on the Phase26 side of the boundary.
+- Phase26 now overlaps node-media-prep and multimodal embedding by submitting timeline-local batches and embedding each completed batch immediately instead of waiting on one monolithic media-prep result.
 
 ## 3) Phase 1 Architecture
 
@@ -109,14 +110,15 @@ flowchart TD
 - Local generation is still OpenAI-compatible against SGLang Qwen at `127.0.0.1:8001`.
 - Vertex embeddings remain unchanged.
 - Node-media-prep is always remote via `RemoteNodeMediaPrepClient`, now pointed at Modal instead of an RTX host.
+- The worker now plans node-media-prep in timeline-local batches, submits each batch as its own Modal job, and reassembles final multimodal embeddings into original node order.
 
 ## 5) Modal Boundary
 
 - `scripts/modal/node_media_prep_app.py` is the active serverless service surface for node-media-prep.
-- GPU target: `L4`
+- GPU target: `L40S`
 - Warm capacity target: `min_containers=1`
 - The app validates that ffmpeg exposes `h264_nvenc` and `h264_cuvid` before serving work.
-- The JSON contract is intentionally unchanged so `RemoteNodeMediaPrepClient` does not need a new request/response shape.
+- The JSON contract remains submit/poll-compatible, but each request now represents one timeline batch and responses may include optional batch timing metadata.
 
 Future:
 

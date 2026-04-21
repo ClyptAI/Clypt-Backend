@@ -7,6 +7,17 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-04-20 - Phase24 node-media-prep bottleneck fixed by timeline batching, pipelined embedding, and Modal L40S retune
+
+- **Date/Time (UTC):** 2026-04-20 22:40 UTC
+- **Subsystem:** Phase24 media-prep / multimodal embedding path (`backend/runtime/phase14_live.py`, `backend/pipeline/semantics/media_embeddings.py`, `backend/runtime/node_media_prep.py`, `backend/providers/node_media_prep_client.py`, `scripts/modal/node_media_prep_app.py`)
+- **Environment:** Current Phase26 H200 + Modal node-media-prep topology
+- **Symptom / Error signature:** Phase24 wall-clock was dominated by node-media-prep on heavier runs because the old path did one monolithic node-media-prep job per run, extracted each node clip independently from the full source, uploaded every clip, and only then began multimodal embedding. The runtime reference showed node-media-prep taking `73.6s` for `17` nodes and `267.6s` for `20` nodes while multimodal embedding itself stayed near `11-14s`.
+- **Root cause:** Two compounding inefficiencies: (1) per-node exact extraction repeatedly paid full-source seek/decode-discard cost even when many nodes were close together in time, and (2) Phase26 treated media prep as a whole-job barrier, so multimodal embedding could not overlap with earlier completed clips.
+- **Fix applied:** Reworked Phase24 to plan timeline-local node batches, submit each batch as its own Modal job, and begin multimodal embedding batch-by-batch as soon as each batch completes. On the worker side, node-media-prep now treats each request as one batch, extracts one shared local batch window via coarse input-side seek, then emits exact per-node trims from within that local window. The Modal deployment target moved from `L4` to `L40S`, and the Phase26 baseline `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` default was retuned from `16` to `12`. Runtime/deploy docs, env baselines, and the active spec were updated in the same change.
+- **Verification evidence:** Focused suites passed after the implementation: `./.venv/bin/python -m pytest tests/backend/pipeline/semantics/test_media_embeddings.py -q` (`7 passed`) and `./.venv/bin/python -m pytest tests/backend/runtime/test_node_media_prep.py tests/backend/providers/test_remote_node_media_prep_client.py tests/scripts/test_modal_node_media_prep_app.py tests/backend/runtime/test_phase14_live.py tests/backend/providers/test_provider_config_and_clients.py -q` (`61 passed`). New regression coverage now verifies batch planning, hybrid batch extraction, optional batch metadata handling, and that Phase26 starts multimodal embedding before later media-prep batches have finished.
+- **Follow-up guardrails:** Keep node-media-prep and docs aligned on three points together: Modal GPU target, `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY`, and the batch planner defaults. Do not reintroduce the old “prepare all media, then embed all media” barrier without explicit approval; it was the main source of avoidable Phase24 wall-clock on heavy runs.
+
 ## 2026-04-20 - Phase1 long-form routing tightened again for shared-H200 memory headroom
 
 - **Date/Time (UTC):** 2026-04-20 06:30 UTC

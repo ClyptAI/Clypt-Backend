@@ -1,16 +1,15 @@
-"""Remote node-media prep runner (ffmpeg + GCS upload).
+"""Remote node-media prep runner (timeline-batched ffmpeg + GCS upload).
 
 The Phase26 worker invokes this via the
 ``POST /tasks/node-media-prep`` endpoint. The media-prep worker:
 
-1. Downloads the source video from GCS into a per-run local scratch dir
-   (once, even if hundreds of nodes share it).
-2. Runs ffmpeg NVENC (via
-   :func:`backend.pipeline.semantics.media_embeddings.extract_node_clip`) for
-   each node in a bounded thread pool.
-3. Uploads each clip to ``gs://{bucket}/{object_prefix}/{node_id}.mp4``.
+1. Downloads the source video from GCS into a per-run local scratch dir.
+2. Treats the request as one timeline-local batch and extracts a shared local
+   batch window with a coarse seek.
+3. Emits exact per-node clips from within that local window and uploads them
+   to ``gs://{bucket}/{object_prefix}/{node_id}.mp4``.
 4. Returns the ordered list of media descriptors (``node_id``, ``file_uri``,
-   ``mime_type``).
+   ``mime_type``) plus optional debug metadata.
 
 The caller never sees raw clip bytes; it only receives the GCS URIs.
 """
@@ -19,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,7 +56,7 @@ class NodeMediaPrepRequest:
             payload.get("object_prefix") or f"phase14/{run_id}/node_media"
         ).strip()
         try:
-            max_concurrency = int(payload.get("max_concurrency") or 8)
+            max_concurrency = int(payload.get("max_concurrency") or 12)
         except (TypeError, ValueError):
             raise ValueError("max_concurrency must be an integer >= 1") from None
         nodes = payload.get("nodes") or []
@@ -162,11 +162,17 @@ def run_node_media_prep(
         job_id=request.run_id,
     )
 
+    request_started = time.perf_counter()
+    batch_start_ms = min(node.start_ms for node in semantic_nodes)
+    batch_end_ms = max(node.end_ms for node in semantic_nodes)
+    batch_id = request.object_prefix.rstrip("/").split("/")[-1] or "batch"
+
     with tempfile.TemporaryDirectory(
         prefix=f"node-media-prep-{request.run_id}-", dir=str(scratch_root)
     ) as tmp_root_str:
         tmp_root = Path(tmp_root_str)
         source_video_path = tmp_root / "source_video.mp4"
+        download_started = time.perf_counter()
         logger.info(
             "[node_media_prep] downloading source video run_id=%s uri=%s",
             request.run_id,
@@ -176,15 +182,17 @@ def run_node_media_prep(
             gcs_uri=request.video_gcs_uri,
             local_path=source_video_path,
         )
+        download_ms = (time.perf_counter() - download_started) * 1000.0
 
         clips_dir = tmp_root / "clips"
-        descriptors = prepare_node_media_embeddings(
+        descriptors, diagnostics = prepare_node_media_embeddings(
             nodes=semantic_nodes,
             source_video_path=source_video_path,
             clips_dir=clips_dir,
             storage_client=storage_client,
             object_prefix=object_prefix,
             max_concurrent=request.max_concurrency,
+            return_diagnostics=True,
         )
 
     # The caller only needs the GCS URIs; strip local_path because the
@@ -197,7 +205,19 @@ def run_node_media_prep(
         }
         for d in descriptors
     ]
-    return {"run_id": request.run_id, "media": media}
+    return {
+        "run_id": request.run_id,
+        "media": media,
+        "batch_id": batch_id,
+        "batch_start_ms": batch_start_ms,
+        "batch_end_ms": batch_end_ms,
+        "node_count": len(semantic_nodes),
+        "ffmpeg_mode": diagnostics.get("ffmpeg_mode", "hybrid_batch_gpu"),
+        "download_ms": download_ms,
+        "extract_ms": float(diagnostics.get("extract_ms") or 0.0),
+        "upload_ms": float(diagnostics.get("upload_ms") or 0.0),
+        "total_ms": (time.perf_counter() - request_started) * 1000.0,
+    }
 
 
 __all__ = ["NodeMediaPrepRequest", "run_node_media_prep"]

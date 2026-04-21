@@ -393,7 +393,7 @@ class NodeMediaPrepSettings:
     service_url: str
     auth_token: str
     timeout_s: float = 1800.0
-    max_concurrency: int = 16
+    max_concurrency: int = 12
 
 
 @dataclass(slots=True)
@@ -570,7 +570,7 @@ def load_provider_settings(
         timeout_s=float(_read_env("CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S") or "1800"),
         max_concurrency=max(
             1,
-            _read_int_env("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY", default=16),
+            _read_int_env("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY", default=12),
         ),
     )
 

@@ -1,4 +1,4 @@
-"""Modal L4 app for Clypt node-media-prep.
+"""Modal L40S app for Clypt node-media-prep.
 
 Uses min_containers=1 to keep one warm GPU worker, preserves the existing
 RemoteNodeMediaPrepClient JSON contract, and validates ffmpeg NVENC/NVDEC
@@ -137,7 +137,7 @@ def node_media_prep_result_route(
 
 @app.function(
     image=image,
-    gpu="L4",
+    gpu="L40S",
     min_containers=1,
     timeout=60 * 60,
     secrets=[modal.Secret.from_name("clypt-node-media-prep")],
@@ -154,7 +154,7 @@ def node_media_prep_job(payload: dict) -> dict:
 
 @app.function(
     image=image,
-    gpu="L4",
+    gpu="L40S",
     min_containers=1,
     timeout=60 * 60,
     secrets=[modal.Secret.from_name("clypt-node-media-prep")],

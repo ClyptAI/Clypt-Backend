@@ -4,6 +4,9 @@ Active specification documents for current and planned backend work.
 
 ## Active Specs
 
+- [2026-04-20_phase24_node_media_prep_batched_l40s_spec.md](2026-04-20_phase24_node_media_prep_batched_l40s_spec.md)
+  Implemented Phase24 timeline-batched node-media-prep with per-batch submit/poll jobs, pipelined multimodal embedding, hybrid fast-seek-plus-precise-trim extraction, and Modal L40S as the active media-prep target.
+
 - [2026-04-19_phase6_captions_metadata_render_spec.md](2026-04-19_phase6_captions_metadata_render_spec.md)
   Planned Phase 6 supplement for retention-oriented burned-in captions, caption presets/placement rules, lightweight publish metadata generation, and deterministic render packaging from Phase 1-5 artifacts.
 

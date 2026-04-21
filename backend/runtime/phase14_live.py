@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import logging
@@ -28,6 +28,7 @@ from backend.pipeline.graph.runtime import (
     run_long_range_edge_adjudication,
 )
 from backend.pipeline.graph.structural_edges import build_structural_edges
+from backend.pipeline.semantics.media_embeddings import plan_node_media_batches
 from backend.pipeline.semantics.runtime import (
     apply_node_embeddings,
     embed_multimodal_media_live,
@@ -75,6 +76,20 @@ _PHASE4_PROMPT_SOURCE_PRIORITY = {
     "trend": 2,
 }
 _PHASE4_POOL_CANDIDATES_PER_CALL = 12
+_PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES = 3
+
+
+@dataclass(slots=True)
+class _Phase2MediaPipelineResult:
+    multimodal_media: list[dict[str, str]]
+    multimodal_embeddings: list[list[float]]
+    media_started_at: datetime
+    media_ended_at: datetime
+    media_duration_ms: float
+    media_diagnostics: dict[str, Any]
+    multimodal_started_at: datetime
+    multimodal_ended_at: datetime
+    multimodal_diagnostics: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -125,6 +140,204 @@ class V31LivePhase14Runner:
 
     def build_run_paths(self, *, run_id: str) -> V31RunPaths:
         return build_run_paths(output_root=self.config.output_root, run_id=run_id)
+
+    def _resolve_local_video_path(self, *, phase1_outputs: Phase1SidecarOutputs) -> Path:
+        phase1_audio = phase1_outputs.phase1_audio
+        local_video_path = (
+            phase1_audio.get("local_video_path")
+            if isinstance(phase1_audio, dict)
+            else getattr(phase1_audio, "local_video_path", None)
+        )
+        if not local_video_path:
+            raise ValueError(
+                "phase1_outputs.phase1_audio.local_video_path is required for live multimodal node embeddings."
+            )
+        return Path(local_video_path)
+
+    def _prepare_multimodal_media_blocking(
+        self,
+        *,
+        nodes: list[SemanticGraphNode],
+        paths: V31RunPaths,
+        phase1_outputs: Phase1SidecarOutputs,
+    ) -> _Phase2MediaPipelineResult:
+        prep_started_at = datetime.now(UTC)
+        prep_started = time.perf_counter()
+        if self.node_media_preparer is not None:
+            media = self.node_media_preparer(nodes=nodes, paths=paths, phase1_outputs=phase1_outputs)
+            media_diagnostics = {
+                "node_count": len(nodes),
+                "prepared_media_count": len(media),
+                "batch_count": 1,
+                "batch_mode": "blocking",
+            }
+        else:
+            if self.storage_client is None:
+                raise ValueError("storage_client is required for live multimodal node embeddings.")
+            media_result = prepare_node_media_embeddings(
+                nodes=nodes,
+                source_video_path=self._resolve_local_video_path(phase1_outputs=phase1_outputs),
+                clips_dir=paths.semantics_dir / "node_media_clips",
+                storage_client=self.storage_client,
+                object_prefix=f"phase14/{paths.run_id}/node_media",
+                return_diagnostics=True,
+            )
+            if isinstance(media_result, tuple):
+                media, media_diagnostics = media_result
+            else:
+                media = media_result
+                media_diagnostics = {}
+            media_diagnostics = {
+                **media_diagnostics,
+                "prepared_media_count": len(media),
+                "batch_count": 1,
+                "batch_mode": "blocking",
+            }
+        prep_ended_at = datetime.now(UTC)
+        prep_duration_ms = (time.perf_counter() - prep_started) * 1000.0
+        logger.info(
+            "[phase2] node clip extraction+upload done in %.1f s (nodes=%d)",
+            prep_duration_ms / 1000.0,
+            len(nodes),
+        )
+        embed_started_at = datetime.now(UTC)
+        embeddings, embed_diagnostics = embed_multimodal_media_live(
+            multimodal_media=media,
+            embedding_client=self.embedding_client,
+        )
+        embed_ended_at = datetime.now(UTC)
+        return _Phase2MediaPipelineResult(
+            multimodal_media=media,
+            multimodal_embeddings=embeddings,
+            media_started_at=prep_started_at,
+            media_ended_at=prep_ended_at,
+            media_duration_ms=prep_duration_ms,
+            media_diagnostics=media_diagnostics,
+            multimodal_started_at=embed_started_at,
+            multimodal_ended_at=embed_ended_at,
+            multimodal_diagnostics=embed_diagnostics,
+        )
+
+    def _prepare_multimodal_media_pipelined(
+        self,
+        *,
+        nodes: list[SemanticGraphNode],
+        paths: V31RunPaths,
+        phase1_outputs: Phase1SidecarOutputs,
+    ) -> _Phase2MediaPipelineResult:
+        if self.node_media_preparer is None or not hasattr(self.node_media_preparer, "prepare_batch"):
+            return self._prepare_multimodal_media_blocking(
+                nodes=nodes,
+                paths=paths,
+                phase1_outputs=phase1_outputs,
+            )
+
+        batches = plan_node_media_batches(nodes=nodes)
+        prep_started_at = datetime.now(UTC)
+        prep_started = time.perf_counter()
+        multimodal_started_at: datetime | None = None
+        multimodal_ended_at: datetime | None = None
+        batch_debug: list[dict[str, Any]] = []
+        media_by_node: dict[str, dict[str, str]] = {}
+        embeddings_by_node: dict[str, list[float]] = {}
+        next_batch_index = 0
+
+        def _submit_batch(batch):
+            return self.node_media_preparer.prepare_batch(
+                nodes=batch.nodes,
+                paths=paths,
+                phase1_outputs=phase1_outputs,
+                batch_id=batch.batch_id,
+                object_prefix=f"phase14/{paths.run_id}/node_media/batches/{batch.batch_id}",
+            )
+
+        with ThreadPoolExecutor(max_workers=_PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES) as batch_pool, ThreadPoolExecutor(
+            max_workers=_PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES
+        ) as embed_pool:
+            pending_batches: dict[Future[Any], Any] = {}
+            pending_embeddings: dict[Future[Any], Any] = {}
+
+            def _submit_more() -> None:
+                nonlocal next_batch_index
+                while (
+                    next_batch_index < len(batches)
+                    and len(pending_batches) < _PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES
+                ):
+                    batch = batches[next_batch_index]
+                    next_batch_index += 1
+                    pending_batches[batch_pool.submit(_submit_batch, batch)] = batch
+
+            _submit_more()
+            while pending_batches:
+                done, _pending = wait(pending_batches.keys(), return_when=FIRST_COMPLETED)
+                for future in done:
+                    batch = pending_batches.pop(future)
+                    batch_result = future.result()
+                    batch_debug.append(dict(getattr(batch_result, "metadata", {}) or {}))
+                    for item in batch_result.media:
+                        node_id = str(item["node_id"])
+                        if node_id in media_by_node:
+                            raise ValueError(f"duplicate node-media descriptor for node_id={node_id}")
+                        media_by_node[node_id] = item
+                    if multimodal_started_at is None:
+                        multimodal_started_at = datetime.now(UTC)
+                    pending_embeddings[
+                        embed_pool.submit(
+                            embed_multimodal_media_live,
+                            multimodal_media=batch_result.media,
+                            embedding_client=self.embedding_client,
+                        )
+                    ] = (batch, batch_result.media)
+                _submit_more()
+
+            embed_duration_ms = 0.0
+            for future in as_completed(pending_embeddings):
+                batch, batch_media = pending_embeddings[future]
+                batch_embeddings, batch_diagnostics = future.result()
+                embed_duration_ms += float(batch_diagnostics.get("multimodal_duration_ms") or 0.0)
+                multimodal_ended_at = datetime.now(UTC)
+                for item, embedding in zip(batch_media, batch_embeddings, strict=True):
+                    node_id = str(item["node_id"])
+                    if node_id in embeddings_by_node:
+                        raise ValueError(f"duplicate multimodal embedding for node_id={node_id}")
+                    embeddings_by_node[node_id] = embedding
+
+        prep_ended_at = datetime.now(UTC)
+        prep_duration_ms = (time.perf_counter() - prep_started) * 1000.0
+        ordered_media = [media_by_node[node.node_id] for node in nodes]
+        missing_embeddings = [node.node_id for node in nodes if node.node_id not in embeddings_by_node]
+        if missing_embeddings:
+            raise ValueError(
+                "missing multimodal embeddings for nodes: "
+                f"{missing_embeddings[:20]}{'…' if len(missing_embeddings) > 20 else ''}"
+            )
+        ordered_embeddings = [embeddings_by_node[node.node_id] for node in nodes]
+        if multimodal_started_at is None:
+            multimodal_started_at = prep_ended_at
+        if multimodal_ended_at is None:
+            multimodal_ended_at = prep_ended_at
+        return _Phase2MediaPipelineResult(
+            multimodal_media=ordered_media,
+            multimodal_embeddings=ordered_embeddings,
+            media_started_at=prep_started_at,
+            media_ended_at=prep_ended_at,
+            media_duration_ms=prep_duration_ms,
+            media_diagnostics={
+                "node_count": len(nodes),
+                "prepared_media_count": len(ordered_media),
+                "batch_count": len(batches),
+                "inflight_limit": _PHASE2_NODE_MEDIA_MAX_INFLIGHT_BATCHES,
+                "batch_mode": "pipelined_remote_batches",
+                "batches": batch_debug,
+            },
+            multimodal_started_at=multimodal_started_at,
+            multimodal_ended_at=multimodal_ended_at,
+            multimodal_diagnostics={
+                "multimodal_item_count": len(ordered_media),
+                "multimodal_duration_ms": embed_duration_ms,
+                "multimodal_batch_count": len(batches),
+            },
+        )
 
     def _apply_phase4_prompt_budget(
         self,
@@ -678,30 +891,7 @@ class V31LivePhase14Runner:
         semantic_started_at = datetime.now(UTC)
         semantic_started = time.perf_counter()
 
-        def _prepare_multimodal_media() -> list[dict[str, str]]:
-            if self.node_media_preparer is not None:
-                return self.node_media_preparer(nodes=nodes, paths=paths, phase1_outputs=phase1_outputs)
-            phase1_audio = phase1_outputs.phase1_audio
-            local_video_path = (
-                phase1_audio.get("local_video_path")
-                if isinstance(phase1_audio, dict)
-                else getattr(phase1_audio, "local_video_path", None)
-            )
-            if not local_video_path:
-                raise ValueError(
-                    "phase1_outputs.phase1_audio.local_video_path is required for live multimodal node embeddings."
-                )
-            if self.storage_client is None:
-                raise ValueError("storage_client is required for live multimodal node embeddings.")
-            return prepare_node_media_embeddings(
-                nodes=nodes,
-                source_video_path=Path(local_video_path),
-                clips_dir=paths.semantics_dir / "node_media_clips",
-                storage_client=self.storage_client,
-                object_prefix=f"phase14/{paths.run_id}/node_media",
-            )
-
-        def _media_prep_then_embed() -> tuple[list, datetime, datetime, float, datetime, dict]:
+        def _media_prep_then_embed() -> _Phase2MediaPipelineResult:
             """Chain media_prep → multimodal_embedding as one task.
 
             Runs concurrently with semantic_embedding (and the Phase 3
@@ -709,22 +899,18 @@ class V31LivePhase14Runner:
             embedding begins as soon as media_prep is done with no
             inter-pool scheduling gap.
             """
-            prep_started_at_ = datetime.now(UTC)
-            prep_started_ = time.perf_counter()
-            media = _prepare_multimodal_media()
-            prep_ended_at_ = datetime.now(UTC)
-            prep_duration_ms_ = (time.perf_counter() - prep_started_) * 1000.0
+            pipeline_result = self._prepare_multimodal_media_pipelined(
+                nodes=nodes,
+                paths=paths,
+                phase1_outputs=phase1_outputs,
+            )
             logger.info(
-                "[phase2] node clip extraction+upload done in %.1f s (nodes=%d)",
-                prep_duration_ms_ / 1000.0,
+                "[phase2] node clip extraction+upload done in %.1f s (nodes=%d batches=%d)",
+                pipeline_result.media_duration_ms / 1000.0,
                 len(nodes),
+                int(pipeline_result.media_diagnostics.get("batch_count") or 1),
             )
-            embed_started_at_ = datetime.now(UTC)
-            embs, diags = embed_multimodal_media_live(
-                multimodal_media=media,
-                embedding_client=self.embedding_client,
-            )
-            return media, prep_started_at_, prep_ended_at_, prep_duration_ms_, embed_started_at_, diags, embs
+            return pipeline_result
 
         with ThreadPoolExecutor(max_workers=2) as phase2_pool:
             semantic_future = phase2_pool.submit(
@@ -734,15 +920,15 @@ class V31LivePhase14Runner:
             )
             combined_future = phase2_pool.submit(_media_prep_then_embed)
             semantic_embeddings, semantic_diagnostics = semantic_future.result()
-            (
-                multimodal_media,
-                media_started_at,
-                media_ended_at,
-                media_duration_ms,
-                multimodal_started_at,
-                multimodal_diagnostics,
-                multimodal_embeddings,
-            ) = combined_future.result()
+            pipeline_result = combined_future.result()
+            multimodal_media = pipeline_result.multimodal_media
+            media_started_at = pipeline_result.media_started_at
+            media_ended_at = pipeline_result.media_ended_at
+            media_duration_ms = pipeline_result.media_duration_ms
+            multimodal_started_at = pipeline_result.multimodal_started_at
+            multimodal_ended_at = pipeline_result.multimodal_ended_at
+            multimodal_diagnostics = pipeline_result.multimodal_diagnostics
+            multimodal_embeddings = pipeline_result.multimodal_embeddings
 
         phase2_substeps.append(
             self._make_phase_substep_record(
@@ -755,8 +941,7 @@ class V31LivePhase14Runner:
                 ended_at=media_ended_at,
                 duration_ms=media_duration_ms,
                 metadata={
-                    "node_count": len(nodes),
-                    "prepared_media_count": len(multimodal_media),
+                    **pipeline_result.media_diagnostics,
                     "media_backend": "custom_preparer" if self.node_media_preparer is not None else "local_storage_upload",
                 },
             )
@@ -782,7 +967,7 @@ class V31LivePhase14Runner:
                 step_key="multimodal_embedding",
                 status="succeeded",
                 started_at=multimodal_started_at,
-                ended_at=datetime.now(UTC),
+                ended_at=multimodal_ended_at,
                 duration_ms=float(multimodal_diagnostics.get("multimodal_duration_ms") or 0.0),
                 metadata=multimodal_diagnostics,
             )

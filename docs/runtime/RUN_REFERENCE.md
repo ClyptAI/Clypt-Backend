@@ -52,7 +52,8 @@ The entries below were gathered on the current split runtime:
   - `clypt-phase26-h200-nyc2`
   - local SQLite queue + local worker + SGLang Qwen
 - Modal:
-  - L4 `node-media-prep`
+  - historical entries below were gathered on L4 `node-media-prep`
+  - active target is now L40S `node-media-prep`
 
 | Context | Video | Nodes | Phase 1 effective | node-media-prep | Multimodal embeddings | Phase 2-4 | Effective total | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |

@@ -561,6 +561,133 @@ def test_phase14_live_run_phase2_starts_semantic_embeddings_before_media_prep_fi
     assert result["nodes"][0].multimodal_embedding == [0.3, 0.4]
 
 
+def test_phase14_live_run_phase2_pipelines_batch_embedding_and_preserves_node_order(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from backend.runtime import phase14_live
+
+    nodes = [
+        SemanticGraphNode(
+            node_id="node-1",
+            node_type="claim",
+            start_ms=0,
+            end_ms=1000,
+            source_turn_ids=["t_1"],
+            word_ids=["w_1"],
+            transcript_text="hello",
+            node_flags=[],
+            summary="summary",
+            evidence=SemanticNodeEvidence(),
+            semantic_embedding=[0.0, 0.0],
+            multimodal_embedding=[0.0, 0.0],
+        ),
+        SemanticGraphNode(
+            node_id="node-2",
+            node_type="claim",
+            start_ms=1500,
+            end_ms=2500,
+            source_turn_ids=["t_2"],
+            word_ids=["w_2"],
+            transcript_text="world",
+            node_flags=[],
+            summary="summary",
+            evidence=SemanticNodeEvidence(),
+            semantic_embedding=[0.0, 0.0],
+            multimodal_embedding=[0.0, 0.0],
+        ),
+        SemanticGraphNode(
+            node_id="node-3",
+            node_type="claim",
+            start_ms=7000,
+            end_ms=8000,
+            source_turn_ids=["t_3"],
+            word_ids=["w_3"],
+            transcript_text="again",
+            node_flags=[],
+            summary="summary",
+            evidence=SemanticNodeEvidence(),
+            semantic_embedding=[0.0, 0.0],
+            multimodal_embedding=[0.0, 0.0],
+        ),
+    ]
+
+    runner = V31LivePhase14Runner(
+        config=V31Config(output_root=tmp_path),
+        llm_client=object(),
+        embedding_client=object(),
+        node_media_preparer=object(),
+    )
+
+    first_batch_embedding_started = threading.Event()
+
+    class _BatchPreparer:
+        def prepare_batch(self, *, nodes, paths, phase1_outputs, batch_id, object_prefix):
+            if batch_id == "batch_0001":
+                assert first_batch_embedding_started.wait(timeout=1), (
+                    "first batch embedding did not start before second batch finished"
+                )
+            media = [
+                {
+                    "node_id": node.node_id,
+                    "file_uri": f"gs://bucket/{batch_id}/{node.node_id}.mp4",
+                    "mime_type": "video/mp4",
+                    "local_path": "",
+                }
+                for node in nodes
+            ]
+            return SimpleNamespace(
+                media=media,
+                metadata={"batch_id": batch_id, "node_count": len(nodes)},
+            )
+
+    runner.node_media_preparer = _BatchPreparer()
+
+    monkeypatch.setattr(
+        phase14_live,
+        "run_merge_classify_and_reconcile",
+        lambda **kwargs: (nodes, [], []),
+    )
+    monkeypatch.setattr(
+        phase14_live,
+        "embed_text_semantic_nodes_live",
+        lambda **kwargs: (
+            [[0.1, 0.2], [0.2, 0.3], [0.3, 0.4]],
+            {"node_count": 3, "semantic_payload_chars": 15, "semantic_duration_ms": 0.0},
+        ),
+        raising=False,
+    )
+
+    def _fake_embed_multimodal_media_live(*, multimodal_media, embedding_client):
+        node_ids = [item["node_id"] for item in multimodal_media]
+        if node_ids == ["node-1", "node-2"]:
+            first_batch_embedding_started.set()
+            return [[1.0, 1.0], [2.0, 2.0]], {"multimodal_item_count": 2, "multimodal_duration_ms": 5.0}
+        return [[3.0, 3.0]], {"multimodal_item_count": 1, "multimodal_duration_ms": 5.0}
+
+    monkeypatch.setattr(
+        phase14_live,
+        "embed_multimodal_media_live",
+        _fake_embed_multimodal_media_live,
+        raising=False,
+    )
+
+    result = runner.run_phase_2(
+        paths=runner.build_run_paths(run_id="run_phase2_pipelined"),
+        phase1_outputs=SimpleNamespace(phase1_audio={"video_gcs_uri": "gs://bucket/source.mp4"}),
+        canonical_timeline=SimpleNamespace(),
+        speech_emotion_timeline=None,
+        audio_event_timeline=None,
+    )
+
+    assert [node.node_id for node in result["nodes"]] == ["node-1", "node-2", "node-3"]
+    assert [node.multimodal_embedding for node in result["nodes"]] == [
+        [1.0, 1.0],
+        [2.0, 2.0],
+        [3.0, 3.0],
+    ]
+
+
 def test_phase14_live_run_phase3_overlaps_local_and_long_range(
     monkeypatch,
     tmp_path: Path,

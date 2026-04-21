@@ -9,7 +9,7 @@ This service is the active remote backend for:
 
 Target shape:
 
-- GPU: `L4`
+- GPU: `L40S`
 - `min_containers=1`
 - ffmpeg must expose both `h264_nvenc` and `h264_cuvid`
 
@@ -90,7 +90,7 @@ Important:
 
 ## 5) Notes
 
-- Each submitted job downloads the source video once into worker scratch space, extracts all requested clips, uploads them to GCS, and returns only the resulting `file_uri` descriptors.
-- `RemoteNodeMediaPrepClient` now implements submit-and-poll so Phase26 still sees the same final ordered `media` list.
+- Each submitted job now represents one timeline-local batch. The worker downloads the source video once into worker scratch space, extracts a shared local batch window, emits exact per-node clips from that window, uploads them to GCS, and returns the resulting `file_uri` descriptors plus optional batch timing metadata.
+- `RemoteNodeMediaPrepClient` now implements submit-and-poll so Phase26 can pipeline batch completion into immediate multimodal embedding while still producing one final ordered result per node.
 - This is a warm serverless surface, not a permanently pinned VM.
 - Future Phase 6 render/export should follow the same submit-and-poll pattern if render duration can cross Modal's webhook timeout boundary, but do not wire that endpoint into runtime until the Phase 6 contract is finalized.

@@ -65,6 +65,7 @@ The active HTTP contract is async:
 
 - `POST /tasks/node-media-prep` returns `202 Accepted` with `call_id`
 - `GET /tasks/node-media-prep/result/{call_id}` returns `202` while pending, `200` on completion
+- each request now represents one timeline-local batch, and responses may include optional batch timing metadata
 
 ## 2) Recommended Working Profiles
 
@@ -127,7 +128,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 ```
 
 `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` accepts either the Modal base URL or the full task endpoint URL. The current known-good records use the full endpoint URL.
-`RemoteNodeMediaPrepClient` handles the follow-up result polling internally, so Phase26 still receives a final ordered `media` list.
+`RemoteNodeMediaPrepClient` handles the follow-up result polling internally, and Phase26 now pipelines batch completion into immediate multimodal embedding while still producing one final ordered result per node.
 
 Additional live non-secret values captured from `/etc/clypt-phase26/phase26.env` on 2026-04-20:
 
@@ -144,7 +145,7 @@ SG_CHUNKED_PREFILL_SIZE=8192
 SG_MEM_FRACTION_STATIC=0.78
 SG_CONTEXT_LENGTH=65536
 CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=1800
-CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=16
+CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=12
 CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1
 ```
 
@@ -256,7 +257,7 @@ Operational notes:
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` | required | Modal submit endpoint base or full task URL. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN` | required | Shared bearer token. |
 | `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S` | `1800` | Total submit+poll wait budget on the Phase26 side. |
-| `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` | `16` | Modal L4 concurrency cap. |
+| `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY` | `12` | Modal L40S starting concurrency cap for timeline-batched node-media-prep. |
 
 ### 4.4 Local OpenAI generation
 

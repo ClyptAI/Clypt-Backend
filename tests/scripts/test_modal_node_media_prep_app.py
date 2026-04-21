@@ -176,7 +176,19 @@ def test_node_media_prep_result_returns_completed_payload(monkeypatch) -> None:
             self.object_id = object_id
 
         def get(self, timeout=0):  # noqa: ARG002
-            return {"run_id": "run-123", "media": [{"node_id": "n_1", "file_uri": "gs://bucket/n_1.mp4"}]}
+            return {
+                "run_id": "run-123",
+                "batch_id": "batch_0000",
+                "batch_start_ms": 0,
+                "batch_end_ms": 1000,
+                "node_count": 1,
+                "ffmpeg_mode": "hybrid_batch_gpu",
+                "download_ms": 10.0,
+                "extract_ms": 20.0,
+                "upload_ms": 30.0,
+                "total_ms": 60.0,
+                "media": [{"node_id": "n_1", "file_uri": "gs://bucket/n_1.mp4"}],
+            }
 
     monkeypatch.setattr(
         node_media_prep_app.modal.FunctionCall,
@@ -193,6 +205,15 @@ def test_node_media_prep_result_returns_completed_payload(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "run_id": "run-123",
+        "batch_id": "batch_0000",
+        "batch_start_ms": 0,
+        "batch_end_ms": 1000,
+        "node_count": 1,
+        "ffmpeg_mode": "hybrid_batch_gpu",
+        "download_ms": 10.0,
+        "extract_ms": 20.0,
+        "upload_ms": 30.0,
+        "total_ms": 60.0,
         "media": [{"node_id": "n_1", "file_uri": "gs://bucket/n_1.mp4"}],
         "call_id": "fc-123",
         "status": "succeeded",

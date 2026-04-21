@@ -83,18 +83,20 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
 - `CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=1800`
-- `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=16`
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=12`
 
 ### 2.3 Modal node-media-prep
 
 - app path: `scripts/modal/node_media_prep_app.py`
-- GPU target: `L4`
+- GPU target: `L40S`
 - warm pool target: `min_containers=1`
 - submit/poll contract:
   - `POST /tasks/node-media-prep` -> `202 Accepted` + `call_id`
   - `GET /tasks/node-media-prep/result/{call_id}` -> `202 pending` or `200` final result
 - `RemoteNodeMediaPrepClient` hides this async contract from Phase 2 and still returns the same final `media` list shape to the worker
+- node-media-prep requests are now timeline-local batches, not the full node set
 - clip extraction now downscales to 480p before upload / Vertex multimodal embedding
+- Phase26 starts multimodal embedding batch-by-batch as node-media-prep results arrive instead of waiting for all media first
 
 Current live non-secret Modal deployment snapshot on 2026-04-20:
 
@@ -193,7 +195,7 @@ These now belong to the Phase26 host, not the Phase1 host.
 - Modal must expose working:
   - `h264_nvenc`
   - `h264_cuvid`
-- Modal L4 baseline sets `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=16`
+- Modal L40S baseline sets `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=12`
 - `min_containers=1` is the intended warm baseline, not a permanent dedicated VM
 
 ## 8) Canonical Runtime Files

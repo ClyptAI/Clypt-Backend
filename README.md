@@ -41,7 +41,7 @@ flowchart LR
   source["Long-form video"]
   phase1["Phase 1 host<br/>DigitalOcean H200"]
   phase26["Phase26 host<br/>DigitalOcean H200"]
-  modal["Modal L4<br/>node-media-prep"]
+  modal["Modal L40S<br/>node-media-prep"]
   vertex["Vertex embeddings"]
   out["Ranked clip candidates"]
 
@@ -78,9 +78,9 @@ The downstream host owns the graph and ranking pipeline:
 Modal currently handles the stateless media-prep step:
 
 - `POST /tasks/node-media-prep`
-- `L4`
+- `L40S`
 - `min_containers=1`
-- ffmpeg GPU path for clip extraction/encoding before multimodal embedding
+- timeline-batched ffmpeg GPU path for clip extraction/encoding before multimodal embedding
 
 ## End-to-End Flow
 
@@ -122,7 +122,7 @@ One important runtime property: the post-ASR audio chain starts as soon as ASR r
 ## Backend Stack
 
 - **GPU compute**: DigitalOcean H200 droplets
-- **Serverless media prep**: Modal L4
+- **Serverless media prep**: Modal L40S
 - **Local generation**: SGLang serving Qwen 3.6
 - **Embeddings**: Vertex AI
 - **Persistence**: Google Cloud Storage + Spanner
@@ -193,7 +193,7 @@ Start here if you want the operational details:
 
 - Implemented and actively exercised: **Phases 1-4**
 - Planned next: **Phases 5-6**
-- Current validated architecture: **DigitalOcean H200 + H200 + Modal L4**
+- Current validated architecture: **DigitalOcean H200 + H200 + Modal L40S**
 
 ## For Maintainers
 

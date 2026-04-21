@@ -127,7 +127,7 @@ def test_call_posts_expected_body_and_returns_ordered_media(
         "run_id": "run-abc",
         "video_gcs_uri": "gs://bucket/video.mp4",
         "object_prefix": "phase14/run-abc/node_media",
-        "max_concurrency": 16,
+        "max_concurrency": 12,
         "nodes": [
             {"node_id": "n_1", "start_ms": 0, "end_ms": 1000},
             {"node_id": "n_2", "start_ms": 1000, "end_ms": 2500},
@@ -142,6 +142,81 @@ def test_call_posts_expected_body_and_returns_ordered_media(
     assert result[0]["file_uri"] == "gs://bucket/p/n_1.mp4"
     assert result[0]["mime_type"] == "video/mp4"
     assert result[0]["local_path"] == ""
+
+
+def test_prepare_batch_returns_optional_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-batch"}).encode("utf-8"), status=202)
+        return _FakeResponse(
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "batch_id": "batch_0000",
+                    "batch_start_ms": 0,
+                    "batch_end_ms": 2500,
+                    "node_count": 2,
+                    "ffmpeg_mode": "hybrid_batch_gpu",
+                    "download_ms": 10.0,
+                    "extract_ms": 20.0,
+                    "upload_ms": 30.0,
+                    "total_ms": 60.0,
+                    "media": [
+                        {"node_id": "n_2", "file_uri": "gs://bucket/p/n_2.mp4"},
+                        {"node_id": "n_1", "file_uri": "gs://bucket/p/n_1.mp4"},
+                    ],
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = RemoteNodeMediaPrepClient(settings=_settings(), max_retries=0)
+    result = client.prepare_batch(
+        nodes=[
+            _StubNode(node_id="n_1", start_ms=0, end_ms=1000),
+            _StubNode(node_id="n_2", start_ms=1000, end_ms=2500),
+        ],
+        paths=_StubPaths(run_id="run-abc"),
+        phase1_outputs=_phase1_outputs(),
+        batch_id="batch_0000",
+    )
+
+    assert [item["node_id"] for item in result.media] == ["n_1", "n_2"]
+    assert result.metadata == {
+        "batch_id": "batch_0000",
+        "batch_start_ms": 0,
+        "batch_end_ms": 2500,
+        "node_count": 2,
+        "ffmpeg_mode": "hybrid_batch_gpu",
+        "download_ms": 10.0,
+        "extract_ms": 20.0,
+        "upload_ms": 30.0,
+        "total_ms": 60.0,
+    }
+
+
+def test_submit_batch_uses_batch_specific_object_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        if req.data is not None:
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResponse(json.dumps({"call_id": "fc-batch"}).encode("utf-8"), status=202)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = RemoteNodeMediaPrepClient(settings=_settings(), max_retries=0)
+    handle = client.submit_batch(
+        nodes=[_StubNode(node_id="n_1", start_ms=0, end_ms=1000)],
+        paths=_StubPaths(run_id="run-abc"),
+        phase1_outputs=_phase1_outputs(),
+        batch_id="batch_0007",
+        object_prefix="phase14/run-abc/node_media/batches/batch_0007",
+    )
+
+    assert handle.batch_id == "batch_0007"
+    assert captured["body"]["object_prefix"] == "phase14/run-abc/node_media/batches/batch_0007"
 
 
 def test_call_accepts_full_task_endpoint_url(monkeypatch: pytest.MonkeyPatch) -> None:

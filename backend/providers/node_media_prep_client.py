@@ -76,6 +76,20 @@ class _NodeSpec:
         }
 
 
+@dataclass(slots=True)
+class NodeMediaPrepBatchHandle:
+    batch_id: str
+    call_id: str
+    specs: list[_NodeSpec]
+
+
+@dataclass(slots=True)
+class NodeMediaPrepBatchResult:
+    batch_id: str
+    media: list[dict[str, str]]
+    metadata: dict[str, Any]
+
+
 def _extract_video_gcs_uri(phase1_outputs: Any) -> str:
     phase1_audio = getattr(phase1_outputs, "phase1_audio", None)
     if phase1_audio is None and isinstance(phase1_outputs, dict):
@@ -263,69 +277,13 @@ class RemoteNodeMediaPrepClient:
             )
         return call_id
 
-    def _poll_result(self, *, call_id: str, timeout_s: float) -> dict[str, Any]:
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
-        poll_path = f"/tasks/node-media-prep/result/{call_id}"
-        while True:
-            remaining_s = deadline - time.monotonic()
-            if remaining_s < 0.0:
-                raise RemoteNodeMediaPrepError(
-                    f"node-media-prep timed out while polling call_id={call_id}",
-                )
-            raw = self._request_json(
-                path=poll_path,
-                method="GET",
-                payload=None,
-                timeout_s=max(1.0, min(30.0, remaining_s or 0.0)),
-            )
-            status = str(raw.get("status") or "").strip().lower()
-            if status in {"", "succeeded", "success", "completed"}:
-                return raw
-            if status in {"pending", "running", "submitted"}:
-                sleep_s = min(self._DEFAULT_POLL_INTERVAL_S, max(0.0, remaining_s))
-                if sleep_s > 0.0:
-                    time.sleep(sleep_s)
-                continue
-            raise RemoteNodeMediaPrepError(
-                f"node-media-prep poll for call_id={call_id} returned terminal status {status!r}"
-            )
-
-    def __call__(
+    def _parse_media_result(
         self,
         *,
-        nodes: list[Any],
-        paths: Any,
-        phase1_outputs: Any,
-    ) -> list[dict[str, str]]:
-        if not nodes:
-            return []
-
-        run_id = _extract_run_id(paths)
-        video_gcs_uri = _extract_video_gcs_uri(phase1_outputs)
-        specs = _node_specs(nodes)
-
-        payload: dict[str, Any] = {
-            "run_id": run_id,
-            "video_gcs_uri": video_gcs_uri,
-            "object_prefix": _normalize_node_media_object_prefix(
-                "",
-                f"phase14/{run_id}/node_media",
-                job_id=run_id,
-            ),
-            "max_concurrency": int(self.settings.max_concurrency),
-            "nodes": [spec.to_json() for spec in specs],
-        }
-
-        t_start = time.perf_counter()
-        logger.info(
-            "[node_media_prep_client] invoking node-media-prep run_id=%s nodes=%d video=%s",
-            run_id,
-            len(specs),
-            video_gcs_uri,
-        )
-        call_id = self._submit_job(payload=payload, timeout_s=float(self.settings.timeout_s))
-        raw = self._poll_result(call_id=call_id, timeout_s=float(self.settings.timeout_s))
-
+        raw: dict[str, Any],
+        specs: list[_NodeSpec],
+        batch_id: str,
+    ) -> NodeMediaPrepBatchResult:
         media = raw.get("media")
         if not isinstance(media, list):
             raise RemoteNodeMediaPrepError(
@@ -356,9 +314,6 @@ class RemoteNodeMediaPrepClient:
                 "node_id": node_id,
                 "file_uri": file_uri,
                 "mime_type": mime_type,
-                # Clip bytes live only on the RTX box. Downstream consumers
-                # (vertex embeddings, debug JSON dump) only read file_uri, so
-                # an empty local_path is safe and keeps the shape stable.
                 "local_path": "",
             }
 
@@ -370,6 +325,156 @@ class RemoteNodeMediaPrepClient:
             )
 
         ordered = [by_node[spec.node_id] for spec in specs]
+        metadata = {
+            key: raw.get(key)
+            for key in (
+                "batch_id",
+                "batch_start_ms",
+                "batch_end_ms",
+                "node_count",
+                "ffmpeg_mode",
+                "download_ms",
+                "extract_ms",
+                "upload_ms",
+                "total_ms",
+            )
+            if raw.get(key) is not None
+        }
+        metadata.setdefault("batch_id", batch_id)
+        metadata.setdefault("batch_start_ms", min(spec.start_ms for spec in specs))
+        metadata.setdefault("batch_end_ms", max(spec.end_ms for spec in specs))
+        metadata.setdefault("node_count", len(specs))
+        return NodeMediaPrepBatchResult(
+            batch_id=str(metadata["batch_id"]),
+            media=ordered,
+            metadata=metadata,
+        )
+
+    def _poll_result(self, *, call_id: str, timeout_s: float) -> dict[str, Any]:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        poll_path = f"/tasks/node-media-prep/result/{call_id}"
+        while True:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s < 0.0:
+                raise RemoteNodeMediaPrepError(
+                    f"node-media-prep timed out while polling call_id={call_id}",
+                )
+            raw = self._request_json(
+                path=poll_path,
+                method="GET",
+                payload=None,
+                timeout_s=max(1.0, min(30.0, remaining_s or 0.0)),
+            )
+            status = str(raw.get("status") or "").strip().lower()
+            if status in {"", "succeeded", "success", "completed"}:
+                return raw
+            if status in {"pending", "running", "submitted"}:
+                sleep_s = min(self._DEFAULT_POLL_INTERVAL_S, max(0.0, remaining_s))
+                if sleep_s > 0.0:
+                    time.sleep(sleep_s)
+                continue
+            raise RemoteNodeMediaPrepError(
+                f"node-media-prep poll for call_id={call_id} returned terminal status {status!r}"
+            )
+
+    def _batch_payload(
+        self,
+        *,
+        run_id: str,
+        video_gcs_uri: str,
+        specs: list[_NodeSpec],
+        object_prefix: str,
+    ) -> dict[str, Any]:
+        return {
+            "run_id": run_id,
+            "video_gcs_uri": video_gcs_uri,
+            "object_prefix": object_prefix,
+            "max_concurrency": int(self.settings.max_concurrency),
+            "nodes": [spec.to_json() for spec in specs],
+        }
+
+    def submit_batch(
+        self,
+        *,
+        nodes: list[Any],
+        paths: Any,
+        phase1_outputs: Any,
+        batch_id: str,
+        object_prefix: str | None = None,
+    ) -> NodeMediaPrepBatchHandle:
+        run_id = _extract_run_id(paths)
+        video_gcs_uri = _extract_video_gcs_uri(phase1_outputs)
+        specs = _node_specs(nodes)
+        payload = self._batch_payload(
+            run_id=run_id,
+            video_gcs_uri=video_gcs_uri,
+            specs=specs,
+            object_prefix=_normalize_node_media_object_prefix(
+                "",
+                object_prefix or f"phase14/{run_id}/node_media/batches/{batch_id}",
+                job_id=run_id,
+            ),
+        )
+        call_id = self._submit_job(payload=payload, timeout_s=float(self.settings.timeout_s))
+        return NodeMediaPrepBatchHandle(batch_id=batch_id, call_id=call_id, specs=specs)
+
+    def wait_for_batch(self, *, handle: NodeMediaPrepBatchHandle) -> NodeMediaPrepBatchResult:
+        raw = self._poll_result(
+            call_id=handle.call_id,
+            timeout_s=float(self.settings.timeout_s),
+        )
+        return self._parse_media_result(
+            raw=raw,
+            specs=handle.specs,
+            batch_id=handle.batch_id,
+        )
+
+    def prepare_batch(
+        self,
+        *,
+        nodes: list[Any],
+        paths: Any,
+        phase1_outputs: Any,
+        batch_id: str,
+        object_prefix: str | None = None,
+    ) -> NodeMediaPrepBatchResult:
+        handle = self.submit_batch(
+            nodes=nodes,
+            paths=paths,
+            phase1_outputs=phase1_outputs,
+            batch_id=batch_id,
+            object_prefix=object_prefix,
+        )
+        return self.wait_for_batch(handle=handle)
+
+    def __call__(
+        self,
+        *,
+        nodes: list[Any],
+        paths: Any,
+        phase1_outputs: Any,
+    ) -> list[dict[str, str]]:
+        if not nodes:
+            return []
+
+        run_id = _extract_run_id(paths)
+        video_gcs_uri = _extract_video_gcs_uri(phase1_outputs)
+        specs = _node_specs(nodes)
+
+        t_start = time.perf_counter()
+        logger.info(
+            "[node_media_prep_client] invoking node-media-prep run_id=%s nodes=%d video=%s",
+            run_id,
+            len(specs),
+            video_gcs_uri,
+        )
+        ordered = self.prepare_batch(
+            nodes=nodes,
+            paths=paths,
+            phase1_outputs=phase1_outputs,
+            batch_id="all",
+            object_prefix=f"phase14/{run_id}/node_media",
+        ).media
         elapsed_ms = (time.perf_counter() - t_start) * 1000.0
         logger.info(
             "[node_media_prep_client] node-media-prep completed run_id=%s nodes=%d in %.1f ms",

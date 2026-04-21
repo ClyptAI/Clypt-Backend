@@ -57,6 +57,7 @@ The Phase26 worker now uses a submit-and-poll contract against Modal:
 
 - `POST /tasks/node-media-prep` returns a `call_id`
 - `GET /tasks/node-media-prep/result/{call_id}` is polled until completion
+- each request now represents one timeline-local node batch, and Phase26 starts multimodal embedding as each batch completes
 
 Credential requirement:
 
