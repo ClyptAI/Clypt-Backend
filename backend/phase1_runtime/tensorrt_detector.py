@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -221,14 +221,35 @@ class TensorRTDetector:
             }
             self._context.set_tensor_address(name, buf.data_ptr())
 
-    def _preprocess_batch(self, frames: list[np.ndarray]):
-        """Move frames to CUDA, normalize there, and return an NCHW tensor."""
+    def _preprocess_batch(self, frames: list[np.ndarray] | Any):
+        """Normalize a host or CUDA frame batch and return an NCHW CUDA tensor."""
         import torch
 
         res = self._config.detector_resolution
-        batch_np = np.stack(frames, axis=0)
-        batch = torch.from_numpy(batch_np).to(device="cuda", dtype=torch.float32)
-        batch = batch.permute(0, 3, 1, 2).contiguous()
+        if hasattr(frames, "device") and hasattr(frames, "ndim"):
+            batch = frames
+            device_type = getattr(batch.device, "type", str(batch.device))
+            if device_type != "cuda":
+                batch = batch.to(device="cuda", non_blocking=True)
+            if batch.ndim != 4:
+                raise RuntimeError(
+                    "Expected detector batch tensor with 4 dimensions, "
+                    f"got {tuple(batch.shape)!r}."
+                )
+            if batch.shape[1] == 3:
+                batch = batch.contiguous()
+            elif batch.shape[-1] == 3:
+                batch = batch.permute(0, 3, 1, 2).contiguous()
+            else:
+                raise RuntimeError(
+                    "Expected RGB tensor batch with channel dimension 3, "
+                    f"got {tuple(batch.shape)!r}."
+                )
+            batch = batch.to(dtype=torch.float32)
+        else:
+            batch_np = np.stack(frames, axis=0)
+            batch = torch.from_numpy(batch_np).to(device="cuda", dtype=torch.float32)
+            batch = batch.permute(0, 3, 1, 2).contiguous()
         if batch.shape[-2:] != (res, res):
             batch = torch.nn.functional.interpolate(
                 batch,
@@ -302,14 +323,15 @@ class TensorRTDetector:
 
     def detect_batch(
         self,
-        frames: list[np.ndarray],
+        frames: list[np.ndarray] | Any,
         *,
         orig_sizes: list[tuple[int, int]] | None = None,
     ) -> list:
-        """Run person detection on a batch of HWC uint8 RGB numpy frames."""
+        """Run person detection on a host or CUDA RGB frame batch."""
         if self._context is None:
             raise RuntimeError("TensorRT detector not loaded. Call load() first.")
-        if orig_sizes is not None and len(orig_sizes) != len(frames):
+        total_frames = int(frames.shape[0]) if hasattr(frames, "shape") else len(frames)
+        if orig_sizes is not None and len(orig_sizes) != total_frames:
             raise ValueError("orig_sizes must match the number of frames")
 
         import torch
@@ -317,18 +339,31 @@ class TensorRTDetector:
         batch_size = self._config.detector_batch_size
         all_detections = []
 
-        for batch_start in range(0, len(frames), batch_size):
+        for batch_start in range(0, total_frames, batch_size):
             batch = frames[batch_start: batch_start + batch_size]
             batch_orig_sizes = (
                 orig_sizes[batch_start: batch_start + batch_size]
                 if orig_sizes is not None
-                else [(f.shape[0], f.shape[1]) for f in batch]
+                else [
+                    (int(f.shape[-2]), int(f.shape[-1])) if hasattr(f, "shape") and len(f.shape) == 3 and int(f.shape[0]) == 3
+                    else (int(f.shape[0]), int(f.shape[1]))
+                    for f in batch
+                ]
             )
-            actual_batch_len = len(batch)
+            actual_batch_len = int(batch.shape[0]) if hasattr(batch, "shape") else len(batch)
 
             if actual_batch_len < batch_size:
-                pad_frame = np.zeros_like(batch[0])
-                batch = batch + [pad_frame] * (batch_size - actual_batch_len)
+                if hasattr(batch, "device") and hasattr(batch, "shape"):
+                    pad_shape = (batch_size - actual_batch_len, *batch.shape[1:])
+                    pad_frames = torch.zeros(
+                        pad_shape,
+                        dtype=batch.dtype,
+                        device=batch.device,
+                    )
+                    batch = torch.cat((batch, pad_frames), dim=0)
+                else:
+                    pad_frame = np.zeros_like(batch[0])
+                    batch = batch + [pad_frame] * (batch_size - actual_batch_len)
 
             input_tensor = self._preprocess_batch(batch)
 

@@ -117,6 +117,7 @@ curl -sf http://127.0.0.1:8000/v1/models
 - The VibeVoice sidecar must report the downloaded `microsoft/VibeVoice-ASR` snapshot via `/v1/models`; a green outer service health check alone is not enough.
 - The VibeVoice service now supports 40-160 minute podcast inputs by splitting canonical audio into 2-4 temporary shard WAVs, uploading them to run-scoped GCS paths, and stitching shard-local speakers back into one global speaker space before Phase1 audio-post begins.
 - If `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`, the deploy script now installs and verifies both `trtexec` and the TensorRT Python package automatically.
+- The current visual fast path also assumes the Phase1 venv includes `torchaudio` with StreamReader support and that the host FFmpeg build exposes the matching NVDEC decoder for the source codec (for example `h264_cuvid`).
 - The deploy script also prewarms NFA, emotion2vec+, and YAMNet so the first live job does not stall on model downloads.
 - That prewarm must run with the same cache env as the live services:
   - `HOME=/opt/clypt-phase1`
@@ -125,3 +126,11 @@ curl -sf http://127.0.0.1:8000/v1/models
   - `TORCH_HOME=/opt/clypt-phase1/.cache/torch`
   - `HF_HOME=/opt/clypt-phase1/.cache/huggingface`
 - `deploy_phase1_services.sh` now hard-fails if the NeMo forced-aligner model does not land in the service cache tree after prewarm.
+- For visual-only RF-DETR throughput checks on a host, use:
+
+```bash
+cd /opt/clypt-phase1/repo
+/opt/clypt-phase1/venvs/phase1/bin/python scripts/tmp_rfdetr_visual_only.py \
+  --video-path /abs/path/to/video.mp4 \
+  --benchmark-batches 16,24,32
+```

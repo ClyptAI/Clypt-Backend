@@ -57,6 +57,8 @@ flowchart TD
   - ByteTrack buffer `30`
   - ByteTrack match threshold `0.7`
   - GPU decode required
+  - direct-CUDA NVDEC `StreamReader` decode
+  - bounded decode/infer overlap queue (`2` batches by default)
 - NFA, emotion2vec+, and YAMNet stay in-process because they already benefit from long-lived provider singletons without requiring more RPC boundaries.
 - Phase26 becomes the clean downstream execution boundary. The queue remains local to that host, but Phase 1 no longer reaches into SQLite directly.
 - Node-media-prep moves to Modal because it is naturally stateless, and it sits after node creation on the Phase26 side of the boundary.

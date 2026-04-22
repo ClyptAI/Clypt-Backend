@@ -20,6 +20,11 @@ class VisualPipelineConfig:
     tracker_match_threshold: float
     frame_decode_backend: str
     tensorrt_engine_dir: str
+    decode_queue_depth: int = 2
+    decode_buffer_chunk_size: int = 3
+    decode_hw_accel_device: str = "cuda:0"
+    decode_hw_device_index: int = 0
+    benchmark_batch_sizes: tuple[int, ...] = (16, 24, 32)
 
     PERSON_CLASS_ID: int = 0
 
@@ -40,12 +45,34 @@ class VisualPipelineConfig:
                 "CLYPT_PHASE1_VISUAL_TRT_ENGINE_DIR",
                 "backend/outputs/tensorrt_engines",
             ),
+            decode_queue_depth=int(_env("CLYPT_PHASE1_VISUAL_DECODE_QUEUE_DEPTH", "2")),
+            decode_buffer_chunk_size=int(
+                _env("CLYPT_PHASE1_VISUAL_DECODE_BUFFER_CHUNKS", "3")
+            ),
+            decode_hw_accel_device=_env(
+                "CLYPT_PHASE1_VISUAL_DECODE_HWACCEL_DEVICE",
+                "cuda:0",
+            ),
+            decode_hw_device_index=int(
+                _env("CLYPT_PHASE1_VISUAL_DECODE_HW_DEVICE_INDEX", "0")
+            ),
+            benchmark_batch_sizes=tuple(
+                int(value.strip())
+                for value in _env("CLYPT_PHASE1_VISUAL_BENCHMARK_BATCH_SIZES", "16,24,32").split(",")
+                if value.strip()
+            ),
         )
         if config.frame_decode_backend != "gpu":
             raise ValueError(
                 "Unsupported CLYPT_PHASE1_VISUAL_DECODE="
                 f"{config.frame_decode_backend!r}; GPU decode is required."
             )
+        if config.decode_queue_depth < 1:
+            raise ValueError("CLYPT_PHASE1_VISUAL_DECODE_QUEUE_DEPTH must be >= 1.")
+        if config.decode_buffer_chunk_size < 1:
+            raise ValueError("CLYPT_PHASE1_VISUAL_DECODE_BUFFER_CHUNKS must be >= 1.")
+        if not config.benchmark_batch_sizes:
+            raise ValueError("CLYPT_PHASE1_VISUAL_BENCHMARK_BATCH_SIZES must not be empty.")
         return config
 
     @property

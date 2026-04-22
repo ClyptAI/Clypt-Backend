@@ -61,6 +61,7 @@ Current live non-secret Phase1 env snapshot from `clypt-phase1-h200-rithvik-nyc2
 - `VIBEVOICE_LONGFORM_MAX_SHARDS=4`
 - `CLYPT_PHASE1_INPUT_MODE=test_bank`
 - visual fast-path settings remain `tensorrt_fp16`, batch `16`, threshold `0.35`, shape `640`, ByteTrack buffer `30`, ByteTrack match `0.7`, GPU decode
+- visual decode now runs through TorchAudio NVDEC `StreamReader` with direct CUDA frame tensors, GPU YUV->RGB conversion, and a bounded decode/infer queue
 - fresh-host deploy invariant: NFA/emotion2vec+/YAMNet prewarm must use the same service cache roots (`HOME=/opt/clypt-phase1`, `CLYPT_PHASE1_CACHE_HOME=/opt/clypt-phase1/.cache`, `TORCH_HOME=/opt/clypt-phase1/.cache/torch`, `HF_HOME=/opt/clypt-phase1/.cache/huggingface`) before services are restarted
 
 ### 2.2 Phase26 host
@@ -163,8 +164,20 @@ The intended Phase 1 visual settings are preserved:
 Operationally, the fast path remains:
 
 ```text
-NVDEC -> scale_cuda -> hwdownload -> CUDA tensor normalize -> TensorRT -> ByteTrack
+NVDEC StreamReader -> CUDA YUV->RGB -> CUDA normalize -> TensorRT -> ByteTrack
 ```
+
+Additional non-semantic speed knobs now available on the Phase1 host:
+
+- `CLYPT_PHASE1_VISUAL_DECODE_QUEUE_DEPTH` (default `2`)
+- `CLYPT_PHASE1_VISUAL_DECODE_BUFFER_CHUNKS` (default `3`)
+- `CLYPT_PHASE1_VISUAL_DECODE_HWACCEL_DEVICE` (default `cuda:0`)
+- `CLYPT_PHASE1_VISUAL_DECODE_HW_DEVICE_INDEX` (default `0`)
+- `CLYPT_PHASE1_VISUAL_BENCHMARK_BATCH_SIZES` (default `16,24,32`)
+
+The current visual-only benchmark helper is:
+
+- `python scripts/tmp_rfdetr_visual_only.py --video-path /abs/path/to/video.mp4 --benchmark-batches 16,24,32`
 
 The H100 backup overlay must not change semantic visual behavior.
 
