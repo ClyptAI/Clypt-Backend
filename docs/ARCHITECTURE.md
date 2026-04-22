@@ -1,7 +1,7 @@
 # ARCHITECTURE
 
-**Status:** Active (implemented Phases 1-4, planned Phases 5-6)  
-**Last updated:** 2026-04-19
+**Status:** Active (implemented Phases 1-4 plus Phase 6 packaging/render groundwork; Phase 5 still pending full rollout)  
+**Last updated:** 2026-04-22
 
 This document describes the current code-backed topology: a **Phase 1 H200**, a **Phase26 H200**, and a **Modal L40S media-prep service**.
 
@@ -89,6 +89,7 @@ flowchart TD
 
 - Audio and visual paths run concurrently.
 - The audio-post chain launches immediately after the VibeVoice HTTP response returns.
+- For `source_url` jobs, Phase 1 now resolves the URL through the test-bank mapping and fetches persisted YouTube source metadata during ingress.
 - Phase 1 dispatches downstream through `POST /tasks/phase26-enqueue` when its Phase 1 handoff payload is ready.
 
 ## 4) Phase26 Architecture
@@ -140,6 +141,7 @@ Phase26 host must have:
 - `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_*`
 - local SGLang / OpenAI-compatible generation settings
+- optional `CLYPT_PHASE24_PHASE6_RENDER_*` envs when remote render/export is turned on
 
 Phase 1 fallback note:
 

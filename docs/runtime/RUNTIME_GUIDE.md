@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-04-21
+**Last updated:** 2026-04-22
 
 This is the runtime source of truth for the current repository state.
 
@@ -39,6 +39,9 @@ Key behavior:
 - `RemoteVibeVoiceAsrClient` targets the local service at `POST /tasks/vibevoice-asr`
 - `RemotePhase1VisualClient` targets the local service at `POST /tasks/visual-extract`
 - `RemotePhase26DispatchClient` targets the downstream host at `POST /tasks/phase26-enqueue`
+- `source_url` ingestion now expects a YouTube URL that exists in the configured Phase 1 test-bank mapping
+- during `source_url` ingress, Phase 1 fetches public YouTube long-form metadata into persisted `source_context.json`
+- that metadata fetch does not require creator-account auth, but it does require a project YouTube Data API key (`CLYPT_YOUTUBE_DATA_API_KEY` or `YOUTUBE_API_KEY`); service-account ADC on the host is not used for this YouTube Data API path
 - the VibeVoice service keeps the existing single-pass path through 40 minutes, splits `>40..80` minute jobs into 2 shards, splits `>80..160` minute jobs into 4 shards, and fails fast above 160 minutes
 - long-form shard requests still target the same local vLLM sidecar and are stitched back into one global speaker space before the HTTP response returns
 - forced alignment now uses duration-bounded global chunks by default instead of a per-turn fallback:
@@ -96,8 +99,9 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
 - `CLYPT_PHASE24_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS=10000`
 - `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096`
 - `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192`
+- optional render rollout envs: `CLYPT_PHASE24_PHASE6_RENDER_URL`, `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`
 
-### 2.3 Modal node-media-prep
+### 2.3 Modal node-media-prep / render
 
 - app path: `scripts/modal/node_media_prep_app.py`
 - web surface: CPU ASGI app for submit/poll
@@ -111,6 +115,8 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
 - batch planning and worker fan-out are env-tunable on the Phase26 side via the `CLYPT_PHASE24_NODE_MEDIA_BATCH_*` knobs and `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES`
 - clip extraction now downscales to 480p before upload / Vertex multimodal embedding
 - Phase26 starts multimodal embedding batch-by-batch as node-media-prep results arrive instead of waiting for all media first
+- Phase 6 render/export now uses a separate Modal submit/poll surface when the Phase26 host has `CLYPT_PHASE24_PHASE6_RENDER_*` configured
+- the render worker stages bundled pinned fonts from `backend/assets/fonts` by default; `CLYPT_PHASE6_FONT_ASSET_DIR` is only an override
 
 Current live non-secret Modal deployment snapshot on 2026-04-21:
 

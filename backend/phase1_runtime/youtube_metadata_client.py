@@ -97,7 +97,8 @@ def fetch_youtube_source_context(*, source_url: str) -> dict[str, Any]:
     client = build_youtube_metadata_client()
     if client is None:
         raise ValueError(
-            "CLYPT_YOUTUBE_DATA_API_KEY (or YOUTUBE_API_KEY) is required for Phase 1 source_url metadata ingestion."
+            "CLYPT_YOUTUBE_DATA_API_KEY (or YOUTUBE_API_KEY) is required for "
+            "Phase 1 public YouTube metadata ingestion."
         )
     return client.fetch_source_context(source_url=source_url)
 

@@ -1,7 +1,7 @@
 # ENV REFERENCE
 
 **Status:** Active  
-**Last updated:** 2026-04-21
+**Last updated:** 2026-04-22
 
 This is the code-backed env catalog for the current Phase1 + Phase26 + Modal topology.
 
@@ -24,11 +24,15 @@ Required by `load_phase1_host_settings()`:
 - `CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN`
 - `CLYPT_PHASE24_DISPATCH_URL`
 - `CLYPT_PHASE24_DISPATCH_AUTH_TOKEN`
+- `CLYPT_YOUTUBE_DATA_API_KEY` or `YOUTUBE_API_KEY` for public `source_url` YouTube metadata ingestion
 
 Operational notes:
 
 - Phase 1 is allowed to keep `VIBEVOICE_*` env because it owns the local VibeVoice service and sidecar.
 - `CLYPT_PHASE1_INPUT_MODE=test_bank` is still required.
+- `source_url` now means a YouTube URL that must both resolve to a YouTube video ID and exist in the configured Phase 1 test-bank mapping. If either check fails, Phase 1 hard-fails.
+- The YouTube Data API path here is only for public data such as video/channel metadata and public comments. It does not require creator-account auth, but it still requires a credential on the request.
+- The current supported credential shape for this Phase 1 path is a project API key (`CLYPT_YOUTUBE_DATA_API_KEY` / `YOUTUBE_API_KEY`). Service-account ADC / `gcloud` host auth is not sufficient for this YouTube Data API call path.
 
 ### 1.2 Phase26 host
 
@@ -42,6 +46,12 @@ Required by `load_phase26_host_settings()`:
 - `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN`
+
+Optional when Phase 6 remote render/export is enabled:
+
+- `CLYPT_PHASE24_PHASE6_RENDER_URL`
+- `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`
+- `CLYPT_PHASE24_PHASE6_RENDER_TIMEOUT_S`
 
 ### 1.3 Modal node-media-prep
 
@@ -130,6 +140,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 
 `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` accepts either the Modal base URL or the full task endpoint URL. The current known-good records use the full endpoint URL.
 `RemoteNodeMediaPrepClient` handles the follow-up result polling internally, and Phase26 now pipelines batch completion into immediate multimodal embedding while still producing one final ordered result per node.
+Phase 6 render/export uses the same submit-and-poll pattern when `CLYPT_PHASE24_PHASE6_RENDER_URL` and `CLYPT_PHASE24_PHASE6_RENDER_TOKEN` are set. The worker now ships with bundled fonts under `backend/assets/fonts`, so `CLYPT_PHASE6_FONT_ASSET_DIR` is only an override knob.
 
 Additional live non-secret values captured from `/etc/clypt-phase26/phase26.env` on 2026-04-21:
 

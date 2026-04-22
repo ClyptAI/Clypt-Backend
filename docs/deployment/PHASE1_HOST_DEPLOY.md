@@ -45,7 +45,15 @@ Required values to set:
 - service account key path
 - bearer tokens
 - Phase26 dispatch URL
+- project YouTube Data API key for Phase 1 public `source_url` metadata ingress
 - GCS / Spanner project-specific values
+
+Important:
+
+- Phase 1 now fetches public long-form source metadata into `source_context.json` during `source_url` ingress.
+- For that path, set either `CLYPT_YOUTUBE_DATA_API_KEY` or `YOUTUBE_API_KEY` in `/etc/clypt-phase1/phase1.env`.
+- This path does not require creator-account auth, but it still needs a credential on each request.
+- The YouTube Data API public metadata path does not use service-account ADC on the host; the current supported credential shape here is a project API key.
 
 Long-form ASR defaults already live in the baseline env:
 

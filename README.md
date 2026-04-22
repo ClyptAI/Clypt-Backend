@@ -86,7 +86,7 @@ Modal currently handles the stateless media-prep step:
 
 ```mermaid
 flowchart TD
-  source["Source URL or local asset"]
+  source["YouTube URL from test bank or local asset"]
   asr["VibeVoice ASR"]
   audio["NFA to emotion2vec plus to YAMNet"]
   visual["RF-DETR and ByteTrack"]
@@ -188,6 +188,11 @@ Start here if you want the operational details:
 - [Phase26 host deploy](docs/deployment/PHASE26_HOST_DEPLOY.md)
 - [Modal node-media-prep deploy](docs/deployment/MODAL_NODE_MEDIA_PREP_DEPLOY.md)
 - [Specs index](docs/specs/SPEC_INDEX.md)
+
+Operational note:
+
+- `source_url` ingestion now assumes a YouTube URL that exists in the configured Phase 1 test-bank mapping.
+- Phase 1 also fetches public long-form YouTube metadata into `source_context.json` during ingress, so the host needs a project-scoped YouTube Data API key (`CLYPT_YOUTUBE_DATA_API_KEY` or `YOUTUBE_API_KEY`) unless you are using `source_path` instead.
 
 ## Status
 

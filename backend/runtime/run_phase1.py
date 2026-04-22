@@ -19,7 +19,10 @@ logger = logging.getLogger("clypt.phase1")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the V3.1 Phase 1 runtime locally.")
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--source-url", help="YouTube or direct source URL")
+    source.add_argument(
+        "--source-url",
+        help="YouTube source URL present in the Phase 1 test-bank mapping",
+    )
     source.add_argument("--source-path", help="Local source video path")
     parser.add_argument("--job-id", required=True, help="Stable run/job id")
     parser.add_argument("--run-phase14", action="store_true", help="Continue into live Phases 2-4 after Phase 1")

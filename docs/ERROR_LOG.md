@@ -7,6 +7,16 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-04-22 - Phase1 YouTube metadata ingress contract drifted ahead of runtime/deploy docs
+
+- **Date/Time (UTC):** 2026-04-22 21:15 UTC
+- **Subsystem:** Phase1 ingress + operator docs (`backend/phase1_runtime/*`, `docs/runtime/*`, `docs/deployment/*`, `README.md`)
+- **Environment:** Repo source of truth after the Phase 6 follow-up pass; not yet live-validated on droplets
+- **Symptom / Error signature:** Phase1 `source_url` ingestion had been updated to fetch persisted `source_context.json` during ingress, but the Phase1 env/deploy docs and baseline env did not list the YouTube Data API credential requirement. Separately, some user-facing docs and CLI help still implied generic direct `source_url` support even though the new ingress path expects a YouTube URL that resolves through the test-bank mapping.
+- **Root cause:** The runtime behavior changed faster than the operator/source-of-truth docs. The new YouTube metadata client correctly enforced the credential and URL contract, but the surrounding deploy/env/readme material was not updated in the same pass.
+- **Fix applied:** Updated README, runtime/deploy architecture docs, baseline env files, and CLI help text to reflect the real contract: `source_url` means a YouTube URL present in the Phase1 test-bank mapping; Phase1 fetches public YouTube metadata at ingress and therefore requires `CLYPT_YOUTUBE_DATA_API_KEY` or `YOUTUBE_API_KEY`; creator-account auth is not needed for this public-data path, but service-account ADC is also not the supported auth shape. Also documented the optional Phase26 Phase 6 render envs and the bundled-font default so tonight's remote render rollout has a correct deploy reference.
+- **Verification evidence:** Broad repo tests remained green after the doc/help sweep in the previous implementation pass: `./.venv/bin/python -m pytest tests/backend/phase1_runtime -q`, `./.venv/bin/python -m pytest tests/backend/runtime -q`, and `./.venv/bin/python -m pytest tests/backend/pipeline -q`. Auth assumption was re-checked against current official Google docs on 2026-04-22: the YouTube Data API requires either an API key or OAuth 2.0, and Google explicitly states that YouTube does not support service-account auth for this flow.
+
 ## 2026-04-21 - Rolled back the unvalidated visual optimization path and switched Phase1 RF-DETR from Small to Nano
 
 - **Date/Time (UTC):** 2026-04-22 05:00 UTC

@@ -39,6 +39,12 @@ Required values to set:
 - Modal endpoint URL
 - GCS / Spanner project-specific values
 
+Optional values to set when turning on remote Phase 6 render/export:
+
+- `CLYPT_PHASE24_PHASE6_RENDER_URL`
+- `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`
+- `CLYPT_PHASE24_PHASE6_RENDER_TIMEOUT_S`
+
 Current known-good Modal endpoint:
 
 - `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
@@ -62,6 +68,8 @@ The Phase26 worker now uses a submit-and-poll contract against Modal:
 - `GET /tasks/node-media-prep/result/{call_id}` is polled until completion
 - each request now represents one timeline-local node batch, and Phase26 starts multimodal embedding as each batch completes
 - the public Modal route is CPU-only; the actual batch worker is the only function that reserves an `L40S`
+- the same submit-and-poll shape is used for Phase 6 render/export once the render surface is deployed
+- the render worker now ships with bundled pinned fonts, so `CLYPT_PHASE6_FONT_ASSET_DIR` is optional and only needed to override the default bundle
 
 Credential requirement:
 
