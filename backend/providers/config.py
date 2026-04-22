@@ -397,6 +397,15 @@ class NodeMediaPrepSettings:
 
 
 @dataclass(slots=True)
+class Phase6RenderSettings:
+    """Required settings for remote Phase 6 render/export."""
+
+    service_url: str
+    auth_token: str
+    timeout_s: float = 3600.0
+
+
+@dataclass(slots=True)
 class ProviderSettings:
     vibevoice: VibeVoiceSettings
     vllm_vibevoice: VibeVoiceVLLMSettings
@@ -405,6 +414,7 @@ class ProviderSettings:
     storage: StorageSettings
     vibevoice_asr_service: VibeVoiceAsrServiceSettings
     node_media_prep: NodeMediaPrepSettings
+    phase6_render: Phase6RenderSettings | None = None
     phase1_visual_service: Phase1VisualServiceSettings | None = None
     phase26_dispatch_service: Phase26DispatchServiceSettings | None = None
     phase1_asr: Phase1ASRSettings = field(default_factory=Phase1ASRSettings)
@@ -573,6 +583,16 @@ def load_provider_settings(
             _read_int_env("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY", default=12),
         ),
     )
+
+    phase6_render: Phase6RenderSettings | None = None
+    phase6_render_url = _read_env("CLYPT_PHASE24_PHASE6_RENDER_URL")
+    phase6_render_token = _read_env("CLYPT_PHASE24_PHASE6_RENDER_TOKEN")
+    if phase6_render_url or phase6_render_token:
+        phase6_render = Phase6RenderSettings(
+            service_url=(phase6_render_url or "").rstrip("/"),
+            auth_token=phase6_render_token or "",
+            timeout_s=float(_read_env("CLYPT_PHASE24_PHASE6_RENDER_TIMEOUT_S") or "3600"),
+        )
 
     phase1_visual_service: Phase1VisualServiceSettings | None = None
     phase1_visual_service_url = _read_env("CLYPT_PHASE1_VISUAL_SERVICE_URL")
@@ -764,6 +784,7 @@ def load_provider_settings(
         storage=StorageSettings(gcs_bucket=gcs_bucket),
         vibevoice_asr_service=vibevoice_asr_service,
         node_media_prep=node_media_prep,
+        phase6_render=phase6_render,
         phase1_visual_service=phase1_visual_service,
         phase26_dispatch_service=phase26_dispatch_service,
         spanner=SpannerSettings(

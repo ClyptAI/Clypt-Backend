@@ -134,6 +134,44 @@ def test_phase24_worker_service_processes_task_and_updates_repository():
     assert repository.job_record.task_name == "task-001"
 
 
+def test_phase24_worker_service_merges_payload_source_context_into_phase1_outputs():
+    from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService
+
+    repository = _FakeRepository()
+    runner = _FakeRunner()
+    service = Phase24WorkerService(
+        repository=repository,
+        runner=runner,
+        service_name="clypt-phase26-worker",
+        environment="staging",
+        default_query_version="graph-v1",
+        max_attempts=3,
+    )
+
+    payload_dict = _build_payload()
+    payload_dict["source_context"] = {
+        "source_url": "https://example.com/video",
+        "youtube_video_id": "abc123xyz00",
+        "source_title": "Persisted Title",
+        "source_description": "Persisted description",
+        "channel_id": "channel_123",
+        "channel_title": "Persisted Channel",
+        "published_at": "2026-04-19T00:00:00+00:00",
+        "default_audio_language": "en",
+        "category_id": "22",
+        "tags": ["persisted"],
+        "thumbnails": {"default": {"url": "https://example.com/thumb.jpg"}},
+    }
+
+    service.handle_task(
+        payload=Phase24TaskPayload(**payload_dict),
+        job_id="task-001",
+        attempt=1,
+    )
+
+    assert runner.calls[0]["phase1_outputs"].source_context["source_title"] == "Persisted Title"
+
+
 def test_phase24_worker_service_short_circuits_completed_jobs():
     from backend.repository.models import Phase24JobRecord
     from backend.runtime.phase24_worker_app import Phase24TaskPayload, Phase24WorkerService

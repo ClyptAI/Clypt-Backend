@@ -14,6 +14,7 @@ from backend.phase1_runtime.payloads import Phase1SidecarOutputs
 from backend.providers import (
     LocalOpenAIQwenClient,
     RemoteNodeMediaPrepClient,
+    RemotePhase6RenderClient,
     VertexEmbeddingClient,
     load_provider_settings,
 )
@@ -40,6 +41,7 @@ class Phase24TaskPayload(BaseModel):
     source_video_gcs_uri: str | None = None
     phase1_outputs: Phase1SidecarOutputs | None = None
     phase1_outputs_gcs_uri: str | None = None
+    source_context: dict[str, Any] | None = None
     phase3_long_range_top_k: int | None = None
     phase4_extra_prompt_texts: list[str] = Field(default_factory=list)
     query_version: str | None = None
@@ -404,6 +406,8 @@ class Phase24WorkerService:
             except Exception:
                 temp_dir.cleanup()
                 raise
+        if payload.source_context is not None and phase1_outputs.source_context is None:
+            phase1_outputs = phase1_outputs.model_copy(update={"source_context": payload.source_context})
 
         # Node-media prep runs on the remote RTX host, so the H200 does not
         # need to have the source video on local disk. We only require that
@@ -542,12 +546,22 @@ def build_default_phase24_worker_service(*, settings=None) -> Phase24WorkerServi
     # Node-media prep runs exclusively on the remote media-prep service; there
     # is no in-process fallback. Always wire the remote client.
     node_media_preparer = RemoteNodeMediaPrepClient(settings=settings.node_media_prep)
+    phase6_render_settings = getattr(settings, "phase6_render", None)
+    render_executor = (
+        RemotePhase6RenderClient(
+            settings=phase6_render_settings,
+            storage_client=GCSStorageClient(settings=settings.storage),
+        )
+        if phase6_render_settings is not None
+        else None
+    )
     runner = V31LivePhase14Runner.from_env(
         llm_client=llm_client,
         embedding_client=VertexEmbeddingClient(settings=settings.vertex),
         flash_model=local_flash_model,
         storage_client=GCSStorageClient(settings=settings.storage),
         node_media_preparer=node_media_preparer,
+        render_executor=render_executor,
         repository=repository,
         query_version=settings.phase24_worker.query_version,
         debug_snapshots=settings.phase24_worker.debug_snapshots,

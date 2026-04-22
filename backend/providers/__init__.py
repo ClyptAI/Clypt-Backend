@@ -3,6 +3,7 @@ from .config import (
     AudioHostSettings,  # deprecated alias of VibeVoiceAsrServiceSettings
     LocalGenerationSettings,
     NodeMediaPrepSettings,
+    Phase6RenderSettings,
     Phase1VisualServiceSettings,
     Phase26DispatchServiceSettings,
     Phase1ASRSettings,
@@ -34,6 +35,10 @@ from .node_media_prep_client import (
     RemoteNodeMediaPrepClient,
     RemoteNodeMediaPrepError,
 )
+from .phase6_render_client import (
+    RemotePhase6RenderClient,
+    RemotePhase6RenderError,
+)
 from .phase26_dispatch_client import (
     RemotePhase26DispatchClient,
     RemotePhase26DispatchError,
@@ -61,6 +66,7 @@ __all__ = [
     "LocalGenerationSettings",
     "LocalOpenAIQwenClient",
     "NodeMediaPrepSettings",
+    "Phase6RenderSettings",
     "Phase1VisualServiceSettings",
     "Phase26DispatchServiceSettings",
     "Phase1ASRSettings",
@@ -72,6 +78,8 @@ __all__ = [
     "RemoteAudioChainError",  # deprecated alias of RemoteVibeVoiceAsrError
     "RemoteNodeMediaPrepClient",
     "RemoteNodeMediaPrepError",
+    "RemotePhase6RenderClient",
+    "RemotePhase6RenderError",
     "RemotePhase1VisualClient",
     "RemotePhase1VisualError",
     "RemotePhase26DispatchClient",

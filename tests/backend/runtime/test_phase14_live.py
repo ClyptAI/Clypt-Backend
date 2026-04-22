@@ -280,6 +280,307 @@ def test_phase14_live_run_phase4_writes_all_signal_tables(monkeypatch, tmp_path:
     assert repo.calls["write_subgraph_provenance"] == 1
 
 
+def test_live_phase14_runner_invokes_phase6_after_phase4(monkeypatch, tmp_path: Path) -> None:
+    from backend.runtime import phase14_live
+
+    runner = V31LivePhase14Runner(
+        config=V31Config(output_root=tmp_path),
+        llm_client=object(),
+        embedding_client=object(),
+    )
+
+    candidate = ClipCandidate(
+        clip_id="clip-1",
+        node_ids=["node-1"],
+        start_ms=0,
+        end_ms=1000,
+        score=1.0,
+        rationale="r",
+    )
+    node = SemanticGraphNode(
+        node_id="node-1",
+        node_type="claim",
+        start_ms=0,
+        end_ms=1000,
+        transcript_text="hello",
+        summary="summary",
+        evidence=SemanticNodeEvidence(),
+        semantic_embedding=[1.0, 0.0],
+        multimodal_embedding=[1.0, 0.0],
+    )
+    edge = SemanticGraphEdge(
+        source_node_id="node-1",
+        target_node_id="node-1",
+        edge_type="next_turn",
+        rationale="self",
+        confidence=1.0,
+        support_count=1,
+        batch_ids=["b1"],
+    )
+
+    def _run_phase_1(self, **kwargs):
+        return {
+            "canonical_timeline": SimpleNamespace(turns=[SimpleNamespace(end_ms=1000)]),
+            "speech_emotion_timeline": SimpleNamespace(),
+            "audio_event_timeline": SimpleNamespace(),
+            "shot_tracklet_index": SimpleNamespace(tracklets=[]),
+            "tracklet_geometry": SimpleNamespace(tracklets=[]),
+        }
+
+    def _run_phase_2(self, **kwargs):
+        return {"nodes": [node]}
+
+    def _run_phase_3(self, **kwargs):
+        return {"edges": [edge]}
+
+    def _run_phase_4(self, **kwargs):
+        return {
+            "candidates": [candidate],
+            "seed_count": 1,
+            "subgraph_count": 1,
+            "raw_candidate_count": 1,
+            "deduped_candidate_count": 1,
+            "final_candidate_count": 1,
+        }
+
+    phase6_calls: list[dict[str, object]] = []
+
+    def _run_phase_6(self, **kwargs):
+        phase6_calls.append(kwargs)
+        return {
+            "clip_count": 1,
+            "artifact_paths": {
+                "caption_plan": str(kwargs["paths"].caption_plan),
+                "publish_metadata": str(kwargs["paths"].publish_metadata),
+                "render_plan": str(kwargs["paths"].render_plan),
+            },
+        }
+
+    monkeypatch.setattr(type(runner), "run_phase_1", _run_phase_1)
+    monkeypatch.setattr(type(runner), "run_phase_2", _run_phase_2)
+    monkeypatch.setattr(type(runner), "run_phase_3", _run_phase_3)
+    monkeypatch.setattr(type(runner), "run_phase_4", _run_phase_4)
+    monkeypatch.setattr(type(runner), "run_phase_6", _run_phase_6, raising=False)
+    monkeypatch.setattr(phase14_live, "start_comments_future", lambda **kwargs: None)
+    monkeypatch.setattr(phase14_live, "start_trends_future", lambda **kwargs: None)
+
+    summary = runner.run(
+        run_id="run_phase6",
+        source_url="https://www.youtube.com/watch?v=abc123xyz00",
+        phase1_outputs=SimpleNamespace(
+            phase1_audio={"local_video_path": "/tmp/source.mp4"},
+            diarization_payload={"turns": []},
+            phase1_visual={"video_metadata": {"fps": 30.0}, "shot_changes": [], "tracks": []},
+            emotion2vec_payload={"segments": []},
+            yamnet_payload={"events": []},
+        ),
+        job_id="job-1",
+        attempt=1,
+    )
+
+    assert phase6_calls
+    assert phase6_calls[0]["phase4_result"]["candidates"] == [candidate]
+    assert summary.artifact_paths["caption_plan"].endswith("caption_plan.json")
+    assert summary.artifact_paths["publish_metadata"].endswith("publish_metadata.json")
+    assert summary.artifact_paths["render_plan"].endswith("render_plan.json")
+    assert "caption_plan" in summary.metadata["phase6_artifacts"]
+
+
+def test_live_phase14_run_phase6_uses_persisted_source_context(monkeypatch, tmp_path: Path) -> None:
+    from backend.runtime import phase14_live
+
+    runner = V31LivePhase14Runner(
+        config=V31Config(output_root=tmp_path),
+        llm_client=object(),
+        embedding_client=object(),
+    )
+    paths = runner.build_run_paths(run_id="run_phase6_context")
+    paths.source_context.write_text(
+        (
+            "{\n"
+            '  "source_url": "https://www.youtube.com/watch?v=abc123xyz00",\n'
+            '  "youtube_video_id": "abc123xyz00",\n'
+            '  "source_title": "Persisted Title",\n'
+            '  "source_description": "Persisted description",\n'
+            '  "channel_id": "channel_123",\n'
+            '  "channel_title": "Persisted Channel",\n'
+            '  "published_at": "2026-04-19T00:00:00+00:00",\n'
+            '  "default_audio_language": "en",\n'
+            '  "category_id": "22",\n'
+            '  "tags": ["persisted"],\n'
+            '  "thumbnails": {"default": {"url": "https://example.com/thumb.jpg"}}\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    candidate = ClipCandidate(
+        clip_id="clip-1",
+        node_ids=["node-1"],
+        start_ms=0,
+        end_ms=1000,
+        score=1.0,
+        rationale="r",
+    )
+    node = SemanticGraphNode(
+        node_id="node-1",
+        node_type="claim",
+        start_ms=0,
+        end_ms=1000,
+        transcript_text="hello",
+        summary="summary",
+        evidence=SemanticNodeEvidence(),
+        semantic_embedding=[1.0, 0.0],
+        multimodal_embedding=[1.0, 0.0],
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_compile_phase6_artifacts(**kwargs):
+        captured.update(kwargs)
+        return {
+            "artifact_paths": {
+                "source_context": str(paths.source_context),
+                "caption_plan": str(paths.caption_plan),
+                "publish_metadata": str(paths.publish_metadata),
+                "render_plan": str(paths.render_plan),
+            }
+        }
+
+    monkeypatch.setattr(phase14_live, "compile_phase6_artifacts", _fake_compile_phase6_artifacts)
+    monkeypatch.setattr(
+        phase14_live,
+        "resolve_youtube_video_id",
+        lambda _: (_ for _ in ()).throw(AssertionError("phase6 should use persisted source_context")),
+    )
+
+    result = runner.run_phase_6(
+        paths=paths,
+        source_url="https://www.youtube.com/watch?v=abc123xyz00",
+        canonical_timeline=SimpleNamespace(turns=[]),
+        shot_tracklet_index=SimpleNamespace(tracklets=[]),
+        tracklet_geometry=SimpleNamespace(tracklets=[]),
+        nodes=[node],
+        phase4_result={"candidates": [candidate]},
+    )
+
+    assert result["artifact_paths"]["source_context"] == str(paths.source_context)
+    assert captured["source_context"]["source_title"] == "Persisted Title"
+    assert captured["source_context"]["youtube_video_id"] == "abc123xyz00"
+
+
+def test_live_phase14_run_phase6_requires_persisted_source_context_for_candidates(tmp_path: Path) -> None:
+    runner = V31LivePhase14Runner(
+        config=V31Config(output_root=tmp_path),
+        llm_client=object(),
+        embedding_client=object(),
+    )
+    paths = runner.build_run_paths(run_id="run_phase6_missing_context")
+    candidate = ClipCandidate(
+        clip_id="clip-1",
+        node_ids=["node-1"],
+        start_ms=0,
+        end_ms=1000,
+        score=1.0,
+        rationale="r",
+    )
+
+    try:
+        runner.run_phase_6(
+            paths=paths,
+            source_url="https://www.youtube.com/watch?v=abc123xyz00",
+            canonical_timeline=SimpleNamespace(turns=[]),
+            shot_tracklet_index=SimpleNamespace(tracklets=[]),
+            tracklet_geometry=SimpleNamespace(tracklets=[]),
+            nodes=[],
+            phase4_result={"candidates": [candidate]},
+        )
+    except ValueError as exc:
+        assert "persisted source_context" in str(exc)
+    else:
+        raise AssertionError("expected run_phase_6 to require persisted source_context for candidates")
+
+
+def test_live_phase14_run_phase6_invokes_render_executor_and_exposes_outputs(monkeypatch, tmp_path: Path) -> None:
+    from backend.runtime import phase14_live
+
+    class _RenderExecutor:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "outputs": [
+                    {
+                        "clip_id": "clip-1",
+                        "video_gcs_uri": "gs://bucket/phase14/run_phase6_render/render_outputs/clip-1.mp4",
+                    }
+                ]
+            }
+
+    render_executor = _RenderExecutor()
+    runner = V31LivePhase14Runner(
+        config=V31Config(output_root=tmp_path),
+        llm_client=object(),
+        embedding_client=object(),
+        render_executor=render_executor,
+    )
+    paths = runner.build_run_paths(run_id="run_phase6_render")
+    paths.source_context.write_text(
+        (
+            "{\n"
+            '  "source_url": "https://www.youtube.com/watch?v=abc123xyz00",\n'
+            '  "youtube_video_id": "abc123xyz00",\n'
+            '  "source_title": "Persisted Title",\n'
+            '  "source_description": "Persisted description",\n'
+            '  "channel_id": "channel_123",\n'
+            '  "channel_title": "Persisted Channel",\n'
+            '  "published_at": "2026-04-19T00:00:00+00:00",\n'
+            '  "default_audio_language": "en",\n'
+            '  "category_id": "22",\n'
+            '  "tags": ["persisted"],\n'
+            '  "thumbnails": {"default": {"url": "https://example.com/thumb.jpg"}}\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    candidate = ClipCandidate(
+        clip_id="clip-1",
+        node_ids=["node-1"],
+        start_ms=0,
+        end_ms=1000,
+        score=1.0,
+        rationale="r",
+    )
+
+    monkeypatch.setattr(
+        phase14_live,
+        "compile_phase6_artifacts",
+        lambda **kwargs: {
+            "artifact_paths": {
+                "source_context": str(paths.source_context),
+                "caption_plan": str(paths.caption_plan),
+                "publish_metadata": str(paths.publish_metadata),
+                "render_plan": str(paths.render_plan),
+                "captions_clip-1.ass": str(paths.captions_ass("clip-1")),
+            }
+        },
+    )
+
+    result = runner.run_phase_6(
+        paths=paths,
+        source_url="https://www.youtube.com/watch?v=abc123xyz00",
+        phase1_outputs=SimpleNamespace(phase1_audio={"video_gcs_uri": "gs://bucket/source.mp4"}),
+        canonical_timeline=SimpleNamespace(turns=[]),
+        shot_tracklet_index=SimpleNamespace(tracklets=[]),
+        tracklet_geometry=SimpleNamespace(tracklets=[]),
+        nodes=[],
+        phase4_result={"candidates": [candidate]},
+    )
+
+    assert render_executor.calls
+    assert result["artifact_paths"]["rendered_clip-1.mp4"].endswith("clip-1.mp4")
+
+
 def test_phase14_live_uses_phase_specific_concurrency_knobs(monkeypatch, tmp_path: Path) -> None:
     from backend.runtime import phase14_live
 

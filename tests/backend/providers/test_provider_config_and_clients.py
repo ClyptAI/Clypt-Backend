@@ -676,6 +676,7 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
     from backend.providers.config import (
         LocalGenerationSettings,
         NodeMediaPrepSettings,
+        Phase6RenderSettings,
         ProviderSettings,
         StorageSettings,
         VertexSettings,
@@ -699,6 +700,10 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
             service_url="http://10.0.0.5:9100",
             auth_token="test-prep-token",
         ),
+        phase6_render=Phase6RenderSettings(
+            service_url="http://10.0.0.6:9200",
+            auth_token="test-render-token",
+        ),
     )
 
     captured: dict[str, Any] = {}
@@ -716,6 +721,7 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
         def from_env(cls, **kwargs):
             captured["llm_client"] = kwargs["llm_client"]
             captured["node_media_preparer"] = kwargs.get("node_media_preparer")
+            captured["render_executor"] = kwargs.get("render_executor")
             return object()
 
     monkeypatch.setattr(phase24_worker_app, "SpannerPhase14Repository", _FakeRepo)
@@ -730,11 +736,14 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
     monkeypatch.setattr(phase24_worker_app, "load_provider_settings", lambda: settings_local)
     phase24_worker_app.build_default_phase24_worker_service()
     from backend.providers.node_media_prep_client import RemoteNodeMediaPrepClient
+    from backend.providers.phase6_render_client import RemotePhase6RenderClient
 
     assert isinstance(captured["llm_client"], LocalOpenAIQwenClient)
     assert captured["llm_client"].settings.model == "local-qwen"
     assert isinstance(captured["node_media_preparer"], RemoteNodeMediaPrepClient)
     assert captured["node_media_preparer"].settings.service_url == "http://10.0.0.5:9100"
+    assert isinstance(captured["render_executor"], RemotePhase6RenderClient)
+    assert captured["render_executor"].settings.service_url == "http://10.0.0.6:9200"
 
     settings_dev = ProviderSettings(
         **base,

@@ -34,10 +34,6 @@ Copy the baseline:
 
 - [known-good-phase1-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-h200.env)
 
-Optional overlay for H100 only:
-
-- [known-good-phase1-h100-backup.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-h100-backup.env)
-
 Install to:
 
 ```bash

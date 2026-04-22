@@ -209,6 +209,19 @@ def test_orchestrator_runs_phases_1_to_4_and_writes_artifacts(tmp_path: Path):
                 ],
                 "dropped_candidate_temp_ids": [],
             },
+            source_context={
+                "source_url": "https://www.youtube.com/watch?v=demo1234567",
+                "youtube_video_id": "demo1234567",
+                "source_title": "Why this demo matters",
+                "source_description": "Demo description",
+                "channel_id": "channel_demo",
+                "channel_title": "Clypt",
+                "published_at": "2026-04-19T00:00:00+00:00",
+                "default_audio_language": "en",
+                "category_id": "22",
+                "tags": ["demo", "clips"],
+                "thumbnails": {"default": {"url": "https://example.com/thumb.jpg"}},
+            },
         ),
     )
 
@@ -217,8 +230,17 @@ def test_orchestrator_runs_phases_1_to_4_and_writes_artifacts(tmp_path: Path):
     assert Path(summary.artifact_paths["semantic_graph_nodes"]).exists()
     assert Path(summary.artifact_paths["semantic_graph_edges"]).exists()
     assert Path(summary.artifact_paths["clip_candidates"]).exists()
+    assert Path(summary.artifact_paths["source_context"]).exists()
+    assert Path(summary.artifact_paths["caption_plan"]).exists()
+    assert Path(summary.artifact_paths["publish_metadata"]).exists()
+    assert Path(summary.artifact_paths["render_plan"]).exists()
 
     clip_candidates_path = Path(summary.artifact_paths["clip_candidates"])
     clip_payload = clip_candidates_path.read_text(encoding="utf-8")
     assert "sg_0002_cand_01" in clip_payload
     assert "\"pool_rank\": 1" in clip_payload
+
+    render_plan_path = Path(summary.artifact_paths["render_plan"])
+    render_payload = render_plan_path.read_text(encoding="utf-8")
+    assert "caption_plan_ref" in render_payload
+    assert "publish_metadata_ref" in render_payload

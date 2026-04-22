@@ -125,7 +125,7 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
 - Qwen serving target is the SGLang service on Phase26 `127.0.0.1:8001`.
 - Node-media prep is always delegated remotely. Do not re-introduce an in-process ffmpeg fallback on either H200 host.
-- Phase 1 H100 backup settings belong only in [docs/runtime/known-good-phase1-h100-backup.env](docs/runtime/known-good-phase1-h100-backup.env), and that file must only adjust memory-sensitive knobs.
+- The old Phase 1 H100 backup env overlay has been intentionally removed from this repo; do not reintroduce or reference `known-good-phase1-h100-backup.env` unless the user explicitly asks for a fresh replacement.
 
 ## Critical Maintenance Rule
 
@@ -145,7 +145,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (4057 symbols, 10021 relationships, 243 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (4023 symbols, 9961 relationships, 243 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

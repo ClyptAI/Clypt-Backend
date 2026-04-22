@@ -52,6 +52,7 @@ class Phase1SidecarOutputs(_StrictModel):
     phase1_visual: VisualPayload
     emotion2vec_payload: EmotionSegmentsPayload
     yamnet_payload: YamnetPayload
+    source_context: dict[str, Any] | None = None
 
 
 __all__ = [

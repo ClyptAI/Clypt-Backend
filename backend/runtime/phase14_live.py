@@ -11,7 +11,7 @@ import time
 from typing import Any, Callable
 
 from backend.phase1_runtime.payloads import Phase1SidecarOutputs
-from backend.pipeline.artifacts import V31RunPaths, build_run_paths, save_json
+from backend.pipeline.artifacts import V31RunPaths, build_run_paths, load_json, save_json
 from backend.pipeline.candidates.build_local_subgraphs import build_local_subgraphs
 from backend.pipeline.candidates.dedupe_candidates import dedupe_clip_candidates
 from backend.pipeline.candidates.runtime import (
@@ -23,6 +23,7 @@ from backend.pipeline.candidates.runtime import (
 from backend.pipeline.candidates.seed_retrieval import retrieve_seed_nodes
 from backend.pipeline.config import V31Config, get_v31_config
 from backend.pipeline.contracts import ClipCandidate, Phase14RunSummary, SemanticGraphEdge, SemanticGraphNode
+from backend.pipeline.render.phase6 import run_phase_6 as compile_phase6_artifacts
 from backend.pipeline.graph.reconcile_edges import reconcile_semantic_edges
 from backend.pipeline.graph.runtime import (
     run_local_semantic_edge_batches,
@@ -116,6 +117,7 @@ class V31LivePhase14Runner:
     flash_model: str = "Qwen/Qwen3.6-35B-A3B"
     storage_client: StorageClient | None = None
     node_media_preparer: NodeMediaPreparerCallable | None = None
+    render_executor: Callable[..., dict[str, Any]] | None = None
     repository: Phase14Repository | None = None
     query_version: str | None = None
     debug_snapshots: bool = False
@@ -136,6 +138,7 @@ class V31LivePhase14Runner:
         flash_model: str = "Qwen/Qwen3.6-35B-A3B",
         storage_client: StorageClient | None = None,
         node_media_preparer: NodeMediaPreparerCallable | None = None,
+        render_executor: Callable[..., dict[str, Any]] | None = None,
         repository: Phase14Repository | None = None,
         query_version: str | None = None,
         debug_snapshots: bool = False,
@@ -148,6 +151,7 @@ class V31LivePhase14Runner:
             flash_model=flash_model,
             storage_client=storage_client,
             node_media_preparer=node_media_preparer,
+            render_executor=render_executor,
             repository=repository,
             query_version=query_version,
             debug_snapshots=debug_snapshots,
@@ -725,6 +729,26 @@ class V31LivePhase14Runner:
                     "candidate_count": payload["final_candidate_count"],
                 },
             )
+
+            phase6 = self._execute_phase(
+                run_id=run_id,
+                job_id=job_id,
+                attempt=attempt,
+                phase_name="phase6",
+                operation=lambda: self.run_phase_6(
+                    paths=paths,
+                    source_url=source_url,
+                    phase1_outputs=phase1_outputs,
+                    canonical_timeline=phase1["canonical_timeline"],
+                    shot_tracklet_index=phase1.get("shot_tracklet_index"),
+                    tracklet_geometry=phase1.get("tracklet_geometry"),
+                    nodes=phase2_nodes,
+                    phase4_result=phase4,
+                ),
+                metric_metadata_builder=lambda payload: {
+                    "clip_count": payload["clip_count"],
+                },
+            )
         except Exception as exc:
             ended_at = datetime.now(UTC)
             total_duration_ms = (time.perf_counter() - run_started) * 1000.0
@@ -775,6 +799,7 @@ class V31LivePhase14Runner:
             phase2_nodes=phase2_nodes,
             phase3_edges=phase3_edges,
             phase4_result=phase4,
+            phase6_result=phase6,
         )
 
     def run_phase_1(self, *, paths: V31RunPaths, phase1_outputs: Phase1SidecarOutputs) -> dict[str, Any]:
@@ -815,11 +840,67 @@ class V31LivePhase14Runner:
         self._save_debug_json(paths.audio_event_timeline, audio_event_timeline.model_dump(mode="json"))
         self._save_debug_json(paths.shot_tracklet_index, shot_tracklet_index.model_dump(mode="json"))
         self._save_debug_json(paths.tracklet_geometry, tracklet_geometry.model_dump(mode="json"))
+        source_context = getattr(phase1_outputs, "source_context", None)
+        if source_context:
+            self._save_debug_json(paths.source_context, source_context)
 
         return {
             "canonical_timeline": canonical_timeline,
             "speech_emotion_timeline": speech_emotion_timeline,
             "audio_event_timeline": audio_event_timeline,
+            "shot_tracklet_index": shot_tracklet_index,
+            "tracklet_geometry": tracklet_geometry,
+        }
+
+    def run_phase_6(
+        self,
+        *,
+        paths: V31RunPaths,
+        source_url: str,
+        phase1_outputs: Phase1SidecarOutputs | None = None,
+        canonical_timeline: Any,
+        shot_tracklet_index: Any,
+        tracklet_geometry: Any,
+        nodes: list[SemanticGraphNode],
+        phase4_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        candidates = list(phase4_result.get("candidates") or [])
+        source_context: dict[str, Any] | None = None
+        if paths.source_context.exists():
+            source_context = load_json(paths.source_context)
+        elif candidates:
+            raise ValueError(
+                "Phase 6 requires persisted source_context.json for candidate packaging metadata."
+            )
+        result = compile_phase6_artifacts(
+            paths=paths,
+            canonical_timeline=canonical_timeline,
+            shot_tracklet_index=shot_tracklet_index,
+            tracklet_geometry=tracklet_geometry,
+            candidates=candidates,
+            nodes=nodes,
+            source_context=source_context,
+        )
+        artifact_paths = dict(result.get("artifact_paths") or {})
+        candidates = list(phase4_result.get("candidates") or [])
+        if self.render_executor is not None and candidates:
+            if phase1_outputs is None:
+                raise ValueError("phase1_outputs is required for Phase 6 render execution.")
+            render_result = self.render_executor(
+                paths=paths,
+                phase1_outputs=phase1_outputs,
+                artifact_paths=artifact_paths,
+            )
+            for output in render_result.get("outputs") or []:
+                clip_id = str(output.get("clip_id") or "").strip()
+                video_gcs_uri = str(output.get("video_gcs_uri") or "").strip()
+                if clip_id and video_gcs_uri:
+                    artifact_paths[f"rendered_{clip_id}.mp4"] = video_gcs_uri
+            result["render_outputs"] = render_result.get("outputs") or []
+        return {
+            "clip_count": len(candidates),
+            "artifact_paths": artifact_paths,
+            "render_outputs": result.get("render_outputs") or [],
         }
 
     def run_phase_2(
@@ -2545,6 +2626,7 @@ class V31LivePhase14Runner:
         phase3_edges: list[Any],
         phase4_candidates: list[Any] | None = None,
         phase4_result: dict[str, Any] | None = None,
+        phase6_result: dict[str, Any] | None = None,
         resumed_phases: tuple[str, ...] = (),
     ) -> Phase14RunSummary:
         if resumed_phases:
@@ -2586,13 +2668,16 @@ class V31LivePhase14Runner:
             final_status="PHASE24_DONE",
             total_duration_ms=total_duration_ms,
         )
+        artifact_paths = paths.existing_artifact_paths()
+        artifact_paths.update(dict((phase6_result or {}).get("artifact_paths") or {}))
         return Phase14RunSummary(
             run_id=run_id,
-            artifact_paths=paths.to_dict() if self.debug_snapshots else {},
+            artifact_paths=artifact_paths,
             metadata={
                 "node_count": len(phase2_nodes),
                 "edge_count": len(phase3_edges),
                 "candidate_count": candidate_count,
+                "phase6_artifacts": dict((phase6_result or {}).get("artifact_paths") or {}),
                 "query_version": self.query_version,
             },
         )

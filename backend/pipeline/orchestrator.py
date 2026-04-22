@@ -14,11 +14,15 @@ from backend.phase1_runtime.payloads import (
 from .artifacts import V31RunPaths, build_run_paths, save_json
 from .config import V31Config, get_v31_config
 from .contracts import (
+    CanonicalTimeline,
     ClipCandidate,
+    ShotTrackletIndex,
     Phase14RunSummary,
     SemanticGraphEdge,
     SemanticGraphNode,
+    TrackletGeometry,
 )
+from .render.phase6 import run_phase_6
 from .timeline.audio_events import build_audio_event_timeline
 from .timeline.emotion_events import build_speech_emotion_timeline
 from .timeline.timeline_builder import build_canonical_timeline
@@ -61,6 +65,7 @@ class V31Phase14RunInputs:
     phase4_extra_prompt_texts: list[str] | None = None
     phase4_subgraph_responses: dict[str, dict] | None = None
     phase4_pool_response: dict | None = None
+    source_context: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -85,8 +90,26 @@ class V31Phase14Orchestrator:
         phase1_outputs = self.run_phase_1(run_id=run_id, source_url=source_url, paths=paths, inputs=inputs)
         phase2_outputs = self.run_phase_2(run_id=run_id, paths=paths, inputs=inputs, phase1_outputs=phase1_outputs)
         phase3_outputs = self.run_phase_3(run_id=run_id, paths=paths, inputs=inputs, phase2_outputs=phase2_outputs)
-        self.run_phase_4(run_id=run_id, paths=paths, inputs=inputs, phase1_outputs=phase1_outputs, phase2_outputs=phase2_outputs, phase3_outputs=phase3_outputs)
-        return Phase14RunSummary(run_id=run_id, artifact_paths=paths.to_dict())
+        phase4_outputs = self.run_phase_4(
+            run_id=run_id,
+            paths=paths,
+            inputs=inputs,
+            phase1_outputs=phase1_outputs,
+            phase2_outputs=phase2_outputs,
+            phase3_outputs=phase3_outputs,
+        )
+        phase6_outputs = self.run_phase_6(
+            run_id=run_id,
+            source_url=source_url,
+            paths=paths,
+            inputs=inputs,
+            phase1_outputs=phase1_outputs,
+            phase2_outputs=phase2_outputs,
+            phase4_outputs=phase4_outputs,
+        )
+        artifact_paths = paths.to_dict()
+        artifact_paths.update(phase6_outputs.get("artifact_paths", {}))
+        return Phase14RunSummary(run_id=run_id, artifact_paths=artifact_paths)
 
     def run_phase_1(self, *, run_id: str, source_url: str, paths: V31RunPaths, inputs: V31Phase14RunInputs) -> dict[str, Any]:
         canonical_timeline = build_canonical_timeline(
@@ -125,6 +148,8 @@ class V31Phase14Orchestrator:
             "canonical_timeline": canonical_timeline,
             "speech_emotion_timeline": speech_emotion_timeline,
             "audio_event_timeline": audio_event_timeline,
+            "shot_tracklet_index": shot_tracklet_index,
+            "tracklet_geometry": tracklet_geometry,
         }
 
     def run_phase_2(self, *, run_id: str, paths: V31RunPaths, inputs: V31Phase14RunInputs, phase1_outputs: dict[str, Any]) -> dict[str, Any]:
@@ -209,7 +234,7 @@ class V31Phase14Orchestrator:
             "long_range_pairs": long_range_pairs,
         }
 
-    def run_phase_4(self, *, run_id: str, paths: V31RunPaths, inputs: V31Phase14RunInputs, phase1_outputs: dict[str, Any], phase2_outputs: dict[str, Any], phase3_outputs: dict[str, Any]) -> None:
+    def run_phase_4(self, *, run_id: str, paths: V31RunPaths, inputs: V31Phase14RunInputs, phase1_outputs: dict[str, Any], phase2_outputs: dict[str, Any], phase3_outputs: dict[str, Any]) -> dict[str, Any]:
         duration_s = 0.0
         turns = phase1_outputs["canonical_timeline"].turns
         if turns:
@@ -282,6 +307,39 @@ class V31Phase14Orchestrator:
                 "deduped_candidate_count": len(deduped_candidates),
                 "final_candidate_count": len(final_candidates),
             },
+        )
+        return {"candidates": final_candidates}
+
+    def run_phase_6(
+        self,
+        *,
+        run_id: str,
+        source_url: str,
+        paths: V31RunPaths,
+        inputs: V31Phase14RunInputs,
+        phase1_outputs: dict[str, Any],
+        phase2_outputs: dict[str, Any],
+        phase4_outputs: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        phase4_outputs = phase4_outputs or {}
+        canonical_timeline = phase1_outputs.get("canonical_timeline")
+        shot_tracklet_index = phase1_outputs.get("shot_tracklet_index", ShotTrackletIndex(tracklets=[]))
+        tracklet_geometry = phase1_outputs.get("tracklet_geometry", TrackletGeometry(tracklets=[]))
+        if not isinstance(canonical_timeline, CanonicalTimeline):
+            canonical_timeline = CanonicalTimeline(
+                words=list(getattr(canonical_timeline, "words", [])) if canonical_timeline is not None else [],
+                turns=list(getattr(canonical_timeline, "turns", [])) if canonical_timeline is not None else [],
+                source_video_url=getattr(canonical_timeline, "source_video_url", source_url) if canonical_timeline is not None else source_url,
+                video_gcs_uri=getattr(canonical_timeline, "video_gcs_uri", None) if canonical_timeline is not None else None,
+            )
+        return run_phase_6(
+            paths=paths,
+            canonical_timeline=canonical_timeline,
+            shot_tracklet_index=shot_tracklet_index,
+            tracklet_geometry=tracklet_geometry,
+            candidates=phase4_outputs.get("candidates", []),
+            nodes=phase2_outputs.get("nodes", []),
+            source_context=inputs.source_context,
         )
 
 

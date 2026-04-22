@@ -8,7 +8,6 @@ This is the code-backed env catalog for the current Phase1 + Phase26 + Modal top
 Canonical baselines:
 
 - [known-good-phase1-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-h200.env)
-- [known-good-phase1-h100-backup.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-h100-backup.env)
 - [known-good-phase26-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-h200.env)
 
 ## 1) Required Core Inputs

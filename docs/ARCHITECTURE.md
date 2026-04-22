@@ -120,10 +120,12 @@ flowchart TD
 - The worker validates that ffmpeg exposes `h264_nvenc` and `h264_cuvid` before processing work.
 - The JSON contract remains submit/poll-compatible, but each request now represents one timeline batch and responses may include optional batch timing metadata.
 
-Future:
+Phase 6 render/export:
 
-- `scripts/modal/render_video_app.py` is the stub for eventual Phase 6 render/export.
-- Phase 6 planning should stay on the Phase26 host; only final render/export should move remote.
+- `scripts/modal/render_video_app.py` is now the Modal submit/poll surface for Phase 6 render/export.
+- `render_video` is the CPU ASGI submit/poll surface.
+- `render_video_job` is the GPU-backed `L40S` worker that stages Phase 6 artifacts, pinned font assets, and runs ffmpeg/libass burn-in.
+- Phase 6 planning stays on the Phase26 host; only final render/export moves remote.
 
 ## 6) Config Invariants
 
@@ -139,11 +141,10 @@ Phase26 host must have:
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_*`
 - local SGLang / OpenAI-compatible generation settings
 
-Phase 1 H100 fallback:
+Phase 1 fallback note:
 
-- `docs/runtime/known-good-phase1-h100-backup.env` is an overlay only
-- it may change memory-sensitive VibeVoice knobs
-- it must not change RF-DETR thresholds, tracker behavior, or semantic defaults
+- the old H100 overlay env file was intentionally removed from this repo
+- if an alternate low-memory Phase 1 profile is needed later, treat it as a fresh, explicit replacement rather than relying on a stale backup baseline
 
 ## 7) Implemented vs Planned
 
@@ -152,7 +153,8 @@ Phase 1 H100 fallback:
   - remote Phase26 enqueue boundary
   - local Phase26 queue + worker + SGLang
   - Modal node-media-prep surface
+  - Modal Phase 6 render/export surface
 - **Planned later**
   - Phase 5 participation grounding on Phase26
-  - Phase 6 render planning on Phase26
-  - Modal final render/export endpoint
+  - richer Phase 5 camera-intent production feeding Phase 6 placement
+  - broader collision heuristics for split seams / overlay exclusion zones

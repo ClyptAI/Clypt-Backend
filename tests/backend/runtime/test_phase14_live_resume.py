@@ -232,6 +232,12 @@ def test_live_phase14_runner_short_circuits_when_phase4_already_succeeded(tmp_pa
     repository.candidates = [_candidate("clip_3"), _candidate("clip_4")]
     log_events: list[dict[str, object]] = []
     runner = _build_runner(tmp_path, repository, log_events)
+    paths = runner.build_run_paths(run_id="run_003")
+    paths.source_context.write_text("{}", encoding="utf-8")
+    paths.caption_plan.write_text("{}", encoding="utf-8")
+    paths.publish_metadata.write_text("{}", encoding="utf-8")
+    paths.render_plan.write_text("{}", encoding="utf-8")
+    paths.captions_ass("clip_real").write_text("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello", encoding="utf-8")
 
     def _unexpected_call(self, **kwargs):
         raise AssertionError("heavy phase should be skipped when phase4 already succeeded")
@@ -248,5 +254,8 @@ def test_live_phase14_runner_short_circuits_when_phase4_already_succeeded(tmp_pa
     )
 
     assert summary.metadata["candidate_count"] == 2
+    assert summary.artifact_paths["source_context"] == str(paths.source_context)
+    assert summary.artifact_paths["captions_clip_real.ass"] == str(paths.captions_ass("clip_real"))
+    assert "captions_clip_001.ass" not in summary.artifact_paths
     skip_events = [event for event in log_events if event["event"] == "phase_skipped_resume"]
     assert {event["phase"] for event in skip_events} >= {"phase2", "phase3", "phase4"}

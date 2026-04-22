@@ -17,7 +17,7 @@ Target shape:
 
 - [scripts/modal/node_media_prep_app.py](/Users/rithvik/Clypt-Backend/scripts/modal/node_media_prep_app.py)
 
-Future sibling:
+Phase 6 sibling:
 
 - [scripts/modal/render_video_app.py](/Users/rithvik/Clypt-Backend/scripts/modal/render_video_app.py)
 
@@ -94,4 +94,5 @@ Important:
 - `RemoteNodeMediaPrepClient` now implements submit-and-poll so Phase26 can pipeline batch completion into immediate multimodal embedding while still producing one final ordered result per node.
 - Only `node_media_prep_job` keeps a warm GPU. The public `node_media_prep` route should not reserve an `L40S`.
 - This is a warm serverless surface, not a permanently pinned VM.
-- Future Phase 6 render/export should follow the same submit-and-poll pattern if render duration can cross Modal's webhook timeout boundary, but do not wire that endpoint into runtime until the Phase 6 contract is finalized.
+- Phase 6 render/export now follows the same submit-and-poll pattern through `scripts/modal/render_video_app.py`.
+- Render deploys additionally require `PHASE6_RENDER_AUTH_TOKEN` (or `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`) plus a pinned font-asset directory exposed to the worker via `CLYPT_PHASE6_FONT_ASSET_DIR`.

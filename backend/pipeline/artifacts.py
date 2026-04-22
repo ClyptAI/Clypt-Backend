@@ -28,6 +28,14 @@ class V31RunPaths:
         return self.root / self.run_id / "candidates"
 
     @property
+    def render_dir(self) -> Path:
+        return self.root / self.run_id / "render"
+
+    @property
+    def captions_dir(self) -> Path:
+        return self.render_dir / "captions"
+
+    @property
     def canonical_timeline(self) -> Path:
         return self.timeline_dir / "canonical_timeline.json"
 
@@ -58,6 +66,22 @@ class V31RunPaths:
     @property
     def clip_candidates(self) -> Path:
         return self.candidates_dir / "clip_candidates.json"
+
+    @property
+    def source_context(self) -> Path:
+        return self.render_dir / "source_context.json"
+
+    @property
+    def caption_plan(self) -> Path:
+        return self.render_dir / "caption_plan.json"
+
+    @property
+    def publish_metadata(self) -> Path:
+        return self.render_dir / "publish_metadata.json"
+
+    @property
+    def render_plan(self) -> Path:
+        return self.render_dir / "render_plan.json"
 
     @property
     def turn_neighborhoods_debug(self) -> Path:
@@ -91,12 +115,17 @@ class V31RunPaths:
     def phase_4_summary(self) -> Path:
         return self.candidates_dir / "phase_4_summary.json"
 
+    def captions_ass(self, clip_id: str) -> Path:
+        return self.captions_dir / f"{clip_id}.ass"
+
     def ensure_dirs(self) -> None:
         for path in (
             self.timeline_dir,
             self.semantics_dir,
             self.graph_dir,
             self.candidates_dir,
+            self.render_dir,
+            self.captions_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -111,7 +140,23 @@ class V31RunPaths:
             "semantic_graph_nodes": str(self.semantic_graph_nodes),
             "semantic_graph_edges": str(self.semantic_graph_edges),
             "clip_candidates": str(self.clip_candidates),
+            "source_context": str(self.source_context),
+            "caption_plan": str(self.caption_plan),
+            "publish_metadata": str(self.publish_metadata),
+            "render_plan": str(self.render_plan),
+            "captions_dir": str(self.captions_dir),
         }
+
+    def existing_artifact_paths(self) -> dict[str, str]:
+        artifact_paths: dict[str, str] = {}
+        for key, raw_path in self.to_dict().items():
+            path = Path(raw_path)
+            if path.exists():
+                artifact_paths[key] = str(path)
+        if self.captions_dir.exists():
+            for ass_path in sorted(self.captions_dir.glob("*.ass")):
+                artifact_paths[f"captions_{ass_path.stem}.ass"] = str(ass_path)
+        return artifact_paths
 
 
 def build_run_paths(*, output_root: Path, run_id: str) -> V31RunPaths:
