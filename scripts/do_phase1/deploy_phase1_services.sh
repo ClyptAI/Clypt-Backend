@@ -70,6 +70,19 @@ import tensorrt
 
 print(f"[deploy-phase1] TensorRT Python runtime ready: {tensorrt.__version__}")
 PY
+  python - <<'PY'
+from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
+from backend.phase1_runtime.visual_config import VisualPipelineConfig
+
+config = VisualPipelineConfig.from_env()
+detector = TensorRTDetector(config)
+engine_path = detector._ensure_engine()
+if not engine_path.exists():
+    raise SystemExit(
+        f"[deploy-phase1] visual TensorRT engine missing after prewarm: {engine_path}"
+    )
+print(f"[deploy-phase1] prewarmed visual TensorRT engine at {engine_path}")
+PY
 fi
 
 python - <<'PY'

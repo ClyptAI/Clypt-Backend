@@ -4,9 +4,6 @@ Active specification documents for current and planned backend work.
 
 ## Active Specs
 
-- [2026-04-21_phase1_visual_zero_copy_overlap_batching_spec.md](2026-04-21_phase1_visual_zero_copy_overlap_batching_spec.md)
-  Planned Phase1 visual speed pass: eliminate the GPU-to-CPU-to-GPU detector input path, overlap decode and TensorRT inference with bounded staging queues, and benchmark static TensorRT batches `16`, `24`, and `32` without changing visual semantics.
-
 - [2026-04-20_phase24_node_media_prep_batched_l40s_spec.md](2026-04-20_phase24_node_media_prep_batched_l40s_spec.md)
   Implemented Phase24 timeline-batched node-media-prep with per-batch submit/poll jobs, pipelined multimodal embedding, hybrid fast-seek-plus-precise-trim extraction, and Modal L40S as the active media-prep target.
 

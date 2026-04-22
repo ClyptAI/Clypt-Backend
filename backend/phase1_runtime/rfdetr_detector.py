@@ -1,7 +1,7 @@
-"""RF-DETR Small person detector for Phase 1 visual extraction.
+"""RF-DETR person detector for Phase 1 visual extraction.
 
 Responsibilities:
-- Load RFDETRSmall on CUDA
+- Load the configured RF-DETR model on CUDA
 - optimize_for_inference with FP16
 - Emit per-frame sv.Detections filtered to person class only
 - Remain stateless across frames
@@ -56,7 +56,7 @@ def _require_cuda() -> None:
 
 
 class RFDETRPersonDetector:
-    """Wraps RFDETRSmall for person-only detection with CUDA/FP16."""
+    """Wraps the configured RF-DETR model for person-only detection with CUDA/FP16."""
 
     def __init__(self, config: VisualPipelineConfig) -> None:
         self._config = config
@@ -75,7 +75,10 @@ class RFDETRPersonDetector:
         _require_cuda()
 
         try:
-            from rfdetr import RFDETRSmall
+            if self._config.detector_model == "nano":
+                from rfdetr import RFDETRNano as RFDETRModel
+            else:
+                from rfdetr import RFDETRSmall as RFDETRModel
         except ImportError as exc:
             raise RuntimeError(
                 "rfdetr is required for RF-DETR visual extraction. "
@@ -84,13 +87,14 @@ class RFDETRPersonDetector:
 
         self._device = "cuda"
         logger.info(
-            "Loading RFDETRSmall on %s (resolution=%d, backend=%s)",
+            "Loading RFDETR%s on %s (resolution=%d, backend=%s)",
+            self._config.detector_model.capitalize(),
             self._device,
             self._config.detector_resolution,
             self._config.detector_backend,
         )
 
-        model = RFDETRSmall(resolution=self._config.detector_resolution)
+        model = RFDETRModel(resolution=self._config.detector_resolution)
 
         torch.backends.cudnn.benchmark = True
 

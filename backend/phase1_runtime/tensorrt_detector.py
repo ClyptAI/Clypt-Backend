@@ -1,7 +1,7 @@
-"""TensorRT-based RF-DETR Small person detector for Phase 1 visual extraction.
+"""TensorRT-based RF-DETR person detector for Phase 1 visual extraction.
 
 Full pipeline:
-1. Export RFDETRSmall to ONNX via rfdetr's model.export()
+1. Export the configured RF-DETR model to ONNX via rfdetr's model.export()
 2. Convert ONNX to TensorRT engine via trtexec (must run on target GPU)
 3. Load the .engine and run native TensorRT FP16 inference
 4. Post-process raw outputs into sv.Detections filtered to person class
@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -33,7 +33,7 @@ _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 class TensorRTDetector:
-    """Runs RF-DETR Small person detection via a native TensorRT engine."""
+    """Runs the configured RF-DETR person detector via a native TensorRT engine."""
 
     def __init__(self, config: VisualPipelineConfig) -> None:
         self._config = config
@@ -66,16 +66,23 @@ class TensorRTDetector:
         onnx_path = onnx_dir / "inference_model.onnx"
 
         if not onnx_path.exists():
-            logger.info("Exporting RFDETRSmall to ONNX at %s ...", onnx_path)
+            logger.info(
+                "Exporting RFDETR%s to ONNX at %s ...",
+                self._config.detector_model.capitalize(),
+                onnx_path,
+            )
             try:
-                from rfdetr import RFDETRSmall
+                if self._config.detector_model == "nano":
+                    from rfdetr import RFDETRNano as RFDETRModel
+                else:
+                    from rfdetr import RFDETRSmall as RFDETRModel
             except ImportError as exc:
                 raise RuntimeError(
                     "rfdetr is required for TensorRT engine build. "
                     "Install with: pip install 'rfdetr[onnx]'"
                 ) from exc
 
-            model = RFDETRSmall(resolution=self._config.detector_resolution)
+            model = RFDETRModel(resolution=self._config.detector_resolution)
             model.export(
                 output_dir=str(onnx_dir),
                 batch_size=self._config.detector_batch_size,
@@ -99,29 +106,11 @@ class TensorRTDetector:
         return engine_path
 
     def _convert_onnx_to_engine(self, onnx_path: Path, engine_path: Path) -> None:
-        """Convert an ONNX model to a TensorRT engine using rfdetr's trtexec
-        wrapper if available, otherwise fall back to the trtexec CLI."""
-        try:
-            from argparse import Namespace
+        """Convert an ONNX model to a TensorRT engine via an explicit CLI build.
 
-            from rfdetr.export.tensorrt import trtexec
-
-            args = Namespace(verbose=True, profile=False, dry_run=False)
-            trtexec(str(onnx_path), args)
-
-            built = onnx_path.with_suffix(".engine")
-            if built.exists() and built != engine_path:
-                built.rename(engine_path)
-            elif not engine_path.exists():
-                raise RuntimeError(
-                    f"rfdetr trtexec completed but engine not found at {engine_path}"
-                )
-            return
-        except ImportError:
-            logger.info(
-                "rfdetr.export.tensorrt not available, falling back to trtexec CLI."
-            )
-
+        We intentionally bypass rfdetr's helper wrapper so bootstrap and first-run
+        engine creation do not also pay for an inference benchmark pass.
+        """
         import subprocess
 
         cmd = [
@@ -129,6 +118,8 @@ class TensorRTDetector:
             f"--onnx={onnx_path}",
             f"--saveEngine={engine_path}",
             "--fp16",
+            "--skipInference",
+            "--memPoolSize=workspace:4096",
             f"--optShapes=input:{self._config.detector_batch_size}x3"
             f"x{self._config.detector_resolution}x{self._config.detector_resolution}",
             f"--minShapes=input:1x3"
@@ -142,6 +133,10 @@ class TensorRTDetector:
                 f"trtexec failed (exit {result.returncode}):\n"
                 f"stdout: {result.stdout[-2000:]}\n"
                 f"stderr: {result.stderr[-2000:]}"
+            )
+        if not engine_path.exists():
+            raise RuntimeError(
+                f"trtexec completed without writing TensorRT engine to {engine_path}"
             )
 
     # ------------------------------------------------------------------
@@ -221,35 +216,14 @@ class TensorRTDetector:
             }
             self._context.set_tensor_address(name, buf.data_ptr())
 
-    def _preprocess_batch(self, frames: list[np.ndarray] | Any):
-        """Normalize a host or CUDA frame batch and return an NCHW CUDA tensor."""
+    def _preprocess_batch(self, frames: list[np.ndarray]):
+        """Move frames to CUDA, normalize there, and return an NCHW tensor."""
         import torch
 
         res = self._config.detector_resolution
-        if hasattr(frames, "device") and hasattr(frames, "ndim"):
-            batch = frames
-            device_type = getattr(batch.device, "type", str(batch.device))
-            if device_type != "cuda":
-                batch = batch.to(device="cuda", non_blocking=True)
-            if batch.ndim != 4:
-                raise RuntimeError(
-                    "Expected detector batch tensor with 4 dimensions, "
-                    f"got {tuple(batch.shape)!r}."
-                )
-            if batch.shape[1] == 3:
-                batch = batch.contiguous()
-            elif batch.shape[-1] == 3:
-                batch = batch.permute(0, 3, 1, 2).contiguous()
-            else:
-                raise RuntimeError(
-                    "Expected RGB tensor batch with channel dimension 3, "
-                    f"got {tuple(batch.shape)!r}."
-                )
-            batch = batch.to(dtype=torch.float32)
-        else:
-            batch_np = np.stack(frames, axis=0)
-            batch = torch.from_numpy(batch_np).to(device="cuda", dtype=torch.float32)
-            batch = batch.permute(0, 3, 1, 2).contiguous()
+        batch_np = np.stack(frames, axis=0)
+        batch = torch.from_numpy(batch_np).to(device="cuda", dtype=torch.float32)
+        batch = batch.permute(0, 3, 1, 2).contiguous()
         if batch.shape[-2:] != (res, res):
             batch = torch.nn.functional.interpolate(
                 batch,
@@ -323,15 +297,14 @@ class TensorRTDetector:
 
     def detect_batch(
         self,
-        frames: list[np.ndarray] | Any,
+        frames: list[np.ndarray],
         *,
         orig_sizes: list[tuple[int, int]] | None = None,
     ) -> list:
-        """Run person detection on a host or CUDA RGB frame batch."""
+        """Run person detection on a batch of HWC uint8 RGB numpy frames."""
         if self._context is None:
             raise RuntimeError("TensorRT detector not loaded. Call load() first.")
-        total_frames = int(frames.shape[0]) if hasattr(frames, "shape") else len(frames)
-        if orig_sizes is not None and len(orig_sizes) != total_frames:
+        if orig_sizes is not None and len(orig_sizes) != len(frames):
             raise ValueError("orig_sizes must match the number of frames")
 
         import torch
@@ -339,31 +312,18 @@ class TensorRTDetector:
         batch_size = self._config.detector_batch_size
         all_detections = []
 
-        for batch_start in range(0, total_frames, batch_size):
+        for batch_start in range(0, len(frames), batch_size):
             batch = frames[batch_start: batch_start + batch_size]
             batch_orig_sizes = (
                 orig_sizes[batch_start: batch_start + batch_size]
                 if orig_sizes is not None
-                else [
-                    (int(f.shape[-2]), int(f.shape[-1])) if hasattr(f, "shape") and len(f.shape) == 3 and int(f.shape[0]) == 3
-                    else (int(f.shape[0]), int(f.shape[1]))
-                    for f in batch
-                ]
+                else [(f.shape[0], f.shape[1]) for f in batch]
             )
-            actual_batch_len = int(batch.shape[0]) if hasattr(batch, "shape") else len(batch)
+            actual_batch_len = len(batch)
 
             if actual_batch_len < batch_size:
-                if hasattr(batch, "device") and hasattr(batch, "shape"):
-                    pad_shape = (batch_size - actual_batch_len, *batch.shape[1:])
-                    pad_frames = torch.zeros(
-                        pad_shape,
-                        dtype=batch.dtype,
-                        device=batch.device,
-                    )
-                    batch = torch.cat((batch, pad_frames), dim=0)
-                else:
-                    pad_frame = np.zeros_like(batch[0])
-                    batch = batch + [pad_frame] * (batch_size - actual_batch_len)
+                pad_frame = np.zeros_like(batch[0])
+                batch = batch + [pad_frame] * (batch_size - actual_batch_len)
 
             input_tensor = self._preprocess_batch(batch)
 

@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import os
 import sys
-import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 
 # ---------- visual_config tests ----------
@@ -30,6 +30,7 @@ class TestVisualPipelineConfig:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig.from_env()
+        assert config.detector_model == "nano"
         assert config.detector_backend == "tensorrt_fp16"
         assert config.detector_batch_size == 16
         assert config.detection_threshold == pytest.approx(0.35)
@@ -40,26 +41,18 @@ class TestVisualPipelineConfig:
         assert config.use_tensorrt is True
         assert config.is_cuda_required is True
         assert config.tensorrt_engine_dir == "backend/outputs/tensorrt_engines"
-        assert config.decode_queue_depth == 2
-        assert config.decode_buffer_chunk_size == 3
-        assert config.decode_hw_accel_device == "cuda:0"
-        assert config.decode_hw_device_index == 0
-        assert config.benchmark_batch_sizes == (16, 24, 32)
 
     def test_from_env_custom(self, monkeypatch):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         monkeypatch.setenv("CLYPT_PHASE1_VISUAL_BACKEND", "tensorrt_fp16")
+        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_MODEL", "small")
         monkeypatch.setenv("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "8")
         monkeypatch.setenv("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.5")
         monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SHAPE", "640")
-        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_DECODE_QUEUE_DEPTH", "4")
-        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_DECODE_BUFFER_CHUNKS", "5")
-        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_DECODE_HWACCEL_DEVICE", "cuda:1")
-        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_DECODE_HW_DEVICE_INDEX", "1")
-        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_BENCHMARK_BATCH_SIZES", "16, 32")
 
         config = VisualPipelineConfig.from_env()
+        assert config.detector_model == "small"
         assert config.detector_backend == "tensorrt_fp16"
         assert config.detector_batch_size == 8
         assert config.detection_threshold == pytest.approx(0.5)
@@ -67,11 +60,6 @@ class TestVisualPipelineConfig:
         assert config.use_fp16 is True
         assert config.use_tensorrt is True
         assert config.is_cuda_required is True
-        assert config.decode_queue_depth == 4
-        assert config.decode_buffer_chunk_size == 5
-        assert config.decode_hw_accel_device == "cuda:1"
-        assert config.decode_hw_device_index == 1
-        assert config.benchmark_batch_sizes == (16, 32)
 
     def test_from_env_rejects_cpu_decode_backend(self, monkeypatch):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
@@ -90,6 +78,7 @@ class TestVisualPipelineConfig:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig(
+            detector_model="nano",
             detector_backend="tensorrt_fp16",
             detector_batch_size=4,
             detection_threshold=0.35,
@@ -100,7 +89,7 @@ class TestVisualPipelineConfig:
             frame_decode_backend="gpu",
             tensorrt_engine_dir="/tmp/engines",
         )
-        expected = Path("/tmp/engines/rfdetr_small_b4_r560_fp16.engine")
+        expected = Path("/tmp/engines/rfdetr_nano_b4_r560_fp16.engine")
         assert config.tensorrt_engine_path == expected
 
     def test_tensorrt_engine_dir_from_env(self, monkeypatch):
@@ -116,22 +105,15 @@ class TestVisualPipelineConfig:
 
 
 class TestFrameDecode:
-    def test_select_hw_video_decoder(self):
-        from backend.phase1_runtime.frame_decode import _select_hw_video_decoder
-
-        assert _select_hw_video_decoder(codec_name="h264") == "h264_cuvid"
-        with pytest.raises(RuntimeError, match="Unsupported video codec"):
-            _select_hw_video_decoder(codec_name="unknown_codec")
-
     def test_batch_frames_groups_correctly(self):
         from backend.phase1_runtime.frame_decode import DecodedFrame, batch_frames
 
         frames = [
             DecodedFrame(
                 frame_idx=i,
+                rgb=np.zeros((2, 2, 3), dtype=np.uint8),
                 source_width=2,
                 source_height=2,
-                rgb=np.zeros((2, 2, 3), dtype=np.uint8),
             )
             for i in range(7)
         ]
@@ -154,9 +136,9 @@ class TestFrameDecode:
         frames = [
             DecodedFrame(
                 frame_idx=i,
+                rgb=np.zeros((1, 1, 3), dtype=np.uint8),
                 source_width=1,
                 source_height=1,
-                rgb=np.zeros((1, 1, 3), dtype=np.uint8),
             )
             for i in range(6)
         ]
@@ -172,80 +154,130 @@ class TestFrameDecode:
         with pytest.raises(ValueError, match="only 'gpu' is supported"):
             next(decode_video_frames(video_path=video, decode_backend="cpu"))
 
-    def test_decode_video_frame_batches_uses_streamreader_cuda_hw_decoder_and_resize(self, monkeypatch, tmp_path: Path):
-        from backend.phase1_runtime.frame_decode import decode_video_frame_batches
+    def test_decode_video_frames_uses_nv12_then_rgb24_filter(self, monkeypatch, tmp_path: Path):
+        from backend.phase1_runtime.frame_decode import decode_video_frames
 
         video = tmp_path / "sample.mp4"
         video.write_bytes(b"not-a-real-video")
 
         monkeypatch.setattr(
-            "backend.phase1_runtime.frame_decode._probe_video_stream_info",
-            lambda **_: (4, 3, "h264"),
-        )
-        monkeypatch.setattr(
-            "backend.phase1_runtime.frame_decode._yuv_to_rgb_cuda",
-            lambda frames: frames,
+            "backend.phase1_runtime.frame_decode._probe_frame_dimensions",
+            lambda **_: (2, 2),
         )
 
-        class _FakeChunk:
-            def __init__(self, array):
-                self._array = np.asarray(array)
-                self.device = types.SimpleNamespace(type="cuda")
-
-            @property
-            def shape(self):
-                return self._array.shape
-
-            def __getitem__(self, item):
-                return _FakeChunk(self._array[item])
-
-        captured: dict[str, object] = {}
-
-        class _FakeStreamReader:
-            def __init__(self, src):
-                captured["src"] = src
+        class _DummyStdout:
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
                 self._served = False
 
-            def add_video_stream(self, *args, **kwargs):
-                captured["args"] = args
-                captured["kwargs"] = kwargs
-
-            def fill_buffer(self):
-                return 0 if not self._served else 1
-
-            def pop_chunks(self):
+            def read(self, _n: int) -> bytes:
                 if self._served:
-                    return (None,)
+                    return b""
                 self._served = True
-                return (_FakeChunk(np.zeros((2, 3, 2, 2), dtype=np.uint8)),)
+                return self._payload
 
-        fake_io = types.SimpleNamespace(StreamReader=_FakeStreamReader)
-        monkeypatch.setitem(sys.modules, "torchaudio", types.SimpleNamespace(io=fake_io))
-        monkeypatch.setitem(sys.modules, "torchaudio.io", fake_io)
+            def close(self) -> None:
+                return None
 
-        batches = list(
-            decode_video_frame_batches(
+        class _DummyStderr:
+            def read(self) -> bytes:
+                return b""
+
+            def close(self) -> None:
+                return None
+
+        class _DummyProcess:
+            def __init__(self, payload: bytes) -> None:
+                self.stdout = _DummyStdout(payload)
+                self.stderr = _DummyStderr()
+                self.returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                return self.returncode
+
+        captured_cmd: list[str] = []
+
+        def _fake_popen(cmd, stdout=None, stderr=None):  # noqa: ARG001
+            captured_cmd.extend(cmd)
+            return _DummyProcess(payload=(b"\x00" * (2 * 2 * 3)))
+
+        monkeypatch.setattr("backend.phase1_runtime.frame_decode.subprocess.Popen", _fake_popen)
+
+        frames = list(decode_video_frames(video_path=video, decode_backend="gpu"))
+        assert len(frames) == 1
+        vf_index = captured_cmd.index("-vf")
+        assert captured_cmd[vf_index + 1] == "hwdownload,format=nv12,format=rgb24"
+
+    def test_decode_video_frames_can_resize_on_gpu_and_preserve_source_dimensions(self, monkeypatch, tmp_path: Path):
+        from backend.phase1_runtime.frame_decode import decode_video_frames
+
+        video = tmp_path / "sample.mp4"
+        video.write_bytes(b"not-a-real-video")
+
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode._probe_frame_dimensions",
+            lambda **_: (4, 3),
+        )
+
+        class _DummyStdout:
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
+                self._served = False
+
+            def read(self, _n: int) -> bytes:
+                if self._served:
+                    return b""
+                self._served = True
+                return self._payload
+
+            def close(self) -> None:
+                return None
+
+        class _DummyStderr:
+            def read(self) -> bytes:
+                return b""
+
+            def close(self) -> None:
+                return None
+
+        class _DummyProcess:
+            def __init__(self, payload: bytes) -> None:
+                self.stdout = _DummyStdout(payload)
+                self.stderr = _DummyStderr()
+                self.returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                return self.returncode
+
+        captured_cmd: list[str] = []
+
+        def _fake_popen(cmd, stdout=None, stderr=None):  # noqa: ARG001
+            captured_cmd.extend(cmd)
+            return _DummyProcess(payload=(b"\x00" * (2 * 2 * 3)))
+
+        monkeypatch.setattr("backend.phase1_runtime.frame_decode.subprocess.Popen", _fake_popen)
+
+        frames = list(
+            decode_video_frames(
                 video_path=video,
-                batch_size=2,
                 decode_backend="gpu",
                 target_width=2,
                 target_height=2,
-                buffer_chunk_size=4,
-                hw_accel_device="cuda:0",
-                hw_device_index=0,
             )
         )
 
-        assert len(batches) == 1
-        assert batches[0].frame_indices == (0, 1)
-        assert batches[0].source_width == 4
-        assert batches[0].source_height == 3
-        assert captured["src"] == str(video)
-        assert captured["args"] == (2,)
-        assert captured["kwargs"]["decoder"] == "h264_cuvid"
-        assert captured["kwargs"]["decoder_option"] == {"gpu": "0", "resize": "2x2"}
-        assert captured["kwargs"]["hw_accel"] == "cuda:0"
-        assert captured["kwargs"]["buffer_chunk_size"] == 4
+        assert len(frames) == 1
+        assert frames[0].rgb.shape == (2, 2, 3)
+        assert frames[0].source_width == 4
+        assert frames[0].source_height == 3
+        vf_index = captured_cmd.index("-vf")
+        assert captured_cmd[vf_index + 1] == "scale_cuda=2:2,hwdownload,format=nv12,format=rgb24"
 
 
 # ---------- rfdetr_detector tests ----------
@@ -278,9 +310,8 @@ class TestRFDETRPersonDetector:
     def test_require_cuda_fails_when_unavailable(self):
         from backend.phase1_runtime.rfdetr_detector import _require_cuda
 
-        fake_torch = types.SimpleNamespace(
-            cuda=types.SimpleNamespace(is_available=lambda: False)
-        )
+        fake_torch = MagicMock()
+        fake_torch.cuda.is_available.return_value = False
         with patch.dict(sys.modules, {"torch": fake_torch}):
             with pytest.raises(RuntimeError, match="CUDA is required"):
                 _require_cuda()
@@ -332,6 +363,7 @@ class TestTensorRTDetector:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         return VisualPipelineConfig(
+            detector_model="nano",
             detector_backend="tensorrt_fp16",
             detector_batch_size=2,
             detection_threshold=0.35,
@@ -367,14 +399,10 @@ class TestTensorRTDetector:
                 self.dtype = self._array.dtype
 
             @property
-            def ndim(self):
-                return self._array.ndim
-
-            @property
             def shape(self):
                 return self._array.shape
 
-            def to(self, device=None, dtype=None, non_blocking=None):  # noqa: ARG002
+            def to(self, device=None, dtype=None):
                 return FakeTensor(
                     self._array.astype(dtype or self._array.dtype, copy=False),
                     device=device or self.device,
@@ -425,15 +453,6 @@ class TestTensorRTDetector:
         assert batch.device == "cuda"
         assert batch.dtype == np.float32
 
-        cuda_frames = FakeTensor(
-            np.zeros((2, 3, 560, 560), dtype=np.uint8),
-            device=types.SimpleNamespace(type="cuda"),
-        )
-        cuda_batch = det._preprocess_batch(cuda_frames)
-        assert cuda_batch.shape == (2, 3, 560, 560)
-        assert getattr(cuda_batch.device, "type", cuda_batch.device) == "cuda"
-        assert cuda_batch.dtype == np.float32
-
     def test_ensure_engine_reuses_existing(self, tmp_path):
         from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
 
@@ -445,6 +464,29 @@ class TestTensorRTDetector:
 
         result = det._ensure_engine()
         assert result == engine_path
+
+    def test_convert_onnx_to_engine_uses_skip_inference_cli(self, tmp_path, monkeypatch):
+        from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
+
+        config = self._make_tensorrt_config(tmp_path)
+        det = TensorRTDetector(config)
+        onnx_path = tmp_path / "model.onnx"
+        onnx_path.write_bytes(b"onnx")
+        engine_path = tmp_path / "engine.engine"
+        captured: dict[str, list[str]] = {}
+
+        def _fake_run(cmd, capture_output, text, check):  # noqa: ARG001
+            captured["cmd"] = cmd
+            engine_path.write_bytes(b"engine")
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+
+        det._convert_onnx_to_engine(onnx_path, engine_path)
+
+        assert engine_path.exists()
+        assert "--skipInference" in captured["cmd"]
+        assert f"--saveEngine={engine_path}" in captured["cmd"]
 
     def test_unload_clears_state(self, tmp_path):
         from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
@@ -673,6 +715,7 @@ class TestDetectorFactory:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig(
+            detector_model="nano",
             detector_backend="pytorch_cuda_fp16",
             detector_batch_size=4,
             detection_threshold=0.35,
@@ -692,6 +735,7 @@ class TestDetectorFactory:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig(
+            detector_model="nano",
             detector_backend="tensorrt_fp16",
             detector_batch_size=4,
             detection_threshold=0.35,
@@ -707,115 +751,6 @@ class TestDetectorFactory:
 
 
 # ---------- Integration: visual extractor with injected tracker_runner ----------
-
-
-class TestVisualRuntimePipeline:
-    def test_rfdetr_pipeline_uses_gpu_batches_and_reports_queue_metrics(self, monkeypatch, tmp_path):
-        from backend.phase1_runtime.visual import _run_rfdetr_tracking_pipeline
-        from backend.phase1_runtime.visual_config import VisualPipelineConfig
-
-        config = VisualPipelineConfig(
-            detector_backend="tensorrt_fp16",
-            detector_batch_size=2,
-            detection_threshold=0.35,
-            detector_resolution=560,
-            tracker_backend="bytetrack",
-            tracker_lost_buffer=30,
-            tracker_match_threshold=0.8,
-            frame_decode_backend="gpu",
-            tensorrt_engine_dir=str(tmp_path / "engines"),
-            decode_queue_depth=2,
-            decode_buffer_chunk_size=3,
-            decode_hw_accel_device="cuda:0",
-            decode_hw_device_index=0,
-            benchmark_batch_sizes=(16, 24, 32),
-        )
-
-        fake_frames = types.SimpleNamespace(shape=(2, 3, 560, 560))
-        fake_batch = types.SimpleNamespace(
-            frame_indices=(0, 1),
-            frames=fake_frames,
-            source_width=1920,
-            source_height=1080,
-        )
-
-        class FakeDetector:
-            def __init__(self):
-                self.metrics = types.SimpleNamespace(
-                    frames_processed=2,
-                    mean_detector_latency_ms=4.5,
-                    total_detector_ms=9.0,
-                    warmup_ms=1.0,
-                )
-                self.seen_frames = None
-
-            def load(self):
-                return None
-
-            def detect_batch(self, frames, *, orig_sizes=None):
-                self.seen_frames = frames
-                assert orig_sizes == [(1080, 1920), (1080, 1920)]
-                return ["det0", "det1"]
-
-            def unload(self):
-                return None
-
-        class FakeTracker:
-            def __init__(self, _config):
-                self.metrics = types.SimpleNamespace(mean_tracker_latency_ms=1.0)
-
-            def initialize(self, frame_rate):
-                assert frame_rate > 0
-
-            def update(self, frame_idx, detections):
-                assert detections in {"det0", "det1"}
-                return [
-                    types.SimpleNamespace(
-                        frame_idx=frame_idx,
-                        track_id=frame_idx + 1,
-                        class_id=0,
-                        confidence=0.9,
-                        x1=10.0,
-                        y1=20.0,
-                        x2=30.0,
-                        y2=40.0,
-                    )
-                ]
-
-        fake_detector = FakeDetector()
-        monkeypatch.setattr(
-            "backend.phase1_runtime.visual._make_detector",
-            lambda _config: fake_detector,
-        )
-        monkeypatch.setattr(
-            "backend.phase1_runtime.frame_decode.decode_video_frame_batches",
-            lambda **_: iter([fake_batch]),
-        )
-        monkeypatch.setattr(
-            "backend.phase1_runtime.tracker_runtime.ByteTrackTrackerRuntime",
-            FakeTracker,
-        )
-        monkeypatch.setitem(sys.modules, "cv2", types.SimpleNamespace(
-            CAP_PROP_FPS=5,
-            CAP_PROP_FRAME_COUNT=7,
-            VideoCapture=lambda _path: types.SimpleNamespace(
-                get=lambda prop: 30.0 if prop == 5 else 2,
-                release=lambda: None,
-            ),
-        ))
-
-        tracks, metrics = _run_rfdetr_tracking_pipeline(
-            video_path=tmp_path / "sample.mp4",
-            config=config,
-        )
-
-        assert len(tracks) == 2
-        assert fake_detector.seen_frames is fake_frames
-        assert metrics["frames_processed"] == 2
-        assert metrics["decode_queue_depth"] == 2
-        assert metrics["max_decode_queue_depth_observed"] >= 1
-        assert "mean_decode_batch_latency_ms" in metrics
-        assert "mean_decode_queue_wait_ms" in metrics
 
 
 class TestVisualExtractorArtifactContract:
@@ -839,7 +774,7 @@ class TestVisualExtractorArtifactContract:
 
         ext = self._make_extractor(tracks=[])
         payload = ext.extract(video_path=workspace.video_path, workspace=workspace)
-        assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_small_bytetrack"
+        assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_nano_bytetrack"
 
     def test_person_detections_schema_stable(self, tmp_path: Path):
         from backend.phase1_runtime.models import Phase1Workspace

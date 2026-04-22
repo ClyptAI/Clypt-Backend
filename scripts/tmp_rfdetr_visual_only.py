@@ -64,14 +64,16 @@ def _run_visual_once(*, video_path: Path, work_root: Path, run_id: str, config: 
     started = time.perf_counter()
     payload = extractor.extract(video_path=video_path, workspace=workspace)
     wall_ms = (time.perf_counter() - started) * 1000.0
+    shot_changes = list(payload.get("shot_changes") or [])
+    tracking_metrics = dict(payload.get("tracking_metrics") or {})
     return {
         "run_id": run_id,
         "batch_size": config.detector_batch_size,
         "wall_ms": round(wall_ms, 1),
-        "tracking_metrics": payload["tracking_metrics"],
+        "tracking_metrics": tracking_metrics,
         "track_rows": len(payload["tracks"]),
         "person_segments": len(payload["person_detections"]),
-        "shot_count": len(payload["shot_boundaries"]),
+        "shot_count": int(tracking_metrics.get("shot_count", len(shot_changes))),
     }
 
 

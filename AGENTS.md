@@ -100,6 +100,7 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - VibeVoice at `POST /tasks/vibevoice-asr`
   - visual extraction at `POST /tasks/visual-extract`
 - Current Phase 1 visual settings must stay intact unless the user explicitly approves retuning:
+  - `CLYPT_PHASE1_VISUAL_MODEL=nano`
   - `tensorrt_fp16`
   - batch size `16`
   - threshold `0.35`
@@ -144,7 +145,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (3991 symbols, 9909 relationships, 243 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (4057 symbols, 10021 relationships, 243 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

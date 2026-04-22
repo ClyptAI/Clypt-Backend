@@ -46,7 +46,7 @@ def test_remote_phase1_visual_client_extract(monkeypatch: pytest.MonkeyPatch, tm
                 "face_detections": [],
                 "visual_identities": [],
                 "mask_stability_signals": [],
-                "tracking_metrics": {"tracker_backend": "rfdetr_small_bytetrack"},
+                "tracking_metrics": {"tracker_backend": "rfdetr_nano_bytetrack"},
             }
         )
 
@@ -61,7 +61,7 @@ def test_remote_phase1_visual_client_extract(monkeypatch: pytest.MonkeyPatch, tm
 
     payload = client.extract(video_path=video_path, workspace=None)
 
-    assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_small_bytetrack"
+    assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_nano_bytetrack"
     assert captured["url"] == "http://127.0.0.1:9200/tasks/visual-extract"
     assert captured["body"] == {"video_path": str(video_path)}
 

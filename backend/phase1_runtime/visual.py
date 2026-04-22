@@ -4,7 +4,7 @@ This module orchestrates:
 1. video metadata probing
 2. shot boundary detection
 3. frame decoding (GPU / NVDEC)
-4. RF-DETR Small person detection (GPU)
+4. RF-DETR person detection (GPU)
 5. ByteTrack tracking
 6. post-processing into the canonical artifact schemas
 
@@ -17,9 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import queue
 import subprocess
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -116,7 +114,7 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
 
     Returns (track_rows, runtime_metrics).
     """
-    from .frame_decode import decode_video_frame_batches
+    from .frame_decode import batch_frames, decode_video_frames
     from .tracker_runtime import ByteTrackTrackerRuntime
 
     detector = _make_detector(config)
@@ -140,9 +138,6 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
 
     all_track_rows: list[dict] = []
     pipeline_start = time.perf_counter()
-    decode_batch_latencies_ms: list[float] = []
-    queue_wait_latencies_ms: list[float] = []
-    max_queue_depth = 0
 
     # Estimate total frames for progress display
     total_frames: int | None = None
@@ -157,79 +152,23 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
     _log_interval = max(1, (total_frames or 500) // 20)  # ~20 progress lines per video
     _frames_seen = 0
     _last_log_frame = -1
-    decode_queue: queue.Queue[object] = queue.Queue(maxsize=config.decode_queue_depth)
-    decode_done = object()
-    producer_error: dict[str, BaseException] = {}
-    stop_event = threading.Event()
 
-    def _producer() -> None:
-        nonlocal max_queue_depth
-        batch_iter = decode_video_frame_batches(
+    try:
+        frame_stream = decode_video_frames(
             video_path=video_path,
-            batch_size=config.detector_batch_size,
             decode_backend=config.frame_decode_backend,
             target_width=config.detector_resolution if config.use_tensorrt else None,
             target_height=config.detector_resolution if config.use_tensorrt else None,
-            buffer_chunk_size=config.decode_buffer_chunk_size,
-            hw_accel_device=config.decode_hw_accel_device,
-            hw_device_index=config.decode_hw_device_index,
         )
-        try:
-            while not stop_event.is_set():
-                decode_start = time.perf_counter()
-                try:
-                    batch = next(batch_iter)
-                except StopIteration:
-                    break
-                decode_batch_latencies_ms.append(
-                    (time.perf_counter() - decode_start) * 1000.0
-                )
-                while not stop_event.is_set():
-                    try:
-                        decode_queue.put(batch, timeout=0.1)
-                        max_queue_depth = max(max_queue_depth, decode_queue.qsize())
-                        break
-                    except queue.Full:
-                        continue
-        except BaseException as exc:  # pragma: no cover - surfaced in consumer
-            producer_error["exc"] = exc
-        finally:
-            while not stop_event.is_set():
-                try:
-                    decode_queue.put(decode_done, timeout=0.1)
-                    break
-                except queue.Full:
-                    continue
+        for frame_batch in batch_frames(frame_stream, batch_size=config.detector_batch_size):
+            rgb_arrays = [f.rgb for f in frame_batch]
+            frame_indices = [f.frame_idx for f in frame_batch]
+            orig_sizes = [(f.source_height, f.source_width) for f in frame_batch]
 
-    producer_thread = threading.Thread(
-        target=_producer,
-        name="phase1-visual-decode",
-        daemon=True,
-    )
-    producer_thread.start()
-
-    try:
-        while True:
-            queue_wait_start = time.perf_counter()
-            frame_batch = decode_queue.get()
-            queue_wait_latencies_ms.append(
-                (time.perf_counter() - queue_wait_start) * 1000.0
-            )
-            if frame_batch is decode_done:
-                break
-            assert hasattr(frame_batch, "frames")
-            frame_indices = list(frame_batch.frame_indices)
-            orig_sizes = [
-                (frame_batch.source_height, frame_batch.source_width)
-                for _ in frame_indices
-            ]
             if config.use_tensorrt:
-                detections_list = detector.detect_batch(
-                    frame_batch.frames,
-                    orig_sizes=orig_sizes,
-                )
+                detections_list = detector.detect_batch(rgb_arrays, orig_sizes=orig_sizes)
             else:
-                detections_list = detector.detect_batch(frame_batch.frames)
+                detections_list = detector.detect_batch(rgb_arrays)
 
             for frame_idx, detections in zip(frame_indices, detections_list, strict=True):
                 track_rows = tracker.update(frame_idx=frame_idx, detections=detections)
@@ -258,7 +197,7 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
                             "geometry_type": "aabb",
                         }
                     )
-            _frames_seen += len(frame_indices)
+                _frames_seen += 1
 
             # Progress log every ~5% of video
             if _frames_seen - _last_log_frame >= _log_interval:
@@ -278,11 +217,7 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
                     )
                 _last_log_frame = _frames_seen
     finally:
-        stop_event.set()
-        producer_thread.join(timeout=5.0)
         detector.unload()
-    if "exc" in producer_error:
-        raise RuntimeError("Phase1 visual decode producer failed.") from producer_error["exc"]
 
     pipeline_elapsed_ms = (time.perf_counter() - pipeline_start) * 1000.0
     det_metrics = detector.metrics
@@ -295,7 +230,7 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
 
     runtime_metrics = {
         "detector_backend": config.detector_backend,
-        "detector_model": "rfdetr_small",
+        "detector_model": f"rfdetr_{config.detector_model}",
         "tracker_backend": f"bytetrack",
         "inference_backend": config.detector_backend,
         "batch_size": config.detector_batch_size,
@@ -309,16 +244,6 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
         "effective_fps": round(effective_fps, 1),
         "warmup_ms": round(det_metrics.warmup_ms, 1),
         "pipeline_elapsed_ms": round(pipeline_elapsed_ms, 1),
-        "mean_decode_batch_latency_ms": round(
-            (sum(decode_batch_latencies_ms) / max(1, len(decode_batch_latencies_ms))),
-            2,
-        ),
-        "mean_decode_queue_wait_ms": round(
-            (sum(queue_wait_latencies_ms) / max(1, len(queue_wait_latencies_ms))),
-            2,
-        ),
-        "decode_queue_depth": config.decode_queue_depth,
-        "max_decode_queue_depth_observed": max_queue_depth,
     }
     return all_track_rows, runtime_metrics
 
@@ -527,7 +452,10 @@ class V31VisualExtractor:
         return tracks
 
     def extract(self, *, video_path: Path, workspace) -> dict:
+        from .visual_config import VisualPipelineConfig
+
         self._last_runtime_metrics: dict[str, Any] = {}
+        config = self._visual_config or VisualPipelineConfig.from_env()
 
         logger.info("[visual]  probing metadata: %s", video_path.name)
         metadata = dict(self._metadata_probe(video_path=video_path))
@@ -584,7 +512,7 @@ class V31VisualExtractor:
         )
 
         tracking_metrics = {
-            "tracker_backend": "rfdetr_small_bytetrack",
+            "tracker_backend": f"rfdetr_{config.detector_model}_bytetrack",
             "input_track_rows": len(raw_tracks),
             "emitted_track_rows": len(tracks),
             "emitted_person_detection_segments": len(person_detections),

@@ -19,7 +19,7 @@ class _FakeVisualExtractor:
             "face_detections": [],
             "visual_identities": [],
             "mask_stability_signals": [],
-            "tracking_metrics": {"tracker_backend": "rfdetr_small_bytetrack"},
+            "tracking_metrics": {"tracker_backend": "rfdetr_nano_bytetrack"},
         }
 
 
@@ -65,5 +65,5 @@ def test_phase1_visual_extract_returns_visual_payload(tmp_path: Path) -> None:
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["tracking_metrics"]["tracker_backend"] == "rfdetr_small_bytetrack"
+    assert body["tracking_metrics"]["tracker_backend"] == "rfdetr_nano_bytetrack"
     assert fake.calls == [(video_path, None)]
