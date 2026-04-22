@@ -7,6 +7,17 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-04-21 - Phase 4 pooled review still truncated on long-form replay; defaults raised and run extraction unified
+
+- **Date/Time (UTC):** 2026-04-22 02:25 UTC
+- **Subsystem:** Phase 4 pooled candidate review + operator diagnostics (`backend/pipeline/config.py`, `backend/providers/openai_local.py`, `scripts/extract_run_diagnostics.py`)
+- **Environment:** Live long-form replay `job_5ab9c5a9837b41fe8eb4ddf566c554f8` on current Phase1 H200 + Phase26 H200 + Modal topology
+- **Symptom / Error signature:** Phase1 succeeded and Phase2/3 completed, but Phase4 failed with `ValueError: LLM response content is not valid JSON ... (finish_reason=length, max_output_tokens=2048)` during the pooled candidate review. The failure could be reconstructed, but the needed evidence was scattered across Spanner, the Phase 1 API SQLite store, the Phase26 queue SQLite file, a Phase 1 log file, and noisy journald output that also contained recurring non-blocking Cloud Monitoring exporter warnings.
+- **Root cause:** The active Phase 4 defaults were still too small for the long-form pooled review path: `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS` was effectively `2048` in code defaults and `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS` was effectively `2048` in the live/default runtime shape, so longer pooled structured outputs were still hitting `finish_reason=length`. Separately, there was no single canonical repo tool for extracting a run's durable state plus host logs, which made repeated debugging slower and more error-prone than necessary.
+- **Fix applied:** Raised the Phase 4 defaults to `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096` and `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192` in the code-backed defaults plus the committed Phase26 runtime templates (`docs/runtime/known-good-phase26-h200.env`, `scripts/do_phase26/clypt-phase26-runtime.env`, runtime docs). Tightened the local OpenAI-compatible structured-output failure path so invalid/truncated JSON now persists a response artifact and raises an error message that includes `finish_reason`, `prompt_tokens`, `completion_tokens`, `response_chars`, and the artifact path. Added a canonical extractor script [`scripts/extract_run_diagnostics.py`](../scripts/extract_run_diagnostics.py), a runbook [`docs/runtime/LOG_EXTRACTION_RUNBOOK.md`](./runtime/LOG_EXTRACTION_RUNBOOK.md), and a committed ad-hoc replay helper [`scripts/tmp_replay_phase4_from_persisted_run.py`](../scripts/tmp_replay_phase4_from_persisted_run.py) for rerunning Phase 4 against a new replay run id from durable Phase1/2/3 state.
+- **Verification evidence:** Focused provider/config tests passed after the change set, including the updated structured-output failure assertions and the new Phase 4 default-cap assertions: `./.venv/bin/python -m pytest tests/backend/providers/test_provider_config_and_clients.py -q`. The new scripts also compile cleanly with `python -m py_compile scripts/extract_run_diagnostics.py scripts/tmp_replay_phase4_from_persisted_run.py`.
+- **Follow-up guardrails:** Treat [`scripts/extract_run_diagnostics.py`](../scripts/extract_run_diagnostics.py) + [`docs/runtime/LOG_EXTRACTION_RUNBOOK.md`](./runtime/LOG_EXTRACTION_RUNBOOK.md) as the first stop for every run-debug task. If a future Phase 4 truncation still occurs, inspect the saved local OpenAI failure artifact before changing more token caps. Keep code defaults, committed host env templates, and runtime docs aligned in the same change whenever any Phase 4 token ceiling moves.
+
 ## 2026-04-21 - Modal node-media-prep reserved two warm L40S containers for one service
 
 - **Date/Time (UTC):** 2026-04-22 01:45 UTC
@@ -17,6 +28,17 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 - **Fix applied:** Moved the public `node_media_prep` ASGI surface to CPU while keeping `node_media_prep_job` on `L40S` with `min_containers=1`; worker-only codec checks now run inside `node_media_prep_job`, and the Modal / Phase26 deploy docs plus known-good env records were updated to reflect the CPU-route / single-GPU-worker design and the current `testifytestprep` endpoint.
 - **Verification evidence:** Local Modal app tests passed after the change, the redeployed Modal app health route returned `{"status":"ok"}`, and the code-backed Modal configuration now reserves `L40S` only on `node_media_prep_job`.
 - **Follow-up guardrails:** Treat the public Modal submit/poll surface as CPU-only unless it starts doing real media work. Any future warm GPU reservation should belong only to a spawned worker that actually needs ffmpeg NVDEC/NVENC.
+
+## 2026-04-22 - Fresh Phase1 H200 still prewarmed NeMo into root cache instead of the service cache
+
+- **Date/Time (UTC):** 2026-04-22 01:46-02:00 UTC
+- **Subsystem:** Phase1 deploy prewarm / forced aligner cache path (`scripts/do_phase1/deploy_phase1_services.sh`)
+- **Environment:** Fresh Phase1 host `clypt-phase1-h200-rithvik-nyc2`, replay `job_bcb5b39dab4f4b36bfd556465349f4c2`
+- **Symptom / Error signature:** Long-form VibeVoice ASR completed, then forced alignment failed with `ValueError: Not able to download url right now, please try again.` even though the deploy script logged `prewarmed NFA, emotion2vec+, and YAMNet`.
+- **Root cause:** The deploy script restored audio-post prewarm, but it still ran the prewarm Python under root's default `HOME`, so NeMo cached `stt_en_fastconformer_hybrid_large_pc.nemo` under `/root/.cache/torch/NeMo/...` while the live services looked in `/opt/clypt-phase1/.cache/torch/NeMo/...`. On the fresh host, the service cache contained only incomplete `.tmp` files and the worker fell back to a live redownload.
+- **Fix applied:** Updated `deploy_phase1_services.sh` to export the live service cache env before any model prewarm (`HOME=/opt/clypt-phase1`, `CLYPT_PHASE1_CACHE_HOME=/opt/clypt-phase1/.cache`, `XDG_CACHE_HOME=/opt/clypt-phase1/.cache`, `TORCH_HOME=/opt/clypt-phase1/.cache/torch`, `HF_HOME=/opt/clypt-phase1/.cache/huggingface`), ensure those directories exist, and hard-fail the deploy if the NeMo `.nemo` artifact is missing from the service cache after prewarm. Seeded the current live host's `/opt/clypt-phase1/.cache/...` from the already-downloaded root cache so the fresh replay path could proceed immediately.
+- **Verification evidence:** On the failing host, `/root/.cache/torch/NeMo/.../stt_en_fastconformer_hybrid_large_pc.nemo` existed while `/opt/clypt-phase1/.cache/torch/NeMo/...` contained only `*.tmp` files. After the fix, the repo deploy script now encodes the service-cache env explicitly and checks for the final `.nemo` artifact before service restart.
+- **Follow-up guardrails:** A successful prewarm log line is not enough. Fresh-host Phase1 deploys must verify the final NeMo artifact exists under `/opt/clypt-phase1/.cache/...`, not just somewhere under root's cache.
 
 ## 2026-04-20 - Phase24 node-media-prep bottleneck fixed by timeline batching, pipelined embedding, and Modal L40S retune
 

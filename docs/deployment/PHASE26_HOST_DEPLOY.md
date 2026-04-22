@@ -43,13 +43,16 @@ Current known-good Modal endpoint:
 
 - `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 
-Observed live non-secret Phase26 values on 2026-04-20:
+Observed live non-secret Phase26 values on 2026-04-21:
 
-- host: `clypt-phase26-h200-ming-nyc2` (`162.243.208.185`)
+- host: `clypt-phase26-h200-ming-nyc2` (`107.170.33.122`)
 - `GENAI_GENERATION_MODEL=Qwen/Qwen3.6-35B-A3B`
+- `GENAI_GENERATION_BACKEND=local_openai`
 - `CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1`
 - `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
 - `CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1`
+- `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096`
+- `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192`
 
 `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` may be set to either the Modal base URL or the full task endpoint URL. The current known-good env uses the full endpoint URL.
 
@@ -101,3 +104,4 @@ curl -sf http://127.0.0.1:8001/v1/models
 - Queue backend must remain `local_sqlite`.
 - Node-media-prep must point at Modal, not the Phase1 host.
 - The host-level entrypoint is `run_phase26_worker`, even though the underlying business logic still lives under current `phase24` modules.
+- The canonical per-run debugging flow now starts with [LOG_EXTRACTION_RUNBOOK.md](/Users/rithvik/Clypt-Backend/docs/runtime/LOG_EXTRACTION_RUNBOOK.md) and [scripts/extract_run_diagnostics.py](/Users/rithvik/Clypt-Backend/scripts/extract_run_diagnostics.py); use that before ad-hoc `journalctl` / SQLite / Spanner spelunking.

@@ -531,7 +531,7 @@ def test_local_openai_qwen_client_parses_json_and_validates_schema(
     assert "JSON" in captured_payloads[0]["messages"][0]["content"]
 
     _install_response("not-json")
-    with pytest.raises(ValueError, match="valid JSON"):
+    with pytest.raises(ValueError, match="valid JSON.*artifact="):
         client.generate_json(prompt="p", response_schema=schema)
 
     with pytest.raises(ValueError, match="response_schema is required"):
@@ -541,8 +541,16 @@ def test_local_openai_qwen_client_parses_json_and_validates_schema(
     with pytest.raises(ValueError, match="missing required"):
         client.generate_json(prompt="p", response_schema=schema)
 
-    _install_response("not-json", finish_reason="length")
-    with pytest.raises(ValueError, match="finish_reason=length"):
+    _install_payload(
+        {
+            "choices": [{"finish_reason": "length", "message": {"content": "not-json"}}],
+            "usage": {"prompt_tokens": 111, "completion_tokens": 7},
+        }
+    )
+    with pytest.raises(
+        ValueError,
+        match="finish_reason=length.*prompt_tokens=111.*completion_tokens=7.*artifact=",
+    ):
         client.generate_json(prompt="p", response_schema=schema, max_output_tokens=7)
 
     _install_payload(
@@ -591,6 +599,15 @@ def test_v31_config_reads_phase3_and_phase4_output_caps(monkeypatch: pytest.Monk
     assert config.phase4_subgraph_max_output_tokens == 2048
     assert config.phase4_subgraph_max_concurrent == 10
     assert config.phase4_pool_max_output_tokens == 768
+
+
+def test_v31_config_defaults_use_updated_phase4_caps() -> None:
+    from backend.pipeline.config import V31Config
+
+    config = V31Config()
+
+    assert config.phase4_meta_max_output_tokens == 4096
+    assert config.phase4_pool_max_output_tokens == 8192
 
 
 def test_v31_config_reads_phase2_and_signal_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:

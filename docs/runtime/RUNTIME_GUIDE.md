@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-04-20
+**Last updated:** 2026-04-21
 
 This is the runtime source of truth for the current repository state.
 
@@ -49,17 +49,19 @@ Key behavior:
   If any chunk-level alignment fails, Phase 1 hard-fails instead of dropping to per-turn alignment.
 - Phase 1 audio-post launches immediately after the VibeVoice response returns
 
-Current live non-secret Phase1 env snapshot from `clypt-phase1-h200-rithvik-nyc2` on 2026-04-20:
+Current live non-secret Phase1 env snapshot from `clypt-phase1-h200-rithvik-nyc2` (`107.170.11.76`) on 2026-04-21:
 
-- dispatch URL: `http://162.243.208.185:9300`
+- dispatch URL: `http://107.170.33.122:9300`
 - `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.60`
 - `VIBEVOICE_VLLM_MAX_NUM_SEQS=4`
+- `VIBEVOICE_VLLM_DTYPE=bfloat16`
 - `VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=40`
 - `VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=80`
 - `VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES=160`
 - `VIBEVOICE_LONGFORM_MAX_SHARDS=4`
 - `CLYPT_PHASE1_INPUT_MODE=test_bank`
 - visual fast-path settings remain `tensorrt_fp16`, batch `16`, threshold `0.35`, shape `640`, ByteTrack buffer `30`, ByteTrack match `0.7`, GPU decode
+- fresh-host deploy invariant: NFA/emotion2vec+/YAMNet prewarm must use the same service cache roots (`HOME=/opt/clypt-phase1`, `CLYPT_PHASE1_CACHE_HOME=/opt/clypt-phase1/.cache`, `TORCH_HOME=/opt/clypt-phase1/.cache/torch`, `HF_HOME=/opt/clypt-phase1/.cache/huggingface`) before services are restarted
 
 ### 2.2 Phase26 host
 
@@ -74,9 +76,10 @@ Key behavior:
 - the worker still runs current Phase 2-4 business logic
 - node-media-prep is called only after node creation
 
-Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2` on 2026-04-20:
+Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2` (`107.170.33.122`) on 2026-04-21:
 
 - `GENAI_GENERATION_MODEL=Qwen/Qwen3.6-35B-A3B`
+- `GENAI_GENERATION_BACKEND=local_openai`
 - `CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1`
 - `VERTEX_EMBEDDING_LOCATION=us-central1`
 - `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
@@ -90,6 +93,8 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
 - `CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_SPAN_MS=120000`
 - `CLYPT_PHASE24_NODE_MEDIA_BATCH_PAD_MS=2000`
 - `CLYPT_PHASE24_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS=10000`
+- `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096`
+- `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192`
 
 ### 2.3 Modal node-media-prep
 
@@ -109,7 +114,7 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
 Current live non-secret Modal deployment snapshot on 2026-04-21:
 
 - app name: `clypt-node-media-prep`
-- app id: `ap-5cylWYEts4MoJtkNoROVUu`
+- app id: `ap-FV1hNRaPzXUIV72NIsFNSk`
 - secret name present in Modal: `clypt-node-media-prep`
 - endpoint: `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 - required secret-backed envs remain `GCS_BUCKET`, `NODE_MEDIA_PREP_AUTH_TOKEN`, and `GOOGLE_APPLICATION_CREDENTIALS_JSON`
@@ -212,5 +217,6 @@ These now belong to the Phase26 host, not the Phase1 host.
 - Phase1 baseline: [known-good-phase1-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-h200.env)
 - Phase1 H100 overlay: [known-good-phase1-h100-backup.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-h100-backup.env)
 - Phase26 baseline: [known-good-phase26-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-h200.env)
+- Diagnostics runbook: [LOG_EXTRACTION_RUNBOOK.md](/Users/rithvik/Clypt-Backend/docs/runtime/LOG_EXTRACTION_RUNBOOK.md)
 
 Legacy env files remain only as migration pointers and should not be treated as canonical baselines.

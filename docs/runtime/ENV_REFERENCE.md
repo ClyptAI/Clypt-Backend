@@ -1,7 +1,7 @@
 # ENV REFERENCE
 
 **Status:** Active  
-**Last updated:** 2026-04-20
+**Last updated:** 2026-04-21
 
 This is the code-backed env catalog for the current Phase1 + Phase26 + Modal topology.
 
@@ -56,7 +56,7 @@ and the service expects at minimum:
 
 Observed live Modal deployment on 2026-04-21:
 
-- app id: `ap-5cylWYEts4MoJtkNoROVUu`
+- app id: `ap-FV1hNRaPzXUIV72NIsFNSk`
 - endpoint: `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 - secret present in `modal secret list`: `clypt-node-media-prep`
 - working non-secret runtime value: `GCS_BUCKET=clypt-storage-v3`
@@ -83,7 +83,7 @@ CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN=<shared-bearer>
 CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S=3600
 CLYPT_PHASE1_VISUAL_SERVICE_HEALTHCHECK_PATH=/health
 
-CLYPT_PHASE24_DISPATCH_URL=http://162.243.208.185:9300
+CLYPT_PHASE24_DISPATCH_URL=http://107.170.33.122:9300
 CLYPT_PHASE24_DISPATCH_AUTH_TOKEN=<shared-bearer>
 CLYPT_PHASE24_DISPATCH_TIMEOUT_S=30
 
@@ -131,7 +131,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` accepts either the Modal base URL or the full task endpoint URL. The current known-good records use the full endpoint URL.
 `RemoteNodeMediaPrepClient` handles the follow-up result polling internally, and Phase26 now pipelines batch completion into immediate multimodal embedding while still producing one final ordered result per node.
 
-Additional live non-secret values captured from `/etc/clypt-phase26/phase26.env` on 2026-04-20:
+Additional live non-secret values captured from `/etc/clypt-phase26/phase26.env` on 2026-04-21:
 
 ```bash
 GOOGLE_CLOUD_PROJECT=clypt-v3
@@ -147,7 +147,17 @@ SG_MEM_FRACTION_STATIC=0.78
 SG_CONTEXT_LENGTH=65536
 CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=1800
 CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=12
+CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES=3
+CLYPT_PHASE24_NODE_MEDIA_BATCH_GAP_MS=2000
+CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_NODES=8
+CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_SPAN_MS=120000
+CLYPT_PHASE24_NODE_MEDIA_BATCH_PAD_MS=2000
+CLYPT_PHASE24_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS=10000
 CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1
+CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0
+CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1
+CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096
+CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192
 ```
 
 ## 3) Phase1 Service Settings
@@ -265,6 +275,8 @@ Operational notes:
 | `CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_SPAN_MS` | `120000` | Hard cap on total timeline span per batch. |
 | `CLYPT_PHASE24_NODE_MEDIA_BATCH_PAD_MS` | `2000` | Pre/post pad added around each extracted batch window on the Modal worker. |
 | `CLYPT_PHASE24_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS` | `10000` | Extra pre-roll used for hybrid fast-seek + precise trim extraction. |
+| `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS` | `4096` | Phase 4 meta prompt generation output ceiling. |
+| `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS` | `8192` | Phase 4 pooled candidate review output ceiling. |
 
 ### 4.4 Local OpenAI generation
 

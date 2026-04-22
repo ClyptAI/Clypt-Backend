@@ -46,6 +46,21 @@ python -m pip install "setuptools==69.5.1" "Cython<4"
 python -m pip install --no-build-isolation "youtokentome>=1.0.5"
 python -m pip install -r requirements-do-phase1-h200.txt
 
+PHASE1_RUNTIME_HOME="${PHASE1_RUNTIME_HOME:-/opt/clypt-phase1}"
+export HOME="$PHASE1_RUNTIME_HOME"
+export CLYPT_PHASE1_CACHE_HOME="${CLYPT_PHASE1_CACHE_HOME:-$PHASE1_RUNTIME_HOME/.cache}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$CLYPT_PHASE1_CACHE_HOME}"
+export TORCH_HOME="${TORCH_HOME:-$XDG_CACHE_HOME/torch}"
+export HF_HOME="${HF_HOME:-$XDG_CACHE_HOME/huggingface}"
+
+install -d -m 0755 \
+  "$PHASE1_RUNTIME_HOME" \
+  "$CLYPT_PHASE1_CACHE_HOME" \
+  "$XDG_CACHE_HOME" \
+  "$TORCH_HOME" \
+  "$HF_HOME" \
+  /opt/clypt-phase1/hf-cache
+
 if [[ "${CLYPT_PHASE1_VISUAL_BACKEND:-}" == tensorrt* ]]; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y libnvinfer-bin
   python -m pip install "tensorrt-cu13"
@@ -88,6 +103,12 @@ yamnet_provider._ensure_runner()
 
 print("[deploy-phase1] prewarmed NFA, emotion2vec+, and YAMNet")
 PY
+
+NFA_MODEL_PATH="$TORCH_HOME/NeMo/NeMo_1.23.0/stt_en_fastconformer_hybrid_large_pc/465b32000fc320f5905fda11a1866ef6/stt_en_fastconformer_hybrid_large_pc.nemo"
+if [[ ! -f "$NFA_MODEL_PATH" ]]; then
+  echo "[deploy-phase1] ERROR: expected NFA model cache missing at $NFA_MODEL_PATH" >&2
+  exit 1
+fi
 
 install -d -m 0755 /etc/clypt
 install -D -m 0644 scripts/do_phase1/clypt-phase1-runtime.env /etc/clypt/clypt-phase1-runtime.env

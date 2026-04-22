@@ -196,7 +196,7 @@ class V31Config:
     )
     phase4_meta_max_output_tokens: int = field(
         default_factory=lambda: int(
-            os.getenv("CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS") or "2048"
+            os.getenv("CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS") or "4096"
         )
     )
     phase4_subgraph_max_output_tokens: int = field(
@@ -206,7 +206,7 @@ class V31Config:
     )
     phase4_pool_max_output_tokens: int = field(
         default_factory=lambda: int(
-            os.getenv("CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS") or "2048"
+            os.getenv("CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS") or "8192"
         )
     )
     phase4_subgraph_max_concurrent: int = field(

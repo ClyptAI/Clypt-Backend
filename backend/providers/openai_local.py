@@ -357,11 +357,31 @@ class LocalOpenAIQwenClient:
         try:
             parsed = _parse_json_content(content)
         except ValueError as exc:
+            artifact = _persist_failed_chat_completion(
+                raw_response=raw_response,
+                request_payload=payload,
+                reason="invalid_json_content",
+                response_payload=data,
+                metadata={
+                    "finish_reason": finish_reason or None,
+                    "max_output_tokens": max_output_tokens,
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                    "response_chars": response_chars,
+                },
+            )
             if finish_reason:
                 raise ValueError(
-                    f"{exc} (finish_reason={finish_reason}, max_output_tokens={max_output_tokens})"
+                    f"{exc} (finish_reason={finish_reason}, max_output_tokens={max_output_tokens}, "
+                    f"prompt_tokens={usage.get('prompt_tokens')}, "
+                    f"completion_tokens={usage.get('completion_tokens')}, "
+                    f"response_chars={response_chars}, artifact={artifact})"
                 ) from exc
-            raise
+            raise ValueError(
+                f"{exc} (prompt_tokens={usage.get('prompt_tokens')}, "
+                f"completion_tokens={usage.get('completion_tokens')}, "
+                f"response_chars={response_chars}, artifact={artifact})"
+            ) from exc
         _validate_schema_subset(parsed, strict_response_schema)
         return parsed
 
