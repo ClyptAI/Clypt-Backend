@@ -65,6 +65,8 @@ class V31Phase14RunInputs:
     phase4_extra_prompt_texts: list[str] | None = None
     phase4_subgraph_responses: dict[str, dict] | None = None
     phase4_pool_response: dict | None = None
+    participation_timeline: dict[str, Any] | None = None
+    camera_intent_timeline: dict[str, Any] | None = None
     source_context: dict[str, Any] | None = None
 
 
@@ -322,6 +324,12 @@ class V31Phase14Orchestrator:
         phase4_outputs: dict[str, Any] | None,
     ) -> dict[str, Any]:
         phase4_outputs = phase4_outputs or {}
+        participation_timeline = inputs.participation_timeline
+        if participation_timeline is None:
+            participation_timeline = phase4_outputs.get("participation_timeline")
+        camera_intent_timeline = inputs.camera_intent_timeline
+        if camera_intent_timeline is None:
+            camera_intent_timeline = phase4_outputs.get("camera_intent_timeline")
         canonical_timeline = phase1_outputs.get("canonical_timeline")
         shot_tracklet_index = phase1_outputs.get("shot_tracklet_index", ShotTrackletIndex(tracklets=[]))
         tracklet_geometry = phase1_outputs.get("tracklet_geometry", TrackletGeometry(tracklets=[]))
@@ -340,6 +348,8 @@ class V31Phase14Orchestrator:
             candidates=phase4_outputs.get("candidates", []),
             nodes=phase2_outputs.get("nodes", []),
             source_context=inputs.source_context,
+            participation_timeline=participation_timeline,
+            camera_intent_timeline=camera_intent_timeline,
         )
 
 

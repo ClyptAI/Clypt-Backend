@@ -864,6 +864,13 @@ class V31LivePhase14Runner:
         nodes: list[SemanticGraphNode],
         phase4_result: dict[str, Any],
     ) -> dict[str, Any]:
+        def _timeline_payload(payload: Any | None, name: str) -> Any | None:
+            if payload is None:
+                return None
+            if isinstance(payload, dict):
+                return payload.get(name)
+            return getattr(payload, name, None)
+
         candidates = list(phase4_result.get("candidates") or [])
         source_context: dict[str, Any] | None = None
         if paths.source_context.exists():
@@ -872,6 +879,12 @@ class V31LivePhase14Runner:
             raise ValueError(
                 "Phase 6 requires persisted source_context.json for candidate packaging metadata."
             )
+        participation_timeline = _timeline_payload(phase4_result, "participation_timeline")
+        if participation_timeline is None:
+            participation_timeline = _timeline_payload(phase1_outputs, "participation_timeline")
+        camera_intent_timeline = _timeline_payload(phase4_result, "camera_intent_timeline")
+        if camera_intent_timeline is None:
+            camera_intent_timeline = _timeline_payload(phase1_outputs, "camera_intent_timeline")
         result = compile_phase6_artifacts(
             paths=paths,
             canonical_timeline=canonical_timeline,
@@ -880,6 +893,8 @@ class V31LivePhase14Runner:
             candidates=candidates,
             nodes=nodes,
             source_context=source_context,
+            participation_timeline=participation_timeline,
+            camera_intent_timeline=camera_intent_timeline,
         )
         artifact_paths = dict(result.get("artifact_paths") or {})
         candidates = list(phase4_result.get("candidates") or [])

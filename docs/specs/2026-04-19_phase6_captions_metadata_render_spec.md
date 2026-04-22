@@ -350,6 +350,12 @@ Phase 6 chooses a zone in this order:
 3. if collision is too high, fallback to the next safe zone,
 4. record the fallback reason in the render plan.
 
+Current rollout note as of April 22, 2026:
+
+- backend-generated caption plans now default to `lower_safe`,
+- camera-intent artifacts are still forwarded into the render plan as layout metadata,
+- but automatic zone switching from camera intent is deferred so the frontend can expose that choice explicitly later.
+
 ## 7.4 Camera-intent defaults
 
 - `follow` -> prefer `center_band`, fallback `lower_safe`

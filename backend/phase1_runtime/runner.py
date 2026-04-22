@@ -18,6 +18,7 @@ from backend.phase1_runtime.input_resolver import (
 )
 from backend.phase1_runtime.media import prepare_workspace_media
 from backend.phase1_runtime.models import Phase1SidecarOutputs, Phase1Workspace
+from backend.phase1_runtime.youtube_metadata_client import fetch_youtube_source_context
 from backend.repository import Phase24JobRecord, PhaseMetricRecord, RunRecord
 
 logger = logging.getLogger(__name__)
@@ -334,6 +335,10 @@ class Phase1JobRunner:
                     f"{exc} Add a test-bank mapping or use source_path."
                 ) from exc
 
+        source_context: dict[str, Any] | None = None
+        if source_url is not None:
+            source_context = fetch_youtube_source_context(source_url=source_url)
+
         if resolved_source_path is None:
             raise ValueError(
                 "Unable to resolve local source_path for Phase 1 media. "
@@ -425,6 +430,7 @@ class Phase1JobRunner:
                 source_url=source_ref,
                 video_gcs_uri=video_gcs_uri,
                 audio_gcs_uri=resolved_audio_gcs_uri,
+                source_context=source_context,
                 workspace=workspace,
                 vibevoice_asr_client=self.vibevoice_asr_client,
                 forced_aligner=self.forced_aligner,
@@ -466,6 +472,7 @@ class Phase1JobRunner:
                 source_url=source_ref,
                 video_gcs_uri=video_gcs_uri,
                 audio_gcs_uri=resolved_audio_gcs_uri,
+                source_context=source_context,
                 workspace=workspace,
                 vibevoice_asr_client=self.vibevoice_asr_client,
                 forced_aligner=self.forced_aligner,

@@ -467,6 +467,74 @@ def test_live_phase14_run_phase6_uses_persisted_source_context(monkeypatch, tmp_
     assert captured["source_context"]["youtube_video_id"] == "abc123xyz00"
 
 
+def test_live_phase14_run_phase6_forwards_phase4_timelines(monkeypatch, tmp_path: Path) -> None:
+    from backend.runtime import phase14_live
+
+    runner = V31LivePhase14Runner(
+        config=V31Config(output_root=tmp_path),
+        llm_client=object(),
+        embedding_client=object(),
+    )
+    paths = runner.build_run_paths(run_id="run_phase6_timelines")
+    paths.source_context.write_text(
+        (
+            "{\n"
+            '  "source_url": "https://www.youtube.com/watch?v=abc123xyz00",\n'
+            '  "youtube_video_id": "abc123xyz00",\n'
+            '  "source_title": "Persisted Title",\n'
+            '  "source_description": "Persisted description",\n'
+            '  "channel_id": "channel_123",\n'
+            '  "channel_title": "Persisted Channel",\n'
+            '  "published_at": "2026-04-19T00:00:00+00:00",\n'
+            '  "default_audio_language": "en",\n'
+            '  "category_id": "22",\n'
+            '  "tags": ["persisted"],\n'
+            '  "thumbnails": {"default": {"url": "https://example.com/thumb.jpg"}}\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    candidate = ClipCandidate(
+        clip_id="clip-1",
+        node_ids=["node-1"],
+        start_ms=0,
+        end_ms=1000,
+        score=1.0,
+        rationale="r",
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_compile_phase6_artifacts(**kwargs):
+        captured.update(kwargs)
+        return {
+            "artifact_paths": {
+                "source_context": str(paths.source_context),
+                "caption_plan": str(paths.caption_plan),
+                "publish_metadata": str(paths.publish_metadata),
+                "render_plan": str(paths.render_plan),
+            }
+        }
+
+    monkeypatch.setattr(phase14_live, "compile_phase6_artifacts", _fake_compile_phase6_artifacts)
+
+    runner.run_phase_6(
+        paths=paths,
+        source_url="https://www.youtube.com/watch?v=abc123xyz00",
+        canonical_timeline=SimpleNamespace(turns=[]),
+        shot_tracklet_index=SimpleNamespace(tracklets=[]),
+        tracklet_geometry=SimpleNamespace(tracklets=[]),
+        nodes=[],
+        phase4_result={
+            "candidates": [candidate],
+            "participation_timeline": {"segments": [{"start_ms": 0, "end_ms": 1000}]},
+            "camera_intent_timeline": {"segments": [{"start_ms": 0, "end_ms": 1000}]},
+        },
+    )
+
+    assert captured["participation_timeline"] == {"segments": [{"start_ms": 0, "end_ms": 1000}]}
+    assert captured["camera_intent_timeline"] == {"segments": [{"start_ms": 0, "end_ms": 1000}]}
+
+
 def test_live_phase14_run_phase6_requires_persisted_source_context_for_candidates(tmp_path: Path) -> None:
     runner = V31LivePhase14Runner(
         config=V31Config(output_root=tmp_path),

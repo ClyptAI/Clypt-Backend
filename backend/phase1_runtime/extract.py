@@ -283,6 +283,7 @@ def run_phase1_sidecars(
     source_url: str,
     video_gcs_uri: str,
     audio_gcs_uri: str | None = None,
+    source_context: dict[str, Any] | None = None,
     workspace: Phase1Workspace,
     vibevoice_asr_client: RemoteVibeVoiceAsrClient,
     forced_aligner: Any,
@@ -398,6 +399,7 @@ def run_phase1_sidecars(
                 phase1_visual=VisualPayload(),
                 emotion2vec_payload=emotion2vec_payload,
                 yamnet_payload=yamnet_payload,
+                source_context=source_context,
             )
             on_audio_chain_complete(_partial)
             logger.info(
@@ -445,6 +447,7 @@ def run_phase1_sidecars(
         phase1_visual=phase1_visual,
         emotion2vec_payload=emotion2vec_payload,
         yamnet_payload=yamnet_payload,
+        source_context=source_context,
     )
 
 

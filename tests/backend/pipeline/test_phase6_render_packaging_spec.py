@@ -114,7 +114,7 @@ def test_phase6_caption_chunking_is_deterministic_and_preserves_word_highlights(
     clip_plan = plan_a["clips"][0]
     assert clip_plan["clip_id"] == "clip_001"
     assert clip_plan["preset_id"] == "karaoke_focus"
-    assert clip_plan["default_zone"] == "center_band"
+    assert clip_plan["default_zone"] == "lower_safe"
     assert [segment["text"] for segment in clip_plan["segments"]] == [
         "We can ship this today.",
         "Then we document the result.",

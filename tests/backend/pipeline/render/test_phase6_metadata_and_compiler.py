@@ -416,14 +416,91 @@ def test_compile_render_plan_logs_zone_transitions_from_camera_intent_segments()
     )
 
     segments = render_plan["clips"][0]["segments"]
-    assert [segment["caption_zone"] for segment in segments] == ["center_band", "split_band"]
+    assert [segment["caption_zone"] for segment in segments] == ["center_band", "center_band"]
     assert segments[0]["review_needed"] is False
     assert segments[0]["review_reasons"] == []
     assert segments[0]["zone_transition_reason"] == ""
     assert segments[1]["review_needed"] is False
     assert segments[1]["review_reasons"] == []
-    assert segments[1]["zone_transition_reason"] == "camera_intent:follow->split"
+    assert segments[1]["zone_transition_reason"] == ""
     assert segments[1]["layout_mode"] == "split"
+    assert segments[1]["primary_tracklet_id"] == "tracklet_1"
+    assert segments[1]["secondary_tracklet_id"] == "tracklet_2"
+
+
+def test_compile_render_plan_keeps_lower_safe_default_even_with_camera_intent() -> None:
+    from backend.pipeline.render.compiler import compile_render_plan
+
+    render_plan = compile_render_plan(
+        run_id="run_phase6",
+        caption_plan={
+            "run_id": "run_phase6",
+            "clips": [
+                {
+                    "clip_id": "clip_001",
+                    "clip_start_ms": 0,
+                    "clip_end_ms": 610,
+                    "preset_id": "karaoke_focus",
+                    "default_zone": "lower_safe",
+                    "segments": [
+                        {
+                            "segment_id": "clip_001_seg_001",
+                            "start_ms": 0,
+                            "end_ms": 280,
+                            "text": "Nobody saw",
+                            "word_ids": ["w1", "w2"],
+                            "speaker_ids": ["SPEAKER_0"],
+                            "turn_ids": ["t1"],
+                            "placement_zone": "lower_safe",
+                            "highlight_mode": "word_highlight",
+                            "review_needed": False,
+                            "review_reason": "",
+                            "active_word_timings": [],
+                        },
+                        {
+                            "segment_id": "clip_001_seg_002",
+                            "start_ms": 280,
+                            "end_ms": 610,
+                            "text": "this coming",
+                            "word_ids": ["w3", "w4"],
+                            "speaker_ids": ["SPEAKER_0"],
+                            "turn_ids": ["t1"],
+                            "placement_zone": "lower_safe",
+                            "highlight_mode": "word_highlight",
+                            "review_needed": False,
+                            "review_reason": "",
+                            "active_word_timings": [],
+                        },
+                    ],
+                }
+            ],
+        },
+        publish_metadata={
+            "run_id": "run_phase6",
+            "clips": [
+                {
+                    "clip_id": "clip_001",
+                    "title_primary": "Nobody Saw This Coming",
+                    "title_alternates": ["This Was Unexpected", "Nobody Saw It"],
+                    "description_short": "A surprise reveal lands fast.",
+                    "thumbnail_text": "NOBODY SAW THIS",
+                    "topic_tags": ["surprise", "reveal", "interview"],
+                    "hashtags": ["#surprise", "#reveal", "#interview"],
+                    "generation_inputs_summary": {},
+                }
+            ],
+        },
+        camera_intent_timeline=_camera_intent_follow_then_split(),
+        shot_tracklet_index=_shot_tracklets_with_split().model_dump(mode="json"),
+        tracklet_geometry=_tracklet_geometry_below_center().model_dump(mode="json"),
+    )
+
+    segments = render_plan["clips"][0]["segments"]
+    assert [segment["caption_zone"] for segment in segments] == ["lower_safe", "lower_safe"]
+    assert segments[0]["layout_mode"] == "follow"
+    assert segments[1]["layout_mode"] == "split"
+    assert segments[0]["zone_transition_reason"] == ""
+    assert segments[1]["zone_transition_reason"] == ""
     assert segments[1]["primary_tracklet_id"] == "tracklet_1"
     assert segments[1]["secondary_tracklet_id"] == "tracklet_2"
 

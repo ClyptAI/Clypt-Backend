@@ -79,3 +79,45 @@ def test_run_phase6_render_downloads_inputs_runs_ffmpeg_and_uploads_output(tmp_p
     assert any("fontsdir=" in token for token in commands[0])
     assert "-c:v" in commands[0]
     assert "h264_nvenc" in commands[0]
+
+
+def test_run_phase6_render_uses_repo_pinned_fonts_when_env_unset(tmp_path, monkeypatch) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.delenv("CLYPT_PHASE6_FONT_ASSET_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    def fake_run(cmd, check, capture_output, text):  # noqa: ARG001
+        commands.append(cmd)
+        output_path = Path(cmd[-1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"rendered")
+        return None
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    request = Phase6RenderRequest.from_payload(
+        {
+            "run_id": "run-123",
+            "source_video_gcs_uri": "gs://bucket/source.mp4",
+            "artifact_gcs_uris": {
+                "render_plan": "gs://bucket/phase14/run-123/render_inputs/render_plan.json",
+                "captions_clip_001.ass": "gs://bucket/phase14/run-123/render_inputs/captions_clip_001.ass",
+            },
+            "clips": [
+                {
+                    "clip_id": "clip_001",
+                    "clip_start_ms": 100,
+                    "clip_end_ms": 900,
+                }
+            ],
+        }
+    )
+
+    result = run_phase6_render(
+        request=request,
+        storage_client=_FakeStorageClient(tmp_path),
+        scratch_root=tmp_path,
+    )
+
+    assert result["outputs"][0]["clip_id"] == "clip_001"
+    assert any("fontsdir=" in token for token in commands[0])

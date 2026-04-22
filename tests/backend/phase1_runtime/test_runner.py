@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -140,6 +141,34 @@ def _patch_vibevoice_merge(monkeypatch: pytest.MonkeyPatch):
             ],
             "words": list(word_alignments),
         },
+    )
+
+
+@pytest.fixture(autouse=True)
+def _patch_youtube_source_context(monkeypatch: pytest.MonkeyPatch):
+    """Keep the runner tests offline while Phase 1 now fetches YouTube metadata."""
+
+    def _fake_source_context(*, source_url: str) -> dict[str, Any]:
+        from backend.phase1_runtime.input_resolver import _extract_youtube_video_id
+
+        video_id = _extract_youtube_video_id(source_url) or "unknown"
+        return {
+            "source_url": source_url,
+            "youtube_video_id": video_id,
+            "source_title": "Test Source Title",
+            "source_description": "Test source description.",
+            "channel_id": "channel-123",
+            "channel_title": "Test Channel",
+            "published_at": "2026-04-22T00:00:00Z",
+            "default_audio_language": "en",
+            "category_id": "22",
+            "tags": ["test", "phase1", "metadata"],
+            "thumbnails": {"default": {"url": "https://example.test/thumb.jpg"}},
+        }
+
+    monkeypatch.setattr(
+        "backend.phase1_runtime.runner.fetch_youtube_source_context",
+        _fake_source_context,
     )
 
 
@@ -305,6 +334,83 @@ def test_phase1_job_runner_enqueues_phase24_when_queue_mode_enabled(tmp_path: Pa
     # Visual extractor ran, and the phase24 handoff was uploaded.
     assert "visual:source_video.mp4" in calls
     assert "upload:phase1/job_001/phase24_inputs/phase1_outputs.json" in calls
+
+
+def test_phase1_job_runner_persists_source_context_in_handoff_and_final_outputs(tmp_path: Path):
+    from backend.phase1_runtime.input_resolver import Phase1InputResolver
+    from backend.phase1_runtime.runner import Phase1JobRunner
+
+    captured: dict[str, Any] = {}
+
+    mapping_path, _ = _write_test_bank_mapping(
+        tmp_path,
+        source_url="https://youtube.com/watch?v=source-context",
+        video_gcs_uri="gs://bucket/canonical/source-context.mp4",
+        audio_gcs_uri="gs://bucket/canonical/source-context.wav",
+    )
+
+    def fake_audio_extractor(*, video_path: Path, audio_path: Path) -> None:
+        audio_path.write_text("audio", encoding="utf-8")
+
+    class _FakeStorage:
+        def upload_file(self, *, local_path: Path, object_name: str) -> str:
+            if object_name.endswith("phase1_outputs.json"):
+                captured["handoff_payload"] = json.loads(local_path.read_text(encoding="utf-8"))
+            return f"gs://bucket/{object_name}"
+
+    class _FakeVisual:
+        def extract(self, *, video_path: Path, workspace):
+            return {
+                "video_metadata": {"fps": 30.0, "duration_ms": 1000},
+                "shot_changes": [{"start_time_ms": 0, "end_time_ms": 1000}],
+                "tracks": [],
+            }
+
+    class _FakeQueueClient:
+        def enqueue_phase24(self, *, run_id: str, payload: dict, worker_url: str | None = None) -> str:
+            captured["queued_payload"] = payload
+            return "local-sqlite:00000000-0000-0000-0000-000000000003"
+
+    expected_context = {
+        "source_url": "https://youtube.com/watch?v=source-context",
+        "youtube_video_id": "source-context",
+        "source_title": "Fetched Title",
+        "source_description": "Fetched Description",
+        "channel_id": "channel-ctx",
+        "channel_title": "Fetched Channel",
+        "published_at": "2026-04-22T00:00:00Z",
+        "default_audio_language": "en",
+        "category_id": "22",
+        "tags": ["clip", "metadata"],
+        "thumbnails": {"default": {"url": "https://example.test/thumb.jpg"}},
+    }
+
+    runner = Phase1JobRunner(
+        working_root=tmp_path,
+        audio_extractor=fake_audio_extractor,
+        storage_client=_FakeStorage(),
+        vibevoice_asr_client=_make_fake_vibevoice_asr_client(),
+        visual_extractor=_FakeVisual(),
+        phase24_task_queue_client=_FakeQueueClient(),
+        input_resolver=Phase1InputResolver.from_mapping_file(mapping_path),
+        **_make_local_audio_providers(),
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "backend.phase1_runtime.runner.fetch_youtube_source_context",
+            lambda *, source_url: expected_context,
+        )
+        result = runner.run_job(
+            job_id="job_source_context",
+            source_url="https://youtube.com/watch?v=source-context",
+            source_path=None,
+            runtime_controls={"run_phase14": True},
+        )
+
+    assert result["phase1"]["source_context"] == expected_context
+    assert captured["handoff_payload"]["source_context"] == expected_context
+    assert captured["queued_payload"]["run_id"] == "job_source_context"
 
 
 def test_phase1_job_runner_queue_mode_enqueues_before_visual_completes(tmp_path: Path):

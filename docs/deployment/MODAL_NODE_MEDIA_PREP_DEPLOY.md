@@ -95,4 +95,5 @@ Important:
 - Only `node_media_prep_job` keeps a warm GPU. The public `node_media_prep` route should not reserve an `L40S`.
 - This is a warm serverless surface, not a permanently pinned VM.
 - Phase 6 render/export now follows the same submit-and-poll pattern through `scripts/modal/render_video_app.py`.
-- Render deploys additionally require `PHASE6_RENDER_AUTH_TOKEN` (or `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`) plus a pinned font-asset directory exposed to the worker via `CLYPT_PHASE6_FONT_ASSET_DIR`.
+- Render deploys additionally require `PHASE6_RENDER_AUTH_TOKEN` (or `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`).
+- The worker now ships with repo-pinned fonts under `backend/assets/fonts`, so `CLYPT_PHASE6_FONT_ASSET_DIR` is only an override knob, not a required deploy env.

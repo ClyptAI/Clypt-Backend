@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from backend.pipeline.config import V31Config
 from backend.pipeline.contracts import Phase14RunSummary, SemanticGraphNode, SemanticNodeEvidence
@@ -244,3 +245,41 @@ def test_orchestrator_runs_phases_1_to_4_and_writes_artifacts(tmp_path: Path):
     render_payload = render_plan_path.read_text(encoding="utf-8")
     assert "caption_plan_ref" in render_payload
     assert "publish_metadata_ref" in render_payload
+
+
+def test_orchestrator_run_phase_6_forwards_timelines_to_phase6_renderer(monkeypatch, tmp_path: Path) -> None:
+    from backend.pipeline import orchestrator as orchestrator_module
+
+    orchestrator = V31Phase14Orchestrator(config=V31Config(output_root=tmp_path))
+    captured: dict[str, object] = {}
+
+    def _fake_run_phase_6(**kwargs):
+        captured.update(kwargs)
+        return {"artifact_paths": {}}
+
+    monkeypatch.setattr(orchestrator_module, "run_phase_6", _fake_run_phase_6)
+
+    orchestrator.run_phase_6(
+        run_id="run_phase6",
+        source_url="https://example.com/video",
+        paths=orchestrator.build_run_paths(run_id="run_phase6"),
+        inputs=V31Phase14RunInputs(
+            phase1_audio={
+                "source_audio": "https://example.com/video",
+                "video_gcs_uri": "gs://bucket/video.mp4",
+            },
+            diarization_payload={"words": [], "turns": []},
+            participation_timeline={"segments": [{"start_ms": 0, "end_ms": 1000}]},
+            camera_intent_timeline={"segments": [{"start_ms": 0, "end_ms": 1000}]},
+        ),
+        phase1_outputs={
+            "canonical_timeline": SimpleNamespace(words=[], turns=[], source_video_url="https://example.com/video"),
+            "shot_tracklet_index": SimpleNamespace(tracklets=[]),
+            "tracklet_geometry": SimpleNamespace(tracklets=[]),
+        },
+        phase2_outputs={"nodes": []},
+        phase4_outputs={"candidates": []},
+    )
+
+    assert captured["participation_timeline"] == {"segments": [{"start_ms": 0, "end_ms": 1000}]}
+    assert captured["camera_intent_timeline"] == {"segments": [{"start_ms": 0, "end_ms": 1000}]}

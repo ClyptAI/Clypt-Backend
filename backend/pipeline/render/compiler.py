@@ -68,12 +68,7 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 def _intent_default_zone(intent: str | None, fallback_zone: str) -> str:
-    if intent == "follow":
-        return "center_band"
-    if intent == "reaction":
-        return "lower_safe"
-    if intent == "split":
-        return "split_band"
+    del intent
     return fallback_zone
 
 

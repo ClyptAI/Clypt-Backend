@@ -78,7 +78,8 @@ def _ffmpeg_filter(*, ass_path: Path, fonts_dir: Path) -> str:
 
 
 def _stage_font_assets(*, render_plan: dict[str, Any], clip_ids: list[str], fonts_dir: Path) -> None:
-    asset_root = Path(os.environ.get("CLYPT_PHASE6_FONT_ASSET_DIR") or "backend/assets/fonts")
+    default_asset_root = Path(__file__).resolve().parents[1] / "assets" / "fonts"
+    asset_root = Path(os.environ.get("CLYPT_PHASE6_FONT_ASSET_DIR") or default_asset_root)
     presets = load_caption_presets()
     needed_assets: set[str] = set()
     clips_by_id = {str(clip["clip_id"]): dict(clip) for clip in render_plan.get("clips", [])}
