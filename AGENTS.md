@@ -10,7 +10,7 @@ Operational startup and maintenance guide for coding agents.
 - Active topology: **Phase1 H200 + Phase26 H200 + Modal**
   - **Phase1 host (H200 default)**: Phase 1 runner/orchestrator, persistent local VibeVoice service, persistent local visual service, co-located VibeVoice vLLM sidecar, in-process NFA -> emotion2vec+ -> YAMNet.
   - **Phase26 host (H200)**: `POST /tasks/phase26-enqueue`, local SQLite queue + worker, SGLang Qwen on `:8001`, current Phase 2-4 runtime, future Phase 5-6 orchestration.
-  - **Modal**: `POST /tasks/node-media-prep` on `L4` with `min_containers=1`; future render/export will follow the same external-worker pattern.
+  - **Modal**: CPU `POST /tasks/node-media-prep` submit/poll surface plus one warm `L40S` `node_media_prep_job` worker; future render/export will follow the same external-worker pattern.
 - Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint on the Phase26 host.
 
 ## Read Order (Required - You MUST read these before reporting back to the user.)
@@ -144,7 +144,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (3940 symbols, 9755 relationships, 229 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (3937 symbols, 9755 relationships, 229 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

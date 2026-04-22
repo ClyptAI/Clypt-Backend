@@ -9,9 +9,9 @@ This service is the active remote backend for:
 
 Target shape:
 
-- GPU: `L40S`
-- `min_containers=1`
-- ffmpeg must expose both `h264_nvenc` and `h264_cuvid`
+- CPU ASGI submit/poll surface
+- one warm `L40S` worker via `node_media_prep_job min_containers=1`
+- ffmpeg must expose both `h264_nvenc` and `h264_cuvid` inside the worker runtime
 
 ## 1) App Source
 
@@ -39,10 +39,10 @@ At minimum, provide:
 Current deployed Modal wiring:
 
 - App name: `clypt-node-media-prep`
-- App id from `modal app list`: `ap-xX4QTM2zo19aGNRKw1fEYM`
+- App id from `modal app list`: `ap-5cylWYEts4MoJtkNoROVUu`
 - Secret name: `clypt-node-media-prep`
 - Deployed endpoint:
-  `https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+  `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 - Working bucket value: `GCS_BUCKET=clypt-storage-v3`
 
 The deployed ASGI app exposes:
@@ -58,7 +58,7 @@ the host deploy credential standard.
 
 ## 4) Smoke Checks
 
-The app already verifies codec availability at startup. In addition, validate:
+The web app starts on CPU and the spawned worker verifies GPU codec availability before processing. In addition, validate:
 
 ```bash
 modal app list
@@ -92,5 +92,6 @@ Important:
 
 - Each submitted job now represents one timeline-local batch. The worker downloads the source video once into worker scratch space, extracts a shared local batch window, emits exact per-node clips from that window, uploads them to GCS, and returns the resulting `file_uri` descriptors plus optional batch timing metadata.
 - `RemoteNodeMediaPrepClient` now implements submit-and-poll so Phase26 can pipeline batch completion into immediate multimodal embedding while still producing one final ordered result per node.
+- Only `node_media_prep_job` keeps a warm GPU. The public `node_media_prep` route should not reserve an `L40S`.
 - This is a warm serverless surface, not a permanently pinned VM.
 - Future Phase 6 render/export should follow the same submit-and-poll pattern if render duration can cross Modal's webhook timeout boundary, but do not wire that endpoint into runtime until the Phase 6 contract is finalized.

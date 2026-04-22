@@ -78,8 +78,8 @@ The downstream host owns the graph and ranking pipeline:
 Modal currently handles the stateless media-prep step:
 
 - `POST /tasks/node-media-prep`
-- `L40S`
-- `min_containers=1`
+- CPU web submit/poll surface
+- one warm `L40S` worker via `node_media_prep_job`
 - timeline-batched ffmpeg GPU path for clip extraction/encoding before multimodal embedding
 
 ## End-to-End Flow

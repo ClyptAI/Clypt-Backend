@@ -44,7 +44,7 @@ flowchart TD
 | --- | --- |
 | **Phase1 host (H200 default)** | Phase 1 runner, persistent local VibeVoice service, co-located VibeVoice vLLM, persistent local visual service, RF-DETR + ByteTrack settings preserved, in-process NFA + emotion2vec+ + YAMNet. |
 | **Phase26 host (H200)** | `POST /tasks/phase26-enqueue`, local SQLite queue, current Phase 2-4 worker/runtime, SGLang Qwen on `:8001`, future Phase 5-6 orchestration. |
-| **Modal L40S** | `POST /tasks/node-media-prep`, bearer-auth protected, `min_containers=1`, ffmpeg NVDEC/NVENC smoke-checked at startup, timeline-batched hybrid seek/trim extraction, and 480p clip generation for Vertex multimodal embeddings. Future `render-video` endpoint will live here too. |
+| **Modal** | CPU `POST /tasks/node-media-prep` submit/poll surface plus one warm `L40S` `node_media_prep_job` worker, bearer-auth protected, ffmpeg NVDEC/NVENC worker checks, timeline-batched hybrid seek/trim extraction, and 480p clip generation for Vertex multimodal embeddings. Future `render-video` endpoint will live here too. |
 
 ### Design rationale
 
@@ -115,9 +115,9 @@ flowchart TD
 ## 5) Modal Boundary
 
 - `scripts/modal/node_media_prep_app.py` is the active serverless service surface for node-media-prep.
-- GPU target: `L40S`
-- Warm capacity target: `min_containers=1`
-- The app validates that ffmpeg exposes `h264_nvenc` and `h264_cuvid` before serving work.
+- `node_media_prep` is the CPU ASGI submit/poll surface.
+- `node_media_prep_job` is the only GPU-backed worker and keeps the warm `L40S` pool via `min_containers=1`.
+- The worker validates that ffmpeg exposes `h264_nvenc` and `h264_cuvid` before processing work.
 - The JSON contract remains submit/poll-compatible, but each request now represents one timeline batch and responses may include optional batch timing metadata.
 
 Future:

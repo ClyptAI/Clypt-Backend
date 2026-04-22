@@ -7,6 +7,17 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-04-21 - Modal node-media-prep reserved two warm L40S containers for one service
+
+- **Date/Time (UTC):** 2026-04-22 01:45 UTC
+- **Subsystem:** Modal node-media-prep deployment (`scripts/modal/node_media_prep_app.py`)
+- **Environment:** `testifytestprep` Modal account, app `clypt-node-media-prep`
+- **Symptom / Error signature:** Modal showed both `node_media_prep` and `node_media_prep_job` as `L40S GPU` functions with `1 container` each, which kept two warm L40S reservations alive for one logical media-prep service.
+- **Root cause:** The public ASGI submit/poll function and the spawned worker function were both decorated with `gpu="L40S"` and `min_containers=1`, even though only the spawned worker performs ffmpeg NVDEC/NVENC extraction.
+- **Fix applied:** Moved the public `node_media_prep` ASGI surface to CPU while keeping `node_media_prep_job` on `L40S` with `min_containers=1`; worker-only codec checks now run inside `node_media_prep_job`, and the Modal / Phase26 deploy docs plus known-good env records were updated to reflect the CPU-route / single-GPU-worker design and the current `testifytestprep` endpoint.
+- **Verification evidence:** Local Modal app tests passed after the change, the redeployed Modal app health route returned `{"status":"ok"}`, and the code-backed Modal configuration now reserves `L40S` only on `node_media_prep_job`.
+- **Follow-up guardrails:** Treat the public Modal submit/poll surface as CPU-only unless it starts doing real media work. Any future warm GPU reservation should belong only to a spawned worker that actually needs ffmpeg NVDEC/NVENC.
+
 ## 2026-04-20 - Phase24 node-media-prep bottleneck fixed by timeline batching, pipelined embedding, and Modal L40S retune
 
 - **Date/Time (UTC):** 2026-04-20 22:40 UTC

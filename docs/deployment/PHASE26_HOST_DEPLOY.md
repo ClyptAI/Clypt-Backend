@@ -41,7 +41,7 @@ Required values to set:
 
 Current known-good Modal endpoint:
 
-- `https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 
 Observed live non-secret Phase26 values on 2026-04-20:
 
@@ -58,6 +58,7 @@ The Phase26 worker now uses a submit-and-poll contract against Modal:
 - `POST /tasks/node-media-prep` returns a `call_id`
 - `GET /tasks/node-media-prep/result/{call_id}` is polled until completion
 - each request now represents one timeline-local node batch, and Phase26 starts multimodal embedding as each batch completes
+- the public Modal route is CPU-only; the actual batch worker is the only function that reserves an `L40S`
 
 Credential requirement:
 

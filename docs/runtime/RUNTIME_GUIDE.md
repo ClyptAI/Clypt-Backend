@@ -81,7 +81,7 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
 - `VERTEX_EMBEDDING_LOCATION=us-central1`
 - `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
 - `CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1`
-- `CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=1800`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=12`
 - `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES=3`
@@ -94,8 +94,9 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
 ### 2.3 Modal node-media-prep
 
 - app path: `scripts/modal/node_media_prep_app.py`
-- GPU target: `L40S`
-- warm pool target: `min_containers=1`
+- web surface: CPU ASGI app for submit/poll
+- worker GPU target: `L40S`
+- warm GPU pool target: `node_media_prep_job min_containers=1`
 - submit/poll contract:
   - `POST /tasks/node-media-prep` -> `202 Accepted` + `call_id`
   - `GET /tasks/node-media-prep/result/{call_id}` -> `202 pending` or `200` final result
@@ -105,12 +106,12 @@ Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2`
 - clip extraction now downscales to 480p before upload / Vertex multimodal embedding
 - Phase26 starts multimodal embedding batch-by-batch as node-media-prep results arrive instead of waiting for all media first
 
-Current live non-secret Modal deployment snapshot on 2026-04-20:
+Current live non-secret Modal deployment snapshot on 2026-04-21:
 
 - app name: `clypt-node-media-prep`
-- app id: `ap-xX4QTM2zo19aGNRKw1fEYM`
+- app id: `ap-5cylWYEts4MoJtkNoROVUu`
 - secret name present in Modal: `clypt-node-media-prep`
-- endpoint: `https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- endpoint: `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 - required secret-backed envs remain `GCS_BUCKET`, `NODE_MEDIA_PREP_AUTH_TOKEN`, and `GOOGLE_APPLICATION_CREDENTIALS_JSON`
 
 ## 3) Phase 1 Execution Semantics
@@ -199,11 +200,12 @@ These now belong to the Phase26 host, not the Phase1 host.
 
 - `RemoteNodeMediaPrepClient` continues to own the JSON contract
 - Modal web requests must stay short; long-running clip extraction happens in a spawned Modal function call that the Phase26 client polls
-- Modal must expose working:
+- only the spawned worker needs GPU access; the public submit/poll route stays on CPU
+- the Modal worker must expose working:
   - `h264_nvenc`
   - `h264_cuvid`
 - Modal L40S baseline sets `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=12`
-- `min_containers=1` is the intended warm baseline, not a permanent dedicated VM
+- `node_media_prep_job min_containers=1` is the intended warm GPU baseline, not a permanent dedicated VM
 
 ## 8) Canonical Runtime Files
 

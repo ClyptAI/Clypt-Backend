@@ -39,6 +39,7 @@ def _load_app_module():
 
         def function(self, **_kwargs):
             def _decorator(fn):
+                setattr(fn, "_modal_function_kwargs", dict(_kwargs))
                 return fn
 
             return _decorator
@@ -87,7 +88,7 @@ def _payload() -> dict:
 
 def test_health_returns_ok(monkeypatch) -> None:
     node_media_prep_app = _load_app_module()
-    monkeypatch.setattr(node_media_prep_app, "_require_codec", lambda *_args: None)
+    monkeypatch.setattr(node_media_prep_app, "_require_ffmpeg", lambda: None)
     client = TestClient(node_media_prep_app.web_app)
     response = client.get("/health")
     assert response.status_code == 200
@@ -96,7 +97,7 @@ def test_health_returns_ok(monkeypatch) -> None:
 
 def test_node_media_prep_requires_bearer_token(monkeypatch) -> None:
     node_media_prep_app = _load_app_module()
-    monkeypatch.setattr(node_media_prep_app, "_require_codec", lambda *_args: None)
+    monkeypatch.setattr(node_media_prep_app, "_require_ffmpeg", lambda: None)
     monkeypatch.setenv("NODE_MEDIA_PREP_AUTH_TOKEN", "secret-token")
     client = TestClient(node_media_prep_app.web_app)
 
@@ -106,7 +107,7 @@ def test_node_media_prep_requires_bearer_token(monkeypatch) -> None:
 
 def test_node_media_prep_submit_returns_call_id(monkeypatch) -> None:
     node_media_prep_app = _load_app_module()
-    monkeypatch.setattr(node_media_prep_app, "_require_codec", lambda *_args: None)
+    monkeypatch.setattr(node_media_prep_app, "_require_ffmpeg", lambda: None)
     monkeypatch.setenv("NODE_MEDIA_PREP_AUTH_TOKEN", "secret-token")
 
     captured: dict[str, object] = {}
@@ -140,7 +141,7 @@ def test_node_media_prep_submit_returns_call_id(monkeypatch) -> None:
 
 def test_node_media_prep_result_returns_pending(monkeypatch) -> None:
     node_media_prep_app = _load_app_module()
-    monkeypatch.setattr(node_media_prep_app, "_require_codec", lambda *_args: None)
+    monkeypatch.setattr(node_media_prep_app, "_require_ffmpeg", lambda: None)
     monkeypatch.setenv("NODE_MEDIA_PREP_AUTH_TOKEN", "secret-token")
 
     class _PendingCall:
@@ -168,7 +169,7 @@ def test_node_media_prep_result_returns_pending(monkeypatch) -> None:
 
 def test_node_media_prep_result_returns_completed_payload(monkeypatch) -> None:
     node_media_prep_app = _load_app_module()
-    monkeypatch.setattr(node_media_prep_app, "_require_codec", lambda *_args: None)
+    monkeypatch.setattr(node_media_prep_app, "_require_ffmpeg", lambda: None)
     monkeypatch.setenv("NODE_MEDIA_PREP_AUTH_TOKEN", "secret-token")
 
     class _CompleteCall:
@@ -257,3 +258,32 @@ def test_build_storage_client_supports_json_credentials(monkeypatch) -> None:
     assert client.settings.gcs_bucket == "bucket"
     assert calls["project"] == "project-123"
     assert calls["scopes"] == ["https://www.googleapis.com/auth/cloud-platform"]
+
+
+def test_modal_function_shapes_separate_cpu_route_from_gpu_worker() -> None:
+    node_media_prep_app = _load_app_module()
+
+    worker_kwargs = node_media_prep_app.node_media_prep_job._modal_function_kwargs
+    route_kwargs = node_media_prep_app.node_media_prep._modal_function_kwargs
+
+    assert worker_kwargs["gpu"] == "L40S"
+    assert worker_kwargs["min_containers"] == 1
+    assert "gpu" not in route_kwargs
+    assert route_kwargs["min_containers"] == 1
+
+
+def test_worker_runtime_checks_require_gpu_codecs(monkeypatch) -> None:
+    node_media_prep_app = _load_app_module()
+    calls: list[tuple[list[str], str]] = []
+
+    def fake_require_codec(codec_cmd, expected):
+        calls.append((list(codec_cmd), expected))
+
+    monkeypatch.setattr(node_media_prep_app, "_require_codec", fake_require_codec)
+
+    node_media_prep_app._require_worker_runtime()
+
+    assert calls == [
+        (["ffmpeg", "-encoders"], "h264_nvenc"),
+        (["ffmpeg", "-decoders"], "h264_cuvid"),
+    ]

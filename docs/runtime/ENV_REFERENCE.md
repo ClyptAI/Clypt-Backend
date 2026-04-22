@@ -54,12 +54,13 @@ and the service expects at minimum:
 - `NODE_MEDIA_PREP_AUTH_TOKEN`
 - `GOOGLE_APPLICATION_CREDENTIALS_JSON`
 
-Observed live Modal deployment on 2026-04-20:
+Observed live Modal deployment on 2026-04-21:
 
-- app id: `ap-xX4QTM2zo19aGNRKw1fEYM`
-- endpoint: `https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- app id: `ap-5cylWYEts4MoJtkNoROVUu`
+- endpoint: `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 - secret present in `modal secret list`: `clypt-node-media-prep`
 - working non-secret runtime value: `GCS_BUCKET=clypt-storage-v3`
+- web surface remains CPU-only; the warm `L40S` reservation belongs to `node_media_prep_job`
 
 The active HTTP contract is async:
 
@@ -123,7 +124,7 @@ CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1
 CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.6-35B-A3B
 
 CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite
-CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://rithuuu--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep
+CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep
 CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 ```
 

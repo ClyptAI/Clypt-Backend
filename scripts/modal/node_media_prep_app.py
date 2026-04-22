@@ -1,8 +1,9 @@
-"""Modal L40S app for Clypt node-media-prep.
+"""Modal app for Clypt node-media-prep.
 
-Uses min_containers=1 to keep one warm GPU worker, preserves the existing
-RemoteNodeMediaPrepClient JSON contract, and validates ffmpeg NVENC/NVDEC
-availability before serving work.
+The public ASGI surface stays on CPU, while the spawned worker keeps a single
+warm L40S for the actual ffmpeg NVDEC/NVENC extraction path. This preserves the
+existing RemoteNodeMediaPrepClient JSON contract without reserving a second warm
+GPU for request submit/poll traffic.
 """
 
 from __future__ import annotations
@@ -38,6 +39,15 @@ def _require_codec(codec_cmd: list[str], expected: str) -> None:
     output = subprocess.check_output(codec_cmd, text=True)
     if expected not in output:
         raise RuntimeError(f"missing required ffmpeg codec support: {expected}")
+
+
+def _require_ffmpeg() -> None:
+    subprocess.check_output(["ffmpeg", "-version"], text=True)
+
+
+def _require_worker_runtime() -> None:
+    _require_codec(["ffmpeg", "-encoders"], "h264_nvenc")
+    _require_codec(["ffmpeg", "-decoders"], "h264_cuvid")
 
 
 def _require_auth_header(authorization: str | None) -> None:
@@ -81,8 +91,7 @@ def _build_storage_client() -> GCSStorageClient:
 
 @web_app.on_event("startup")
 def _startup_checks() -> None:
-    _require_codec(["ffmpeg", "-encoders"], "h264_nvenc")
-    _require_codec(["ffmpeg", "-decoders"], "h264_cuvid")
+    _require_ffmpeg()
 
 
 @web_app.get("/health")
@@ -146,6 +155,7 @@ def node_media_prep_result_route(
     secrets=[modal.Secret.from_name("clypt-node-media-prep")],
 )
 def node_media_prep_job(payload: dict) -> dict:
+    _require_worker_runtime()
     request = NodeMediaPrepRequest.from_payload(payload)
     scratch_root = Path(tempfile.mkdtemp(prefix="clypt-modal-node-media-"))
     return run_node_media_prep(
@@ -157,7 +167,6 @@ def node_media_prep_job(payload: dict) -> dict:
 
 @app.function(
     image=image,
-    gpu="L40S",
     min_containers=1,
     timeout=60 * 60,
     secrets=[modal.Secret.from_name("clypt-node-media-prep")],

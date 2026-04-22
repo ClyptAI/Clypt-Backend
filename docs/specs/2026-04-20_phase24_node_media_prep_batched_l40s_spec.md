@@ -109,8 +109,9 @@ Phase26 baseline changes:
 
 Modal deployment changes:
 
-- `gpu="L40S"`
-- `min_containers=1`
+- CPU ASGI submit/poll surface
+- `node_media_prep_job gpu="L40S"`
+- `node_media_prep_job min_containers=1`
 
 ## 8. Acceptance Criteria
 
