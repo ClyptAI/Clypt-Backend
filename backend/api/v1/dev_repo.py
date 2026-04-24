@@ -34,6 +34,7 @@ class InMemoryDevRepository(Phase14Repository):
         self._turns: dict[str, list[TimelineTurnRecord]] = {}
         self._metrics: dict[str, list[PhaseMetricRecord]] = {}
         self._substeps: dict[str, list[PhaseSubstepRecord]] = {}
+        self._approvals: dict[tuple[str, str], str] = {}
 
     # ── Runs ──────────────────────────────────────────────────────────────
 
@@ -84,6 +85,12 @@ class InMemoryDevRepository(Phase14Repository):
 
     def list_candidates(self, *, run_id):
         return self._candidates.get(run_id, [])
+
+    def get_clip_approval(self, *, run_id, clip_id):
+        return self._approvals.get((run_id, clip_id), "pending")
+
+    def set_clip_approval(self, *, run_id, clip_id, status):
+        self._approvals[(run_id, clip_id)] = status
 
     # ── Phase metrics ─────────────────────────────────────────────────────
 

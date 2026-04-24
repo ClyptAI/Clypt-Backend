@@ -92,6 +92,9 @@ class SemanticGraphEdge(BaseModel):
 
 # ── Clips ─────────────────────────────────────────────���───────────────────────
 
+ClipApprovalStatus = Literal["pending", "approved", "rejected"]
+
+
 class ClipCandidate(BaseModel):
     clip_id: str | None = None
     node_ids: list[str] = Field(default_factory=list)
@@ -105,6 +108,7 @@ class ClipCandidate(BaseModel):
     query_aligned: bool | None = None
     pool_rank: int | None = None
     score_breakdown: dict[str, float] | None = None
+    approval_status: ClipApprovalStatus = "pending"
 
 
 # ── Timeline ───────────────────────────────────────��──────────────────────────

@@ -62,6 +62,14 @@ class Phase14Repository(ABC):
     def list_candidates(self, *, run_id: str) -> list[ClipCandidateRecord]:
         raise NotImplementedError
 
+    # Concrete no-op defaults so production (Spanner) inherits without a migration.
+    # Override in dev/test repos to actually persist approval state.
+    def get_clip_approval(self, *, run_id: str, clip_id: str) -> str:
+        return "pending"
+
+    def set_clip_approval(self, *, run_id: str, clip_id: str, status: str) -> None:
+        return None
+
     @abstractmethod
     def write_external_signals(self, *, run_id: str, signals: Sequence[ExternalSignalRecord]) -> None:
         raise NotImplementedError
