@@ -31,6 +31,11 @@
       "sourceType": "github",
       "computedHash": "b873ff9ff01467c301f6e00c4477006a82f1211d1050458a1e419cdb6608e24f"
     },
+    "mattpocock-skills": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "computedHash": "ebf91987ebbf13489869e6790aad8463e1ec96610ecfdd92aec08f3373fa9bcd"
+    },
     "superpowers": {
       "source": "obra/superpowers",
       "sourceType": "github",
