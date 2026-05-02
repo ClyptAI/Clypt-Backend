@@ -7,6 +7,16 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-05-02 - Rithvik-AMD MI300X Phase1 droplet provisioning blocked by regional capacity/API availability
+
+- **Date/Time (UTC):** 2026-05-02 05:27 UTC
+- **Subsystem:** DigitalOcean Phase1 MI300X provisioning (`doctl`, Rithvik-AMD team, `gpu-amd-base`, `gpu-mi300x1-192gb`)
+- **Environment:** Local operator machine on `AMD-refactor`, active `doctl` context `rithvik-amd`, project `My AMD Home` (`75263152-7331-4244-a367-e76a55fcae89`)
+- **Symptom / Error signature:** `doctl compute size list` reported `gpu-mi300x1-192gb` as `available=true`, and `gpu-amd-base` existed as image `221919586`, but droplet creation failed in every image-supported region with `422 Size is not available in this region` or equivalent region-unavailable errors. Default-region creation also failed with `422 Size is not available in this region`. The contracted slug probe failed with `422 This size is unavailable`.
+- **Root cause:** DigitalOcean's public size metadata currently exposes the MI300X 1x slug without any usable region for this team/API token. The CLI can see the Rithvik-AMD project, SSH key, GPU image, and size slug, so the blocker is not local repo state, missing SSH key import, or bad deploy scripts.
+- **Fix applied:** No source/runtime fix available yet because no droplet was created. Imported the Phase1 SSH key into the Rithvik-AMD account, created the expected tags, verified the target project/context, and exhaustively probed all `gpu-amd-base` image regions plus the default region. The next operational step is to resolve DigitalOcean capacity/access for `gpu-mi300x1-192gb` or receive the specific region/contracted size slug that the Rithvik-AMD team can provision.
+- **Verification evidence:** `doctl auth list` showed `rithvik-amd (current)`; `doctl compute ssh-key list` showed key `56038404` (`clypt-do-phase1`); `doctl compute image get 221919586` listed `gpu-amd-base` regions; `doctl compute droplet list` remained empty after the failed creation attempts, confirming no partial droplet was left running.
+
 ## 2026-04-22 - Phase1 YouTube metadata ingress contract drifted ahead of runtime/deploy docs
 
 - **Date/Time (UTC):** 2026-04-22 21:15 UTC
