@@ -1,0 +1,17 @@
+[Unit]
+Description=Clypt Phase26 Worker
+After=network.target clypt-phase26-sglang-qwen.service
+Requires=clypt-phase26-sglang-qwen.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase26/repo
+EnvironmentFile=/etc/clypt-phase26/phase26.env
+EnvironmentFile=/etc/clypt/clypt-phase26-runtime.env
+ExecStart=/opt/clypt-phase26/venvs/phase26/bin/python -m backend.runtime.run_phase26_worker
+Restart=always
+RestartSec=5
+LimitNOFILE=524288
+
+[Install]
+WantedBy=multi-user.target

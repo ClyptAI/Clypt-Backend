@@ -5,13 +5,13 @@ job to invoke the hot local-or-remote VibeVoice service. NFA/emotion2vec+/
 YAMNet run in-process on the Phase 1 host afterwards.
 
 Stage telemetry reported by the remote service is re-emitted through the
-caller-supplied ``stage_event_logger`` so the H200 orchestrator preserves
+caller-supplied ``stage_event_logger`` so the Phase1 orchestrator preserves
 the same ``vibevoice_asr`` stage event it produced when VibeVoice ran
 locally.
 
 HTTP is implemented with ``urllib.request`` to stay aligned with the existing
 client patterns in ``backend/providers/openai_local.py`` — no extra runtime
-dependency on the H200.
+dependency on the Phase1 host.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ class RemoteVibeVoiceAsrClient:
     The client issues a single request per Phase 1 job. The remote service
     is responsible for running VibeVoice vLLM on the hot GPU and returning
     the raw turns plus a stage-events trail. NFA/emotion2vec+/YAMNet are
-    handled on the H200 side after this call returns.
+    handled on the Phase1 host after this call returns.
 
     Parameters
     ----------
@@ -160,7 +160,7 @@ class RemoteVibeVoiceAsrClient:
 
     @property
     def supports_concurrent_visual(self) -> bool:
-        """Remote VibeVoice ASR runs concurrently with H200-local visual extraction."""
+        """Remote VibeVoice ASR runs concurrently with Phase1-local visual extraction."""
         return True
 
     def _endpoint(self, path: str) -> str:

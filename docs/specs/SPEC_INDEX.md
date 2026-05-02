@@ -4,6 +4,12 @@ Active specification documents for current and planned backend work.
 
 ## Active Specs
 
+- [2026-05-02_phase1_amd_mi300x_switchover_spec.md](2026-05-02_phase1_amd_mi300x_switchover_spec.md)
+  Planned Phase1 switchover from H200/CUDA/TensorRT/NVDEC to a dedicated AMD MI300X host using ROCm, AMD VAAPI decode, RF-DETR PyTorch ROCm, ROCm vLLM VibeVoice, and no NVIDIA fallback paths.
+
+- [2026-05-02_phase26_amd_mi300x_sglang_qwen_spec.md](2026-05-02_phase26_amd_mi300x_sglang_qwen_spec.md)
+  Planned Phase26 switchover from H200 SGLang Qwen to a dedicated AMD MI300X host running SGLang on ROCm with local SQLite queue, local OpenAI-compatible generation, and no Nebius/H200 fallback paths.
+
 - [2026-04-20_phase24_node_media_prep_batched_l40s_spec.md](2026-04-20_phase24_node_media_prep_batched_l40s_spec.md)
   Implemented Phase24 timeline-batched node-media-prep with per-batch submit/poll jobs, pipelined multimodal embedding, hybrid fast-seek-plus-precise-trim extraction, and Modal L40S as the active media-prep target.
 

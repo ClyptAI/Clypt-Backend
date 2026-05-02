@@ -1,14 +1,16 @@
 # ENV REFERENCE
 
 **Status:** Active  
-**Last updated:** 2026-04-22
+**Last updated:** 2026-05-02
 
 This is the code-backed env catalog for the current Phase1 + Phase26 + Modal topology.
 
 Canonical baselines:
 
-- [known-good-phase1-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-h200.env)
-- [known-good-phase26-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-h200.env)
+- [known-good-phase1-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-mi300x.env)
+- [known-good-phase26-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-mi300x.env)
+
+Historical H200 env files are superseded on AMD-refactor and remain only as migration references.
 
 ## 1) Required Core Inputs
 
@@ -79,7 +81,7 @@ The active HTTP contract is async:
 
 ## 2) Recommended Working Profiles
 
-### 2.1 Phase1 H200 default
+### 2.1 Phase1 MI300X default
 
 ```bash
 CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL=http://127.0.0.1:9100
@@ -92,16 +94,26 @@ CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN=<shared-bearer>
 CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S=3600
 CLYPT_PHASE1_VISUAL_SERVICE_HEALTHCHECK_PATH=/health
 CLYPT_PHASE1_VISUAL_MODEL=nano
+CLYPT_PHASE1_VISUAL_BACKEND=rfdetr_rocm_fp16
+CLYPT_PHASE1_VISUAL_BATCH_SIZE=16
+CLYPT_PHASE1_VISUAL_DECODE=gpu
+CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=vaapi
+CLYPT_PHASE1_NFA_DEVICE=cuda
+CLYPT_PHASE1_EMOTION2VEC_DEVICE=cuda
+CLYPT_PHASE1_YAMNET_DEVICE=cpu
 
-CLYPT_PHASE24_DISPATCH_URL=http://107.170.33.122:9300
+CLYPT_PHASE24_DISPATCH_URL=http://<phase26-mi300x-public-or-private-ip>:9300
 CLYPT_PHASE24_DISPATCH_AUTH_TOKEN=<shared-bearer>
 CLYPT_PHASE24_DISPATCH_TIMEOUT_S=30
 
 VIBEVOICE_BACKEND=vllm
 VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000
 VIBEVOICE_VLLM_MODEL=vibevoice
+VIBEVOICE_MODEL_ID=microsoft/VibeVoice-ASR
+VIBEVOICE_MODEL_REVISION=main
 VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.60
 VIBEVOICE_VLLM_MAX_NUM_SEQS=4
+HF_HUB_OFFLINE=1
 VIBEVOICE_LONGFORM_ENABLED=1
 VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=40
 VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=80
@@ -115,23 +127,16 @@ VIBEVOICE_LONGFORM_VERIFIER_DEVICE=cpu
 VIBEVOICE_LONGFORM_VERIFIER_MODEL_ID=speechbrain/spkrec-ecapa-voxceleb
 ```
 
-### 2.2 Phase1 H100 overlay
-
-Only memory-sensitive overrides belong here:
-
-```bash
-VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.74
-VIBEVOICE_VLLM_MAX_NUM_SEQS=2
-```
-
-Do not change visual thresholds, tracker behavior, or semantic runtime defaults in the overlay.
-
-### 2.3 Phase26 H200 default
+### 2.2 Phase26 MI300X default
 
 ```bash
 GENAI_GENERATION_BACKEND=local_openai
 CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1
 CLYPT_LOCAL_LLM_MODEL=Qwen/Qwen3.6-35B-A3B
+SG_DOCKER_IMAGE=lmsysorg/sglang:v0.5.10-rocm720-mi30x
+SG_MODEL=Qwen/Qwen3.6-35B-A3B
+SG_LAUNCH_PROFILE=final
+SG_ACCEPTANCE_PROFILES=minimal strict_json fp8_kv scheduler_cache speculative
 
 CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite
 CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep
@@ -142,7 +147,7 @@ CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=<shared-bearer>
 `RemoteNodeMediaPrepClient` handles the follow-up result polling internally, and Phase26 now pipelines batch completion into immediate multimodal embedding while still producing one final ordered result per node.
 Phase 6 render/export uses the same submit-and-poll pattern when `CLYPT_PHASE24_PHASE6_RENDER_URL` and `CLYPT_PHASE24_PHASE6_RENDER_TOKEN` are set. The worker now ships with bundled fonts under `backend/assets/fonts`, so `CLYPT_PHASE6_FONT_ASSET_DIR` is only an override knob.
 
-Additional live non-secret values captured from `/etc/clypt-phase26/phase26.env` on 2026-04-21:
+Additional live-test values:
 
 ```bash
 GOOGLE_CLOUD_PROJECT=clypt-v3
@@ -196,14 +201,15 @@ CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192
 | Env | Default | Notes |
 | --- | --- | --- |
 | `CLYPT_PHASE1_VISUAL_MODEL` | `nano` | Active RF-DETR model family on the Phase1 host. |
-| `CLYPT_PHASE1_VISUAL_BACKEND` | `tensorrt_fp16` | Required fast path. |
-| `CLYPT_PHASE1_VISUAL_BATCH_SIZE` | `16` | Preserve on H200 default. |
+| `CLYPT_PHASE1_VISUAL_BACKEND` | `rfdetr_rocm_fp16` | Required MI300X fast path. |
+| `CLYPT_PHASE1_VISUAL_BATCH_SIZE` | `16` | Preserve on MI300X default. |
 | `CLYPT_PHASE1_VISUAL_THRESHOLD` | `0.35` | Preserve. |
 | `CLYPT_PHASE1_VISUAL_SHAPE` | `640` | Preserve. |
 | `CLYPT_PHASE1_VISUAL_TRACKER` | `bytetrack` | Preserve. |
 | `CLYPT_PHASE1_VISUAL_TRACKER_BUFFER` | `30` | Preserve. |
 | `CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH` | `0.7` | Preserve. |
 | `CLYPT_PHASE1_VISUAL_DECODE` | `gpu` | Preserve. |
+| `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND` | `vaapi` | Required AMD decode path. |
 
 ### 3.4 Phase1 dispatch routing
 

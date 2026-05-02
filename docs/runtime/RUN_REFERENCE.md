@@ -1,7 +1,7 @@
 # RUN REFERENCE
 
 **Status:** Active  
-**Last updated:** 2026-04-18
+**Last updated:** 2026-05-02
 
 This document tracks reference runs and migration validation targets.
 
@@ -19,14 +19,14 @@ The entries below are still useful for relative performance comparison, but many
 
 The current topology to validate is:
 
-- Phase1 H200:
+- Phase1 MI300X:
   - local VibeVoice service
   - local visual service
   - in-process NFA + emotion2vec+ + YAMNet
-- Phase26 H200:
+- Phase26 MI300X:
   - remote enqueue API
   - local SQLite queue + local worker
-  - SGLang Qwen on `:8001`
+  - SGLang ROCm Qwen on `:8001`
 - Modal:
   - node-media-prep after node creation
 
@@ -41,14 +41,14 @@ For every new benchmark, record:
 - node-media-prep wall time on Modal
 - end-to-end total wall time
 
-## 2A) Current Two-H200 + Modal Benchmarks
+## 2A) Historical Two-H200 + Modal Benchmarks
 
-The entries below were gathered on the current split runtime:
+The entries below were gathered before the AMD-refactor and are retained only for comparison against Spanner/prior benchmark telemetry:
 
-- Phase1 H200:
+- Phase1 historical H200:
   - `clypt-phase1-h200-nyc2`
   - local VibeVoice service + local visual service
-- Phase26 H200:
+- Phase26 historical H200:
   - `clypt-phase26-h200-nyc2`
   - local SQLite queue + local worker + SGLang Qwen
 - Modal:
@@ -61,7 +61,7 @@ The entries below were gathered on the current split runtime:
 | Mid-sized reference | `joeroganflagrant.mp4` | 17 | 79.0s | 73.6s | 11.4s | 99.5s | 178.5s | Healthy run; node-media-prep dominated overall Phase 2 cost |
 | Heavy reference | `verticalagentsyc.mp4` | 20 | 126.3s | 267.6s | 14.1s | 370.5s | 496.9s | Healthy run; very heavy clip spans and long Phase 4 windows |
 
-## 3) Migration Acceptance Targets
+## 3) MI300X Migration Acceptance Targets
 
 For this split, validate:
 
@@ -69,10 +69,10 @@ For this split, validate:
 2. Phase 1 handoff reaches `POST /tasks/phase26-enqueue` successfully.
 3. Phase26 worker calls Modal for media prep, not the Phase1 host.
 4. RF-DETR output parity stays within expected bounds with the preserved fast settings.
-5. The H100 overlay changes only memory-sensitive VibeVoice knobs.
+5. VAAPI decode, RF-DETR ROCm, NFA GPU, emotion2vec+ GPU, and SGLang staged profiles fail hard instead of silently downgrading.
 
 ## 4) Notes
 
 - Until new measurements are recorded, use the historical table above only as directional context.
-- Add new entries here after the first successful two-H200 + Modal benchmark pass.
+- Add new entries here after the first successful MI300X + MI300X + Modal benchmark pass.
 - Log any regressions or deployment recoveries in [docs/ERROR_LOG.md](/Users/rithvik/Clypt-Backend/docs/ERROR_LOG.md).

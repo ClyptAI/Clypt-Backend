@@ -31,35 +31,37 @@ class TestVisualPipelineConfig:
 
         config = VisualPipelineConfig.from_env()
         assert config.detector_model == "nano"
-        assert config.detector_backend == "tensorrt_fp16"
+        assert config.detector_backend == "rfdetr_rocm_fp16"
         assert config.detector_batch_size == 16
         assert config.detection_threshold == pytest.approx(0.35)
         assert config.detector_resolution == 640
         assert config.tracker_backend == "bytetrack"
         assert config.frame_decode_backend == "gpu"
+        assert config.gpu_decode_backend == "vaapi"
         assert config.use_fp16 is True
-        assert config.use_tensorrt is True
-        assert config.is_cuda_required is True
-        assert config.tensorrt_engine_dir == "backend/outputs/tensorrt_engines"
+        assert config.use_tensorrt is False
+        assert config.is_gpu_required is True
+        assert config.detector_artifact_dir == "backend/outputs/phase1_visual"
 
     def test_from_env_custom(self, monkeypatch):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
-        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_BACKEND", "tensorrt_fp16")
+        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_BACKEND", "rfdetr_rocm_fp16")
         monkeypatch.setenv("CLYPT_PHASE1_VISUAL_MODEL", "small")
         monkeypatch.setenv("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "8")
         monkeypatch.setenv("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.5")
         monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SHAPE", "640")
+        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND", "vaapi")
 
         config = VisualPipelineConfig.from_env()
         assert config.detector_model == "small"
-        assert config.detector_backend == "tensorrt_fp16"
+        assert config.detector_backend == "rfdetr_rocm_fp16"
         assert config.detector_batch_size == 8
         assert config.detection_threshold == pytest.approx(0.5)
         assert config.detector_resolution == 640
         assert config.use_fp16 is True
-        assert config.use_tensorrt is True
-        assert config.is_cuda_required is True
+        assert config.use_tensorrt is False
+        assert config.is_gpu_required is True
 
     def test_from_env_rejects_cpu_decode_backend(self, monkeypatch):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
@@ -68,13 +70,20 @@ class TestVisualPipelineConfig:
         with pytest.raises(ValueError, match="GPU decode is required"):
             VisualPipelineConfig.from_env()
 
+    def test_from_env_rejects_non_vaapi_gpu_decode_backend(self, monkeypatch):
+        from backend.phase1_runtime.visual_config import VisualPipelineConfig
+
+        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND", "cuda")
+        with pytest.raises(ValueError, match="VAAPI GPU decode is required"):
+            VisualPipelineConfig.from_env()
+
     def test_person_class_id(self):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig.from_env()
         assert config.PERSON_CLASS_ID == 0
 
-    def test_tensorrt_engine_path_encodes_config(self):
+    def test_tensorrt_engine_path_uses_generic_artifact_dir_for_legacy_callers(self):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig(
@@ -87,18 +96,19 @@ class TestVisualPipelineConfig:
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
             frame_decode_backend="gpu",
-            tensorrt_engine_dir="/tmp/engines",
+            gpu_decode_backend="vaapi",
+            detector_artifact_dir="/tmp/engines",
         )
         expected = Path("/tmp/engines/rfdetr_nano_b4_r560_fp16.engine")
         assert config.tensorrt_engine_path == expected
 
-    def test_tensorrt_engine_dir_from_env(self, monkeypatch):
+    def test_detector_artifact_dir_from_env(self, monkeypatch):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
-        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_TRT_ENGINE_DIR", "/data/trt_cache")
+        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_ARTIFACT_DIR", "/data/visual_artifacts")
         config = VisualPipelineConfig.from_env()
-        assert config.tensorrt_engine_dir == "/data/trt_cache"
-        assert str(config.tensorrt_engine_path).startswith("/data/trt_cache/")
+        assert config.detector_artifact_dir == "/data/visual_artifacts"
+        assert str(config.tensorrt_engine_path).startswith("/data/visual_artifacts/")
 
 
 # ---------- frame_decode tests ----------
@@ -154,15 +164,64 @@ class TestFrameDecode:
         with pytest.raises(ValueError, match="only 'gpu' is supported"):
             next(decode_video_frames(video_path=video, decode_backend="cpu"))
 
-    def test_decode_video_frames_uses_nv12_then_rgb24_filter(self, monkeypatch, tmp_path: Path):
+    def test_discover_vaapi_render_node_picks_first_render_device(self, tmp_path: Path):
+        from backend.phase1_runtime.frame_decode import discover_vaapi_render_node
+
+        dev_dri = tmp_path / "dri"
+        dev_dri.mkdir()
+        (dev_dri / "card0").touch()
+        (dev_dri / "renderD129").touch()
+        (dev_dri / "renderD128").touch()
+
+        assert discover_vaapi_render_node(dev_dri=dev_dri) == dev_dri / "renderD128"
+
+    def test_discover_vaapi_render_node_fails_without_render_device(self, tmp_path: Path):
+        from backend.phase1_runtime.frame_decode import discover_vaapi_render_node
+
+        dev_dri = tmp_path / "dri"
+        dev_dri.mkdir()
+        (dev_dri / "card0").touch()
+
+        with pytest.raises(RuntimeError, match="No VAAPI render node"):
+            discover_vaapi_render_node(dev_dri=dev_dri)
+
+    def test_validate_vaapi_render_node_fails_fast_on_vainfo_error(self, monkeypatch, tmp_path: Path):
+        from backend.phase1_runtime.frame_decode import validate_vaapi_render_node
+
+        render_node = tmp_path / "renderD128"
+        render_node.touch()
+
+        def _fake_run(*_args, **_kwargs):
+            return SimpleNamespace(returncode=1, stdout="", stderr="driver missing")
+
+        monkeypatch.setattr("backend.phase1_runtime.frame_decode.subprocess.run", _fake_run)
+
+        with pytest.raises(RuntimeError, match="VAAPI validation failed"):
+            validate_vaapi_render_node(render_node)
+
+    def test_decode_video_frames_uses_vaapi_device_and_nv12_then_rgb24_filter(self, monkeypatch, tmp_path: Path):
         from backend.phase1_runtime.frame_decode import decode_video_frames
 
         video = tmp_path / "sample.mp4"
         video.write_bytes(b"not-a-real-video")
+        render_node = tmp_path / "renderD128"
+        render_node.touch()
 
         monkeypatch.setattr(
             "backend.phase1_runtime.frame_decode._probe_frame_dimensions",
             lambda **_: (2, 2),
+        )
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode.discover_vaapi_render_node",
+            lambda: render_node,
+        )
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode.validate_vaapi_render_node",
+            lambda _node: None,
+        )
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode.validate_ffmpeg_vaapi_support",
+            lambda: None,
         )
 
         class _DummyStdout:
@@ -208,6 +267,9 @@ class TestFrameDecode:
 
         frames = list(decode_video_frames(video_path=video, decode_backend="gpu"))
         assert len(frames) == 1
+        assert captured_cmd[captured_cmd.index("-vaapi_device") + 1] == str(render_node)
+        assert captured_cmd[captured_cmd.index("-hwaccel") + 1] == "vaapi"
+        assert captured_cmd[captured_cmd.index("-hwaccel_output_format") + 1] == "vaapi"
         vf_index = captured_cmd.index("-vf")
         assert captured_cmd[vf_index + 1] == "hwdownload,format=nv12,format=rgb24"
 
@@ -220,6 +282,18 @@ class TestFrameDecode:
         monkeypatch.setattr(
             "backend.phase1_runtime.frame_decode._probe_frame_dimensions",
             lambda **_: (4, 3),
+        )
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode.discover_vaapi_render_node",
+            lambda: tmp_path / "renderD128",
+        )
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode.validate_vaapi_render_node",
+            lambda _node: None,
+        )
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode.validate_ffmpeg_vaapi_support",
+            lambda: None,
         )
 
         class _DummyStdout:
@@ -277,7 +351,7 @@ class TestFrameDecode:
         assert frames[0].source_width == 4
         assert frames[0].source_height == 3
         vf_index = captured_cmd.index("-vf")
-        assert captured_cmd[vf_index + 1] == "scale_cuda=2:2,hwdownload,format=nv12,format=rgb24"
+        assert captured_cmd[vf_index + 1] == "scale_vaapi=2:2,hwdownload,format=nv12,format=rgb24"
 
 
 # ---------- rfdetr_detector tests ----------
@@ -307,14 +381,14 @@ class TestRFDETRPersonDetector:
         with pytest.raises(RuntimeError, match="not loaded"):
             det.detect_batch([np.zeros((10, 10, 3), dtype=np.uint8)])
 
-    def test_require_cuda_fails_when_unavailable(self):
-        from backend.phase1_runtime.rfdetr_detector import _require_cuda
+    def test_require_gpu_fails_when_rocm_unavailable(self):
+        from backend.phase1_runtime.rfdetr_detector import _require_gpu
 
         fake_torch = MagicMock()
         fake_torch.cuda.is_available.return_value = False
         with patch.dict(sys.modules, {"torch": fake_torch}):
-            with pytest.raises(RuntimeError, match="CUDA is required"):
-                _require_cuda()
+            with pytest.raises(RuntimeError, match="ROCm/HIP GPU is required"):
+                _require_gpu()
 
 
 # ---------- tracker_runtime tests ----------
@@ -372,7 +446,8 @@ class TestTensorRTDetector:
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
             frame_decode_backend="gpu",
-            tensorrt_engine_dir=str(tmp_path / "engines"),
+            gpu_decode_backend="vaapi",
+            detector_artifact_dir=str(tmp_path / "engines"),
         )
 
     def test_detect_batch_raises_if_not_loaded(self, tmp_path):
@@ -724,13 +799,13 @@ class TestDetectorFactory:
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
             frame_decode_backend="gpu",
-            tensorrt_engine_dir="/tmp/engines",
+            gpu_decode_backend="vaapi",
+            detector_artifact_dir="/tmp/engines",
         )
         det = _make_detector(config)
         assert isinstance(det, RFDETRPersonDetector)
 
-    def test_factory_picks_tensorrt_when_configured(self):
-        from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
+    def test_factory_rejects_tensorrt_on_amd_active_path(self):
         from backend.phase1_runtime.visual import _make_detector
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
@@ -744,10 +819,11 @@ class TestDetectorFactory:
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
             frame_decode_backend="gpu",
-            tensorrt_engine_dir="/tmp/engines",
+            gpu_decode_backend="vaapi",
+            detector_artifact_dir="/tmp/engines",
         )
-        det = _make_detector(config)
-        assert isinstance(det, TensorRTDetector)
+        with pytest.raises(RuntimeError, match="TensorRT is not supported"):
+            _make_detector(config)
 
 
 # ---------- Integration: visual extractor with injected tracker_runner ----------

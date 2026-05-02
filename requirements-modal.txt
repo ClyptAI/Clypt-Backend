@@ -1,0 +1,15 @@
+# Modal worker/web runtime deps.
+#
+# Used by node-media-prep and render/export Modal apps. The GPU capabilities
+# come from the Modal L40S image/ffmpeg runtime, not host-specific H200 or
+# MI300X Python wheels.
+
+pydantic>=2.11.0
+pytest>=8.4.0
+httpx>=0.28.0
+python-dotenv>=1.0.1
+google-genai>=1.17.0
+google-cloud-storage>=2.19.0
+google-cloud-spanner>=3.50.0
+fastapi>=0.116.0
+uvicorn>=0.35.0

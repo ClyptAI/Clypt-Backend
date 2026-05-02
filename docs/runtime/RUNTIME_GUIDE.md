@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-04-22
+**Last updated:** 2026-05-02
 
 This is the runtime source of truth for the current repository state.
 
@@ -9,13 +9,13 @@ This is the runtime source of truth for the current repository state.
 
 The active topology is:
 
-- **Phase1 host (H200 default)**
+- **Phase1 host (MI300X default)**
   - Phase 1 runner/orchestrator
   - local VibeVoice service on `:9100`
   - local visual service on `:9200`
   - co-located VibeVoice vLLM sidecar on `:8000`
   - in-process NFA -> emotion2vec+ -> YAMNet
-- **Phase26 host (H200)**
+- **Phase26 host (MI300X)**
   - Phase26 dispatch API on `:9300`
   - local SQLite queue + local worker
   - SGLang Qwen on `:8001`
@@ -52,7 +52,7 @@ Key behavior:
   If any chunk-level alignment fails, Phase 1 hard-fails instead of dropping to per-turn alignment.
 - Phase 1 audio-post launches immediately after the VibeVoice response returns
 
-Current live non-secret Phase1 env snapshot from `clypt-phase1-h200-rithvik-nyc2` (`107.170.11.76`) on 2026-04-21:
+Current Phase1 AMD-refactor baseline is [known-good-phase1-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-mi300x.env). Prior H200 snapshots are historical only.
 
 - dispatch URL: `http://107.170.33.122:9300`
 - `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.60`
@@ -63,8 +63,8 @@ Current live non-secret Phase1 env snapshot from `clypt-phase1-h200-rithvik-nyc2
 - `VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES=160`
 - `VIBEVOICE_LONGFORM_MAX_SHARDS=4`
 - `CLYPT_PHASE1_INPUT_MODE=test_bank`
-- visual fast-path settings remain RF-DETR Nano with `tensorrt_fp16`, batch `16`, threshold `0.35`, shape `640`, ByteTrack buffer `30`, ByteTrack match `0.7`, GPU decode
-- fresh-host deploy invariant: the matching RF-DETR Nano TensorRT engine must be prebuilt during bootstrap so the first live visual request does not pay the engine-build tax
+- visual fast-path settings remain RF-DETR Nano with `rfdetr_rocm_fp16`, batch `16`, threshold `0.35`, shape `640`, ByteTrack buffer `30`, ByteTrack match `0.7`, GPU decode via VAAPI
+- fresh-host deploy invariant: ROCm, VAAPI, RF-DETR, NFA, emotion2vec+, YAMNet, and VibeVoice model caches must be validated before services are restarted
 - fresh-host deploy invariant: NFA/emotion2vec+/YAMNet prewarm must use the same service cache roots (`HOME=/opt/clypt-phase1`, `CLYPT_PHASE1_CACHE_HOME=/opt/clypt-phase1/.cache`, `TORCH_HOME=/opt/clypt-phase1/.cache/torch`, `HF_HOME=/opt/clypt-phase1/.cache/huggingface`) before services are restarted
 
 ### 2.2 Phase26 host
@@ -80,26 +80,11 @@ Key behavior:
 - the worker still runs current Phase 2-4 business logic
 - node-media-prep is called only after node creation
 
-Current live non-secret Phase26 env snapshot from `clypt-phase26-h200-ming-nyc2` (`107.170.33.122`) on 2026-04-21:
+Current Phase26 AMD-refactor baseline is [known-good-phase26-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-mi300x.env). Prior H200 snapshots are historical only.
 
-- `GENAI_GENERATION_MODEL=Qwen/Qwen3.6-35B-A3B`
-- `GENAI_GENERATION_BACKEND=local_openai`
-- `CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1`
-- `VERTEX_EMBEDDING_LOCATION=us-central1`
-- `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
-- `CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1`
-- `CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
-- `CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S=1800`
-- `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=12`
-- `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES=3`
-- `CLYPT_PHASE24_NODE_MEDIA_BATCH_GAP_MS=2000`
-- `CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_NODES=8`
-- `CLYPT_PHASE24_NODE_MEDIA_BATCH_MAX_SPAN_MS=120000`
-- `CLYPT_PHASE24_NODE_MEDIA_BATCH_PAD_MS=2000`
-- `CLYPT_PHASE24_NODE_MEDIA_BATCH_COARSE_SEEK_PAD_MS=10000`
-- `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096`
-- `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192`
-- optional render rollout envs: `CLYPT_PHASE24_PHASE6_RENDER_URL`, `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`
+- SGLang serves `Qwen/Qwen3.6-35B-A3B` on `127.0.0.1:8001`.
+- The deploy writes `/etc/clypt-phase26/sg-model.env` with the resolved container-visible HF snapshot path and starts with `HF_HUB_OFFLINE=1`.
+- Queue, Modal, and fail-fast worker settings stay in `known-good-phase26-mi300x.env`.
 
 ### 2.3 Modal node-media-prep / render
 
@@ -158,7 +143,7 @@ Critical invariant:
 
 The intended Phase 1 visual settings are preserved:
 
-- `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`
+- `CLYPT_PHASE1_VISUAL_BACKEND=rfdetr_rocm_fp16`
 - `CLYPT_PHASE1_VISUAL_MODEL=nano`
 - `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`
 - `CLYPT_PHASE1_VISUAL_THRESHOLD=0.35`
@@ -167,20 +152,17 @@ The intended Phase 1 visual settings are preserved:
 - `CLYPT_PHASE1_VISUAL_TRACKER_BUFFER=30`
 - `CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH=0.7`
 - `CLYPT_PHASE1_VISUAL_DECODE=gpu`
-- `CLYPT_PHASE1_VISUAL_TRT_ENGINE_DIR=backend/outputs/tensorrt_engines`
+- `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=vaapi`
 
 Operationally, the fast path remains:
 
 ```text
-NVDEC -> scale_cuda -> hwdownload -> CUDA tensor normalize -> TensorRT -> ByteTrack
+VAAPI decode/scale -> hwdownload -> ROCm/HIP tensor normalize -> RF-DETR PyTorch ROCm -> ByteTrack
 ```
 
-The Phase1 deploy/bootstrap path now prebuilds the active TensorRT engine in
-`CLYPT_PHASE1_VISUAL_TRT_ENGINE_DIR`. If the model family, batch size, and
-input shape stay unchanged, warm hosts should reuse the cached `.engine`
-instead of rebuilding it on the first live request.
-
-The H100 backup overlay must not change semantic visual behavior.
+The Phase1 deploy/bootstrap path validates VAAPI, FFmpeg, PyTorch ROCm, RF-DETR,
+and the audio-post providers before starting services. TensorRT/NVDEC are no
+longer active paths on AMD-refactor.
 
 ## 5) Phase26 Worker Contract
 
@@ -228,8 +210,8 @@ These now belong to the Phase26 host, not the Phase1 host.
 
 ## 8) Canonical Runtime Files
 
-- Phase1 baseline: [known-good-phase1-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-h200.env)
-- Phase26 baseline: [known-good-phase26-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-h200.env)
+- Phase1 baseline: [known-good-phase1-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-mi300x.env)
+- Phase26 baseline: [known-good-phase26-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-mi300x.env)
 - Diagnostics runbook: [LOG_EXTRACTION_RUNBOOK.md](/Users/rithvik/Clypt-Backend/docs/runtime/LOG_EXTRACTION_RUNBOOK.md)
 
 Legacy env files remain only as migration pointers and should not be treated as canonical baselines.

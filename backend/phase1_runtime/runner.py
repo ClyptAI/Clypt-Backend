@@ -63,7 +63,7 @@ class Phase1JobRunner:
         if forced_aligner is None or emotion_provider is None or yamnet_provider is None:
             raise ValueError(
                 "Phase1JobRunner requires forced_aligner, emotion_provider, and "
-                "yamnet_provider — these run in-process on the H200."
+                "yamnet_provider — these run in-process on the Phase1 host."
             )
         self.working_root = Path(working_root)
         self.audio_extractor = audio_extractor

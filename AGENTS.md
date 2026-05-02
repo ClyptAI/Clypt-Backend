@@ -7,10 +7,10 @@ Operational startup and maintenance guide for coding agents.
 - Product: Clypt V3.1 backend
 - Implemented: Phases 1-4
 - Planned: Phases 5-6
-- Active topology: **Phase1 H200 + Phase26 H200 + Modal**
-  - **Phase1 host (H200 default)**: Phase 1 runner/orchestrator, persistent local VibeVoice service, persistent local visual service, co-located VibeVoice vLLM sidecar, in-process NFA -> emotion2vec+ -> YAMNet.
-  - **Phase26 host (H200)**: `POST /tasks/phase26-enqueue`, local SQLite queue + worker, SGLang Qwen on `:8001`, current Phase 2-4 runtime, future Phase 5-6 orchestration.
-  - **Modal**: CPU `POST /tasks/node-media-prep` submit/poll surface plus one warm `L40S` `node_media_prep_job` worker; future render/export will follow the same external-worker pattern.
+- Active topology: **Phase1 MI300X + Phase26 MI300X + Modal L40S**
+  - **Phase1 host (MI300X default)**: Phase 1 runner/orchestrator, persistent local VibeVoice service, persistent local visual service, co-located VibeVoice vLLM ROCm sidecar, in-process NFA -> emotion2vec+ -> YAMNet.
+  - **Phase26 host (MI300X)**: `POST /tasks/phase26-enqueue`, local SQLite queue + worker, SGLang ROCm Qwen on `:8001`, current Phase 2-4 runtime, future Phase 5-6 orchestration.
+  - **Modal**: CPU `POST /tasks/node-media-prep` submit/poll surface plus one warm `L40S` `node_media_prep_job` worker; render/export follows the same external-worker pattern.
 - Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint on the Phase26 host.
 
 ## Read Order (Required - You MUST read these before reporting back to the user.)
@@ -60,7 +60,7 @@ python -m pip install -r requirements-local.txt
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-do-phase1-h200.txt
+python -m pip install -r requirements-do-phase1-mi300x.txt
 ```
 
 ### Phase26 runtime deps
@@ -68,7 +68,7 @@ python -m pip install -r requirements-do-phase1-h200.txt
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-do-phase26-h200.txt
+python -m pip install -r requirements-do-phase26-mi300x.txt
 ```
 
 ### Pipeline tests (offline)
@@ -95,19 +95,21 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
 ## Runtime Truths To Preserve
 
 - `VIBEVOICE_VLLM_MODEL` must be `vibevoice` on the Phase1 host.
-- `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required on both H200 hosts.
+- `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required on both MI300X hosts.
 - Phase 1 now runs on one host with two hot local services:
   - VibeVoice at `POST /tasks/vibevoice-asr`
   - visual extraction at `POST /tasks/visual-extract`
 - Current Phase 1 visual settings must stay intact unless the user explicitly approves retuning:
   - `CLYPT_PHASE1_VISUAL_MODEL=nano`
-  - `tensorrt_fp16`
+  - `CLYPT_PHASE1_VISUAL_BACKEND=rfdetr_rocm_fp16`
   - batch size `16`
   - threshold `0.35`
   - shape `640`
   - ByteTrack buffer `30`
   - ByteTrack match threshold `0.7`
-  - GPU decode
+  - GPU decode through `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=vaapi`
+- Phase1 NFA and emotion2vec+ must run on the ROCm GPU through PyTorch's `cuda` namespace and fail hard if unavailable; YAMNet remains CPU.
+- Phase1 VibeVoice sidecar must use a resolved HF snapshot path with `HF_HUB_OFFLINE=1`; `VLLM_ROCM_BASE_IMAGE` must be an immutable accepted ROCm vLLM image tag, not empty, untagged, or `:latest`.
 - NFA / emotion2vec+ / YAMNet remain persistent in-process on the Phase1 host.
 - There is **no local fallback**:
   - Phase1 requires `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_*`
@@ -123,9 +125,9 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - `CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`
   - `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
-- Qwen serving target is the SGLang service on Phase26 `127.0.0.1:8001`.
-- Node-media prep is always delegated remotely. Do not re-introduce an in-process ffmpeg fallback on either H200 host.
-- The old Phase 1 H100 backup env overlay has been intentionally removed from this repo; do not reintroduce or reference `known-good-phase1-h100-backup.env` unless the user explicitly asks for a fresh replacement.
+- Qwen serving target is the SGLang ROCm service on Phase26 `127.0.0.1:8001`.
+- Node-media prep is always delegated remotely to Modal L40S. Do not re-introduce an in-process ffmpeg fallback on either MI300X host.
+- Historical H200/H100 env overlays are superseded on AMD-refactor; do not reintroduce or reference `known-good-phase1-h100-backup.env` unless the user explicitly asks for a fresh replacement.
 
 ## Critical Maintenance Rule
 
@@ -145,7 +147,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (4435 symbols, 11046 relationships, 263 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (4578 symbols, 11235 relationships, 264 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

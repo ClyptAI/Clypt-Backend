@@ -1,0 +1,26 @@
+[Unit]
+Description=Clypt Phase 1 Worker ROCm
+After=network.target clypt-phase1-vibevoice.service clypt-phase1-visual.service
+Requires=clypt-phase1-vibevoice.service clypt-phase1-visual.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase1/repo
+EnvironmentFile=/etc/clypt-phase1/phase1.env
+EnvironmentFile=/etc/clypt/clypt-phase1-runtime.env
+Environment=CLYPT_ACCELERATOR=rocm
+Environment=CLYPT_PHASE1_VISUAL_BACKEND=rfdetr_rocm_fp16
+Environment=CLYPT_PHASE1_VISUAL_DECODE=gpu
+Environment=CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=vaapi
+Environment=CLYPT_PHASE1_NFA_DEVICE=cuda
+Environment=CLYPT_PHASE1_EMOTION2VEC_DEVICE=cuda
+Environment=CLYPT_PHASE1_YAMNET_DEVICE=cpu
+Environment=HIP_VISIBLE_DEVICES=0
+Environment=ROCR_VISIBLE_DEVICES=0
+Environment=PYTORCH_KERNEL_CACHE_PATH=/opt/clypt-phase1/.cache/torch/kernels
+ExecStart=/opt/clypt-phase1/venvs/phase1/bin/python -m backend.runtime.run_phase1_worker --db-path /var/lib/clypt/phase1/jobs.db --logs-root /var/log/clypt/phase1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

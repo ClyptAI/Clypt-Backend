@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Superseded on AMD-refactor by run_vllm_vibevoice_rocm_container.sh.
+# Kept as historical H200 reference only.
 set -euo pipefail
 
 VLLM_IMAGE_TAG="${VLLM_IMAGE_TAG:-clypt-phase1-vllm-vibevoice:latest}"

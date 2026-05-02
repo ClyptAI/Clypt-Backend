@@ -3,8 +3,8 @@
 This module orchestrates:
 1. video metadata probing
 2. shot boundary detection
-3. frame decoding (GPU / NVDEC)
-4. RF-DETR person detection (GPU)
+3. frame decoding (AMD VAAPI GPU decode)
+4. RF-DETR person detection (ROCm/HIP GPU)
 5. ByteTrack tracking
 6. post-processing into the canonical artifact schemas
 
@@ -101,10 +101,12 @@ def detect_shot_boundaries_ms(*, video_path: Path, duration_ms: int, threshold: 
 # ---------------------------------------------------------------------------
 
 def _make_detector(config):
-    """Pick the right detector backend based on config.detector_backend."""
+    """Create the active AMD RF-DETR detector backend."""
     if config.use_tensorrt:
-        from .tensorrt_detector import TensorRTDetector
-        return TensorRTDetector(config)
+        raise RuntimeError(
+            "TensorRT is not supported on the Phase1 AMD MI300X active path. "
+            "Use CLYPT_PHASE1_VISUAL_BACKEND=rfdetr_rocm_fp16."
+        )
     from .rfdetr_detector import RFDETRPersonDetector
     return RFDETRPersonDetector(config)
 
@@ -157,18 +159,16 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
         frame_stream = decode_video_frames(
             video_path=video_path,
             decode_backend=config.frame_decode_backend,
-            target_width=config.detector_resolution if config.use_tensorrt else None,
-            target_height=config.detector_resolution if config.use_tensorrt else None,
+            gpu_decode_backend=config.gpu_decode_backend,
+            target_width=config.detector_resolution,
+            target_height=config.detector_resolution,
         )
         for frame_batch in batch_frames(frame_stream, batch_size=config.detector_batch_size):
             rgb_arrays = [f.rgb for f in frame_batch]
             frame_indices = [f.frame_idx for f in frame_batch]
             orig_sizes = [(f.source_height, f.source_width) for f in frame_batch]
 
-            if config.use_tensorrt:
-                detections_list = detector.detect_batch(rgb_arrays, orig_sizes=orig_sizes)
-            else:
-                detections_list = detector.detect_batch(rgb_arrays)
+            detections_list = detector.detect_batch(rgb_arrays, orig_sizes=orig_sizes)
 
             for frame_idx, detections in zip(frame_indices, detections_list, strict=True):
                 track_rows = tracker.update(frame_idx=frame_idx, detections=detections)
@@ -235,9 +235,10 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
         "inference_backend": config.detector_backend,
         "batch_size": config.detector_batch_size,
         "frame_decode_backend": config.frame_decode_backend,
+        "gpu_decode_backend": config.gpu_decode_backend,
         "shape": config.detector_resolution,
         "half_precision": config.use_fp16,
-        "tensor_rt_enabled": config.use_tensorrt,
+        "tensor_rt_enabled": False,
         "frames_processed": det_metrics.frames_processed,
         "mean_detector_latency_ms": round(det_metrics.mean_detector_latency_ms, 2),
         "mean_tracker_latency_ms": round(trk_metrics.mean_tracker_latency_ms, 2),

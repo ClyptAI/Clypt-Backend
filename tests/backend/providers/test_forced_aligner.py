@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -28,6 +30,19 @@ def test_alignment_chunk_count_uses_duration_defaults() -> None:
     assert provider._alignment_chunk_count_for_duration_s((80 * 60) + 1) == 8
     assert provider._alignment_chunk_count_for_duration_s(120 * 60) == 8
     assert provider._alignment_chunk_count_for_duration_s(160 * 60) == 8
+
+
+def test_resolve_device_hard_fails_when_requested_cuda_unavailable(monkeypatch) -> None:
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=_FakeCuda()))
+    provider = ForcedAlignmentProvider(device="cuda")
+
+    with pytest.raises(RuntimeError, match="torch.cuda.is_available"):
+        provider._resolve_device()
 
 
 def test_run_uses_duration_chunked_alignment_for_long_inputs(monkeypatch, tmp_path: Path) -> None:

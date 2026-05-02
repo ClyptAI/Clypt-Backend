@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from backend.providers import (
@@ -56,8 +57,12 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
         settings=settings.vibevoice_asr_service,
     )
     visual_extractor = RemotePhase1VisualClient(settings=settings.phase1_visual_service)
-    forced_aligner = ForcedAlignmentProvider()
-    emotion_provider = Emotion2VecPlusProvider()
+    forced_aligner = ForcedAlignmentProvider(
+        device=os.environ.get("CLYPT_PHASE1_NFA_DEVICE", "auto"),
+    )
+    emotion_provider = Emotion2VecPlusProvider(
+        device=os.environ.get("CLYPT_PHASE1_EMOTION2VEC_DEVICE", "auto"),
+    )
     yamnet_provider = YAMNetProvider(
         device="gpu" if settings.phase1_runtime.run_yamnet_on_gpu else "cpu",
     )

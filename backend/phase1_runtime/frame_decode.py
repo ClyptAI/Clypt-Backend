@@ -1,7 +1,7 @@
-"""GPU decode for Phase 1 visual extraction.
+"""AMD VAAPI GPU decode for Phase 1 visual extraction.
 
 Responsibilities:
-- Decode frames with ffmpeg NVDEC (`-hwaccel cuda`)
+- Decode frames with ffmpeg VAAPI (`-hwaccel vaapi`)
 - Yield batches of (frame_idx, rgb_array) tuples
 - Preserve frame index bookkeeping
 - Fail fast when GPU decode is unavailable
@@ -10,6 +10,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,8 @@ from typing import Iterator
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_RENDER_NODE_RE = re.compile(r"^renderD\d+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,10 +60,85 @@ def _probe_frame_dimensions(*, video_path: Path) -> tuple[int, int]:
     return width, height
 
 
+def discover_vaapi_render_node(*, dev_dri: Path = Path("/dev/dri")) -> Path:
+    """Return the first DRM render node suitable for VAAPI decode."""
+    if not dev_dri.exists():
+        raise RuntimeError(
+            f"No VAAPI render node found: {dev_dri} does not exist. "
+            "AMD GPU decode requires /dev/dri/renderD*."
+        )
+    render_nodes = sorted(
+        path for path in dev_dri.iterdir() if _RENDER_NODE_RE.match(path.name)
+    )
+    if not render_nodes:
+        raise RuntimeError(
+            f"No VAAPI render node found under {dev_dri}. "
+            "AMD GPU decode requires /dev/dri/renderD* and must not fall back to software decode."
+        )
+    return render_nodes[0]
+
+
+def validate_vaapi_render_node(render_node: Path) -> None:
+    """Validate the selected render node with vainfo before ffmpeg starts."""
+    if not render_node.exists():
+        raise RuntimeError(f"VAAPI render node does not exist: {render_node}")
+    try:
+        result = subprocess.run(
+            ["vainfo", "--display", "drm", "--device", str(render_node)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "vainfo is required to validate AMD VAAPI decode. "
+            "Install vainfo/libva-utils on the Phase1 MI300X host."
+        ) from exc
+    if result.returncode != 0:
+        details = "\n".join(part for part in [result.stdout, result.stderr] if part)
+        raise RuntimeError(
+            "VAAPI validation failed for "
+            f"{render_node}: {details[-1200:]}"
+        )
+
+
+def validate_ffmpeg_vaapi_support() -> None:
+    """Fail before decode if ffmpeg lacks VAAPI or scale_vaapi support."""
+    try:
+        hwaccels = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        filters = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "ffmpeg is required for AMD VAAPI frame decoding."
+        ) from exc
+    if hwaccels.returncode != 0 or "vaapi" not in (hwaccels.stdout or ""):
+        raise RuntimeError(
+            "ffmpeg does not report VAAPI hwaccel support; "
+            "GPU decode is required and software decode is not allowed."
+        )
+    filter_output = "\n".join(part for part in [filters.stdout, filters.stderr] if part)
+    if filters.returncode != 0 or "scale_vaapi" not in filter_output:
+        raise RuntimeError(
+            "ffmpeg does not expose scale_vaapi; "
+            "AMD GPU resize/decode is required and software decode is not allowed."
+        )
+
+
 def decode_video_frames(
     *,
     video_path: Path,
     decode_backend: str = "gpu",
+    gpu_decode_backend: str = "vaapi",
     stride: int = 1,
     target_width: int | None = None,
     target_height: int | None = None,
@@ -77,6 +155,11 @@ def decode_video_frames(
         raise ValueError(
             f"Unsupported decode backend {decode_backend!r}; only 'gpu' is supported."
         )
+    accelerator_backend = (gpu_decode_backend or "vaapi").strip().lower()
+    if accelerator_backend != "vaapi":
+        raise ValueError(
+            f"Unsupported GPU decode backend {gpu_decode_backend!r}; only AMD VAAPI is supported."
+        )
     if stride < 1:
         raise ValueError("stride must be >= 1")
 
@@ -91,24 +174,28 @@ def decode_video_frames(
             f"Invalid decode frame size for {video_path}: {width}x{height}."
         )
 
+    render_node = discover_vaapi_render_node()
+    validate_vaapi_render_node(render_node)
+    validate_ffmpeg_vaapi_support()
+
     vf_chain = "hwdownload,format=nv12,format=rgb24"
     if output_width != width or output_height != height:
-        vf_chain = f"scale_cuda={output_width}:{output_height},{vf_chain}"
+        vf_chain = f"scale_vaapi={output_width}:{output_height},{vf_chain}"
 
     cmd = [
         "ffmpeg",
         "-v",
         "error",
         "-nostdin",
+        "-vaapi_device",
+        str(render_node),
         "-hwaccel",
-        "cuda",
+        "vaapi",
         "-hwaccel_output_format",
-        "cuda",
+        "vaapi",
         "-i",
         str(video_path),
         "-vf",
-        # Resize on-GPU when requested, then download as NV12 before RGB conversion.
-        # Some ffmpeg/NVDEC builds reject direct hwdownload->rgb24 conversion.
         vf_chain,
         "-f",
         "rawvideo",
@@ -124,7 +211,7 @@ def decode_video_frames(
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
-            "ffmpeg is required for GPU frame decoding."
+            "ffmpeg is required for AMD VAAPI frame decoding."
         ) from exc
 
     frame_idx = 0
@@ -161,7 +248,7 @@ def decode_video_frames(
         process.stderr.close()
     if process.returncode not in (0, None):
         raise RuntimeError(
-            "[visual] GPU frame decode failed "
+            "[visual] AMD VAAPI GPU frame decode failed "
             f"(exit={process.returncode}) for {video_path}: {stderr_text[-1200:]}"
         )
 
@@ -169,7 +256,7 @@ def decode_video_frames(
         "Decoded %d frames from %s (backend=%s)",
         frame_idx,
         video_path.name,
-        backend,
+        accelerator_backend,
     )
 
 
@@ -189,4 +276,11 @@ def batch_frames(
         yield batch
 
 
-__all__ = ["DecodedFrame", "batch_frames", "decode_video_frames"]
+__all__ = [
+    "DecodedFrame",
+    "batch_frames",
+    "decode_video_frames",
+    "discover_vaapi_render_node",
+    "validate_ffmpeg_vaapi_support",
+    "validate_vaapi_render_node",
+]

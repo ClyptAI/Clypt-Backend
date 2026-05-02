@@ -1,0 +1,24 @@
+[Unit]
+Description=Clypt Phase26 MI300X ROCm Qwen SGLang service
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase26/repo
+EnvironmentFile=/etc/clypt-phase26/phase26.env
+EnvironmentFile=-/etc/clypt-phase26/sg-model.env
+Environment=HF_HOME=/opt/clypt-phase26/.cache/huggingface
+Environment=TORCH_HOME=/opt/clypt-phase26/.cache/torch
+Environment=PYTORCH_KERNEL_CACHE_PATH=/opt/clypt-phase26/.cache/torch/kernels
+Environment=HF_HUB_OFFLINE=1
+Environment=SGLANG_ENABLE_SPEC_V2=1
+Environment=SG_LAUNCH_PROFILE=final
+Restart=always
+RestartSec=5
+TimeoutStartSec=3600
+ExecStart=/opt/clypt-phase26/run_sglang_qwen_rocm_container.sh
+
+[Install]
+WantedBy=multi-user.target

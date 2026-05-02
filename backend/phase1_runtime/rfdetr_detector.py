@@ -1,7 +1,7 @@
 """RF-DETR person detector for Phase 1 visual extraction.
 
 Responsibilities:
-- Load the configured RF-DETR model on CUDA
+- Load the configured RF-DETR model on ROCm/HIP GPU
 - optimize_for_inference with FP16
 - Emit per-frame sv.Detections filtered to person class only
 - Remain stateless across frames
@@ -40,23 +40,35 @@ class DetectorMetrics:
         return self.total_detector_ms / self.frames_processed
 
 
-def _require_cuda() -> None:
+def _require_gpu() -> None:
     try:
         import torch
     except ImportError as exc:
         raise RuntimeError(
-            "PyTorch is required for RF-DETR visual extraction."
+            "PyTorch ROCm is required for RF-DETR visual extraction."
         ) from exc
 
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "CUDA is required for RF-DETR visual extraction. "
-            "No CUDA device found. Do not fall back to CPU."
+            "ROCm/HIP GPU is required for RF-DETR visual extraction on AMD. "
+            "PyTorch exposes HIP devices through torch.cuda; no compatible GPU was found. "
+            "Do not fall back to CPU."
+        )
+    hip_version = getattr(getattr(torch, "version", None), "hip", None)
+    if not hip_version:
+        raise RuntimeError(
+            "PyTorch ROCm/HIP build is required for Phase1 AMD RF-DETR visual extraction. "
+            "torch.cuda is available, but torch.version.hip is empty; do not use a CUDA wheel."
         )
 
 
+def _require_cuda() -> None:
+    """Legacy private alias for retired TensorRT helpers that still import it."""
+    _require_gpu()
+
+
 class RFDETRPersonDetector:
-    """Wraps the configured RF-DETR model for person-only detection with CUDA/FP16."""
+    """Wraps the configured RF-DETR model for person-only detection with ROCm/FP16."""
 
     def __init__(self, config: VisualPipelineConfig) -> None:
         self._config = config
@@ -69,10 +81,10 @@ class RFDETRPersonDetector:
         return self._metrics
 
     def load(self) -> None:
-        """Load the model, move to CUDA, optimize, and warm up."""
+        """Load the model, move to ROCm/HIP GPU, optimize, and warm up."""
         import torch
 
-        _require_cuda()
+        _require_gpu()
 
         try:
             if self._config.detector_model == "nano":
@@ -85,6 +97,7 @@ class RFDETRPersonDetector:
                 "Install with: pip install rfdetr"
             ) from exc
 
+        # PyTorch ROCm intentionally exposes HIP devices through the cuda namespace.
         self._device = "cuda"
         logger.info(
             "Loading RFDETR%s on %s (resolution=%d, backend=%s)",
@@ -120,11 +133,18 @@ class RFDETRPersonDetector:
 
         self._model = model
 
-    def detect_batch(self, frames: list[np.ndarray]) -> list[sv.Detections]:
+    def detect_batch(
+        self,
+        frames: list[np.ndarray],
+        *,
+        orig_sizes: list[tuple[int, int]] | None = None,
+    ) -> list[sv.Detections]:
         """Run person detection on a batch of BGR/RGB numpy frames.
 
         Args:
             frames: list of HWC uint8 numpy arrays (RGB).
+            orig_sizes: optional original (height, width) for frames decoded with
+                GPU resize. Output boxes are rescaled back to source coordinates.
 
         Returns:
             list of sv.Detections, one per frame, filtered to person class only.
@@ -155,13 +175,28 @@ class RFDETRPersonDetector:
                 raw = [raw]
 
             # Only keep detections for the real (non-padded) frames
-            for det in raw[:real_count]:
+            for offset, det in enumerate(raw[:real_count]):
                 person_mask = det.class_id == COCO_PERSON_CLASS_ID
+                xyxy = det.xyxy[person_mask]
+                if orig_sizes is not None:
+                    source_height, source_width = orig_sizes[batch_start + offset]
+                    frame_height, frame_width = batch[offset].shape[:2]
+                    if frame_width > 0 and frame_height > 0:
+                        scale = np.array(
+                            [
+                                source_width / frame_width,
+                                source_height / frame_height,
+                                source_width / frame_width,
+                                source_height / frame_height,
+                            ],
+                            dtype=xyxy.dtype,
+                        )
+                        xyxy = xyxy * scale
                 # Build a fresh Detections with only the per-box fields we need.
                 # Using det[mask] fails when det.data contains non-per-detection
                 # arrays (e.g. image metadata sized by height/width).
                 filtered = sv.Detections(
-                    xyxy=det.xyxy[person_mask],
+                    xyxy=xyxy,
                     confidence=det.confidence[person_mask] if det.confidence is not None else None,
                     class_id=det.class_id[person_mask] if det.class_id is not None else None,
                 )
@@ -184,4 +219,4 @@ class RFDETRPersonDetector:
             logger.info("RF-DETR detector unloaded, VRAM released.")
 
 
-__all__ = ["DetectorMetrics", "RFDETRPersonDetector"]
+__all__ = ["DetectorMetrics", "RFDETRPersonDetector", "_require_gpu"]

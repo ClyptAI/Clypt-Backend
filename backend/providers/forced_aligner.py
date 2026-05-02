@@ -15,6 +15,26 @@ _DEFAULT_MODEL_LOAD_RETRIES = 2
 _DEFAULT_MODEL_LOAD_RETRY_BACKOFF_S = 5.0
 
 
+def _is_torch_cuda_device(device: str) -> bool:
+    normalized = device.strip().lower()
+    return normalized == "cuda" or normalized.startswith("cuda:")
+
+
+def _require_torch_cuda_device(*, provider: str, device: str) -> None:
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            f"{provider} requires {device!r}, but PyTorch is not installed."
+        ) from exc
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"{provider} requires {device!r}, but torch.cuda.is_available() is false. "
+            "On ROCm hosts PyTorch must expose MI300X through the torch.cuda namespace."
+        )
+
+
 def _overlap_ms(start_a: int, end_a: int, start_b: int, end_b: int) -> int:
     return max(0, min(end_a, end_b) - max(start_a, start_b))
 
@@ -174,6 +194,11 @@ class ForcedAlignmentProvider:
 
     def _resolve_device(self) -> str:
         if self._device != "auto":
+            if _is_torch_cuda_device(self._device):
+                _require_torch_cuda_device(
+                    provider="forced_aligner",
+                    device=self._device,
+                )
             return self._device
         try:
             import torch
@@ -589,6 +614,11 @@ class ForcedAlignmentProvider:
             return []
 
         if not self._check_available():
+            if _is_torch_cuda_device(self._device):
+                raise RuntimeError(
+                    "forced_aligner requires GPU execution, but NeMo/NFA dependencies "
+                    "are unavailable after install."
+                )
             return []
 
         _ensure_cache_env()

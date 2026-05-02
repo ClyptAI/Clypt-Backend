@@ -69,6 +69,49 @@ def test_emotion2vec_default_model_uses_hf_hub(monkeypatch):
     assert captured_kwargs["model"] == "iic/emotion2vec_plus_large"
     assert captured_kwargs["hub"] == "hf"
     assert captured_kwargs["disable_update"] is True
+    assert "device" not in captured_kwargs
+
+
+def test_emotion2vec_default_model_passes_explicit_cuda_device(monkeypatch):
+    import backend.providers.emotion2vec as emotion2vec
+
+    captured_kwargs = {}
+
+    class _FakeAutoModel:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+    monkeypatch.setitem(sys.modules, "funasr", types.SimpleNamespace(AutoModel=_FakeAutoModel))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=_FakeCuda()))
+
+    model = emotion2vec._build_default_model(device="cuda")
+
+    assert isinstance(model, _FakeAutoModel)
+    assert captured_kwargs["device"] == "cuda"
+
+
+def test_emotion2vec_default_model_hard_fails_when_cuda_unavailable(monkeypatch):
+    import backend.providers.emotion2vec as emotion2vec
+
+    class _FakeAutoModel:
+        def __init__(self, **kwargs):  # pragma: no cover - should not be reached
+            raise AssertionError("AutoModel should not load without cuda")
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    monkeypatch.setitem(sys.modules, "funasr", types.SimpleNamespace(AutoModel=_FakeAutoModel))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=_FakeCuda()))
+
+    with pytest.raises(RuntimeError, match="torch.cuda.is_available"):
+        emotion2vec._build_default_model(device="cuda")
 
 
 def test_emotion2vec_default_model_ignores_non_hf_source(monkeypatch):

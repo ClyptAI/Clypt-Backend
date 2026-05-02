@@ -1,14 +1,10 @@
-# Superseded on AMD-refactor by requirements-do-phase26-mi300x.txt.
-# Kept as historical H200 reference only.
-
---extra-index-url https://download.pytorch.org/whl/cu124
-
-# Phase26 H200 runtime deps.
+# Phase26 MI300X ROCm runtime deps.
 #
 # Hosts:
 #   * Phase26 enqueue/dispatch service
 #   * Phase26 local SQLite queue worker
 #   * local OpenAI-compatible Qwen client integration
+#   * model cache prewarm for the pinned SGLang Docker runtime
 
 pydantic>=2.11.0
 pytest>=8.4.0
@@ -19,3 +15,5 @@ google-cloud-storage>=2.19.0
 google-cloud-spanner>=3.50.0
 fastapi>=0.116.0
 uvicorn>=0.35.0
+huggingface-hub>=0.28.0
+hf-transfer>=0.1.8

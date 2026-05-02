@@ -30,7 +30,7 @@ image = (
     .apt_install("ffmpeg")
     .pip_install("google-cloud-storage>=2.19.0")
     .pip_install("google-auth>=2.38.0")
-    .pip_install_from_requirements("requirements-do-phase26-h200.txt")
+    .pip_install_from_requirements("requirements-modal.txt")
     .add_local_python_source("backend")
 )
 

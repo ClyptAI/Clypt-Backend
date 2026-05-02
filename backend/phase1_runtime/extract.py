@@ -5,7 +5,7 @@ audio chain (NFA -> emotion2vec+ -> YAMNet) on the same host. VibeVoice ASR
 is reached through :class:`backend.providers.audio_host_client.RemoteVibeVoiceAsrClient`,
 which now normally targets the local Phase 1 service boundary.
 
-Execution order (H200 perspective)::
+Execution order (Phase1 host perspective)::
 
     1a. Visual extraction (RF-DETR + ByteTrack)          ─┐ concurrent
     1b. VibeVoice ASR service call                       ─┘  via a pool.
@@ -92,14 +92,12 @@ def _run_audio_chain(
     yamnet_provider: Any,
     stage_event_logger: Callable[..., None] | None = None,
 ) -> tuple[DiarizationPayload, EmotionSegmentsPayload, YamnetPayload]:
-    """NFA → emotion2vec+ → YAMNet, serial with each other to avoid CUDA graph
+    """NFA → emotion2vec+ → YAMNet, serial with each other to avoid GPU graph
     conflicts between them. Returns ``(diarization_payload, emotion2vec_payload,
     yamnet_payload)``.
 
-    Runs on the H200 in a ThreadPoolExecutor worker thread while RF-DETR
-        visual extraction is still on the main GPU stream. The default target
-        is an H200 with enough headroom to co-locate RF-DETR + NFA global
-        alignment without starvation.
+    Runs on the Phase1 host in a ThreadPoolExecutor worker thread while RF-DETR
+        visual extraction is still on the main GPU stream.
     """
     prelim_turns = []
     for idx, t in enumerate(vibevoice_turns, start=1):
@@ -325,7 +323,7 @@ def run_phase1_sidecars(
     t_total = time.perf_counter()
 
     logger.info(
-        "[extract] starting visual extraction (H200) + remote VibeVoice ASR (RTX) "
+        "[extract] starting visual extraction + VibeVoice ASR "
         "in parallel ..."
     )
     t_overlap = time.perf_counter()

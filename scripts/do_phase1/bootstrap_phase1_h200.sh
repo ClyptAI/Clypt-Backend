@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Superseded on AMD-refactor by bootstrap_phase1_mi300x.sh.
+# Kept as historical H200 reference only.
 set -euo pipefail
 
 if [[ "$(id -u)" -ne 0 ]]; then

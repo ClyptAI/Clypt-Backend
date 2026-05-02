@@ -1,23 +1,23 @@
 # ARCHITECTURE
 
 **Status:** Active (implemented Phases 1-4 plus Phase 6 packaging/render groundwork; Phase 5 still pending full rollout)  
-**Last updated:** 2026-04-22
+**Last updated:** 2026-05-02
 
-This document describes the current code-backed topology: a **Phase 1 H200**, a **Phase26 H200**, and a **Modal L40S media-prep service**.
+This document describes the current AMD-refactor topology: a **Phase 1 MI300X**, a **Phase26 MI300X**, and a **Modal L40S media-prep/render service**.
 
 ## 1) End-to-End Flow
 
 ```mermaid
 flowchart TD
   source["Source URL or local path"]
-  p1["Phase 1 runner on Phase1 H200"]
+  p1["Phase 1 runner on Phase1 MI300X"]
   vvsvc["POST tasks vibevoice asr on localhost 9100"]
   vvllm["VibeVoice vLLM sidecar on 8000"]
   audpost["NFA to emotion2vec plus to YAMNet in process"]
   visvc["POST tasks visual extract on localhost 9200"]
   visual["RF-DETR and ByteTrack hot local service"]
   dispatch["POST /tasks/phase26-enqueue"]
-  q["SQLite queue on Phase26 H200"]
+  q["SQLite queue on Phase26 MI300X"]
   worker["Phase26 local worker"]
   llm["SGLang Qwen on 8001"]
   modal["POST tasks node media prep on Modal L40S"]
@@ -42,21 +42,21 @@ flowchart TD
 
 | Surface | Runs |
 | --- | --- |
-| **Phase1 host (H200 default)** | Phase 1 runner, persistent local VibeVoice service, co-located VibeVoice vLLM, persistent local visual service, RF-DETR + ByteTrack settings preserved, in-process NFA + emotion2vec+ + YAMNet. |
-| **Phase26 host (H200)** | `POST /tasks/phase26-enqueue`, local SQLite queue, current Phase 2-4 worker/runtime, SGLang Qwen on `:8001`, future Phase 5-6 orchestration. |
+| **Phase1 host (MI300X default)** | Phase 1 runner, persistent local VibeVoice service, co-located VibeVoice vLLM ROCm sidecar, persistent local visual service, RF-DETR + ByteTrack settings preserved, in-process NFA + emotion2vec+ + YAMNet. |
+| **Phase26 host (MI300X)** | `POST /tasks/phase26-enqueue`, local SQLite queue, current Phase 2-4 worker/runtime, SGLang ROCm Qwen on `:8001`, future Phase 5-6 orchestration. |
 | **Modal** | CPU `POST /tasks/node-media-prep` submit/poll surface plus one warm `L40S` `node_media_prep_job` worker, bearer-auth protected, ffmpeg NVDEC/NVENC worker checks, timeline-batched hybrid seek/trim extraction, and 480p clip generation for Vertex multimodal embeddings. Future `render-video` endpoint will live here too. |
 
 ### Design rationale
 
 - Phase 1 stays cohesive on one host. The runner still owns orchestration, but the heavy model boundaries are now hot local services rather than in-process one-off initialization.
 - RF-DETR Nano remains fast because the existing visual config is preserved:
-  - backend `tensorrt_fp16`
+  - backend `rfdetr_rocm_fp16`
   - batch size `16`
   - threshold `0.35`
   - shape `640`
   - ByteTrack buffer `30`
   - ByteTrack match threshold `0.7`
-  - GPU decode required
+  - GPU decode via VAAPI required
 - NFA, emotion2vec+, and YAMNet stay in-process because they already benefit from long-lived provider singletons without requiring more RPC boundaries.
 - Phase26 becomes the clean downstream execution boundary. The queue remains local to that host, but Phase 1 no longer reaches into SQLite directly.
 - Node-media-prep moves to Modal because it is naturally stateless, and it sits after node creation on the Phase26 side of the boundary.
@@ -108,7 +108,7 @@ flowchart TD
 
 ### 4.3 LLM and media boundaries
 
-- Local generation is still OpenAI-compatible against SGLang Qwen at `127.0.0.1:8001`.
+- Local generation is still OpenAI-compatible against SGLang ROCm Qwen at `127.0.0.1:8001`.
 - Vertex embeddings remain unchanged.
 - Node-media-prep is always remote via `RemoteNodeMediaPrepClient`, now pointed at Modal instead of an RTX host.
 - The worker now plans node-media-prep in timeline-local batches, submits each batch as its own Modal job, and reassembles final multimodal embeddings into original node order.
@@ -145,15 +145,15 @@ Phase26 host must have:
 
 Phase 1 fallback note:
 
-- the old H100 overlay env file was intentionally removed from this repo
+- the old H100/H200 overlay env files are historical and superseded on AMD-refactor
 - if an alternate low-memory Phase 1 profile is needed later, treat it as a fresh, explicit replacement rather than relying on a stale backup baseline
 
 ## 7) Implemented vs Planned
 
 - **Implemented now**
-  - Phase 1 H200 with local persistent VibeVoice + visual services
+  - Phase 1 MI300X with local persistent VibeVoice + visual services
   - remote Phase26 enqueue boundary
-  - local Phase26 queue + worker + SGLang
+  - local Phase26 queue + worker + SGLang ROCm
   - Modal node-media-prep surface
   - Modal Phase 6 render/export surface
 - **Planned later**

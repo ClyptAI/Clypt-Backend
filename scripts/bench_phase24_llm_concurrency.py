@@ -3,12 +3,19 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from backend.pipeline.candidates.prompts import (
     META_PROMPT_GENERATION_SCHEMA,
@@ -295,6 +302,76 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[rank]
 
 
+def _command_snapshot(command: list[str], timeout_s: float = 20.0) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "command": command, "error": "not_found"}
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "command": command,
+            "error": "timeout",
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+        }
+    return {
+        "ok": result.returncode == 0,
+        "command": command,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def _sglang_rocm_env_snapshot() -> dict[str, str | None]:
+    keys = [
+        "SG_MODEL",
+        "SG_DOCKER_IMAGE",
+        "SG_CONTEXT_LENGTH",
+        "SG_MEM_FRACTION_STATIC",
+        "SG_KV_CACHE_DTYPE",
+        "SG_GRAMMAR_BACKEND",
+        "SG_REASONING_PARSER",
+        "SG_ENABLE_SPEC_V2",
+        "SG_SPECULATIVE_ALGORITHM",
+        "SG_SPECULATIVE_NUM_STEPS",
+        "SG_SPECULATIVE_EAGLE_TOPK",
+        "SG_SPECULATIVE_NUM_DRAFT_TOKENS",
+        "SG_MAMBA_SCHEDULER_STRATEGY",
+        "SG_SCHEDULE_POLICY",
+        "SG_CHUNKED_PREFILL_SIZE",
+        "SG_EXTRA_ARGS",
+    ]
+    return {key.removeprefix("SG_").lower(): os.environ.get(key) for key in keys}
+
+
+def _collect_rocm_metadata(
+    *,
+    enabled: bool,
+    label: str,
+    include_amd_smi: bool,
+) -> dict[str, Any]:
+    if not enabled:
+        return {"enabled": False}
+    commands = {"rocm-smi": _command_snapshot(["rocm-smi"])}
+    if include_amd_smi:
+        commands["amd-smi"] = _command_snapshot(["amd-smi", "static"])
+    return {
+        "enabled": True,
+        "label": label,
+        "captured_at_unix_s": time.time(),
+        "commands": commands,
+        "sglang": _sglang_rocm_env_snapshot(),
+    }
+
+
 def _run_once(client: LocalOpenAIQwenClient, scenario: ScenarioSpec, model: str) -> dict[str, Any]:
     started = time.perf_counter()
     parsed = client.generate_json(
@@ -385,6 +462,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="Qwen/Qwen3.6-35B-A3B")
     parser.add_argument("--timeout-s", type=float, default=300.0)
     parser.add_argument("--output-json", type=Path, default=None)
+    parser.add_argument(
+        "--capture-rocm-metadata",
+        action="store_true",
+        help="Capture ROCm and SGLang env metadata before and after the sweep.",
+    )
+    parser.add_argument(
+        "--skip-amd-smi",
+        action="store_true",
+        help="Skip amd-smi static capture when collecting ROCm metadata.",
+    )
     return parser.parse_args()
 
 
@@ -415,6 +502,11 @@ def main() -> None:
         )
     )
 
+    rocm_before = _collect_rocm_metadata(
+        enabled=args.capture_rocm_metadata,
+        label="before",
+        include_amd_smi=not args.skip_amd_smi,
+    )
     results = [
         _run_level(
             client=client,
@@ -425,6 +517,11 @@ def main() -> None:
         )
         for concurrency in concurrency_values
     ]
+    rocm_after = _collect_rocm_metadata(
+        enabled=args.capture_rocm_metadata,
+        label="after",
+        include_amd_smi=not args.skip_amd_smi,
+    )
     best = max(
         (item for item in results if item["error_count"] == 0),
         key=lambda item: (item["requests_per_s"], -item["latency_ms"]["p95"]),
@@ -440,6 +537,11 @@ def main() -> None:
         "results": results,
         "best": best,
     }
+    if args.capture_rocm_metadata:
+        output["rocm_metadata"] = {
+            "before": rocm_before,
+            "after": rocm_after,
+        }
     print(json.dumps(output, indent=2))
     if args.output_json is not None:
         args.output_json.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")

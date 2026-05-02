@@ -13,6 +13,26 @@ _DEFAULT_EMOTION2VEC_MODEL_ID = "iic/emotion2vec_plus_large"
 _DEFAULT_FUNASR_MODEL_SOURCE = "hf"
 
 
+def _is_torch_cuda_device(device: str) -> bool:
+    normalized = device.strip().lower()
+    return normalized == "cuda" or normalized.startswith("cuda:")
+
+
+def _require_torch_cuda_device(*, provider: str, device: str) -> None:
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            f"{provider} requires {device!r}, but PyTorch is not installed."
+        ) from exc
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"{provider} requires {device!r}, but torch.cuda.is_available() is false. "
+            "On ROCm hosts PyTorch must expose MI300X through the torch.cuda namespace."
+        )
+
+
 def _resolve_funasr_hub() -> str:
     source = (
         os.getenv("FUNASR_MODEL_SOURCE", _DEFAULT_FUNASR_MODEL_SOURCE).strip().lower()
@@ -50,7 +70,7 @@ def _write_turn_clip(
     return output_path
 
 
-def _build_default_model():
+def _build_default_model(*, device: str = "auto"):
     try:
         from funasr import AutoModel
     except ImportError as exc:
@@ -59,9 +79,18 @@ def _build_default_model():
         ) from exc
     model_id = os.getenv("EMOTION2VEC_MODEL_ID", _DEFAULT_EMOTION2VEC_MODEL_ID)
     hub = _resolve_funasr_hub()
-    logger.info("[emotion2vec] loading %s (hub=%s) ...", model_id, hub)
+    kwargs: dict[str, Any] = {
+        "model": model_id,
+        "hub": hub,
+        "disable_update": True,
+    }
+    if device != "auto":
+        if _is_torch_cuda_device(device):
+            _require_torch_cuda_device(provider="emotion2vec", device=device)
+        kwargs["device"] = device
+    logger.info("[emotion2vec] loading %s (hub=%s device=%s) ...", model_id, hub, device)
     t0 = time.perf_counter()
-    model = AutoModel(model=model_id, hub=hub, disable_update=True)
+    model = AutoModel(**kwargs)
     logger.info("[emotion2vec] model loaded in %.1f s", time.perf_counter() - t0)
     return model
 
@@ -118,9 +147,16 @@ def _top_label_score(
 
 
 class Emotion2VecPlusProvider:
-    def __init__(self, *, model: Any | None = None, clipper=None) -> None:
+    def __init__(
+        self,
+        *,
+        model: Any | None = None,
+        clipper=None,
+        device: str = "auto",
+    ) -> None:
         self._model = model
         self._clipper = clipper
+        self._device = device
         self._last_run_metrics: dict[str, float | int] = {}
 
     @property
@@ -129,7 +165,9 @@ class Emotion2VecPlusProvider:
 
     def _ensure_model(self):
         if self._model is None:
-            self._model = _build_default_model()
+            self._model = _build_default_model(device=self._device)
+        elif _is_torch_cuda_device(self._device):
+            _require_torch_cuda_device(provider="emotion2vec", device=self._device)
         return self._model
 
     def run(self, *, audio_path: Path, turns: list[dict]) -> dict:

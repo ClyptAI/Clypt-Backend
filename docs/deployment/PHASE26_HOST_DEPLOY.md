@@ -1,30 +1,30 @@
 # Phase26 Host Deploy
 
-Deploy the **Phase26 H200** host.
+Deploy the **Phase26 MI300X** host.
 
 This host owns:
 
 - `POST /tasks/phase26-enqueue`
 - local SQLite queue
 - local Phase 2-4 worker/runtime
-- SGLang Qwen on `:8001`
+- SGLang ROCm Qwen on `:8001`
 - future Phase 5-6 orchestration
 
 ## 1) Bootstrap
 
-On the target H200:
+On the target MI300X provisioned from DigitalOcean `gpu-amd-base` in the `Rithvik-AMD` team:
 
 ```bash
 ssh root@<phase26-host>
 cd /opt/clypt-phase26/repo
-bash scripts/do_phase26/bootstrap_phase26_h200.sh
+bash scripts/do_phase26/bootstrap_phase26_mi300x.sh
 ```
 
 ## 2) Env File
 
 Use:
 
-- [known-good-phase26-h200.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-h200.env)
+- [known-good-phase26-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-mi300x.env)
 
 Install to:
 
@@ -49,14 +49,15 @@ Current known-good Modal endpoint:
 
 - `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
 
-Observed live non-secret Phase26 values on 2026-04-21:
+Active AMD-refactor Phase26 values:
 
-- host: `clypt-phase26-h200-ming-nyc2` (`107.170.33.122`)
 - `GENAI_GENERATION_MODEL=Qwen/Qwen3.6-35B-A3B`
 - `GENAI_GENERATION_BACKEND=local_openai`
 - `CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1`
 - `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
 - `CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1`
+- `SG_DOCKER_IMAGE=lmsysorg/sglang:v0.5.10-rocm720-mi30x`
+- `SG_ACCEPTANCE_PROFILES=minimal strict_json fp8_kv scheduler_cache speculative`
 - `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096`
 - `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192`
 
@@ -80,15 +81,16 @@ Credential requirement:
 
 ```bash
 cd /opt/clypt-phase26/repo
-bash scripts/do_phase26/deploy_phase26_services.sh
+bash scripts/do_phase26/deploy_phase26_mi300x_services.sh
 ```
 
 Before running the deploy:
 
 - exclude repo-root `.env` and `.env.local` from the copy/sync step
 - keep host runtime config only in `/etc/clypt-phase26/phase26.env`
-- expect `deploy_phase26_services.sh` to fail fast if `.env` or `.env.local` exists on the droplet
-- expect `deploy_phase26_services.sh` to fail fast if `GOOGLE_APPLICATION_CREDENTIALS` is not a service-account key
+- expect `deploy_phase26_mi300x_services.sh` to fail fast if `.env` or `.env.local` exists on the droplet
+- expect `deploy_phase26_mi300x_services.sh` to fail fast if `GOOGLE_APPLICATION_CREDENTIALS` is not a service-account key
+- expect the deploy to prewarm Qwen, write `/etc/clypt-phase26/sg-model.env`, restart SGLang with `HF_HUB_OFFLINE=1`, and run staged SGLang acceptance profiles before starting the worker
 
 This deploys:
 

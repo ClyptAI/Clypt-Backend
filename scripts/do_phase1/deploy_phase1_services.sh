@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Superseded on AMD-refactor by deploy_phase1_mi300x_services.sh.
+# Kept as historical H200 reference only.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

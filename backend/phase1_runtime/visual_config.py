@@ -20,7 +20,8 @@ class VisualPipelineConfig:
     tracker_lost_buffer: int
     tracker_match_threshold: float
     frame_decode_backend: str
-    tensorrt_engine_dir: str
+    gpu_decode_backend: str
+    detector_artifact_dir: str
 
     PERSON_CLASS_ID: int = 0
 
@@ -28,7 +29,7 @@ class VisualPipelineConfig:
     def from_env(cls) -> VisualPipelineConfig:
         config = cls(
             detector_model=_env("CLYPT_PHASE1_VISUAL_MODEL", "nano"),
-            detector_backend=_env("CLYPT_PHASE1_VISUAL_BACKEND", "tensorrt_fp16"),
+            detector_backend=_env("CLYPT_PHASE1_VISUAL_BACKEND", "rfdetr_rocm_fp16"),
             detector_batch_size=int(_env("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "16")),
             detection_threshold=float(_env("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.35")),
             detector_resolution=int(_env("CLYPT_PHASE1_VISUAL_SHAPE", "640")),
@@ -38,9 +39,10 @@ class VisualPipelineConfig:
                 _env("CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH", "0.7")
             ),
             frame_decode_backend=_env("CLYPT_PHASE1_VISUAL_DECODE", "gpu"),
-            tensorrt_engine_dir=_env(
-                "CLYPT_PHASE1_VISUAL_TRT_ENGINE_DIR",
-                "backend/outputs/tensorrt_engines",
+            gpu_decode_backend=_env("CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND", "vaapi"),
+            detector_artifact_dir=_env(
+                "CLYPT_PHASE1_VISUAL_ARTIFACT_DIR",
+                "backend/outputs/phase1_visual",
             ),
         )
         if config.frame_decode_backend != "gpu":
@@ -48,10 +50,20 @@ class VisualPipelineConfig:
                 "Unsupported CLYPT_PHASE1_VISUAL_DECODE="
                 f"{config.frame_decode_backend!r}; GPU decode is required."
             )
+        if config.gpu_decode_backend != "vaapi":
+            raise ValueError(
+                "Unsupported CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND="
+                f"{config.gpu_decode_backend!r}; VAAPI GPU decode is required on AMD."
+            )
         if config.detector_model not in {"nano", "small"}:
             raise ValueError(
                 "Unsupported CLYPT_PHASE1_VISUAL_MODEL="
                 f"{config.detector_model!r}; expected 'nano' or 'small'."
+            )
+        if config.use_tensorrt:
+            raise ValueError(
+                "TensorRT is not supported on the Phase1 AMD MI300X active path; "
+                "use CLYPT_PHASE1_VISUAL_BACKEND=rfdetr_rocm_fp16."
             )
         return config
 
@@ -64,8 +76,12 @@ class VisualPipelineConfig:
         return self.detector_backend.startswith("tensorrt")
 
     @property
-    def is_cuda_required(self) -> bool:
-        return "cuda" in self.detector_backend or self.use_tensorrt
+    def is_gpu_required(self) -> bool:
+        return self.frame_decode_backend == "gpu" or "rocm" in self.detector_backend
+
+    @property
+    def tensorrt_engine_dir(self) -> str:
+        return self.detector_artifact_dir
 
     @property
     def tensorrt_engine_path(self) -> Path:
@@ -74,7 +90,7 @@ class VisualPipelineConfig:
             f"_r{self.detector_resolution}"
             f"_fp16.engine"
         )
-        return Path(self.tensorrt_engine_dir) / name
+        return Path(self.detector_artifact_dir) / name
 
 
 __all__ = ["VisualPipelineConfig"]

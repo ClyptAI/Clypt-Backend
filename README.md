@@ -34,14 +34,14 @@ Planned next:
 
 ## Current Production Topology
 
-The backend is currently designed around two DigitalOcean GPU hosts plus one serverless media-prep surface on Modal.
+The backend is currently designed around two DigitalOcean AMD GPU hosts plus one serverless media-prep/render surface on Modal.
 
 ```mermaid
 flowchart LR
   source["Long-form video"]
-  phase1["Phase 1 host - DigitalOcean H200"]
-  phase26["Phase26 host - DigitalOcean H200"]
-  modal["Modal L40S - node media prep"]
+  phase1["Phase 1 host - DigitalOcean MI300X"]
+  phase26["Phase26 host - DigitalOcean MI300X"]
+  modal["Modal L40S - media prep/render"]
   vertex["Vertex embeddings"]
   out["Ranked clip candidates"]
 
@@ -121,12 +121,12 @@ One important runtime property: the post-ASR audio chain starts as soon as ASR r
 
 ## Backend Stack
 
-- **GPU compute**: DigitalOcean H200 droplets
+- **GPU compute**: DigitalOcean MI300X droplets on the `Rithvik-AMD` team
 - **Serverless media prep**: Modal L40S
-- **Local generation**: SGLang serving Qwen 3.6
+- **Local generation**: SGLang ROCm serving Qwen 3.6
 - **Embeddings**: Vertex AI
 - **Persistence**: Google Cloud Storage + Spanner
-- **Primary languages/runtimes**: Python, systemd services, ffmpeg, vLLM, TensorRT
+- **Primary languages/runtimes**: Python, systemd services, ffmpeg, ROCm, vLLM, SGLang
 
 ## Repository Map
 
@@ -137,7 +137,7 @@ backend/runtime/phase1_vibevoice_service/  Local Phase 1 ASR service
 backend/runtime/phase1_visual_service/     Local Phase 1 visual extraction service
 backend/runtime/phase26_dispatch_service/  Downstream enqueue API
 backend/runtime/                           Entry points for Phase 1 and Phase26 services/workers
-docker/vibevoice-vllm/                     VibeVoice vLLM container image
+docker/vibevoice-vllm-rocm/                VibeVoice vLLM ROCm container image
 scripts/do_phase1/                         Phase 1 host bootstrap and deploy scripts
 scripts/do_phase26/                        Phase26 host bootstrap and deploy scripts
 scripts/modal/                             Modal node-media-prep and future render stubs
@@ -160,13 +160,13 @@ python -m pip install -r requirements-local.txt
 Phase 1 host:
 
 ```bash
-python -m pip install -r requirements-do-phase1-h200.txt
+python -m pip install -r requirements-do-phase1-mi300x.txt
 ```
 
 Phase26 host:
 
 ```bash
-python -m pip install -r requirements-do-phase26-h200.txt
+python -m pip install -r requirements-do-phase26-mi300x.txt
 ```
 
 ### Run tests
@@ -198,4 +198,5 @@ Operational note:
 
 - Implemented and actively exercised: **Phases 1-4**
 - Planned next: **Phases 5-6**
-- Current validated architecture: **DigitalOcean H200 + H200 + Modal L40S**
+- Current target architecture on `AMD-refactor`: **DigitalOcean MI300X + MI300X + Modal L40S**
+- Historical H200 files remain in the repo only as migration references and are superseded by the MI300X docs/envs/scripts.
