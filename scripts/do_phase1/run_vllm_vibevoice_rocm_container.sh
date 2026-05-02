@@ -61,7 +61,7 @@ if [[ ! -d "${MODEL_PATH}" ]]; then
   echo "[phase1-vllm-rocm] model path does not exist inside container: ${MODEL_PATH}" >&2
   exit 1
 fi
-python3 -m vllm_plugin.tools.generate_tokenizer_files --output "${MODEL_PATH}" || true
+python3 -m vllm_plugin.tools.generate_tokenizer_files --output "${MODEL_PATH}"
 exec vllm serve "${MODEL_PATH}" \
   --served-model-name vibevoice \
   --trust-remote-code \

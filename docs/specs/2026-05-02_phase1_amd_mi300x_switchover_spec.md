@@ -21,7 +21,7 @@
 10. YAMNet and speaker verifier remain declared CPU stages because that is the current known-good runtime posture.
 11. Modal L40S remains the active render/media-encode worker. Phase1 does not gain encode/render responsibility in this branch.
 12. Historical H200 comparison data comes from existing Spanner run telemetry; no new H200 baseline capture is required before the AMD work starts.
-13. DigitalOcean provisioning uses the distribution image slug **`gpu-amd-base`** ("AMD AI/ML Ready Image") as the default base image. Framework-specific UI images are probes only unless their exact image id and installed versions are verified on the live host.
+13. DigitalOcean provisioning uses the MI300X devcloud size with the ROCm 7.2 application image as the default base: size **`gpu-mi300x1-192gb-devcloud`**, region **`atl1`**, image slug **`amddevelopercloud-rocm72software`** ("ROCm™ 7.2 Software 7.2 on Ubuntu 24.04"). The generic `gpu-amd-base` image is not the current provisionable path for the `Rithvik-AMD` team.
 
 ---
 
@@ -166,7 +166,7 @@ flowchart LR
 4. PyTorch HIP intentionally exposes many operations through the `torch.cuda` namespace; code can often stay operational while messages/config names are cleaned up.
 5. TensorRT has no AMD drop-in replacement. The likely optimized path is MIGraphX or ONNX Runtime with MIGraphX, not a `.engine` file.
 6. vLLM has ROCm Docker support, but the VibeVoice plugin/image must be validated against the chosen ROCm vLLM version.
-7. DigitalOcean `doctl` exposes `gpu-amd-base` as the active AMD distribution image for the `Rithvik-AMD` team. Use that as the default provisioning base. The user-visible framework images include vLLM 0.17.1 ROCm 7.2, SGLang 0.5.9 ROCm 7.0, PyTorch 2.6.0 ROCm 7.0, Megatron ROCm 7.0, JAX ROCm 6.4.2, and ROCm-enabled GPT-OSS 120B; treat them as investigation shortcuts, not source-of-truth production images, until their exact image ids and package inventories are captured from the live host.
+7. DigitalOcean `doctl` exposes the generic `gpu-mi300x1-192gb` size without a usable region for this team, while the provisionable Phase1 path is the devcloud size slug `gpu-mi300x1-192gb-devcloud` in `atl1` with the ROCm 7.2 application image slug `amddevelopercloud-rocm72software`. The user-visible framework images include vLLM 0.17.1 ROCm 7.2, SGLang 0.5.9 ROCm 7.0, PyTorch 2.6.0 ROCm 7.0, Megatron ROCm 7.0, JAX ROCm 6.4.2, and ROCm-enabled GPT-OSS 120B; treat them as investigation shortcuts, not source-of-truth production images, until their exact image ids and package inventories are captured from the live host.
 
 References:
 
@@ -205,8 +205,9 @@ The first accepted AMD host snapshot must include this matrix before the migrati
 Default provisioning target:
 
 ```text
-size:  gpu-mi300x1-192gb
-image: gpu-amd-base
+size:  gpu-mi300x1-192gb-devcloud
+image: amddevelopercloud-rocm72software
+region: atl1
 team:  Rithvik-AMD
 ```
 
@@ -280,6 +281,7 @@ team:  Rithvik-AMD
   - Rename `_require_cuda` semantics to accelerator-neutral `_require_gpu`.
   - Keep `torch.cuda.is_available()` if required by PyTorch ROCm, but error messages must say ROCm/HIP GPU on AMD.
   - Keep RF-DETR Nano, batch 16, shape 640 unless AMD canary requires retuning.
+  - Preserve checkpoint-native positional-encoding size when constructing public RF-DETR Nano/Small checkpoints at custom runtime resolution (`24` for Nano, `32` for Small). `rfdetr 1.6.5.post0` rewrites PE from `resolution / patch_size` unless this is explicit, which breaks the public checkpoint at `640`.
 
 - `backend/phase1_runtime/visual.py`
   - Remove active TensorRT detector selection.

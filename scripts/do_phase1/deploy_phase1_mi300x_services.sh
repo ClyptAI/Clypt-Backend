@@ -31,6 +31,24 @@ wait_url() {
   return 1
 }
 
+wait_for_apt_locks() {
+  if ! command -v fuser >/dev/null 2>&1; then
+    return 0
+  fi
+  local waited_s=0
+  local max_wait_s="${APT_LOCK_WAIT_S:-600}"
+  local locks=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock)
+  while fuser "${locks[@]}" >/dev/null 2>&1; do
+    if (( waited_s >= max_wait_s )); then
+      echo "[deploy-phase1-mi300x] ERROR: timed out waiting for apt/dpkg locks." >&2
+      return 1
+    fi
+    echo "[deploy-phase1-mi300x] waiting for apt/dpkg locks..."
+    sleep 5
+    waited_s=$((waited_s + 5))
+  done
+}
+
 require_root
 require_dir "$REPO_DIR"
 require_file "$ENV_FILE"
@@ -59,10 +77,18 @@ command -v amd-smi >/dev/null
 rocm-smi >/dev/null
 amd-smi static >/dev/null
 
+wait_for_apt_locks
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  build-essential ca-certificates curl docker.io ffmpeg git gnupg lsb-release \
+wait_for_apt_locks
+packages=(
+  build-essential ca-certificates curl ffmpeg git gnupg lsb-release
   libva2 mesa-va-drivers vainfo python3 python3-pip python3-venv unzip
+)
+if ! command -v docker >/dev/null 2>&1; then
+  packages+=(docker.io)
+fi
+wait_for_apt_locks
+DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
 systemctl enable --now docker
 
 python3 -m venv "$PHASE1_VENV_DIR"
@@ -156,7 +182,7 @@ validate_ffmpeg_vaapi_support()
 print(f"[deploy-phase1-mi300x] VAAPI ready on {render_node}")
 PY
 
-python - <<'PY'
+VIBEVOICE_MODEL_ENV_FILE="$VIBEVOICE_MODEL_ENV_FILE" HF_HUB_OFFLINE=0 python - <<'PY'
 import os
 import shlex
 from huggingface_hub import HfApi
@@ -193,7 +219,7 @@ detector.unload()
 print("[deploy-phase1-mi300x] prewarmed RF-DETR ROCm detector")
 PY
 
-python - <<'PY'
+HF_HUB_OFFLINE=0 python - <<'PY'
 import os
 
 from backend.providers.emotion2vec import Emotion2VecPlusProvider
@@ -234,6 +260,27 @@ docker build \
   --build-arg VLLM_ROCM_BASE_IMAGE="$VLLM_ROCM_BASE_IMAGE" \
   -t "$VLLM_IMAGE_TAG" \
   docker/vibevoice-vllm-rocm/
+
+set -a
+# shellcheck source=/dev/null
+source "$VIBEVOICE_MODEL_ENV_FILE"
+set +a
+
+if [[ -z "${VIBEVOICE_MODEL_PATH:-}" ]]; then
+  echo "[deploy-phase1-mi300x] ERROR: VIBEVOICE_MODEL_PATH was not written to $VIBEVOICE_MODEL_ENV_FILE" >&2
+  exit 1
+fi
+
+docker run --rm \
+  -e HF_HOME="/root/.cache/huggingface" \
+  -e HF_HUB_OFFLINE=0 \
+  -e VIBEVOICE_MODEL_PATH="$VIBEVOICE_MODEL_PATH" \
+  -v "${VIBEVOICE_CACHE_DIR}:/root/.cache/huggingface" \
+  -w /opt/vibevoice-baked \
+  --entrypoint bash \
+  "$VLLM_IMAGE_TAG" \
+  -lc 'python3 -m vllm_plugin.tools.generate_tokenizer_files --output "$VIBEVOICE_MODEL_PATH"'
+echo "[deploy-phase1-mi300x] prewarmed VibeVoice tokenizer files for offline sidecar boot"
 
 install -D -m 0644 scripts/do_phase1/systemd/amd/clypt-phase1-api.service /etc/systemd/system/clypt-phase1-api.service
 install -D -m 0644 scripts/do_phase1/systemd/amd/clypt-phase1-worker.service /etc/systemd/system/clypt-phase1-worker.service

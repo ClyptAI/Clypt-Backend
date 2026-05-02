@@ -202,6 +202,24 @@ _restart_sglang_for_profile() {
   esac
 }
 
+wait_for_apt_locks() {
+  if ! command -v fuser >/dev/null 2>&1; then
+    return 0
+  fi
+  local waited_s=0
+  local max_wait_s="${APT_LOCK_WAIT_S:-600}"
+  local locks=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock)
+  while fuser "${locks[@]}" >/dev/null 2>&1; do
+    if (( waited_s >= max_wait_s )); then
+      echo "[deploy-phase26-mi300x] ERROR: timed out waiting for apt/dpkg locks." >&2
+      return 1
+    fi
+    echo "[deploy-phase26-mi300x] waiting for apt/dpkg locks..."
+    sleep 5
+    waited_s=$((waited_s + 5))
+  done
+}
+
 require_root
 require_dir "$REPO_DIR"
 require_file "$ENV_FILE"
@@ -231,9 +249,18 @@ for device_path in /dev/kfd /dev/dri; do
   fi
 done
 
+wait_for_apt_locks
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  build-essential ca-certificates curl ffmpeg git jq lsb-release python3 python3-pip python3-venv unzip docker.io
+wait_for_apt_locks
+packages=(
+  build-essential ca-certificates curl ffmpeg git jq lsb-release
+  python3 python3-pip python3-venv unzip
+)
+if ! command -v docker >/dev/null 2>&1; then
+  packages+=(docker.io)
+fi
+wait_for_apt_locks
+DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
 
 systemctl enable --now docker
 
@@ -243,7 +270,7 @@ python -m pip install --upgrade pip wheel
 python -m pip install -r requirements-do-phase26-mi300x.txt
 
 install -d -m 0755 "$HF_HOME" "$TORCH_HOME" "$PYTORCH_KERNEL_CACHE_PATH"
-HF_HOME="$HF_HOME" HF_HUB_ENABLE_HF_TRANSFER=1 HOME=/opt/clypt-phase26 \
+HF_HOME="$HF_HOME" HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_OFFLINE=0 HOME=/opt/clypt-phase26 \
   python - <<PY
 import shlex
 from huggingface_hub import HfApi, snapshot_download

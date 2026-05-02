@@ -61,7 +61,7 @@ def _probe_frame_dimensions(*, video_path: Path) -> tuple[int, int]:
 
 
 def discover_vaapi_render_node(*, dev_dri: Path = Path("/dev/dri")) -> Path:
-    """Return the first DRM render node suitable for VAAPI decode."""
+    """Return the first DRM render node that actually validates for VAAPI decode."""
     if not dev_dri.exists():
         raise RuntimeError(
             f"No VAAPI render node found: {dev_dri} does not exist. "
@@ -75,7 +75,20 @@ def discover_vaapi_render_node(*, dev_dri: Path = Path("/dev/dri")) -> Path:
             f"No VAAPI render node found under {dev_dri}. "
             "AMD GPU decode requires /dev/dri/renderD* and must not fall back to software decode."
         )
-    return render_nodes[0]
+    failures: list[str] = []
+    for render_node in render_nodes:
+        try:
+            validate_vaapi_render_node(render_node)
+        except RuntimeError as exc:
+            failures.append(f"{render_node}: {exc}")
+            continue
+        return render_node
+    details = "\n".join(failures)[-2400:]
+    raise RuntimeError(
+        "No VAAPI render node passed validation; AMD GPU decode is required "
+        f"and software decode is not allowed. Checked: {', '.join(str(p) for p in render_nodes)}"
+        f"\n{details}"
+    )
 
 
 def validate_vaapi_render_node(render_node: Path) -> None:

@@ -12,7 +12,13 @@ This host owns:
 
 ## 1) Bootstrap
 
-On the target MI300X provisioned from DigitalOcean `gpu-amd-base` in the `Rithvik-AMD` team:
+On the target MI300X provisioned from the DigitalOcean ROCm 7.2 application image
+in the `Rithvik-AMD` team:
+
+- size slug: `gpu-mi300x1-192gb-devcloud`
+- region: `atl1`
+- image slug: `amddevelopercloud-rocm72software`
+- image name: `ROCm™ 7.2 Software 7.2 on Ubuntu 24.04`
 
 ```bash
 ssh root@<phase26-host>

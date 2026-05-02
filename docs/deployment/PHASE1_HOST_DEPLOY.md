@@ -12,7 +12,13 @@ This host owns:
 
 ## 1) Bootstrap
 
-On the target MI300X provisioned from DigitalOcean `gpu-amd-base` in the `Rithvik-AMD` team:
+On the target MI300X provisioned from the DigitalOcean ROCm 7.2 application image
+in the `Rithvik-AMD` team:
+
+- size slug: `gpu-mi300x1-192gb-devcloud`
+- region: `atl1`
+- image slug: `amddevelopercloud-rocm72software`
+- image name: `ROCm™ 7.2 Software 7.2 on Ubuntu 24.04`
 
 ```bash
 ssh root@<phase1-host>
@@ -115,6 +121,7 @@ curl -sf http://127.0.0.1:8000/v1/models
 ## 5) Notes
 
 - Preserve the RF-DETR Nano / ByteTrack settings in the Phase1 env unless explicitly retuning.
+- RF-DETR Nano/Small keep the configured `CLYPT_PHASE1_VISUAL_SHAPE=640`, but the loader must pin the checkpoint-native positional-encoding grid (`24` for Nano, `32` for Small). Do not remove that override unless a validated RF-DETR release loads the public checkpoints at custom resolution without a `position_embeddings` mismatch.
 - Historical H200/H100 overlays are superseded on AMD-refactor.
 - Phase1 does not own the downstream SQLite queue anymore.
 - The canonical per-run debugging flow now starts with [LOG_EXTRACTION_RUNBOOK.md](/Users/rithvik/Clypt-Backend/docs/runtime/LOG_EXTRACTION_RUNBOOK.md) and [scripts/extract_run_diagnostics.py](/Users/rithvik/Clypt-Backend/scripts/extract_run_diagnostics.py); use that before ad-hoc `journalctl` / SQLite / Spanner spelunking.

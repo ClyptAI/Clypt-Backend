@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 # rfdetr uses 1-indexed COCO class IDs (COCO_CLASSES = {1: "person", 2: "bicycle", ...})
 COCO_PERSON_CLASS_ID = 1
+_RFDETR_NATIVE_POSITIONAL_ENCODING_SIZE = {
+    "nano": 24,
+    "small": 32,
+}
 
 
 @dataclass(slots=True)
@@ -107,7 +111,16 @@ class RFDETRPersonDetector:
             self._config.detector_backend,
         )
 
-        model = RFDETRModel(resolution=self._config.detector_resolution)
+        model_kwargs = {"resolution": self._config.detector_resolution}
+        native_pe = _RFDETR_NATIVE_POSITIONAL_ENCODING_SIZE.get(self._config.detector_model)
+        if native_pe is not None:
+            # RF-DETR >=1.6 auto-recomputes positional_encoding_size when a custom
+            # resolution is passed. The public Nano/Small checkpoints keep their
+            # native PE grid, then interpolate at inference time; recomputing it
+            # makes checkpoint loading fail with a position_embeddings mismatch.
+            model_kwargs["positional_encoding_size"] = native_pe
+
+        model = RFDETRModel(**model_kwargs)
 
         torch.backends.cudnn.benchmark = True
 

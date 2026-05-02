@@ -25,7 +25,7 @@
 12. Docker is the primary production SGLang path on AMD. A host venv path may exist for development, but production must avoid rebuilding the ROCm serving stack from pip unless explicitly validated.
 13. The H200 launch flags are the desired end state, not the first-boot line. AMD SGLang flags are enabled in stages: minimal boot, strict JSON, FP8 KV, MTP/NextN, then concurrency.
 14. Existing H200 comparison data comes from Spanner run telemetry and prior benchmark artifacts; no new H200 baseline capture is required before AMD implementation starts.
-15. DigitalOcean provisioning uses the distribution image slug **`gpu-amd-base`** ("AMD AI/ML Ready Image") as the default base image. SGLang is then supplied by the pinned Docker image; the DO SGLang UI image is not the production serving image.
+15. DigitalOcean provisioning uses the MI300X devcloud size with the ROCm 7.2 application image as the default base: size **`gpu-mi300x1-192gb-devcloud`**, region **`atl1`**, image slug **`amddevelopercloud-rocm72software`** ("ROCm™ 7.2 Software 7.2 on Ubuntu 24.04"). SGLang is then supplied by the pinned Docker image; the DO SGLang UI image is not the production serving image.
 
 ---
 
@@ -129,7 +129,7 @@ flowchart TD
 3. AMD published Qwen3.6 support on Instinct GPUs with ROCm 7.0 and upstream serving optimizations.
 4. Qwen model guidance recommends SGLang for Qwen3.6 and includes Qwen3 reasoning/parser flags.
 5. MI300X provides 192 GB HBM3 and 5.3 TB/s bandwidth, which is sufficient for the current 35B-A3B class with long-context KV headroom on one GPU.
-6. DigitalOcean `doctl` exposes `gpu-amd-base` as the active AMD distribution image for the `Rithvik-AMD` team. Use that as the default provisioning base. The user-visible SGLang 0.5.9 ROCm 7.0 image is below the Qwen3.6 target and must not be used as the production serving image unless upgraded and verified.
+6. DigitalOcean `doctl` exposes the generic `gpu-mi300x1-192gb` size without a usable region for this team, while the provisionable MI300X path is the devcloud size slug `gpu-mi300x1-192gb-devcloud` in `atl1` with the ROCm 7.2 application image slug `amddevelopercloud-rocm72software`. The user-visible SGLang 0.5.9 ROCm 7.0 image is below the Qwen3.6 target and must not be used as the production serving image unless upgraded and verified.
 
 References:
 
@@ -249,8 +249,9 @@ Each Phase26 MI300X canary must persist the exact runtime matrix into run notes 
 Default provisioning target:
 
 ```text
-size:  gpu-mi300x1-192gb
-image: gpu-amd-base
+size:  gpu-mi300x1-192gb-devcloud
+image: amddevelopercloud-rocm72software
+region: atl1
 team:  Rithvik-AMD
 ```
 

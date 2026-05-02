@@ -164,7 +164,7 @@ class TestFrameDecode:
         with pytest.raises(ValueError, match="only 'gpu' is supported"):
             next(decode_video_frames(video_path=video, decode_backend="cpu"))
 
-    def test_discover_vaapi_render_node_picks_first_render_device(self, tmp_path: Path):
+    def test_discover_vaapi_render_node_picks_first_valid_render_device(self, monkeypatch, tmp_path: Path):
         from backend.phase1_runtime.frame_decode import discover_vaapi_render_node
 
         dev_dri = tmp_path / "dri"
@@ -173,7 +173,16 @@ class TestFrameDecode:
         (dev_dri / "renderD129").touch()
         (dev_dri / "renderD128").touch()
 
-        assert discover_vaapi_render_node(dev_dri=dev_dri) == dev_dri / "renderD128"
+        def _fake_validate(render_node: Path) -> None:
+            if render_node.name == "renderD128":
+                raise RuntimeError("virtio render node is not usable for VAAPI")
+
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode.validate_vaapi_render_node",
+            _fake_validate,
+        )
+
+        assert discover_vaapi_render_node(dev_dri=dev_dri) == dev_dri / "renderD129"
 
     def test_discover_vaapi_render_node_fails_without_render_device(self, tmp_path: Path):
         from backend.phase1_runtime.frame_decode import discover_vaapi_render_node
@@ -183,6 +192,26 @@ class TestFrameDecode:
         (dev_dri / "card0").touch()
 
         with pytest.raises(RuntimeError, match="No VAAPI render node"):
+            discover_vaapi_render_node(dev_dri=dev_dri)
+
+    def test_discover_vaapi_render_node_fails_when_all_render_devices_fail_validation(
+        self, monkeypatch, tmp_path: Path
+    ):
+        from backend.phase1_runtime.frame_decode import discover_vaapi_render_node
+
+        dev_dri = tmp_path / "dri"
+        dev_dri.mkdir()
+        (dev_dri / "renderD128").touch()
+
+        def _fake_validate(_render_node: Path) -> None:
+            raise RuntimeError("driver missing")
+
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode.validate_vaapi_render_node",
+            _fake_validate,
+        )
+
+        with pytest.raises(RuntimeError, match="No VAAPI render node passed validation"):
             discover_vaapi_render_node(dev_dri=dev_dri)
 
     def test_validate_vaapi_render_node_fails_fast_on_vainfo_error(self, monkeypatch, tmp_path: Path):
@@ -389,6 +418,52 @@ class TestRFDETRPersonDetector:
         with patch.dict(sys.modules, {"torch": fake_torch}):
             with pytest.raises(RuntimeError, match="ROCm/HIP GPU is required"):
                 _require_gpu()
+
+    def test_load_keeps_checkpoint_native_pe_for_custom_resolution(self):
+        from backend.phase1_runtime.rfdetr_detector import RFDETRPersonDetector
+        from backend.phase1_runtime.visual_config import VisualPipelineConfig
+
+        captured_kwargs: dict[str, int] = {}
+
+        class FakeRFDETRNano:
+            def __init__(self, **kwargs):
+                captured_kwargs.update(kwargs)
+
+            def optimize_for_inference(self, **_kwargs):
+                pass
+
+            def predict(self, *_args, **_kwargs):
+                return []
+
+        fake_torch = MagicMock()
+        fake_torch.cuda.is_available.return_value = True
+        fake_torch.version.hip = "6.2"
+        fake_torch.float16 = "float16"
+        fake_torch.float32 = "float32"
+        fake_torch.backends.cudnn.benchmark = False
+        fake_rfdetr = SimpleNamespace(RFDETRNano=FakeRFDETRNano, RFDETRSmall=FakeRFDETRNano)
+
+        config = VisualPipelineConfig(
+            detector_model="nano",
+            detector_backend="rfdetr_rocm_fp16",
+            detector_batch_size=2,
+            detection_threshold=0.35,
+            detector_resolution=640,
+            tracker_backend="bytetrack",
+            tracker_lost_buffer=30,
+            tracker_match_threshold=0.8,
+            frame_decode_backend="gpu",
+            gpu_decode_backend="vaapi",
+            detector_artifact_dir="/tmp/engines",
+        )
+
+        with patch.dict(sys.modules, {"torch": fake_torch, "rfdetr": fake_rfdetr}):
+            RFDETRPersonDetector(config).load()
+
+        assert captured_kwargs == {
+            "resolution": 640,
+            "positional_encoding_size": 24,
+        }
 
 
 # ---------- tracker_runtime tests ----------
