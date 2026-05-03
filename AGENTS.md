@@ -7,10 +7,11 @@ Operational startup and maintenance guide for coding agents.
 - Product: Clypt V3.1 backend
 - Implemented: Phases 1-4
 - Planned: Phases 5-6
-- Active topology: **Phase1 MI300X + Phase26 MI300X + Modal L40S**
-  - **Phase1 host (MI300X default)**: Phase 1 runner/orchestrator, persistent local VibeVoice service, persistent local visual service, co-located VibeVoice vLLM ROCm sidecar, in-process NFA -> emotion2vec+ -> YAMNet.
-  - **Phase26 host (MI300X)**: `POST /tasks/phase26-enqueue`, local SQLite queue + worker, SGLang ROCm Qwen on `:8001`, current Phase 2-4 runtime, future Phase 5-6 orchestration.
-  - **Modal**: CPU `POST /tasks/node-media-prep` submit/poll surface plus one warm `L40S` `node_media_prep_job` worker; render/export follows the same external-worker pattern.
+- Active topology: **Colocated Phase1 vCPU orchestrator + Phase26 MI300X GPU + Modal L40S x2**
+  - **Phase1 orchestrator**: Phase 1 runner, test-bank media ingress, signed HTTPS GCS URL generation for ElevenLabs Scribe v2, Modal RF-DETR submit, and Phase26 dispatch. It runs on the Phase26 MI300X droplet's vCPUs. It does not run local ASR, forced alignment, emotion2vec+, YAMNet, RF-DETR, VibeVoice, vLLM, SGLang, or any local GPU service.
+  - **Phase26 host (MI300X)**: the same droplet also owns `POST /tasks/phase26-enqueue`, local SQLite queue + worker, SGLang ROCm Qwen on `:8001`, current Phase 2-4 runtime, future Phase 5-6 orchestration.
+  - **Modal visual L40S**: CPU `POST /tasks/visual-extract` submit/poll surface plus one warm `L40S` `visual_extract_job` worker using TensorRT/NVDEC RF-DETR.
+  - **Modal media L40S**: CPU submit/poll surfaces for `POST /tasks/node-media-prep` and `POST /tasks/render-video`; both dispatch to one shared warm `L40S` `media_gpu_job` worker.
 - Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint on the Phase26 host.
 
 ## Read Order (Required - You MUST read these before reporting back to the user.)
@@ -60,7 +61,7 @@ python -m pip install -r requirements-local.txt
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-do-phase1-mi300x.txt
+python -m pip install -r requirements-phase1-orchestrator.txt
 ```
 
 ### Phase26 runtime deps
@@ -82,7 +83,7 @@ python -m pytest tests/backend/pipeline -q
 ```bash
 python -m backend.runtime.run_phase1 \
   --job-id "run_$(date +%Y%m%d_%H%M%S)" \
-  --source-path /opt/clypt-phase1/videos/<video>.mp4 \
+  --source-path /opt/clypt-phase26/videos/<video>.mp4 \
   --run-phase14
 ```
 
@@ -94,29 +95,35 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
 
 ## Runtime Truths To Preserve
 
-- `VIBEVOICE_VLLM_MODEL` must be `vibevoice` on the Phase1 host.
-- `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required on both MI300X hosts.
-- Phase 1 now runs on one host with two hot local services:
-  - VibeVoice at `POST /tasks/vibevoice-asr`
-  - visual extraction at `POST /tasks/visual-extract`
-- Current Phase 1 visual settings must stay intact unless the user explicitly approves retuning:
+- `GOOGLE_CLOUD_PROJECT` and `GCS_BUCKET` are required on the colocated Phase1/Phase26 MI300X host.
+- The `Phase26` host name is intentionally retained as semantic shorthand even though Phase1 now runs on the same droplet's vCPUs; do not infer a separate Phase1 host from that name.
+- Phase 1 audio backend is ElevenLabs Scribe v2:
+  - `CLYPT_PHASE1_AUDIO_BACKEND=elevenlabs_scribe_v2`
+  - `ELEVENLABS_API_KEY` is required.
+  - Scribe uses a signed HTTPS GCS audio URL with `source_url` by default.
+  - `CLYPT_PHASE1_SCRIBE_LANGUAGE_CODE=en`
+  - `num_speakers` and `keyterms` are omitted by default unless later supplied by frontend controls.
+  - entity detection/redaction stay disabled.
+- Phase 1 visual extraction is a Modal future:
+  - Phase1 submits `POST /tasks/visual-extract` to the dedicated Modal visual L40S service.
+  - Phase1 enqueues Phase26 immediately after Scribe audio adaptation completes.
+  - Phase26 may run Phase2-4 while RF-DETR continues, but must join/fail-hard on the visual future before Phase5/frontend grounding or Phase6 visual use.
+- Current Modal visual settings must stay intact unless the user explicitly approves retuning:
   - `CLYPT_PHASE1_VISUAL_MODEL=nano`
-  - `CLYPT_PHASE1_VISUAL_BACKEND=rfdetr_rocm_fp16`
+  - Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
+  - Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt` and internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`
   - batch size `16`
   - threshold `0.35`
   - shape `640`
   - ByteTrack buffer `30`
   - ByteTrack match threshold `0.7`
-  - GPU decode through `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=vaapi`
-- Phase1 NFA and emotion2vec+ must run on the ROCm GPU through PyTorch's `cuda` namespace and fail hard if unavailable; YAMNet remains CPU.
-- Phase1 VibeVoice sidecar must use a resolved HF snapshot path with `HF_HUB_OFFLINE=1`; `VLLM_ROCM_BASE_IMAGE` must be an immutable accepted ROCm vLLM image tag, not empty, untagged, or `:latest`.
-- NFA / emotion2vec+ / YAMNet remain persistent in-process on the Phase1 host.
+  - GPU decode through `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
 - There is **no local fallback**:
-  - Phase1 requires `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_*`
   - Phase1 requires `CLYPT_PHASE1_VISUAL_SERVICE_*`
   - Phase1 requires `CLYPT_PHASE24_DISPATCH_*`
+  - Phase1 requires `ELEVENLABS_API_KEY`
   - Phase26 requires `CLYPT_PHASE24_NODE_MEDIA_PREP_*`
-- Phase 1 audio-post must launch immediately after the VibeVoice HTTP call returns, not after visual completion.
+- Legacy Phase1 VibeVoice/NFA/emotion2vec+/YAMNet envs are deleted on this branch and must not be reintroduced as active runtime requirements.
 - Phase 1 runtime requires `CLYPT_PHASE1_INPUT_MODE=test_bank`.
 - `CLYPT_GEMINI_MAX_CONCURRENT` has been removed; use explicit per-stage concurrency envs.
 - Phase26 local runtime requires `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`.
@@ -126,8 +133,8 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
 - Qwen serving target is the SGLang ROCm service on Phase26 `127.0.0.1:8001`.
-- Node-media prep is always delegated remotely to Modal L40S. Do not re-introduce an in-process ffmpeg fallback on either MI300X host.
-- Historical H200/H100 env overlays are superseded on AMD-refactor; do not reintroduce or reference `known-good-phase1-h100-backup.env` unless the user explicitly asks for a fresh replacement.
+- Node-media prep and render/export are always delegated remotely to the shared Modal media L40S. Do not re-introduce an in-process ffmpeg fallback on the Phase26 MI300X host.
+- Historical H200/H100 and Phase1 MI300X/VibeVoice overlays are deleted on AMD-refactor; do not reintroduce or reference `known-good-phase1-h100-backup.env` unless the user explicitly asks for a fresh replacement.
 
 ## Critical Maintenance Rule
 
@@ -147,7 +154,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (4589 symbols, 11268 relationships, 266 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (4605 symbols, 11309 relationships, 266 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

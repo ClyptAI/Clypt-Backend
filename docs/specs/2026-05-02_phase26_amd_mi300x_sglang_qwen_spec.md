@@ -10,7 +10,7 @@
 ## 1. Locked Decisions
 
 1. Phase26 runs on a dedicated **1x AMD MI300X** host.
-2. Phase1 runs on a separate AMD MI300X host and dispatches to Phase26 over the existing `POST /tasks/phase26-enqueue` boundary.
+2. Phase1 runs on the Phase26 MI300X host's vCPUs and dispatches over the existing local `POST /tasks/phase26-enqueue` boundary. The `Phase26` host name is retained as semantic shorthand because the same machine owns the downstream queue, Qwen GPU service, and future Phase 5-6 boundary.
 3. Qwen remains self-hosted through **SGLang**, not Nebius Token Factory.
 4. This branch is an **atomic AMD refactor**. No H200 fallback, CUDA fallback, NVIDIA-specific service units, or Nebius provider fallback are retained.
 5. The OpenAI-compatible local generation contract remains `http://127.0.0.1:8001/v1`.
@@ -68,8 +68,8 @@ The AMD switchover should preserve the semantic serving contract while changing 
 
 ```mermaid
 flowchart LR
-  P1["Phase1 MI300X"] -->|POST /tasks/phase26-enqueue| D["Phase26 dispatch :9300"]
   subgraph P26["Phase26 MI300X"]
+    P1["Phase1 vCPU orchestrator"] -->|POST /tasks/phase26-enqueue| D["Phase26 dispatch :9300"]
     D --> Q["SQLite queue"]
     W["Phase26 worker"] --> Q
     W --> LLM["LocalOpenAIQwenClient"]

@@ -125,7 +125,8 @@ def test_load_provider_settings_includes_phase24_local_queue_defaults(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
     monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_URL", "https://modal.example/tasks/node-media-prep")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN", "prep-token")
 
     settings = load_provider_settings()
 

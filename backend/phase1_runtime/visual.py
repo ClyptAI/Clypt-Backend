@@ -1,15 +1,15 @@
-"""V3.1 Phase 1 visual extraction pipeline.
+"""V3.1 visual extraction pipeline for the Modal L40S RF-DETR worker.
 
 This module orchestrates:
 1. video metadata probing
 2. shot boundary detection
-3. frame decoding (AMD VAAPI GPU decode)
-4. RF-DETR person detection (ROCm/HIP GPU)
+3. frame decoding (NVIDIA NVDEC/CUDA GPU decode)
+4. RF-DETR person detection (TensorRT FP16)
 5. ByteTrack tracking
 6. post-processing into the canonical artifact schemas
 
 It delegates to dedicated modules for detection, tracking, and decoding.
-The old Ultralytics/YOLO path is removed.
+The old Ultralytics/YOLO and PyTorch ROCm paths are removed.
 """
 
 from __future__ import annotations
@@ -101,14 +101,12 @@ def detect_shot_boundaries_ms(*, video_path: Path, duration_ms: int, threshold: 
 # ---------------------------------------------------------------------------
 
 def _make_detector(config):
-    """Create the active AMD RF-DETR detector backend."""
-    if config.use_tensorrt:
-        raise RuntimeError(
-            "TensorRT is not supported on the Phase1 AMD MI300X active path. "
-            "Use CLYPT_PHASE1_VISUAL_BACKEND=rfdetr_rocm_fp16."
-        )
-    from .rfdetr_detector import RFDETRPersonDetector
-    return RFDETRPersonDetector(config)
+    """Create the active RF-DETR detector backend."""
+    from .tensorrt_detector import TensorRTDetector
+
+    if not config.use_tensorrt:
+        raise ValueError("TensorRT visual extraction is required on the Modal L40S path.")
+    return TensorRTDetector(config)
 
 
 def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dict], dict]:

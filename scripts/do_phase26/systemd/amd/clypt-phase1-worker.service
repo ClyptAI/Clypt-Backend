@@ -1,0 +1,17 @@
+[Unit]
+Description=Clypt Phase1 Worker on Phase26 MI300X vCPUs
+After=network.target clypt-phase26-dispatch.service
+Requires=clypt-phase26-dispatch.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase26/repo
+EnvironmentFile=/etc/clypt-phase26/phase26.env
+EnvironmentFile=/etc/clypt/clypt-phase26-runtime.env
+ExecStart=/opt/clypt-phase26/venvs/phase26/bin/python -m backend.runtime.run_phase1_worker --db-path /var/lib/clypt/phase1/jobs.db --logs-root /var/log/clypt/phase1/logs
+Restart=always
+RestartSec=5
+LimitNOFILE=524288
+
+[Install]
+WantedBy=multi-user.target

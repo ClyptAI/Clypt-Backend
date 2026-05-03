@@ -4,6 +4,7 @@
 # Local tooling/editor state
 .tmp/
 .gitnexus/
+.agents/
 
 # Environment
 .env

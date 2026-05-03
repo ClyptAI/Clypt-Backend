@@ -1,162 +1,104 @@
 # ARCHITECTURE
 
-**Status:** Active (implemented Phases 1-4 plus Phase 6 packaging/render groundwork; Phase 5 still pending full rollout)  
+**Status:** Active Scribe/Modal + Phase26 MI300X topology
 **Last updated:** 2026-05-02
 
-This document describes the current AMD-refactor topology: a **Phase 1 MI300X**, a **Phase26 MI300X**, and a **Modal L40S media-prep/render service**.
+This document describes the current `AMD-refactor` topology: Phase1 orchestration colocated on the DigitalOcean MI300X host's vCPUs, Phase26/Qwen on the same MI300X GPU host, and two persistent Modal L40S GPU workers.
 
 ## 1) End-to-End Flow
 
 ```mermaid
 flowchart TD
   source["Source URL or local path"]
-  p1["Phase 1 runner on Phase1 MI300X"]
-  vvsvc["POST tasks vibevoice asr on localhost 9100"]
-  vvllm["VibeVoice vLLM sidecar on 8000"]
-  audpost["NFA to emotion2vec plus to YAMNet in process"]
-  visvc["POST tasks visual extract on localhost 9200"]
-  visual["RF-DETR and ByteTrack hot local service"]
+  p1["Phase1 orchestrator on MI300X vCPUs"]
+  gcs["Canonical audio/video in GCS"]
+  scribe["ElevenLabs Scribe v2"]
+  visual["Modal L40S RF-DETR visual future"]
   dispatch["POST /tasks/phase26-enqueue"]
   q["SQLite queue on Phase26 MI300X"]
   worker["Phase26 local worker"]
-  llm["SGLang Qwen on 8001"]
-  modal["POST tasks node media prep on Modal L40S"]
+  llm["SGLang Qwen on :8001"]
+  media["Modal L40S media prep/render"]
   emb["Vertex embeddings"]
   sp["Spanner persistence"]
   out["Artifacts + terminal state"]
 
-  source --> p1
-  p1 --> vvsvc --> vvllm
-  vvsvc --> audpost
-  p1 --> visvc --> visual
-  audpost --> dispatch --> q --> worker
+  source --> p1 --> gcs
+  gcs --> scribe --> dispatch
+  gcs --> visual
+  dispatch --> q --> worker
   worker --> llm
-  worker --> modal
+  worker --> media
   worker --> emb
   worker --> sp
   worker --> out
-  visual --> p1
+  visual --> worker
 ```
 
-## 2) Host Topology
+Phase26 starts as soon as Scribe audio artifacts are adapted. It does not wait for RF-DETR before Phase2-4, but it must join and fail hard on the visual future before Phase5/frontend grounding or any Phase6 visual use.
+
+## 2) Surfaces
 
 | Surface | Runs |
 | --- | --- |
-| **Phase1 host (MI300X default)** | Phase 1 runner, persistent local VibeVoice service, co-located VibeVoice vLLM ROCm sidecar, persistent local visual service, RF-DETR + ByteTrack settings preserved, in-process NFA + emotion2vec+ + YAMNet. |
-| **Phase26 host (MI300X)** | `POST /tasks/phase26-enqueue`, local SQLite queue, current Phase 2-4 worker/runtime, SGLang ROCm Qwen on `:8001`, future Phase 5-6 orchestration. |
-| **Modal** | CPU `POST /tasks/node-media-prep` submit/poll surface plus one warm `L40S` `node_media_prep_job` worker, bearer-auth protected, ffmpeg NVDEC/NVENC worker checks, timeline-batched hybrid seek/trim extraction, and 480p clip generation for Vertex multimodal embeddings. Future `render-video` endpoint will live here too. |
+| **Phase1 orchestrator** | Runs on the MI300X host's vCPUs. Test-bank ingress, canonical media upload, signed HTTPS GCS URL creation, synchronous ElevenLabs Scribe v2 call, Modal visual future submission, and Phase26 dispatch. No local GPU service. |
+| **Modal visual L40S** | `POST /tasks/visual-extract` submit/poll API plus one warm `visual_extract_job` using CUDA/NVDEC decode, TensorRT FP16 RF-DETR, and ByteTrack. |
+| **Phase26 MI300X** | `POST /tasks/phase26-enqueue`, local SQLite queue, Phase2-4 worker/runtime, SGLang ROCm Qwen on `127.0.0.1:8001`, future Phase5-6 orchestration boundary. |
+| **Modal media L40S** | `POST /tasks/node-media-prep` and `POST /tasks/render-video` submit/poll APIs, both backed by one warm `media_gpu_job` worker. |
 
-### Design rationale
+## 3) Phase1
 
-- Phase 1 stays cohesive on one host. The runner still owns orchestration, but the heavy model boundaries are now hot local services rather than in-process one-off initialization.
-- RF-DETR Nano remains fast because the existing visual config is preserved:
-  - backend `rfdetr_rocm_fp16`
-  - batch size `16`
-  - threshold `0.35`
-  - shape `640`
-  - ByteTrack buffer `30`
-  - ByteTrack match threshold `0.7`
-  - GPU decode via VAAPI required
-- NFA, emotion2vec+, and YAMNet stay in-process because they already benefit from long-lived provider singletons without requiring more RPC boundaries.
-- Phase26 becomes the clean downstream execution boundary. The queue remains local to that host, but Phase 1 no longer reaches into SQLite directly.
-- Node-media-prep moves to Modal because it is naturally stateless, and it sits after node creation on the Phase26 side of the boundary.
-- Phase26 now overlaps node-media-prep and multimodal embedding by submitting timeline-local batches and embedding each completed batch immediately instead of waiting on one monolithic media-prep result.
+Phase1 is orchestration-only and colocated with Phase26:
 
-## 3) Phase 1 Architecture
+- resolves test-bank source URLs or accepts local source paths
+- prepares canonical audio/video artifacts and uploads them to GCS
+- signs the audio GCS object as an HTTPS URL for Scribe v2
+- submits the source video GCS URI to Modal visual extraction
+- adapts Scribe words, speakers, and audio-event tags into the canonical Phase1 handoff payload
+- enqueues Phase26 immediately after audio adaptation
 
-### 3.1 Core behavior
+There is no VibeVoice, local NFA, emotion2vec+, YAMNet, local RF-DETR, local vLLM, local SGLang, VAAPI, or ROCm requirement on Phase1.
 
-- `run_phase1` still builds `Phase1JobRunner`.
-- The factory now wires:
-  - `RemoteVibeVoiceAsrClient` -> local Phase 1 VibeVoice service
-  - `RemotePhase1VisualClient` -> local Phase 1 visual service
-  - `RemotePhase26DispatchClient` -> remote Phase26 enqueue API
-- NFA / emotion2vec+ / YAMNet remain provider singletons held in-process by the Phase 1 runtime factory.
+## 4) Visual
 
-### 3.2 Local Phase 1 services
+The active visual fast path is Modal L40S only:
 
-- **VibeVoice service**
-  - endpoint: `POST /tasks/vibevoice-asr`
-  - health: `GET /health`
-  - co-located with a VibeVoice vLLM sidecar
-  - for `>40` minute inputs, the service shards canonical audio into 2-4 temporary WAVs, fans those requests out to the same local sidecar, then stitches speakers globally before returning one merged transcript
-- **Visual service**
-  - endpoint: `POST /tasks/visual-extract`
-  - health: `GET /health`
-  - owns hot RF-DETR + ByteTrack initialization
+- Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
+- `CLYPT_PHASE1_VISUAL_MODEL=nano`
+- `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`
+- `CLYPT_PHASE1_VISUAL_THRESHOLD=0.35`
+- `CLYPT_PHASE1_VISUAL_SHAPE=640`
+- `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
+- Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt`; the worker sets internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`.
+- ByteTrack buffer `30`
+- ByteTrack match threshold `0.7`
 
-### 3.3 Execution semantics
+The worker fails hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, or RF-DETR dependencies are unavailable. There is no software decode, CPU detector, VAAPI, or PyTorch ROCm fallback path.
 
-- Audio and visual paths run concurrently.
-- The audio-post chain launches immediately after the VibeVoice HTTP response returns.
-- For `source_url` jobs, Phase 1 now resolves the URL through the test-bank mapping and fetches persisted YouTube source metadata during ingress.
-- Phase 1 dispatches downstream through `POST /tasks/phase26-enqueue` when its Phase 1 handoff payload is ready.
+## 5) Phase26
 
-## 4) Phase26 Architecture
+Phase26 owns the downstream queue and graph pipeline:
 
-### 4.1 Dispatch boundary
+- local SQLite queue with `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
+- worker entrypoint: `python -m backend.runtime.run_phase26_worker`
+- local generation through SGLang ROCm Qwen at `http://127.0.0.1:8001/v1`
+- `GENAI_GENERATION_BACKEND=local_openai`
+- Vertex-backed embeddings
+- Modal-backed media prep/render
+- Spanner persistence
 
-- The Phase26 host exposes `POST /tasks/phase26-enqueue`.
-- That API writes to its own local SQLite queue.
-- The Phase 1 host never owns or mounts the downstream queue file.
+The worker may process Phase2-4 while the visual future is pending. Pending visual payloads require a configured Modal visual client and malformed or failed visual results fail hard.
 
-### 4.2 Current worker/runtime behavior
+## 6) Removed Paths
 
-- The Phase26 host still runs the current Phase 2-4 business logic.
-- `run_phase26_worker` is the host-level entrypoint.
-- Under the hood, it still wraps the existing Phase 2-4 worker service until Phase 5-6 logic lands.
+The atomic refactor deletes, rather than keeps, the old active runtime families:
 
-### 4.3 LLM and media boundaries
+- H200 Phase1/Phase26 env baselines and deploy scripts
+- Phase1 MI300X/VibeVoice env baselines and deploy scripts
+- local VibeVoice service and vLLM Docker images
+- local NFA, emotion2vec+, YAMNet, and speaker-verification providers
+- local Phase1 visual FastAPI service
+- PyTorch ROCm/VAAPI RF-DETR path
+- VibeVoice transcript output references
 
-- Local generation is still OpenAI-compatible against SGLang ROCm Qwen at `127.0.0.1:8001`.
-- Vertex embeddings remain unchanged.
-- Node-media-prep is always remote via `RemoteNodeMediaPrepClient`, now pointed at Modal instead of an RTX host.
-- The worker now plans node-media-prep in timeline-local batches, submits each batch as its own Modal job, and reassembles final multimodal embeddings into original node order.
-
-## 5) Modal Boundary
-
-- `scripts/modal/node_media_prep_app.py` is the active serverless service surface for node-media-prep.
-- `node_media_prep` is the CPU ASGI submit/poll surface.
-- `node_media_prep_job` is the only GPU-backed worker and keeps the warm `L40S` pool via `min_containers=1`.
-- The worker validates that ffmpeg exposes `h264_nvenc` and `h264_cuvid` before processing work.
-- The JSON contract remains submit/poll-compatible, but each request now represents one timeline batch and responses may include optional batch timing metadata.
-
-Phase 6 render/export:
-
-- `scripts/modal/render_video_app.py` is now the Modal submit/poll surface for Phase 6 render/export.
-- `render_video` is the CPU ASGI submit/poll surface.
-- `render_video_job` is the GPU-backed `L40S` worker that stages Phase 6 artifacts, pinned font assets, and runs ffmpeg/libass burn-in.
-- Phase 6 planning stays on the Phase26 host; only final render/export moves remote.
-
-## 6) Config Invariants
-
-Phase 1 host must have:
-
-- `CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_*`
-- `CLYPT_PHASE1_VISUAL_SERVICE_*`
-- `CLYPT_PHASE24_DISPATCH_*`
-
-Phase26 host must have:
-
-- `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
-- `CLYPT_PHASE24_NODE_MEDIA_PREP_*`
-- local SGLang / OpenAI-compatible generation settings
-- optional `CLYPT_PHASE24_PHASE6_RENDER_*` envs when remote render/export is turned on
-
-Phase 1 fallback note:
-
-- the old H100/H200 overlay env files are historical and superseded on AMD-refactor
-- if an alternate low-memory Phase 1 profile is needed later, treat it as a fresh, explicit replacement rather than relying on a stale backup baseline
-
-## 7) Implemented vs Planned
-
-- **Implemented now**
-  - Phase 1 MI300X with local persistent VibeVoice + visual services
-  - remote Phase26 enqueue boundary
-  - local Phase26 queue + worker + SGLang ROCm
-  - Modal node-media-prep surface
-  - Modal Phase 6 render/export surface
-- **Planned later**
-  - Phase 5 participation grounding on Phase26
-  - richer Phase 5 camera-intent production feeding Phase 6 placement
-  - broader collision heuristics for split seams / overlay exclusion zones
+Historical incidents remain in [ERROR_LOG.md](/Users/rithvik/Clypt-Backend/docs/ERROR_LOG.md) because they are useful debugging context, but they are not current operator entrypoints.

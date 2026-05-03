@@ -22,7 +22,7 @@ This repository is the backend system that powers it.
 
 This repo currently implements **Phases 1-4** of Clypt’s backend:
 
-1. **Phase 1**: ingest long-form video, run ASR, run the post-ASR audio chain, and extract visual structure.
+1. **Phase 1**: ingest long-form video, run Scribe v2 ASR/diarization/audio tagging, submit RF-DETR visual extraction, and hand off audio-first artifacts downstream.
 2. **Phase 2**: build semantic nodes, prepare clip media, and generate retrieval-ready embeddings.
 3. **Phase 3**: construct the video-level knowledge graph.
 4. **Phase 4**: retrieve, review, and rank clip candidates.
@@ -34,38 +34,39 @@ Planned next:
 
 ## Current Production Topology
 
-The backend is currently designed around two DigitalOcean AMD GPU hosts plus one serverless media-prep/render surface on Modal.
+The backend is currently designed around one DigitalOcean AMD GPU host that runs Phase1 orchestration on MI300X vCPUs and Phase26/Qwen on the MI300X GPU, plus two persistent Modal L40S pools.
 
 ```mermaid
 flowchart LR
   source["Long-form video"]
-  phase1["Phase 1 host - DigitalOcean MI300X"]
-  phase26["Phase26 host - DigitalOcean MI300X"]
+  phase_host["DigitalOcean MI300X host - Phase1 vCPUs + Phase26 GPU"]
+  scribe["ElevenLabs Scribe v2"]
+  visual["Modal L40S - RF-DETR visual"]
   modal["Modal L40S - media prep/render"]
   vertex["Vertex embeddings"]
   out["Ranked clip candidates"]
 
-  source --> phase1
-  phase1 --> phase26
-  phase26 --> modal
-  phase26 --> vertex
-  phase26 --> out
+  source --> phase_host
+  phase_host --> scribe
+  phase_host --> visual
+  phase_host --> modal
+  phase_host --> vertex
+  phase_host --> out
 ```
 
-### Phase 1 host
+### Phase 1 orchestrator
 
-The Phase 1 host owns the real-time multimodal understanding path:
+Phase 1 runs on the MI300X host's vCPUs and owns ingestion/orchestration, but not local GPU inference:
 
 - Phase 1 runner/orchestrator
-- persistent local VibeVoice service
-- co-located VibeVoice vLLM sidecar
-- persistent local visual service
-- RF-DETR + ByteTrack
-- in-process NFA, emotion2vec+, and YAMNet
+- signed HTTPS GCS audio URL generation for ElevenLabs Scribe v2
+- Scribe response adaptation into canonical diarization/audio-event payloads
+- Modal RF-DETR visual future submission
+- immediate Phase26 handoff after audio is ready
 
 ### Phase26 host
 
-The downstream host owns the graph and ranking pipeline:
+The same MI300X host owns the downstream graph and ranking pipeline. The `Phase26` name is retained as a host/project shorthand because the machine owns the downstream queue, Qwen GPU service, and future Phase 5-6 orchestration boundary:
 
 - `POST /tasks/phase26-enqueue`
 - local SQLite queue and worker
@@ -75,11 +76,14 @@ The downstream host owns the graph and ranking pipeline:
 
 ### Modal
 
-Modal currently handles the stateless media-prep step:
+Modal currently handles visual extraction plus media-prep/render:
 
+- `POST /tasks/visual-extract`
 - `POST /tasks/node-media-prep`
+- `POST /tasks/render-video`
 - CPU web submit/poll surface
-- one warm `L40S` worker via `node_media_prep_job`
+- one dedicated warm visual `L40S` worker via `visual_extract_job`
+- one shared warm media `L40S` worker via `media_gpu_job`
 - timeline-batched ffmpeg GPU path for clip extraction/encoding before multimodal embedding
 
 ## End-to-End Flow
@@ -87,9 +91,9 @@ Modal currently handles the stateless media-prep step:
 ```mermaid
 flowchart TD
   source["YouTube URL from test bank or local asset"]
-  asr["VibeVoice ASR"]
-  audio["NFA to emotion2vec plus to YAMNet"]
-  visual["RF-DETR and ByteTrack"]
+  asr["ElevenLabs Scribe v2"]
+  audio["Scribe adapter"]
+  visual["Modal RF-DETR and ByteTrack"]
   dispatch["Phase26 enqueue"]
   nodes["Semantic nodes + boundaries"]
   prep["Node media prep"]
@@ -104,16 +108,13 @@ flowchart TD
   dispatch --> nodes --> prep --> embed --> knowledgeGraph --> rank
 ```
 
-One important runtime property: the post-ASR audio chain starts as soon as ASR returns. It does **not** wait for the visual chain to finish.
+One important runtime property: Phase26 starts as soon as Scribe audio artifacts are ready. It does **not** wait for RF-DETR; Phase26 joins the visual future before Phase5/frontend grounding or Phase6 visual use.
 
 ## Core Capabilities Today
 
 - Long-form video ingestion
-- VibeVoice ASR
-- forced alignment
-- emotion2vec+ segment scoring
-- YAMNet event extraction
-- RF-DETR + ByteTrack visual extraction
+- ElevenLabs Scribe v2 ASR, diarization, word timings, and coarse audio tags
+- Modal RF-DETR + ByteTrack visual extraction
 - semantic node construction
 - clip media extraction for multimodal embedding
 - video-level graph construction
@@ -121,26 +122,22 @@ One important runtime property: the post-ASR audio chain starts as soon as ASR r
 
 ## Backend Stack
 
-- **GPU compute**: DigitalOcean MI300X droplets on the `Rithvik-AMD` team
-- **Serverless media prep**: Modal L40S
+- **GPU compute**: DigitalOcean MI300X droplet on the `Rithvik-AMD` team for colocated Phase1 vCPU orchestration and Phase26 GPU inference
+- **Serverless visual/media GPU work**: Modal L40S
 - **Local generation**: SGLang ROCm serving Qwen 3.6
 - **Embeddings**: Vertex AI
 - **Persistence**: Google Cloud Storage + Spanner
-- **Primary languages/runtimes**: Python, systemd services, ffmpeg, ROCm, vLLM, SGLang
+- **Primary languages/runtimes**: Python, systemd services, ffmpeg, ROCm, TensorRT, SGLang
 
 ## Repository Map
 
 ```text
 backend/phase1_runtime/                     Phase 1 orchestration and payload assembly
 backend/providers/                          Config, remote clients, storage, embeddings, LLM clients
-backend/runtime/phase1_vibevoice_service/  Local Phase 1 ASR service
-backend/runtime/phase1_visual_service/     Local Phase 1 visual extraction service
 backend/runtime/phase26_dispatch_service/  Downstream enqueue API
 backend/runtime/                           Entry points for Phase 1 and Phase26 services/workers
-docker/vibevoice-vllm-rocm/                VibeVoice vLLM ROCm container image
-scripts/do_phase1/                         Phase 1 host bootstrap and deploy scripts
 scripts/do_phase26/                        Phase26 host bootstrap and deploy scripts
-scripts/modal/                             Modal node-media-prep and future render stubs
+scripts/modal/                             Modal visual extraction plus shared media worker apps
 docs/                                      Runtime, deployment, architecture, specs, and run references
 tests/                                     Backend tests
 ```
@@ -157,10 +154,10 @@ python -m pip install -r requirements-local.txt
 
 ### Host-specific dependency sets
 
-Phase 1 host:
+Phase 1 orchestrator:
 
 ```bash
-python -m pip install -r requirements-do-phase1-mi300x.txt
+python -m pip install -r requirements-phase1-orchestrator.txt
 ```
 
 Phase26 host:
@@ -184,7 +181,7 @@ Start here if you want the operational details:
 - [Environment reference](docs/runtime/ENV_REFERENCE.md)
 - [Run reference and benchmarks](docs/runtime/RUN_REFERENCE.md)
 - [Architecture deep dive](docs/ARCHITECTURE.md)
-- [Phase 1 host deploy](docs/deployment/PHASE1_HOST_DEPLOY.md)
+- [Phase 1 colocated deploy](docs/deployment/PHASE1_HOST_DEPLOY.md)
 - [Phase26 host deploy](docs/deployment/PHASE26_HOST_DEPLOY.md)
 - [Modal node-media-prep deploy](docs/deployment/MODAL_NODE_MEDIA_PREP_DEPLOY.md)
 - [Specs index](docs/specs/SPEC_INDEX.md)
@@ -198,5 +195,5 @@ Operational note:
 
 - Implemented and actively exercised: **Phases 1-4**
 - Planned next: **Phases 5-6**
-- Current target architecture on `AMD-refactor`: **DigitalOcean MI300X + MI300X + Modal L40S**
-- Historical H200 files remain in the repo only as migration references and are superseded by the MI300X docs/envs/scripts.
+- Current target architecture on `AMD-refactor`: **DigitalOcean MI300X Phase1-vCPU/Phase26-GPU + Modal L40S x2**
+- Historical H200 files and Phase1 MI300X/VibeVoice runtime files are deleted on this branch. Historical incidents remain in `docs/ERROR_LOG.md` only as debugging context.

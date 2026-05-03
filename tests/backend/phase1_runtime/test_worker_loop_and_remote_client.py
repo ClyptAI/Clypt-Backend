@@ -24,16 +24,6 @@ def test_phase1_worker_run_forever_stops_after_idle_loops(tmp_path):
     assert len(processed) == 1
 
 
-def test_remote_job_client_builds_submit_and_logs_urls():
-    from scripts.do_phase1.run_remote_job import Phase1RemoteClient
-
-    client = Phase1RemoteClient(base_url="http://127.0.0.1:8080")
-
-    assert client.jobs_url == "http://127.0.0.1:8080/jobs"
-    assert client.job_url(job_id="job_123") == "http://127.0.0.1:8080/jobs/job_123"
-    assert client.logs_url(job_id="job_123", tail_lines=50) == "http://127.0.0.1:8080/jobs/job_123/logs?tail_lines=50"
-
-
 def test_run_phase1_worker_configures_info_logging(monkeypatch, tmp_path):
     from backend.runtime import run_phase1_worker
 

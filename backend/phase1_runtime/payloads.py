@@ -38,6 +38,16 @@ class VisualPayload(_StrictModel):
     tracking_metrics: dict[str, Any] = Field(default_factory=dict)
 
 
+class VisualFuturePayload(_StrictModel):
+    backend: str = "modal_rfdetr_l40s"
+    call_id: str
+    service_url: str | None = None
+    result_url: str | None = None
+    source_video_gcs_uri: str | None = None
+    source_video_sha256: str | None = None
+    submitted_at: str | None = None
+
+
 class EmotionSegmentsPayload(_StrictModel):
     segments: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -49,7 +59,9 @@ class YamnetPayload(_StrictModel):
 class Phase1SidecarOutputs(_StrictModel):
     phase1_audio: Phase1AudioAssets
     diarization_payload: DiarizationPayload
-    phase1_visual: VisualPayload
+    phase1_visual_status: str = "ready"
+    phase1_visual: VisualPayload | None = None
+    visual_future: VisualFuturePayload | None = None
     emotion2vec_payload: EmotionSegmentsPayload
     yamnet_payload: YamnetPayload
     source_context: dict[str, Any] | None = None
@@ -60,6 +72,7 @@ __all__ = [
     "EmotionSegmentsPayload",
     "Phase1AudioAssets",
     "Phase1SidecarOutputs",
+    "VisualFuturePayload",
     "VisualPayload",
     "YamnetPayload",
 ]

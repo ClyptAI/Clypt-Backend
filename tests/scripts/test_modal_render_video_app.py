@@ -108,11 +108,13 @@ def test_render_video_submit_returns_call_id(monkeypatch) -> None:
 
     class _FakeJob:
         @staticmethod
-        def spawn(payload):
+        def spawn(kind, payload):
+            assert kind == "render_video"
             assert payload["run_id"] == "run-123"
             return _FakeSpawnedCall()
 
-    monkeypatch.setattr(render_video_app, "render_video_job", _FakeJob)
+    monkeypatch.setattr(render_video_app, "media_gpu_job", _FakeJob)
+    monkeypatch.setattr("scripts.modal.media_worker_app.media_gpu_job", _FakeJob)
 
     client = TestClient(render_video_app.web_app)
     response = client.post(

@@ -80,7 +80,7 @@ Replace URL downloading work for MVP with a deterministic local test-bank.
 ```json
 {
   "https://www.youtube.com/watch?v=abc123": {
-    "local_video_path": "/opt/clypt-phase1/videos/mrbeastflagrant.mp4"
+    "local_video_path": "/opt/clypt-phase26/test-bank-cache/videos/mrbeastflagrant.mp4"
   }
 }
 ```

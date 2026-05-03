@@ -297,17 +297,24 @@ def test_live_phase14_runner_executes_provider_backed_phases_2_to_4(tmp_path: Pa
                 ]
             },
             yamnet_payload={"events": []},
+            source_context={
+                "source_url": "https://example.com/video",
+                "source_title": "Example Video",
+                "channel_title": "Example Channel",
+            },
         ),
     )
 
     assert summary.run_id == "run_live"
-    assert summary.artifact_paths == {}
+    assert summary.artifact_paths["caption_plan"].endswith("caption_plan.json")
+    assert summary.artifact_paths["publish_metadata"].endswith("publish_metadata.json")
+    assert summary.artifact_paths["render_plan"].endswith("render_plan.json")
     assert len(repository.timeline_turns) == 2
     assert len(repository.nodes) >= 1
     assert len(repository.edges) >= 1
     assert len(repository.candidates) == 1
     assert repository.candidates[0].rationale == "Best clip."
-    assert [metric.phase_name for metric in repository.phase_metrics] == ["phase2", "phase3", "phase4", "phase24"]
+    assert [metric.phase_name for metric in repository.phase_metrics] == ["phase2", "phase3", "phase4", "phase6", "phase24"]
     assert all(metric.query_version == "graph-v2" for metric in repository.phase_metrics)
     assert any(item.step_name == "merge_batch" for item in repository.phase_substeps)
     assert any(item.step_name == "local_edge_batch" for item in repository.phase_substeps)

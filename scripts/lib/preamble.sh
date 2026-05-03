@@ -2,8 +2,8 @@
 # Shared bash preamble helpers for Clypt deploy scripts.
 #
 # This library is sourced (not executed) by the active host deploy scripts
-# under scripts/do_phase1/ and scripts/do_phase26/. It factors out idioms
-# that were duplicated across multiple deploy scripts.
+# under scripts/do_phase26/. It factors out idioms that were duplicated
+# across multiple deploy scripts.
 #
 # Usage:
 #     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

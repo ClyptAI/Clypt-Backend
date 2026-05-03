@@ -4,7 +4,6 @@ from typing import Any
 
 from ..contracts import CanonicalTimeline, CanonicalTurn, TranscriptWord
 from .payload_utils import payload_to_dict
-from .vibevoice_merge import merge_vibevoice_outputs
 
 
 def build_canonical_timeline(
@@ -16,15 +15,9 @@ def build_canonical_timeline(
     phase1_audio_dict = payload_to_dict(phase1_audio)
     diarization_payload_dict = payload_to_dict(diarization_payload)
 
-    # diarization_payload already contains {words, turns} from extract.py
-    # If it arrived directly from the merged output, use it as-is.
-    # If it arrived as a raw VibeVoice turns list, merge it (fallback path).
-    if "turns" in diarization_payload_dict and "words" in diarization_payload_dict:
-        merged = diarization_payload_dict
-    else:
-        # Fallback: treat the whole payload as raw VibeVoice turns with no word alignment
-        raw_turns = diarization_payload_dict.get("vibevoice_turns") or []
-        merged = merge_vibevoice_outputs(vibevoice_turns=raw_turns, word_alignments=[])
+    if "turns" not in diarization_payload_dict or "words" not in diarization_payload_dict:
+        raise ValueError("diarization_payload must include canonical turns and words.")
+    merged = diarization_payload_dict
 
     words = [
         TranscriptWord(

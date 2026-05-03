@@ -4,6 +4,7 @@ Deploy the **Phase26 MI300X** host.
 
 This host owns:
 
+- Phase1 API/worker on the host vCPUs
 - `POST /tasks/phase26-enqueue`
 - local SQLite queue
 - local Phase 2-4 worker/runtime
@@ -42,7 +43,9 @@ Required values to set:
 
 - service account key path
 - bearer tokens
-- Modal endpoint URL
+- ElevenLabs API key
+- Modal visual endpoint URL
+- Modal media endpoint URL
 - GCS / Spanner project-specific values
 
 Optional values to set when turning on remote Phase 6 render/export:
@@ -100,6 +103,8 @@ Before running the deploy:
 
 This deploys:
 
+- `clypt-phase1-api.service`
+- `clypt-phase1-worker.service`
 - `clypt-phase26-sglang-qwen.service`
 - `clypt-phase26-dispatch.service`
 - `clypt-phase26-worker.service`
@@ -110,14 +115,18 @@ This deploys:
 systemctl status clypt-phase26-sglang-qwen.service --no-pager
 systemctl status clypt-phase26-dispatch.service --no-pager
 systemctl status clypt-phase26-worker.service --no-pager
+systemctl status clypt-phase1-api.service --no-pager
+systemctl status clypt-phase1-worker.service --no-pager
 curl -sf http://127.0.0.1:8001/health
 curl -sf http://127.0.0.1:9300/health
+curl -sf http://127.0.0.1:8080/health
 curl -sf http://127.0.0.1:8001/v1/models
 ```
 
 ## 5) Notes
 
 - Queue backend must remain `local_sqlite`.
-- Node-media-prep must point at Modal, not the Phase1 host.
+- Phase1 is intentionally colocated on this host's vCPUs; the `Phase26` name remains a shorthand for the machine because it owns the downstream queue and GPU service.
+- Node-media-prep must point at Modal, not a local or Phase1 process.
 - The host-level entrypoint is `run_phase26_worker`, even though the underlying business logic still lives under current `phase24` modules.
 - The canonical per-run debugging flow now starts with [LOG_EXTRACTION_RUNBOOK.md](/Users/rithvik/Clypt-Backend/docs/runtime/LOG_EXTRACTION_RUNBOOK.md) and [scripts/extract_run_diagnostics.py](/Users/rithvik/Clypt-Backend/scripts/extract_run_diagnostics.py); use that before ad-hoc `journalctl` / SQLite / Spanner spelunking.

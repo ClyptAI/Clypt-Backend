@@ -268,8 +268,11 @@ python3 -m venv "$PHASE26_VENV_DIR"
 . "$PHASE26_VENV_DIR/bin/activate"
 python -m pip install --upgrade pip wheel
 python -m pip install -r requirements-do-phase26-mi300x.txt
+python -m pip install -r requirements-phase1-orchestrator.txt
 
 install -d -m 0755 "$HF_HOME" "$TORCH_HOME" "$PYTORCH_KERNEL_CACHE_PATH"
+install -d -m 0755 /opt/clypt-phase26/test-bank-cache/audio /opt/clypt-phase26/test-bank-cache/videos
+install -d -m 0755 /var/lib/clypt/phase1 /var/lib/clypt/phase1/work /var/log/clypt/phase1/logs
 HF_HOME="$HF_HOME" HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_OFFLINE=0 HOME=/opt/clypt-phase26 \
   python - <<PY
 import shlex
@@ -314,13 +317,15 @@ source "$SG_MODEL_ENV_FILE"
 install -d -m 0755 /etc/clypt
 install -D -m 0644 scripts/do_phase26/clypt-phase26-runtime.env /etc/clypt/clypt-phase26-runtime.env
 install -D -m 0755 scripts/do_phase26/run_sglang_qwen_rocm_container.sh /opt/clypt-phase26/run_sglang_qwen_rocm_container.sh
+install -D -m 0644 scripts/do_phase26/systemd/amd/clypt-phase1-api.service /etc/systemd/system/clypt-phase1-api.service
+install -D -m 0644 scripts/do_phase26/systemd/amd/clypt-phase1-worker.service /etc/systemd/system/clypt-phase1-worker.service
 install -D -m 0644 scripts/do_phase26/systemd/amd/clypt-phase26-dispatch.service /etc/systemd/system/clypt-phase26-dispatch.service
 install -D -m 0644 scripts/do_phase26/systemd/amd/clypt-phase26-worker.service /etc/systemd/system/clypt-phase26-worker.service
 install -D -m 0644 scripts/do_phase26/systemd/amd/clypt-phase26-sglang-qwen.service /etc/systemd/system/clypt-phase26-sglang-qwen.service
 
 systemctl daemon-reload
-systemctl enable clypt-phase26-sglang-qwen.service clypt-phase26-dispatch.service clypt-phase26-worker.service
-systemctl stop clypt-phase26-worker.service clypt-phase26-dispatch.service || true
+systemctl enable clypt-phase26-sglang-qwen.service clypt-phase26-dispatch.service clypt-phase26-worker.service clypt-phase1-api.service clypt-phase1-worker.service
+systemctl stop clypt-phase1-worker.service clypt-phase1-api.service clypt-phase26-worker.service clypt-phase26-dispatch.service || true
 for profile in $SG_ACCEPTANCE_PROFILES; do
   HF_HUB_OFFLINE=1 _restart_sglang_for_profile "$profile"
   systemctl stop clypt-phase26-sglang-qwen.service
@@ -331,6 +336,9 @@ _long_context_smoke
 
 systemctl restart clypt-phase26-dispatch.service
 curl -fsS http://127.0.0.1:9300/health >/dev/null
+systemctl restart clypt-phase1-api.service
+curl -fsS http://127.0.0.1:8080/health >/dev/null
 systemctl restart clypt-phase26-worker.service
+systemctl restart clypt-phase1-worker.service
 
 echo "[deploy-phase26-mi300x] done."

@@ -10,11 +10,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.phase1_runtime.payloads import Phase1SidecarOutputs
+from backend.phase1_runtime.payloads import Phase1SidecarOutputs, VisualFuturePayload
 from backend.providers import (
     LocalOpenAIQwenClient,
     RemoteNodeMediaPrepClient,
     RemotePhase6RenderClient,
+    RemoteVisualExtractClient,
     VertexEmbeddingClient,
     load_provider_settings,
 )
@@ -41,6 +42,9 @@ class Phase24TaskPayload(BaseModel):
     source_video_gcs_uri: str | None = None
     phase1_outputs: Phase1SidecarOutputs | None = None
     phase1_outputs_gcs_uri: str | None = None
+    phase1_visual_status: str = "ready"
+    visual_future: VisualFuturePayload | None = None
+    visual_call_id: str | None = None
     source_context: dict[str, Any] | None = None
     phase3_long_range_top_k: int | None = None
     phase4_extra_prompt_texts: list[str] = Field(default_factory=list)
@@ -52,6 +56,12 @@ class Phase24TaskPayload(BaseModel):
             raise ValueError("Provide source_url or source_uri")
         if self.phase1_outputs is None and not self.phase1_outputs_gcs_uri:
             raise ValueError("Provide phase1_outputs or phase1_outputs_gcs_uri")
+        visual_status = (self.phase1_visual_status or "ready").strip().lower()
+        if visual_status not in {"ready", "pending"}:
+            raise ValueError("phase1_visual_status must be 'ready' or 'pending'")
+        self.phase1_visual_status = visual_status
+        if visual_status == "pending" and self.visual_future is None:
+            raise ValueError("visual_future is required when phase1_visual_status=pending")
         return self
 
     @property
@@ -222,6 +232,15 @@ class Phase24WorkerService:
         phase1_outputs, temp_video_dir = self._prepare_phase1_outputs(payload)
         try:
             self._assert_preemption_fail_fast()
+            if (
+                str(getattr(phase1_outputs, "phase1_visual_status", "ready")).lower()
+                == "pending"
+                and getattr(runner, "visual_result_client", None) is None
+            ):
+                raise ValueError(
+                    "visual_result_client is required before starting Phase2 for a pending "
+                    "RF-DETR visual_future."
+                )
             summary = runner.run(
                 run_id=payload.run_id,
                 source_url=payload.source_reference,
@@ -408,11 +427,17 @@ class Phase24WorkerService:
                 raise
         if payload.source_context is not None and phase1_outputs.source_context is None:
             phase1_outputs = phase1_outputs.model_copy(update={"source_context": payload.source_context})
+        if payload.visual_future is not None and phase1_outputs.visual_future is None:
+            phase1_outputs = phase1_outputs.model_copy(
+                update={
+                    "phase1_visual_status": "pending",
+                    "visual_future": payload.visual_future,
+                }
+            )
 
-        # Node-media prep runs on the remote RTX host, so the H200 does not
-        # need to have the source video on local disk. We only require that
-        # video_gcs_uri is present (the remote NVENC endpoint downloads from
-        # GCS itself).
+        # Node-media prep runs on Modal, so the Phase26 host does not need the
+        # source video on local disk. We only require that video_gcs_uri is
+        # present because the remote NVENC endpoint downloads from GCS itself.
         phase1_audio = phase1_outputs.phase1_audio
         video_gcs_uri = payload.source_video_gcs_uri or phase1_audio.video_gcs_uri
         if not video_gcs_uri:
@@ -546,6 +571,12 @@ def build_default_phase24_worker_service(*, settings=None) -> Phase24WorkerServi
     # Node-media prep runs exclusively on the remote media-prep service; there
     # is no in-process fallback. Always wire the remote client.
     node_media_preparer = RemoteNodeMediaPrepClient(settings=settings.node_media_prep)
+    phase1_visual_settings = getattr(settings, "phase1_visual_service", None)
+    visual_result_client = (
+        RemoteVisualExtractClient(settings=phase1_visual_settings)
+        if phase1_visual_settings is not None
+        else None
+    )
     phase6_render_settings = getattr(settings, "phase6_render", None)
     render_executor = (
         RemotePhase6RenderClient(
@@ -562,6 +593,7 @@ def build_default_phase24_worker_service(*, settings=None) -> Phase24WorkerServi
         storage_client=GCSStorageClient(settings=settings.storage),
         node_media_preparer=node_media_preparer,
         render_executor=render_executor,
+        visual_result_client=visual_result_client,
         repository=repository,
         query_version=settings.phase24_worker.query_version,
         debug_snapshots=settings.phase24_worker.debug_snapshots,

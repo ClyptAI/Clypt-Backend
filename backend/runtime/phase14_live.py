@@ -10,7 +10,11 @@ import re
 import time
 from typing import Any, Callable
 
-from backend.phase1_runtime.payloads import Phase1SidecarOutputs
+from backend.phase1_runtime.payloads import (
+    Phase1SidecarOutputs,
+    VisualFuturePayload,
+    VisualPayload,
+)
 from backend.pipeline.artifacts import V31RunPaths, build_run_paths, load_json, save_json
 from backend.pipeline.candidates.build_local_subgraphs import build_local_subgraphs
 from backend.pipeline.candidates.dedupe_candidates import dedupe_clip_candidates
@@ -118,6 +122,7 @@ class V31LivePhase14Runner:
     storage_client: StorageClient | None = None
     node_media_preparer: NodeMediaPreparerCallable | None = None
     render_executor: Callable[..., dict[str, Any]] | None = None
+    visual_result_client: Any | None = None
     repository: Phase14Repository | None = None
     query_version: str | None = None
     debug_snapshots: bool = False
@@ -139,6 +144,7 @@ class V31LivePhase14Runner:
         storage_client: StorageClient | None = None,
         node_media_preparer: NodeMediaPreparerCallable | None = None,
         render_executor: Callable[..., dict[str, Any]] | None = None,
+        visual_result_client: Any | None = None,
         repository: Phase14Repository | None = None,
         query_version: str | None = None,
         debug_snapshots: bool = False,
@@ -152,6 +158,7 @@ class V31LivePhase14Runner:
             storage_client=storage_client,
             node_media_preparer=node_media_preparer,
             render_executor=render_executor,
+            visual_result_client=visual_result_client,
             repository=repository,
             query_version=query_version,
             debug_snapshots=debug_snapshots,
@@ -730,6 +737,28 @@ class V31LivePhase14Runner:
                 },
             )
 
+            if (
+                phase1.get("shot_tracklet_index") is None
+                or phase1.get("tracklet_geometry") is None
+            ):
+                phase1_outputs = self._join_visual_future_for_phase5(
+                    run_id=run_id,
+                    job_id=job_id,
+                    attempt=attempt,
+                    phase1_outputs=phase1_outputs,
+                )
+                phase1_visual = self.run_phase_1(paths=paths, phase1_outputs=phase1_outputs)
+                if (
+                    phase1_visual.get("shot_tracklet_index") is not None
+                    and phase1_visual.get("tracklet_geometry") is not None
+                ):
+                    phase1.update(
+                        {
+                            "shot_tracklet_index": phase1_visual["shot_tracklet_index"],
+                            "tracklet_geometry": phase1_visual["tracklet_geometry"],
+                        }
+                    )
+
             phase6 = self._execute_phase(
                 run_id=run_id,
                 job_id=job_id,
@@ -802,6 +831,180 @@ class V31LivePhase14Runner:
             phase6_result=phase6,
         )
 
+    def _join_visual_future_for_phase5(
+        self,
+        *,
+        run_id: str,
+        job_id: str | None,
+        attempt: int,
+        phase1_outputs: Phase1SidecarOutputs,
+    ) -> Phase1SidecarOutputs:
+        if phase1_outputs.phase1_visual is not None:
+            return phase1_outputs
+        visual_future = phase1_outputs.visual_future
+        if visual_future is None:
+            raise ValueError(
+                "Phase5/Phase6 require RF-DETR visual outputs, but phase1_visual is missing "
+                "and no visual_future was provided."
+            )
+        if self.visual_result_client is None:
+            raise ValueError(
+                "visual_result_client is required to join pending RF-DETR output before Phase5."
+            )
+        future_payload = (
+            visual_future
+            if isinstance(visual_future, VisualFuturePayload)
+            else VisualFuturePayload.model_validate(visual_future)
+        )
+        started_at = datetime.now(UTC)
+        started = time.perf_counter()
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="phase1_visual",
+            event="visual_future_join_start",
+            attempt=attempt,
+            status="start",
+            visual_call_id=future_payload.call_id,
+        )
+        try:
+            raw_visual = self.visual_result_client.wait_for_result(
+                visual_future=future_payload
+            )
+            visual_payload = self._visual_payload_from_result(raw_visual)
+        except Exception as exc:
+            self._emit_log(
+                run_id=run_id,
+                job_id=job_id,
+                phase="phase1_visual",
+                event="visual_future_join_failed",
+                attempt=attempt,
+                status="failed",
+                severity="ERROR",
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                visual_call_id=future_payload.call_id,
+                error_code=exc.__class__.__name__,
+                error_message=str(exc),
+            )
+            self._write_phase_metric(
+                run_id=run_id,
+                phase_name="phase1_visual_join",
+                status="failed",
+                started_at=started_at,
+                ended_at=datetime.now(UTC),
+                error_payload=self._error_payload(exc),
+            )
+            raise
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        artifact_metadata = self._persist_joined_visual_result(
+            run_id=run_id,
+            phase1_outputs=phase1_outputs,
+            visual_payload=visual_payload,
+            raw_visual=raw_visual,
+            visual_call_id=future_payload.call_id,
+        )
+        self._emit_log(
+            run_id=run_id,
+            job_id=job_id,
+            phase="phase1_visual",
+            event="visual_future_join_done",
+            attempt=attempt,
+            status="success",
+            duration_ms=duration_ms,
+            visual_call_id=future_payload.call_id,
+            visual_result_gcs_uri=artifact_metadata.get("visual_result_gcs_uri"),
+            phase1_outputs_gcs_uri=artifact_metadata.get("phase1_outputs_gcs_uri"),
+            shot_change_count=len(visual_payload.shot_changes),
+            track_count=len(visual_payload.tracks),
+        )
+        self._write_phase_metric(
+            run_id=run_id,
+            phase_name="phase1_visual_join",
+            status="succeeded",
+            started_at=started_at,
+            ended_at=datetime.now(UTC),
+            metadata={
+                "visual_call_id": future_payload.call_id,
+                **artifact_metadata,
+                "shot_change_count": len(visual_payload.shot_changes),
+                "track_count": len(visual_payload.tracks),
+            },
+        )
+        return phase1_outputs.model_copy(
+            update={
+                "phase1_visual_status": "ready",
+                "phase1_visual": visual_payload,
+            }
+        )
+
+    @staticmethod
+    def _visual_payload_from_result(raw_visual: Any) -> VisualPayload:
+        if isinstance(raw_visual, VisualPayload):
+            return raw_visual
+        if not isinstance(raw_visual, dict):
+            raise TypeError(
+                f"visual-extract result must be an object, got {type(raw_visual).__name__}"
+            )
+        payload = raw_visual.get("phase1_visual") or raw_visual.get("visual_payload") or raw_visual
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"visual-extract payload must be an object, got {type(payload).__name__}"
+            )
+        for required_key in ("shot_changes", "tracks"):
+            if required_key not in payload:
+                raise ValueError(
+                    f"visual-extract result missing required {required_key!r} field."
+                )
+            if not isinstance(payload[required_key], list):
+                raise TypeError(
+                    f"visual-extract result field {required_key!r} must be a list."
+                )
+        allowed = set(VisualPayload.model_fields)
+        return VisualPayload.model_validate(
+            {key: value for key, value in payload.items() if key in allowed}
+        )
+
+    def _persist_joined_visual_result(
+        self,
+        *,
+        run_id: str,
+        phase1_outputs: Phase1SidecarOutputs,
+        visual_payload: VisualPayload,
+        raw_visual: dict[str, Any],
+        visual_call_id: str,
+    ) -> dict[str, str]:
+        if self.storage_client is None:
+            return {}
+        paths = self.build_run_paths(run_id=run_id)
+        visual_result_path = paths.timeline_dir / "visual_result_join.json"
+        joined_outputs_path = paths.timeline_dir / "phase1_outputs_joined_visual.json"
+        save_json(
+            visual_result_path,
+            {
+                "visual_call_id": visual_call_id,
+                "status": "succeeded",
+                "raw_modal_result": raw_visual,
+                "phase1_visual": visual_payload.model_dump(mode="json"),
+            },
+        )
+        joined_outputs = phase1_outputs.model_copy(
+            update={
+                "phase1_visual_status": "ready",
+                "phase1_visual": visual_payload,
+            }
+        )
+        save_json(joined_outputs_path, joined_outputs.model_dump(mode="json"))
+        return {
+            "visual_result_gcs_uri": self.storage_client.upload_file(
+                local_path=visual_result_path,
+                object_name=f"phase14/{run_id}/phase1/visual_result_join.json",
+            ),
+            "phase1_outputs_gcs_uri": self.storage_client.upload_file(
+                local_path=joined_outputs_path,
+                object_name=f"phase14/{run_id}/phase1/phase1_outputs_joined_visual.json",
+            ),
+        }
+
     def run_phase_1(self, *, paths: V31RunPaths, phase1_outputs: Phase1SidecarOutputs) -> dict[str, Any]:
         canonical_timeline = build_canonical_timeline(
             phase1_audio=phase1_outputs.phase1_audio,
@@ -813,9 +1016,7 @@ class V31LivePhase14Runner:
         audio_event_timeline = build_audio_event_timeline(
             yamnet_payload=phase1_outputs.yamnet_payload,
         )
-        shot_tracklet_index, tracklet_geometry = build_tracklet_artifacts(
-            phase1_visual=phase1_outputs.phase1_visual,
-        )
+        has_visual = phase1_outputs.phase1_visual is not None
 
         if self.repository is not None:
             self.repository.write_timeline_turns(
@@ -838,19 +1039,28 @@ class V31LivePhase14Runner:
         self._save_debug_json(paths.canonical_timeline, canonical_timeline.model_dump(mode="json"))
         self._save_debug_json(paths.speech_emotion_timeline, speech_emotion_timeline.model_dump(mode="json"))
         self._save_debug_json(paths.audio_event_timeline, audio_event_timeline.model_dump(mode="json"))
-        self._save_debug_json(paths.shot_tracklet_index, shot_tracklet_index.model_dump(mode="json"))
-        self._save_debug_json(paths.tracklet_geometry, tracklet_geometry.model_dump(mode="json"))
         source_context = getattr(phase1_outputs, "source_context", None)
         if source_context:
             self._save_debug_json(paths.source_context, source_context)
 
-        return {
+        result = {
             "canonical_timeline": canonical_timeline,
             "speech_emotion_timeline": speech_emotion_timeline,
             "audio_event_timeline": audio_event_timeline,
-            "shot_tracklet_index": shot_tracklet_index,
-            "tracklet_geometry": tracklet_geometry,
         }
+        if has_visual:
+            shot_tracklet_index, tracklet_geometry = build_tracklet_artifacts(
+                phase1_visual=phase1_outputs.phase1_visual,
+            )
+            self._save_debug_json(paths.shot_tracklet_index, shot_tracklet_index.model_dump(mode="json"))
+            self._save_debug_json(paths.tracklet_geometry, tracklet_geometry.model_dump(mode="json"))
+            result.update(
+                {
+                    "shot_tracklet_index": shot_tracklet_index,
+                    "tracklet_geometry": tracklet_geometry,
+                }
+            )
+        return result
 
     def run_phase_6(
         self,
@@ -875,10 +1085,16 @@ class V31LivePhase14Runner:
         source_context: dict[str, Any] | None = None
         if paths.source_context.exists():
             source_context = load_json(paths.source_context)
-        elif candidates:
-            raise ValueError(
-                "Phase 6 requires persisted source_context.json for candidate packaging metadata."
-            )
+        else:
+            phase1_source_context = _timeline_payload(phase1_outputs, "source_context")
+            if isinstance(phase1_source_context, dict):
+                source_context = dict(phase1_source_context)
+            elif phase1_source_context is not None:
+                raise ValueError("Phase 6 source_context must be an object when provided.")
+            elif candidates:
+                raise ValueError(
+                    "Phase 6 requires persisted source_context.json for candidate packaging metadata."
+                )
         participation_timeline = _timeline_payload(phase4_result, "participation_timeline")
         if participation_timeline is None:
             participation_timeline = _timeline_payload(phase1_outputs, "participation_timeline")

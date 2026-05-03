@@ -1,99 +1,112 @@
-# Modal Node-Media-Prep Deploy
+# Modal GPU Worker Deploy
 
-Deploy the Modal `node-media-prep` service.
+Deploy the Modal L40S services used by the Scribe/Modal topology.
 
-This service is the active remote backend for:
+There are two GPU pools:
 
-- `POST /tasks/node-media-prep`
-- `GET /tasks/node-media-prep/result/{call_id}`
+- **Visual pool:** dedicated RF-DETR worker.
+- **Media pool:** one shared worker for node-media-prep and render/export.
 
-Target shape:
+## 1) Visual RF-DETR App
 
-- CPU ASGI submit/poll surface
-- one warm `L40S` worker via `node_media_prep_job min_containers=1`
-- ffmpeg must expose both `h264_nvenc` and `h264_cuvid` inside the worker runtime
+Source:
 
-## 1) App Source
+- [scripts/modal/visual_extract_app.py](/Users/rithvik/Clypt-Backend/scripts/modal/visual_extract_app.py)
+- deps: [requirements-modal-visual-l40s.txt](/Users/rithvik/Clypt-Backend/requirements-modal-visual-l40s.txt)
 
-- [scripts/modal/node_media_prep_app.py](/Users/rithvik/Clypt-Backend/scripts/modal/node_media_prep_app.py)
-
-Phase 6 sibling:
-
-- [scripts/modal/render_video_app.py](/Users/rithvik/Clypt-Backend/scripts/modal/render_video_app.py)
-
-## 2) Deploy
+Deploy:
 
 ```bash
-cd /opt/clypt-phase26/repo
-modal deploy scripts/modal/node_media_prep_app.py
+modal deploy scripts/modal/visual_extract_app.py
 ```
 
-## 3) Required Secrets / Env
-
-At minimum, provide:
+Required secret/env:
 
 - `GCS_BUCKET`
-- `NODE_MEDIA_PREP_AUTH_TOKEN`
+- `VISUAL_EXTRACT_AUTH_TOKEN` or `CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN`
 - `GOOGLE_APPLICATION_CREDENTIALS_JSON`
 
-Current deployed Modal wiring:
-
-- App name: `clypt-node-media-prep`
-- App id from `modal app list`: `ap-FV1hNRaPzXUIV72NIsFNSk`
-- Secret name: `clypt-node-media-prep`
-- Deployed endpoint:
-  `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
-- Working bucket value: `GCS_BUCKET=clypt-storage-v3`
-
-The deployed ASGI app exposes:
+Public contract:
 
 - `GET /health`
-- `POST /tasks/node-media-prep` -> returns `202 Accepted` with `call_id`
-- `GET /tasks/node-media-prep/result/{call_id}` -> returns `202` while pending, `200` with final `media` payload on completion
+- `POST /tasks/visual-extract` -> `202 Accepted` with `call_id`
+- `GET /tasks/visual-extract/result/{call_id}` -> `202 pending` or `200` final result
 
-`GOOGLE_APPLICATION_CREDENTIALS_JSON` should be a real service-account JSON key
-blob. Avoid token-only `authorized_user` ADC documents for production deploys;
-they are less predictable in headless/serverless environments and do not match
-the host deploy credential standard.
+The GPU function is `visual_extract_job` with:
+
+- `gpu="L40S"`
+- `min_containers=1`
+- `max_containers=1`
+
+Required fast-path capabilities:
+
+- CUDA ffmpeg hwaccel
+- `scale_cuda`
+- TensorRT Python runtime
+- `trtexec`
+- CUDA PyTorch
+
+The worker fails hard if any of these are missing. It must not fall back to software decode or CPU RF-DETR.
+
+## 2) Shared Media App
+
+Source:
+
+- [scripts/modal/media_worker_app.py](/Users/rithvik/Clypt-Backend/scripts/modal/media_worker_app.py)
+- compatibility shims:
+  - [scripts/modal/node_media_prep_app.py](/Users/rithvik/Clypt-Backend/scripts/modal/node_media_prep_app.py)
+  - [scripts/modal/render_video_app.py](/Users/rithvik/Clypt-Backend/scripts/modal/render_video_app.py)
+
+Deploy:
+
+```bash
+modal deploy scripts/modal/media_worker_app.py
+```
+
+Required secret/env:
+
+- `GCS_BUCKET`
+- `NODE_MEDIA_PREP_AUTH_TOKEN` or `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN`
+- `PHASE6_RENDER_AUTH_TOKEN` or `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`
+- `GOOGLE_APPLICATION_CREDENTIALS_JSON`
+
+Public contract:
+
+- `GET /health`
+- `POST /tasks/node-media-prep` -> `202 Accepted` with `call_id`
+- `GET /tasks/node-media-prep/result/{call_id}` -> `202 pending` or `200` final result
+- `POST /tasks/render-video` -> `202 Accepted` with `call_id`
+- `GET /tasks/render-video/result/{call_id}` -> `202 pending` or `200` final result
+
+The only media GPU function is `media_gpu_job` with:
+
+- `gpu="L40S"`
+- `min_containers=1`
+- `max_containers=1`
+
+Do not deploy separate warm GPU pools for `node_media_prep_job` and `render_video_job`; those names are compatibility shims only.
+
+## 3) Phase26 Env
+
+Set Phase26 to the deployed endpoints:
+
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`
+- `CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN`
+- `CLYPT_PHASE24_PHASE6_RENDER_URL`
+- `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`
+- `CLYPT_PHASE1_VISUAL_SERVICE_URL`
+- `CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN`
+
+The URL may be either the Modal app base URL or the full task endpoint URL. The clients normalize both forms and must not append duplicate `/tasks/...` suffixes.
 
 ## 4) Smoke Checks
 
-The web app starts on CPU and the spawned worker verifies GPU codec availability before processing. In addition, validate:
-
 ```bash
 modal app list
-modal logs clypt-node-media-prep
+modal logs clypt-visual-l40s
+modal logs clypt-media-l40s
 ```
 
-And confirm the downstream host can reach the deployed endpoint with its configured bearer token.
+Submit smoke requests with bearer auth and confirm each returns a `call_id` immediately, then poll the corresponding result endpoint.
 
-Expected contract:
-
-```bash
-curl -X POST "$CLYPT_PHASE24_NODE_MEDIA_PREP_URL" \
-  -H "Authorization: Bearer $CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN" \
-  -H "Content-Type: application/json" \
-  --data '{"run_id":"smoke","video_gcs_uri":"gs://bucket/video.mp4","nodes":[]}'
-```
-
-This should return a `call_id` immediately. Poll:
-
-```bash
-curl -H "Authorization: Bearer $CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN" \
-  "https://.../tasks/node-media-prep/result/<call_id>"
-```
-
-Important:
-
-- `CLYPT_PHASE24_NODE_MEDIA_PREP_URL` may be set to either the Modal app base URL or the full `POST /tasks/node-media-prep` endpoint URL.
-- The current deploy/env records use the full endpoint URL. Do not append `/tasks/node-media-prep` a second time when validating or wiring callers.
-
-## 5) Notes
-
-- Each submitted job now represents one timeline-local batch. The worker downloads the source video once into worker scratch space, extracts a shared local batch window, emits exact per-node clips from that window, uploads them to GCS, and returns the resulting `file_uri` descriptors plus optional batch timing metadata.
-- `RemoteNodeMediaPrepClient` now implements submit-and-poll so Phase26 can pipeline batch completion into immediate multimodal embedding while still producing one final ordered result per node.
-- Only `node_media_prep_job` keeps a warm GPU. The public `node_media_prep` route should not reserve an `L40S`.
-- This is a warm serverless surface, not a permanently pinned VM.
-- Phase 6 render/export now follows the same submit-and-poll pattern through `scripts/modal/render_video_app.py`.
-- Render deploys additionally require `PHASE6_RENDER_AUTH_TOKEN` (or `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`).
-- The worker now ships with repo-pinned fonts under `backend/assets/fonts`, so `CLYPT_PHASE6_FONT_ASSET_DIR` is only an override knob, not a required deploy env.
+`GOOGLE_APPLICATION_CREDENTIALS_JSON` should be a real service-account JSON key blob. Avoid token-only `authorized_user` ADC documents for production deploys.

@@ -3,147 +3,83 @@
 **Status:** Active  
 **Last updated:** 2026-05-02
 
-This is the runtime source of truth for the current repository state.
+This is the runtime source of truth for the current AMD-refactor state.
 
 ## 1) Runtime Topology
 
 The active topology is:
 
-- **Phase1 host (MI300X default)**
-  - Phase 1 runner/orchestrator
-  - local VibeVoice service on `:9100`
-  - local visual service on `:9200`
-  - co-located VibeVoice vLLM sidecar on `:8000`
-  - in-process NFA -> emotion2vec+ -> YAMNet
-- **Phase26 host (MI300X)**
-  - Phase26 dispatch API on `:9300`
+- **Phase1 orchestrator on MI300X host vCPUs**
+  - `python -m backend.runtime.run_phase1`
+  - test-bank media ingestion and canonical audio preparation
+  - signed HTTPS GCS URL generation for ElevenLabs Scribe v2
+  - Modal RF-DETR visual future submit
+  - immediate Phase26 dispatch after Scribe audio adaptation
+- **ElevenLabs Scribe v2**
+  - synchronous `POST /v1/speech-to-text`
+  - canonical ASR, diarization, word timings, and coarse audio tags
+- **Modal visual L40S**
+  - `POST /tasks/visual-extract`
+  - one warm `L40S` `visual_extract_job`
+  - TensorRT FP16 RF-DETR + NVIDIA GPU decode/resize + ByteTrack
+- **Phase26 host (same MI300X droplet)**
+  - `POST /tasks/phase26-enqueue`
   - local SQLite queue + local worker
   - SGLang Qwen on `:8001`
-- **Modal**
-  - node-media-prep service
+  - Phase2-4 now, Phase5-6 boundary next
+- **Modal media L40S**
+  - `POST /tasks/node-media-prep`
+  - `POST /tasks/render-video`
+  - one shared warm `L40S` `media_gpu_job`
 
-There is **no local fallback** for the remote boundaries. Config loading fails fast when a required service URL or auth token is missing.
+There is **no local fallback** for Scribe, Modal visual, Modal media, Phase26 dispatch, or SGLang Qwen.
 
-## 2) Host Responsibilities
+## 2) Phase1 Behavior
 
-### 2.1 Phase1 host
+Phase1 is colocated with Phase26 on the MI300X droplet's vCPUs and no longer runs VibeVoice, VibeVoice vLLM, NFA, emotion2vec+, YAMNet, local RF-DETR, or any local GPU service on this branch.
 
-- `python -m backend.runtime.run_phase1`
-- `python -m backend.runtime.run_phase1_vibevoice_service`
-- `python -m backend.runtime.run_phase1_visual_service`
-- VibeVoice vLLM sidecar container on `127.0.0.1:8000`
-- in-process NFA / emotion2vec+ / YAMNet provider singletons
+Required Phase1 env:
 
-Key behavior:
-
-- `RemoteVibeVoiceAsrClient` targets the local service at `POST /tasks/vibevoice-asr`
-- `RemotePhase1VisualClient` targets the local service at `POST /tasks/visual-extract`
-- `RemotePhase26DispatchClient` targets the downstream host at `POST /tasks/phase26-enqueue`
-- `source_url` ingestion now expects a YouTube URL that exists in the configured Phase 1 test-bank mapping
-- during `source_url` ingress, Phase 1 fetches public YouTube long-form metadata into persisted `source_context.json`
-- that metadata fetch does not require creator-account auth, but it does require a project YouTube Data API key (`CLYPT_YOUTUBE_DATA_API_KEY` or `YOUTUBE_API_KEY`); service-account ADC on the host is not used for this YouTube Data API path
-- the VibeVoice service keeps the existing single-pass path through 40 minutes, splits `>40..80` minute jobs into 2 shards, splits `>80..160` minute jobs into 4 shards, and fails fast above 160 minutes
-- long-form shard requests still target the same local vLLM sidecar and are stitched back into one global speaker space before the HTTP response returns
-- forced alignment now uses duration-bounded global chunks by default instead of a per-turn fallback:
-  - `<=20 min`: 1 chunk
-  - `>20..40 min`: 2 chunks
-  - `>40..80 min`: 4 chunks
-  - `>80..160 min`: 8 chunks
-  If any chunk-level alignment fails, Phase 1 hard-fails instead of dropping to per-turn alignment.
-- Phase 1 audio-post launches immediately after the VibeVoice response returns
-
-Current Phase1 AMD-refactor baseline is [known-good-phase1-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-mi300x.env). Prior H200 snapshots are historical only.
-
-- dispatch URL: `http://107.170.33.122:9300`
-- `VIBEVOICE_VLLM_GPU_MEMORY_UTILIZATION=0.60`
-- `VIBEVOICE_VLLM_MAX_NUM_SEQS=4`
-- `VIBEVOICE_VLLM_DTYPE=bfloat16`
-- `VIBEVOICE_LONGFORM_SINGLE_PASS_MAX_MINUTES=40`
-- `VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES=80`
-- `VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES=160`
-- `VIBEVOICE_LONGFORM_MAX_SHARDS=4`
+- `GOOGLE_CLOUD_PROJECT`
+- `GCS_BUCKET` or `CLYPT_GCS_BUCKET`
+- `ELEVENLABS_API_KEY`
+- `CLYPT_PHASE1_AUDIO_BACKEND=elevenlabs_scribe_v2`
 - `CLYPT_PHASE1_INPUT_MODE=test_bank`
-- visual fast-path settings remain RF-DETR Nano with `rfdetr_rocm_fp16`, batch `16`, threshold `0.35`, shape `640`, ByteTrack buffer `30`, ByteTrack match `0.7`, GPU decode via VAAPI
-- fresh-host deploy invariant: ROCm, VAAPI, RF-DETR, NFA, emotion2vec+, YAMNet, and VibeVoice model caches must be validated before services are restarted
-- fresh-host deploy invariant: NFA/emotion2vec+/YAMNet prewarm must use the same service cache roots (`HOME=/opt/clypt-phase1`, `CLYPT_PHASE1_CACHE_HOME=/opt/clypt-phase1/.cache`, `TORCH_HOME=/opt/clypt-phase1/.cache/torch`, `HF_HOME=/opt/clypt-phase1/.cache/huggingface`) before services are restarted
+- `CLYPT_PHASE1_TEST_BANK_PATH`
+- `CLYPT_PHASE1_VISUAL_SERVICE_URL`
+- `CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN`
+- `CLYPT_PHASE24_DISPATCH_URL`
+- `CLYPT_PHASE24_DISPATCH_AUTH_TOKEN`
+- `CLYPT_YOUTUBE_DATA_API_KEY` or `YOUTUBE_API_KEY` for public YouTube metadata ingress when using `source_url`
 
-### 2.2 Phase26 host
+Scribe defaults:
 
-- `python -m backend.runtime.run_phase26_dispatch_service`
-- `python -m backend.runtime.run_phase26_worker`
-- local queue backend must be `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
-- generation backend remains `GENAI_GENERATION_BACKEND=local_openai`
+- model: `scribe_v2`
+- URL mode: signed HTTPS GCS URL through `source_url`
+- language: `en`
+- diarization: enabled
+- audio-event tags: enabled
+- timestamp granularity: `word`
+- temperature: `0`
+- `num_speakers`: omitted by default
+- `keyterms`: omitted by default
+- entity detection/redaction: disabled
 
-Key behavior:
+Execution invariant:
 
-- `POST /tasks/phase26-enqueue` writes to local SQLite
-- the worker still runs current Phase 2-4 business logic
-- node-media-prep is called only after node creation
+1. Phase1 prepares/uploads canonical audio and source video.
+2. Phase1 submits Modal RF-DETR and receives a `visual_future`.
+3. Phase1 calls Scribe synchronously.
+4. Phase1 adapts Scribe into `diarization_payload`, empty `emotion2vec_payload`, and Scribe-backed `yamnet_payload`.
+5. Phase1 enqueues Phase26 immediately with `phase1_visual_status="pending"` and `visual_future`.
+6. Phase26 runs Phase2-4 without waiting for RF-DETR.
+7. Phase26 joins/fails-hard on `visual_future` before Phase5/frontend grounding or Phase6 visual use.
 
-Current Phase26 AMD-refactor baseline is [known-good-phase26-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-mi300x.env). Prior H200 snapshots are historical only.
+## 3) Modal Visual Fast Path
 
-- SGLang serves `Qwen/Qwen3.6-35B-A3B` on `127.0.0.1:8001`.
-- The deploy writes `/etc/clypt-phase26/sg-model.env` with the resolved container-visible HF snapshot path and starts with `HF_HUB_OFFLINE=1`.
-- Queue, Modal, and fail-fast worker settings stay in `known-good-phase26-mi300x.env`.
+Current visual settings are preserved unless explicitly retuned:
 
-### 2.3 Modal node-media-prep / render
-
-- app path: `scripts/modal/node_media_prep_app.py`
-- web surface: CPU ASGI app for submit/poll
-- worker GPU target: `L40S`
-- warm GPU pool target: `node_media_prep_job min_containers=1`
-- submit/poll contract:
-  - `POST /tasks/node-media-prep` -> `202 Accepted` + `call_id`
-  - `GET /tasks/node-media-prep/result/{call_id}` -> `202 pending` or `200` final result
-- `RemoteNodeMediaPrepClient` hides this async contract from Phase 2 and still returns the same final `media` list shape to the worker
-- node-media-prep requests are now timeline-local batches, not the full node set
-- batch planning and worker fan-out are env-tunable on the Phase26 side via the `CLYPT_PHASE24_NODE_MEDIA_BATCH_*` knobs and `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_INFLIGHT_BATCHES`
-- clip extraction now downscales to 480p before upload / Vertex multimodal embedding
-- Phase26 starts multimodal embedding batch-by-batch as node-media-prep results arrive instead of waiting for all media first
-- Phase 6 render/export now uses a separate Modal submit/poll surface when the Phase26 host has `CLYPT_PHASE24_PHASE6_RENDER_*` configured
-- the render worker stages bundled pinned fonts from `backend/assets/fonts` by default; `CLYPT_PHASE6_FONT_ASSET_DIR` is only an override
-
-Current live non-secret Modal deployment snapshot on 2026-04-21:
-
-- app name: `clypt-node-media-prep`
-- app id: `ap-FV1hNRaPzXUIV72NIsFNSk`
-- secret name present in Modal: `clypt-node-media-prep`
-- endpoint: `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
-- required secret-backed envs remain `GCS_BUCKET`, `NODE_MEDIA_PREP_AUTH_TOKEN`, and `GOOGLE_APPLICATION_CREDENTIALS_JSON`
-
-## 3) Phase 1 Execution Semantics
-
-```text
-Phase 1 visual chain:
-  Phase1 local visual service (/tasks/visual-extract)
-    -> hot RF-DETR + ByteTrack
-
-Phase 1 audio chain:
-  Phase1 local VibeVoice service (/tasks/vibevoice-asr)
-    -> probe canonical audio duration
-    -> for long-form jobs: split into 2-4 shard WAVs + temporary GCS shard objects
-    -> local VibeVoice vLLM sidecar
-    -> cross-shard speaker verification + merged turns
-    -> response returns to runner
-    -> in-process NFA -> emotion2vec+ -> YAMNet
-
-Downstream handoff:
-  Phase1 runner
-    -> POST /tasks/phase26-enqueue
-```
-
-Critical invariant:
-
-- the audio-post chain does not wait for RF-DETR to finish
-- Phase 1 remains the owner of ASR, audio-post, and visual extraction
-- the queue boundary lives on the Phase26 host, not the Phase1 host
-- long-form ASR still preserves a one-call outer contract and one merged `turns` payload
-
-## 4) Visual Fast Path
-
-The intended Phase 1 visual settings are preserved:
-
-- `CLYPT_PHASE1_VISUAL_BACKEND=rfdetr_rocm_fp16`
+- Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
 - `CLYPT_PHASE1_VISUAL_MODEL=nano`
 - `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`
 - `CLYPT_PHASE1_VISUAL_THRESHOLD=0.35`
@@ -152,32 +88,38 @@ The intended Phase 1 visual settings are preserved:
 - `CLYPT_PHASE1_VISUAL_TRACKER_BUFFER=30`
 - `CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH=0.7`
 - `CLYPT_PHASE1_VISUAL_DECODE=gpu`
-- `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=vaapi`
+- `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
+- Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt`; the worker sets internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16` before constructing the RF-DETR pipeline.
 
-Operationally, the fast path remains:
+Operationally:
 
 ```text
-VAAPI decode/scale -> hwdownload -> ROCm/HIP tensor normalize -> RF-DETR PyTorch ROCm -> ByteTrack
+NVDEC/CUDA decode+resize -> hwdownload -> TensorRT FP16 RF-DETR -> ByteTrack
 ```
 
-The Phase1 deploy/bootstrap path validates VAAPI, FFmpeg, PyTorch ROCm, RF-DETR,
-and the audio-post providers before starting services. TensorRT/NVDEC are no
-longer active paths on AMD-refactor.
+The worker fails hard if CUDA ffmpeg support, `scale_cuda`, TensorRT, `trtexec`, or CUDA PyTorch are unavailable. It must not fall back to software decode or CPU RF-DETR.
 
-## 5) Phase26 Worker Contract
+## 4) Phase26 Worker Contract
 
 - queue rows are stored in local SQLite on the Phase26 host
 - `run_id` remains the idempotency key
-- default crash mode remains fail-fast:
-  - `CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`
-  - `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`
-- generation remains local OpenAI-compatible to SGLang
+- local queue backend must be `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
+- generation backend must be `GENAI_GENERATION_BACKEND=local_openai`
+- generation targets the local SGLang OpenAI-compatible endpoint
 - embeddings remain Vertex-backed
-- `VERTEX_EMBEDDING_LOCATION` stays pinned to `us-central1` for `gemini-embedding-2-preview`; the live Clypt project currently receives `404 NOT_FOUND` on `global` even though the locations doc lists global support
+- `VERTEX_EMBEDDING_LOCATION` stays pinned to `us-central1` for `gemini-embedding-2-preview`
+- pending visual payloads require a configured Modal visual client before Phase2 starts
+- malformed visual results missing `shot_changes` or `tracks` fail hard
+- joined visual result metadata is persisted as Phase1/visual artifacts before Phase6
 
-## 6) SGLang Settings
+Default crash mode remains fail-fast:
 
-Current code-backed Qwen flags remain:
+- `CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`
+- `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`
+
+## 5) SGLang Settings
+
+Current code-backed Qwen flags remain Phase26-owned:
 
 - `--context-length 65536`
 - `--kv-cache-dtype fp8_e4m3`
@@ -195,23 +137,27 @@ Current code-backed Qwen flags remain:
   - `HF_HUB_OFFLINE=1`
   - `SGLANG_ENABLE_SPEC_V2=1`
 
-These now belong to the Phase26 host, not the Phase1 host.
+Current Phase26 AMD-refactor baseline is [known-good-phase26-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-mi300x.env).
 
-## 7) Modal Media-Prep Expectations
+## 6) Modal Media Expectations
 
-- `RemoteNodeMediaPrepClient` continues to own the JSON contract
-- Modal web requests must stay short; long-running clip extraction happens in a spawned Modal function call that the Phase26 client polls
-- only the spawned worker needs GPU access; the public submit/poll route stays on CPU
-- the Modal worker must expose working:
-  - `h264_nvenc`
-  - `h264_cuvid`
-- Modal L40S baseline sets `CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY=12`
-- `node_media_prep_job min_containers=1` is the intended warm GPU baseline, not a permanent dedicated VM
+- `RemoteNodeMediaPrepClient` and `RemotePhase6RenderClient` continue to own the JSON contracts.
+- Modal web requests must stay short; long-running work happens in spawned Modal function calls that clients poll.
+- only the spawned `media_gpu_job` needs GPU access; the public submit/poll route stays on CPU.
+- `media_gpu_job` must be `gpu="L40S"`, `min_containers=1`, `max_containers=1`.
+- node-media-prep must expose working `h264_nvenc` and `h264_cuvid`.
+- render/export must expose working `h264_nvenc`.
+- node-media-prep requests remain timeline-local batches.
+- Phase26 starts multimodal embedding batch-by-batch as node-media-prep results arrive.
 
-## 8) Canonical Runtime Files
+## 7) Canonical Runtime Files
 
-- Phase1 baseline: [known-good-phase1-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase1-mi300x.env)
-- Phase26 baseline: [known-good-phase26-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-mi300x.env)
+- Colocated Phase1/Phase26 env: [known-good-phase26-mi300x.env](/Users/rithvik/Clypt-Backend/docs/runtime/known-good-phase26-mi300x.env)
+- Phase1 orchestrator deps: [requirements-phase1-orchestrator.txt](/Users/rithvik/Clypt-Backend/requirements-phase1-orchestrator.txt)
+- Phase26 GPU deps: [requirements-do-phase26-mi300x.txt](/Users/rithvik/Clypt-Backend/requirements-do-phase26-mi300x.txt)
+- Modal visual deps: [requirements-modal-visual-l40s.txt](/Users/rithvik/Clypt-Backend/requirements-modal-visual-l40s.txt)
+- Modal media deps: [requirements-modal-media-l40s.txt](/Users/rithvik/Clypt-Backend/requirements-modal-media-l40s.txt)
+- Scribe/Modal refactor spec: [2026-05-02_scribe_v2_modal_l40s_phase1_phase26_refactor_spec.md](/Users/rithvik/Clypt-Backend/docs/specs/2026-05-02_scribe_v2_modal_l40s_phase1_phase26_refactor_spec.md)
 - Diagnostics runbook: [LOG_EXTRACTION_RUNBOOK.md](/Users/rithvik/Clypt-Backend/docs/runtime/LOG_EXTRACTION_RUNBOOK.md)
 
-Legacy env files remain only as migration pointers and should not be treated as canonical baselines.
+Legacy H200/H100 and Phase1 MI300X/VibeVoice env files are deleted on this branch. Treat any mentions in `ERROR_LOG.md` as historical incident context only, not runnable baselines.

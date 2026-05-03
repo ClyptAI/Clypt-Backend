@@ -1,0 +1,16 @@
+# Phase 1 orchestrator deps.
+#
+# This branch no longer runs Phase 1 audio or visual GPU services locally.
+# Scribe v2 handles ASR/diarization/audio tags, Modal L40S handles RF-DETR
+# visual extraction, and the colocated Phase26 MI300X services handle
+# dispatch, queueing, and Qwen/SGLang.
+
+pydantic>=2.11.0
+pytest>=8.4.0
+httpx>=0.28.0
+python-dotenv>=1.0.1
+google-genai>=1.17.0
+google-cloud-storage>=2.19.0
+google-cloud-spanner>=3.50.0
+fastapi>=0.116.0
+uvicorn>=0.35.0

@@ -117,11 +117,13 @@ def test_node_media_prep_submit_returns_call_id(monkeypatch) -> None:
 
     class _FakeJob:
         @staticmethod
-        def spawn(payload):
+        def spawn(kind, payload):
+            assert kind == "node_media_prep"
             captured["payload"] = payload
             return _FakeSpawnedCall()
 
-    monkeypatch.setattr(node_media_prep_app, "node_media_prep_job", _FakeJob)
+    monkeypatch.setattr(node_media_prep_app, "media_gpu_job", _FakeJob)
+    monkeypatch.setattr("scripts.modal.media_worker_app.media_gpu_job", _FakeJob)
 
     client = TestClient(node_media_prep_app.web_app)
     response = client.post(
@@ -263,11 +265,12 @@ def test_build_storage_client_supports_json_credentials(monkeypatch) -> None:
 def test_modal_function_shapes_separate_cpu_route_from_gpu_worker() -> None:
     node_media_prep_app = _load_app_module()
 
-    worker_kwargs = node_media_prep_app.node_media_prep_job._modal_function_kwargs
+    worker_kwargs = node_media_prep_app.media_gpu_job._modal_function_kwargs
     route_kwargs = node_media_prep_app.node_media_prep._modal_function_kwargs
 
     assert worker_kwargs["gpu"] == "L40S"
     assert worker_kwargs["min_containers"] == 1
+    assert worker_kwargs["max_containers"] == 1
     assert "gpu" not in route_kwargs
     assert route_kwargs["min_containers"] == 1
 
@@ -279,7 +282,9 @@ def test_worker_runtime_checks_require_gpu_codecs(monkeypatch) -> None:
     def fake_require_codec(codec_cmd, expected):
         calls.append((list(codec_cmd), expected))
 
-    monkeypatch.setattr(node_media_prep_app, "_require_codec", fake_require_codec)
+    import scripts.modal.media_worker_app as media_worker_app
+
+    monkeypatch.setattr(media_worker_app, "_require_codec", fake_require_codec)
 
     node_media_prep_app._require_worker_runtime()
 

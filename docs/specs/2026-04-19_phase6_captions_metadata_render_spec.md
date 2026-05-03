@@ -32,7 +32,7 @@ If this document conflicts with the earlier Phase 5-6 spec, this document contro
 ## 2. Locked Decisions
 
 1. **Captions are a Phase 6 responsibility, not a Phase 1 responsibility.** Phase 1 produces the canonical transcript/timing backbone; Phase 6 decides how those words should be chunked, styled, placed, and rendered.
-2. **NFA-backed canonical word timings are the primary timing source for captions.** Caption timing must come from Phase 1 `canonical_timeline.words`, not from ad-hoc subtitle regeneration during render.
+2. **Canonical word timings are the primary timing source for captions.** Caption timing must come from Phase 1 `canonical_timeline.words`, not from ad-hoc subtitle regeneration during render. In the Scribe v2 + Modal L40S topology defined by `2026-05-02_scribe_v2_modal_l40s_phase1_phase26_refactor_spec.md`, those canonical words are produced from Scribe v2 timings rather than NFA.
 3. **Phase 6 must not rerun ASR or forced alignment.** Caption rerenders must remain possible from stored artifacts alone.
 4. **Caption planning is a distinct artifact from render planning.** Phase 6 emits `caption_plan.json` first, then references it from `render_plan.json`.
 5. **Publish metadata generation is also a distinct artifact.** Titles, short descriptions, thumbnail text, and lightweight tags/hashtags are emitted into `publish_metadata.json`, not buried inside `render_plan.json`.
@@ -726,7 +726,7 @@ Phase 6 should reuse the same general remote-worker pattern already proven by no
 
 - submit render work remotely,
 - run ffmpeg-heavy execution on Modal,
-- keep the H200 hosts focused on upstream planning/orchestration.
+- keep the Phase26 MI300X host focused on upstream planning/orchestration.
 
 ## 11.2 Render execution order
 
@@ -851,7 +851,7 @@ These cases should be surfaced in the render plan, not hidden.
 ## 15. Acceptance Criteria
 
 1. For every Phase 4 finalist, Phase 6 can produce a deterministic `caption_plan.json` using stored canonical word timings.
-2. Caption rerendering does not require rerunning VibeVoice or forced alignment.
+2. Caption rerendering does not require rerunning ASR or forced alignment.
 3. Phase 6 emits `publish_metadata.json` for finalists with titles, alternates, thumbnail text, topic tags, and hashtags.
 4. `render_plan.json` references caption and metadata artifacts rather than recomputing them during render execution.
 5. MVP supports the four caption presets defined in this spec.

@@ -34,8 +34,8 @@ UTC = timezone.utc
 
 _DEFAULT_PHASE1_DB_PATH = Path("/var/lib/clypt/phase1/jobs.db")
 _DEFAULT_PHASE1_UNITS = (
+    "clypt-phase1-api.service",
     "clypt-phase1-worker.service",
-    "clypt-phase1-vibevoice.service",
 )
 _DEFAULT_PHASE26_UNITS = (
     "clypt-phase26-worker.service",
@@ -344,7 +344,17 @@ def main() -> int:
     if not phase_metrics:
         print("  (none)")
     else:
-        for phase_name in ("phase1_media_prep", "phase1_vibevoice_asr", "phase1_forced_alignment", "phase1_emotion2vec", "phase1_yamnet", "phase2", "phase3", "phase4", "phase24"):
+        for phase_name in (
+            "phase1_media_prep",
+            "phase1_visual_extraction_submit",
+            "phase1_scribe_transcription",
+            "phase1_scribe_adapter",
+            "phase1_audio_chain_ready",
+            "phase2",
+            "phase3",
+            "phase4",
+            "phase24",
+        ):
             metric = phase_metric_map.get(phase_name)
             if metric is None:
                 continue

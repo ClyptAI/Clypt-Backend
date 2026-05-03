@@ -62,13 +62,18 @@ systemctl enable --now docker
 install -d /opt/clypt-phase26
 install -d /opt/clypt-phase26/.cache/huggingface
 install -d /opt/clypt-phase26/.cache/torch/kernels
+install -d /opt/clypt-phase26/test-bank-cache/audio
+install -d /opt/clypt-phase26/test-bank-cache/videos
 install -d /opt/clypt-phase26/venvs
 install -d /etc/clypt-phase26
 install -d /etc/clypt
+install -d /var/lib/clypt/phase1
+install -d /var/lib/clypt/phase1/work
 install -d /var/lib/clypt/phase26
+install -d /var/log/clypt/phase1/logs
 install -d /var/log/clypt/phase26
 
 echo "Bootstrap complete. Next steps:"
 echo "  1. rsync the repo to /opt/clypt-phase26/repo"
-echo "  2. create /etc/clypt-phase26/phase26.env for the MI300X Phase26 host"
+echo "  2. create /etc/clypt-phase26/phase26.env for the colocated Phase1 + Phase26 MI300X host"
 echo "  3. bash scripts/do_phase26/deploy_phase26_mi300x_services.sh"

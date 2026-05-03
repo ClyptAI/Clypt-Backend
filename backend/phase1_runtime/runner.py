@@ -44,35 +44,23 @@ class Phase1JobRunner:
         working_root: Path,
         audio_extractor=None,
         storage_client: Any,
-        vibevoice_asr_client: Any,
-        forced_aligner: Any,
+        scribe_provider: Any | None = None,
+        scribe_turn_gap_ms: int = 1200,
         visual_extractor: Any,
-        emotion_provider: Any,
-        yamnet_provider: Any,
         phase24_task_queue_client: Any | None = None,
         phase14_repository: Any | None = None,
         phase24_query_version: str | None = None,
         input_resolver: Phase1InputResolver | None = None,
         input_resolver_strict: bool = True,
     ) -> None:
-        if vibevoice_asr_client is None:
-            raise ValueError(
-                "Phase1JobRunner requires vibevoice_asr_client; VibeVoice ASR "
-                "must be routed through the Phase 1 service boundary."
-            )
-        if forced_aligner is None or emotion_provider is None or yamnet_provider is None:
-            raise ValueError(
-                "Phase1JobRunner requires forced_aligner, emotion_provider, and "
-                "yamnet_provider — these run in-process on the Phase1 host."
-            )
+        if scribe_provider is None:
+            raise ValueError("Phase1JobRunner requires a Scribe provider.")
         self.working_root = Path(working_root)
         self.audio_extractor = audio_extractor
         self.storage_client = storage_client
-        self.vibevoice_asr_client = vibevoice_asr_client
-        self.forced_aligner = forced_aligner
+        self.scribe_provider = scribe_provider
+        self.scribe_turn_gap_ms = int(scribe_turn_gap_ms)
         self.visual_extractor = visual_extractor
-        self.emotion_provider = emotion_provider
-        self.yamnet_provider = yamnet_provider
         self.phase24_task_queue_client = phase24_task_queue_client
         self.phase14_repository = phase14_repository
         self.phase24_query_version = phase24_query_version
@@ -199,6 +187,7 @@ class Phase1JobRunner:
         video_gcs_uri: str,
         phase1_outputs_gcs_uri: str,
         runtime_controls: dict[str, Any],
+        visual_future: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self.phase24_task_queue_client is None:
             raise ValueError("phase24_task_queue_client is required when queue mode is enabled")
@@ -208,6 +197,9 @@ class Phase1JobRunner:
             "source_url": source_ref,
             "source_video_gcs_uri": video_gcs_uri,
             "phase1_outputs_gcs_uri": phase1_outputs_gcs_uri,
+            "phase1_visual_status": "pending" if visual_future else "ready",
+            "visual_future": visual_future,
+            "visual_call_id": (visual_future or {}).get("call_id"),
             "phase3_long_range_top_k": int(runtime_controls.get("phase3_long_range_top_k") or 3),
             "phase4_extra_prompt_texts": list(runtime_controls.get("phase4_extra_prompt_texts") or []),
             "query_version": self.phase24_query_version,
@@ -220,6 +212,8 @@ class Phase1JobRunner:
             "query_version": self.phase24_query_version,
             "task_name": task_name,
             "phase1_outputs_gcs_uri": phase1_outputs_gcs_uri,
+            "phase1_visual_status": payload["phase1_visual_status"],
+            "visual_call_id": payload.get("visual_call_id"),
         }
         self._upsert_run_record(
             run_id=job_id,
@@ -372,6 +366,27 @@ class Phase1JobRunner:
             )
             logger.info("[gcs]    uploaded → %s (%.1f s)", video_gcs_uri, time.perf_counter() - t_upload)
 
+        if resolved_audio_gcs_uri:
+            audio_gcs_uri = resolved_audio_gcs_uri
+            logger.info("[gcs]    using canonical audio URI from test-bank mapping: %s", audio_gcs_uri)
+        else:
+            t_upload = time.perf_counter()
+            logger.info("[gcs]    uploading canonical audio to GCS ...")
+            audio_gcs_uri = self.storage_client.upload_file(
+                local_path=workspace.audio_path,
+                object_name=f"phase1/{job_id}/canonical_audio.wav",
+            )
+            logger.info("[gcs]    uploaded audio → %s (%.1f s)", audio_gcs_uri, time.perf_counter() - t_upload)
+
+        signed_audio_url = None
+        if self.scribe_provider is not None:
+            signed_audio_url = self.storage_client.get_https_url(
+                audio_gcs_uri,
+                expiry_hours=int(
+                    runtime_controls.get("scribe_signed_url_expiry_hours") or 3
+                ),
+            )
+
         source_ref = source_url or str(source_path)
         result: dict[str, Any] = {}
         run_phase14 = bool(runtime_controls.get("run_phase14"))
@@ -399,6 +414,11 @@ class Phase1JobRunner:
                         video_gcs_uri=video_gcs_uri,
                         phase1_outputs_gcs_uri=phase1_outputs_gcs_uri,
                         runtime_controls=runtime_controls,
+                        visual_future=(
+                            partial.visual_future.model_dump(mode="json")
+                            if partial.visual_future is not None
+                            else None
+                        ),
                     )
                     enqueue_summary.append(summary)
                     logger.info(
@@ -429,14 +449,13 @@ class Phase1JobRunner:
             phase1_outputs = run_phase1_sidecars(
                 source_url=source_ref,
                 video_gcs_uri=video_gcs_uri,
-                audio_gcs_uri=resolved_audio_gcs_uri,
+                audio_gcs_uri=audio_gcs_uri,
+                signed_audio_url=signed_audio_url,
                 source_context=source_context,
                 workspace=workspace,
-                vibevoice_asr_client=self.vibevoice_asr_client,
-                forced_aligner=self.forced_aligner,
+                scribe_provider=self.scribe_provider,
+                scribe_turn_gap_ms=self.scribe_turn_gap_ms,
                 visual_extractor=self.visual_extractor,
-                emotion_provider=self.emotion_provider,
-                yamnet_provider=self.yamnet_provider,
                 on_audio_chain_complete=_on_audio_done,
                 stage_event_logger=_on_stage_event,
             )
@@ -471,14 +490,13 @@ class Phase1JobRunner:
             phase1_outputs = run_phase1_sidecars(
                 source_url=source_ref,
                 video_gcs_uri=video_gcs_uri,
-                audio_gcs_uri=resolved_audio_gcs_uri,
+                audio_gcs_uri=audio_gcs_uri,
+                signed_audio_url=signed_audio_url,
                 source_context=source_context,
                 workspace=workspace,
-                vibevoice_asr_client=self.vibevoice_asr_client,
-                forced_aligner=self.forced_aligner,
+                scribe_provider=self.scribe_provider,
+                scribe_turn_gap_ms=self.scribe_turn_gap_ms,
                 visual_extractor=self.visual_extractor,
-                emotion_provider=self.emotion_provider,
-                yamnet_provider=self.yamnet_provider,
                 stage_event_logger=_on_stage_event,
             )
             result["phase1"] = _jsonable(phase1_outputs)
@@ -489,7 +507,7 @@ class Phase1JobRunner:
                 status="PHASE1_DONE",
                 metadata={
                     "query_version": self.phase24_query_version,
-                    "audio_gcs_uri": resolved_audio_gcs_uri,
+                    "audio_gcs_uri": audio_gcs_uri,
                     **hydration_metadata,
                 },
             )

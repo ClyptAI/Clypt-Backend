@@ -29,8 +29,8 @@ What it collects:
 - Phase26 queue row from the configured local SQLite queue
 - Phase 1 job log tail when `log_path` exists
 - filtered journald snippets for:
+  - `clypt-phase1-api.service`
   - `clypt-phase1-worker.service`
-  - `clypt-phase1-vibevoice.service`
   - `clypt-phase26-worker.service`
   - `clypt-phase26-dispatch.service`
 
@@ -75,7 +75,6 @@ Add extra units:
 ```bash
 python scripts/extract_run_diagnostics.py \
   --run-id <run_id> \
-  --journal-unit clypt-phase1-visual.service \
   --journal-unit clypt-phase1-api.service
 ```
 

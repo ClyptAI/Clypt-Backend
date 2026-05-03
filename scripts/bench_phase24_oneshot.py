@@ -5,11 +5,10 @@ from Spanner, rebuilds a fresh run_id under it, and runs
 ``Phase24WorkerService.handle_task`` inline. Captures wall-clock and Spanner
 phase_metrics/substeps breakdown for latency analysis.
 
-Intended for ad-hoc benchmarking on the Phase 2-4 host (currently the H200
-droplet). Node-media prep now runs through the remote Modal worker using the
-submit/poll client, so this script captures the persisted phase metrics and
-substep metadata needed to analyze queue wait, per-batch prep timings, and
-overall Phase 2-4 wall time.
+Intended for ad-hoc benchmarking on the Phase26 MI300X host. Node-media prep
+runs through the remote Modal worker using the submit/poll client, so this
+script captures the persisted phase metrics and substep metadata needed to
+analyze queue wait, per-batch prep timings, and overall Phase 2-4 wall time.
 """
 
 from __future__ import annotations

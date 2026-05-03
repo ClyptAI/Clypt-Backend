@@ -1,0 +1,15 @@
+[Unit]
+Description=Clypt Phase1 API on Phase26 MI300X vCPUs
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clypt-phase26/repo
+EnvironmentFile=/etc/clypt-phase26/phase26.env
+EnvironmentFile=/etc/clypt/clypt-phase26-runtime.env
+ExecStart=/opt/clypt-phase26/venvs/phase26/bin/python -m backend.runtime.run_phase1_service --host 0.0.0.0 --port 8080 --db-path /var/lib/clypt/phase1/jobs.db --logs-root /var/log/clypt/phase1/logs
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

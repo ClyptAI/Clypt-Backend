@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 from backend.providers import (
-    Emotion2VecPlusProvider,
-    ForcedAlignmentProvider,
-    RemotePhase1VisualClient,
+    ElevenLabsScribeClient,
     RemotePhase26DispatchClient,
-    RemoteVibeVoiceAsrClient,
-    YAMNetProvider,
+    RemoteVisualExtractClient,
     load_phase1_host_settings,
 )
 from backend.providers.storage import GCSStorageClient
@@ -53,19 +49,14 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
             "CLYPT_PHASE24_DISPATCH_AUTH_TOKEN."
         )
 
-    vibevoice_asr_client = RemoteVibeVoiceAsrClient(
-        settings=settings.vibevoice_asr_service,
-    )
-    visual_extractor = RemotePhase1VisualClient(settings=settings.phase1_visual_service)
-    forced_aligner = ForcedAlignmentProvider(
-        device=os.environ.get("CLYPT_PHASE1_NFA_DEVICE", "auto"),
-    )
-    emotion_provider = Emotion2VecPlusProvider(
-        device=os.environ.get("CLYPT_PHASE1_EMOTION2VEC_DEVICE", "auto"),
-    )
-    yamnet_provider = YAMNetProvider(
-        device="gpu" if settings.phase1_runtime.run_yamnet_on_gpu else "cpu",
-    )
+    if settings.phase1_asr.backend != "elevenlabs_scribe_v2":
+        raise ValueError(
+            "Phase 1 on AMD-refactor requires CLYPT_PHASE1_AUDIO_BACKEND=elevenlabs_scribe_v2."
+        )
+    if settings.elevenlabs_scribe is None:
+        raise ValueError("ELEVENLABS_API_KEY is required for ElevenLabs Scribe v2.")
+    scribe_provider = ElevenLabsScribeClient(settings=settings.elevenlabs_scribe)
+    visual_extractor = RemoteVisualExtractClient(settings=settings.phase1_visual_service)
 
     phase14_repository = _build_phase14_repository(settings=settings)
     phase24_task_queue_client = RemotePhase26DispatchClient(
@@ -91,11 +82,9 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
     return Phase1JobRunner(
         working_root=Path(working_root or settings.phase1_runtime.working_root),
         storage_client=storage_client,
-        vibevoice_asr_client=vibevoice_asr_client,
-        forced_aligner=forced_aligner,
+        scribe_provider=scribe_provider,
+        scribe_turn_gap_ms=settings.elevenlabs_scribe.turn_gap_ms,
         visual_extractor=visual_extractor,
-        emotion_provider=emotion_provider,
-        yamnet_provider=yamnet_provider,
         phase24_task_queue_client=phase24_task_queue_client,
         phase14_repository=phase14_repository,
         phase24_query_version=settings.phase24_worker.query_version,

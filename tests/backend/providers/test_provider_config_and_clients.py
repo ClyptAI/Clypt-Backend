@@ -10,19 +10,28 @@ from typing import Any
 import pytest
 
 
+def _base_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
+    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "elevenlabs-key")
+    monkeypatch.setenv("CLYPT_PHASE1_AUDIO_BACKEND", "elevenlabs_scribe_v2")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_URL", "https://modal.example/tasks/node-media-prep")
+    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN", "prep-token")
+
+
 def test_load_provider_settings_uses_env_and_gcloud_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
     monkeypatch.delenv("GCS_BUCKET", raising=False)
     monkeypatch.delenv("GENAI_GENERATION_LOCATION", raising=False)
     monkeypatch.delenv("VERTEX_EMBEDDING_LOCATION", raising=False)
     monkeypatch.setenv("CLYPT_GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
 
     def fake_run(cmd, check, capture_output, text):
         assert cmd[:4] == ["gcloud", "config", "get-value", "project"]
@@ -32,103 +41,63 @@ def test_load_provider_settings_uses_env_and_gcloud_fallback(
 
     settings = load_provider_settings()
 
-    assert settings.vllm_vibevoice.base_url == "http://127.0.0.1:8000"
-    assert settings.vllm_vibevoice.model == "vibevoice"
-    assert settings.vllm_vibevoice.audio_mode == "url"
-    assert settings.vibevoice.max_new_tokens == 32768
-    assert settings.vibevoice.do_sample is False
-    assert settings.vibevoice.top_p == 1.0
-    assert settings.vibevoice.num_beams == 1
-    assert settings.vibevoice.repetition_penalty == 1.03
+    assert settings.elevenlabs_scribe is not None
+    assert settings.elevenlabs_scribe.model_id == "scribe_v2"
+    assert settings.elevenlabs_scribe.language_code == "en"
+    assert settings.elevenlabs_scribe.url_field == "source_url"
+    assert settings.elevenlabs_scribe.signed_url_expiry_hours == 24
+    assert settings.phase1_asr.backend == "elevenlabs_scribe_v2"
     assert settings.vertex.project == "clypt-v3"
     assert settings.vertex.generation_location == "global"
     assert settings.vertex.embedding_location == "us-central1"
     assert settings.storage.gcs_bucket == "bucket-a"
-    assert settings.vertex.generation_model
-    assert settings.vertex.embedding_model
     assert settings.spanner.instance == "clypt-spanner-v3"
     assert settings.spanner.database == "clypt-graph-db-v3"
     assert settings.phase24_worker.service_name == "clypt-phase26-worker"
     assert settings.node_media_prep.timeout_s == 1800.0
     assert settings.node_media_prep.max_concurrency == 12
-    assert settings.phase1_runtime.run_yamnet_on_gpu is False
+    assert settings.phase1_runtime.input_mode == "test_bank"
 
 
-def test_load_provider_settings_vllm_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from backend.providers.config import load_provider_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.delenv("VIBEVOICE_BACKEND", raising=False)
-    monkeypatch.delenv("VIBEVOICE_VLLM_MODEL", raising=False)
-
-    settings = load_provider_settings()
-
-    assert settings.vllm_vibevoice.base_url == "http://127.0.0.1:8000"
-    assert settings.vllm_vibevoice.model == "vibevoice"
-    assert settings.vllm_vibevoice.audio_mode == "url"
-    assert settings.vibevoice.max_new_tokens == 32768
-    assert settings.vibevoice.do_sample is False
-    assert settings.vibevoice.top_p == 1.0
-    assert settings.vibevoice.num_beams == 1
-    assert settings.vibevoice.repetition_penalty == 1.03
-
-
-def test_load_audio_host_settings_reads_vibevoice_longform_overrides(
+def test_load_provider_settings_rejects_removed_phase1_audio_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from backend.providers.config import load_audio_host_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_ENABLED", "1")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_TWO_SHARD_MAX_MINUTES", "70")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_FOUR_SHARD_MAX_MINUTES", "150")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_MAX_SHARDS", "4")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_SPEAKER_MATCH_THRESHOLD", "0.9")
-
-    settings = load_audio_host_settings()
-
-    assert settings.vibevoice_longform.enabled is True
-    assert settings.vibevoice_longform.two_shard_max_minutes == 70
-    assert settings.vibevoice_longform.four_shard_max_minutes == 150
-    assert settings.vibevoice_longform.max_shards == 4
-    assert settings.vibevoice_longform.speaker_match_threshold == 0.9
-
-
-def test_load_audio_host_settings_rejects_invalid_vibevoice_longform_limits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from backend.providers.config import load_audio_host_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("VIBEVOICE_LONGFORM_MAX_SHARDS", "5")
-
-    with pytest.raises(ValueError, match="VIBEVOICE_LONGFORM_MAX_SHARDS"):
-        load_audio_host_settings()
-
-
-def test_load_provider_settings_rejects_non_vllm_phase1_asr_backend(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("CLYPT_PHASE1_ASR_BACKEND", "something_else")
 
-    with pytest.raises(ValueError, match="CLYPT_PHASE1_ASR_BACKEND"):
+    with pytest.raises(ValueError, match="VIBEVOICE_VLLM_BASE_URL.*removed"):
         load_provider_settings()
+
+
+def test_load_provider_settings_rejects_non_scribe_phase1_asr_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_provider_settings
+
+    _base_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("CLYPT_PHASE1_ASR_BACKEND", "vllm")
+    monkeypatch.delenv("CLYPT_PHASE1_AUDIO_BACKEND", raising=False)
+
+    with pytest.raises(ValueError, match="elevenlabs_scribe_v2"):
+        load_provider_settings()
+
+
+def test_load_provider_settings_requires_scribe_key_for_phase1_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.providers.config import load_phase1_host_settings
+
+    _base_env(tmp_path, monkeypatch)
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SERVICE_URL", "https://visual.example/tasks/visual-extract")
+    monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN", "visual-token")
+    monkeypatch.setenv("CLYPT_PHASE24_DISPATCH_URL", "http://phase26.example:9300")
+    monkeypatch.setenv("CLYPT_PHASE24_DISPATCH_AUTH_TOKEN", "dispatch-token")
+
+    with pytest.raises(ValueError, match="ELEVENLABS_API_KEY"):
+        load_phase1_host_settings()
 
 
 def test_load_provider_settings_raises_without_gcs_bucket(
@@ -136,75 +105,12 @@ def test_load_provider_settings_raises_without_gcs_bucket(
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.delenv("GCS_BUCKET", raising=False)
     monkeypatch.delenv("CLYPT_GCS_BUCKET", raising=False)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
 
     with pytest.raises(ValueError, match="GCS_BUCKET"):
         load_provider_settings()
-
-
-def test_load_provider_settings_raises_without_vibevoice_asr_service_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """VibeVoice ASR runs on the RTX host; the URL env is required."""
-    from backend.providers.config import load_provider_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.delenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL", raising=False)
-    monkeypatch.delenv("CLYPT_PHASE1_AUDIO_HOST_URL", raising=False)
-
-    with pytest.raises(ValueError, match="CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL"):
-        load_provider_settings()
-
-
-def test_load_provider_settings_raises_without_vibevoice_asr_service_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from backend.providers.config import load_provider_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.delenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TOKEN", raising=False)
-    monkeypatch.delenv("CLYPT_PHASE1_AUDIO_HOST_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLYPT_PHASE1_AUDIO_HOST_TOKEN", raising=False)
-
-    with pytest.raises(
-        ValueError, match="CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN"
-    ):
-        load_provider_settings()
-
-
-def test_load_provider_settings_accepts_legacy_audio_host_envs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Legacy CLYPT_PHASE1_AUDIO_HOST_* env names are still accepted for one release."""
-    from backend.providers.config import load_provider_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    # Force-only the legacy names.
-    monkeypatch.delenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL", raising=False)
-    monkeypatch.delenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TOKEN", raising=False)
-    monkeypatch.setenv("CLYPT_PHASE1_AUDIO_HOST_URL", "http://10.0.0.5:9100")
-    monkeypatch.setenv("CLYPT_PHASE1_AUDIO_HOST_TOKEN", "legacy-token")
-
-    settings = load_provider_settings()
-    assert settings.vibevoice_asr_service.service_url == "http://10.0.0.5:9100"
-    assert settings.vibevoice_asr_service.auth_token == "legacy-token"
-    # Deprecated alias property still exposes the same object.
-    assert settings.audio_host is settings.vibevoice_asr_service
 
 
 def test_load_provider_settings_raises_without_node_media_prep_url(
@@ -212,10 +118,7 @@ def test_load_provider_settings_raises_without_node_media_prep_url(
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.delenv("CLYPT_PHASE24_NODE_MEDIA_PREP_URL", raising=False)
 
     with pytest.raises(ValueError, match="CLYPT_PHASE24_NODE_MEDIA_PREP_URL"):
@@ -227,85 +130,43 @@ def test_load_provider_settings_raises_without_node_media_prep_token(
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.delenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN", raising=False)
 
     with pytest.raises(ValueError, match="CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN"):
         load_provider_settings()
 
 
-def test_load_provider_settings_populates_vibevoice_asr_service_and_node_media_prep(
+def test_load_provider_settings_populates_modal_visual_dispatch_and_render(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv(
-        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL", "http://10.0.0.5:9100/"
-    )
-    monkeypatch.setenv(
-        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN", "audio-token-xyz"
-    )
-    monkeypatch.setenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_TIMEOUT_S", "1800")
-    monkeypatch.setenv(
-        "CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_HEALTHCHECK_PATH", "/healthz"
-    )
-    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_URL", "http://10.0.0.5:9100")
-    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN", "prep-token-abc")
-    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TIMEOUT_S", "900")
-    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_MAX_CONCURRENCY", "4")
-
-    settings = load_provider_settings()
-
-    # URL trailing slash normalised.
-    assert settings.vibevoice_asr_service.service_url == "http://10.0.0.5:9100"
-    assert settings.vibevoice_asr_service.auth_token == "audio-token-xyz"
-    assert settings.vibevoice_asr_service.timeout_s == 1800.0
-    assert settings.vibevoice_asr_service.healthcheck_path == "/healthz"
-    # Deprecated alias still resolves to the same settings object.
-    assert settings.audio_host is settings.vibevoice_asr_service
-    assert settings.node_media_prep.service_url == "http://10.0.0.5:9100"
-    assert settings.node_media_prep.auth_token == "prep-token-abc"
-    assert settings.node_media_prep.timeout_s == 900.0
-    assert settings.node_media_prep.max_concurrency == 4
-
-
-def test_load_provider_settings_populates_phase1_visual_service_and_phase26_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from backend.providers.config import load_provider_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_URL", "http://127.0.0.1:9100")
-    monkeypatch.setenv("CLYPT_PHASE1_VIBEVOICE_ASR_SERVICE_AUTH_TOKEN", "asr-token")
-    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_URL", "https://modal.example/node-media-prep")
-    monkeypatch.setenv("CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN", "modal-token")
-    monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SERVICE_URL", "http://127.0.0.1:9200/")
+    _base_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SERVICE_URL", "https://visual.example/tasks/visual-extract/")
     monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN", "visual-token")
     monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S", "333")
     monkeypatch.setenv("CLYPT_PHASE24_DISPATCH_URL", "http://10.0.0.8:9300/")
     monkeypatch.setenv("CLYPT_PHASE24_DISPATCH_AUTH_TOKEN", "dispatch-token")
     monkeypatch.setenv("CLYPT_PHASE24_DISPATCH_TIMEOUT_S", "444")
+    monkeypatch.setenv("CLYPT_PHASE24_PHASE6_RENDER_URL", "https://media.example/tasks/render-video/")
+    monkeypatch.setenv("CLYPT_PHASE24_PHASE6_RENDER_TOKEN", "render-token")
+    monkeypatch.setenv("CLYPT_PHASE24_PHASE6_RENDER_TIMEOUT_S", "555")
 
     settings = load_provider_settings()
 
     assert settings.phase1_visual_service is not None
-    assert settings.phase1_visual_service.service_url == "http://127.0.0.1:9200"
+    assert settings.phase1_visual_service.service_url == "https://visual.example/tasks/visual-extract"
     assert settings.phase1_visual_service.auth_token == "visual-token"
     assert settings.phase1_visual_service.timeout_s == 333.0
     assert settings.phase26_dispatch_service is not None
     assert settings.phase26_dispatch_service.service_url == "http://10.0.0.8:9300"
     assert settings.phase26_dispatch_service.auth_token == "dispatch-token"
     assert settings.phase26_dispatch_service.timeout_s == 444.0
+    assert settings.phase6_render is not None
+    assert settings.phase6_render.service_url == "https://media.example/tasks/render-video"
+    assert settings.phase6_render.auth_token == "render-token"
+    assert settings.phase6_render.timeout_s == 555.0
 
 
 def test_load_provider_settings_reads_untracked_env_local(
@@ -317,25 +178,29 @@ def test_load_provider_settings_reads_untracked_env_local(
         pytest.skip("python-dotenv is not installed in this test environment")
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
-    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
-    monkeypatch.delenv("GCS_BUCKET", raising=False)
-    monkeypatch.delenv("CLYPT_GCS_BUCKET", raising=False)
-    monkeypatch.delenv("VIBEVOICE_VLLM_MODEL", raising=False)
+    for name in (
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "GCS_BUCKET",
+        "CLYPT_GCS_BUCKET",
+        "ELEVENLABS_API_KEY",
+        "CLYPT_PHASE24_NODE_MEDIA_PREP_URL",
+        "CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
     (tmp_path / ".env.local").write_text(
         "\n".join(
             [
-                "VIBEVOICE_BACKEND=vllm",
-                "VIBEVOICE_VLLM_BASE_URL=http://127.0.0.1:8000",
-                "VIBEVOICE_VLLM_MODEL=vibevoice",
-                "VIBEVOICE_DO_SAMPLE=1.0",
-                "VIBEVOICE_TOP_P=0.91",
-                "VIBEVOICE_NUM_BEAMS=4.0",
-                "VIBEVOICE_REPETITION_PENALTY=1.03",
                 "GOOGLE_CLOUD_PROJECT=clypt-v3",
                 "GENAI_GENERATION_LOCATION=global",
                 "VERTEX_EMBEDDING_LOCATION=us-central1",
                 "GCS_BUCKET=clypt-storage-v3",
+                "ELEVENLABS_API_KEY=scribe-key",
+                "CLYPT_PHASE1_AUDIO_BACKEND=elevenlabs_scribe_v2",
+                "CLYPT_PHASE1_SCRIBE_NUM_SPEAKERS=2",
+                "CLYPT_PHASE1_SCRIBE_KEYTERMS=Rithvik, Clypt",
+                "CLYPT_PHASE24_NODE_MEDIA_PREP_URL=https://modal.example/tasks/node-media-prep",
+                "CLYPT_PHASE24_NODE_MEDIA_PREP_TOKEN=prep-token",
             ]
         ),
         encoding="utf-8",
@@ -343,49 +208,14 @@ def test_load_provider_settings_reads_untracked_env_local(
 
     settings = load_provider_settings()
 
-    assert settings.vllm_vibevoice.base_url == "http://127.0.0.1:8000"
-    assert settings.vllm_vibevoice.model == "vibevoice"
-    assert settings.vllm_vibevoice.audio_mode == "url"
-    assert settings.vibevoice.do_sample is True
-    assert settings.vibevoice.top_p == 0.91
-    assert settings.vibevoice.num_beams == 4
-    assert settings.vibevoice.repetition_penalty == 1.03
+    assert settings.elevenlabs_scribe is not None
+    assert settings.elevenlabs_scribe.api_key == "scribe-key"
+    assert settings.elevenlabs_scribe.num_speakers == 2
+    assert settings.elevenlabs_scribe.keyterms == ("Rithvik", "Clypt")
     assert settings.vertex.project == "clypt-v3"
     assert settings.vertex.generation_location == "global"
     assert settings.vertex.embedding_location == "us-central1"
     assert settings.storage.gcs_bucket == "clypt-storage-v3"
-    assert settings.phase1_runtime.run_yamnet_on_gpu is False
-
-
-def test_load_provider_settings_vibevoice_custom_hotwords(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from backend.providers.config import load_provider_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("VIBEVOICE_HOTWORDS_CONTEXT", "hello, world")
-
-    settings = load_provider_settings()
-
-    assert settings.vibevoice.hotwords_context == "hello, world"
-
-
-def test_load_provider_settings_rejects_non_vllm_backend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from backend.providers.config import load_provider_settings
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("VIBEVOICE_BACKEND", "native")
-
-    with pytest.raises(ValueError, match="only 'vllm' is supported"):
-        load_provider_settings()
 
 
 def test_load_provider_settings_rejects_unknown_generation_backend(
@@ -393,13 +223,10 @@ def test_load_provider_settings_rejects_unknown_generation_backend(
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.setenv("GENAI_GENERATION_BACKEND", "vertex")
 
-    with pytest.raises(ValueError, match="expected 'developer' or 'local_openai'"):
+    with pytest.raises(ValueError, match="local_openai"):
         load_provider_settings()
 
 
@@ -408,10 +235,7 @@ def test_load_provider_settings_defaults_local_openai_and_loads_local_generation
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.delenv("GENAI_GENERATION_BACKEND", raising=False)
     monkeypatch.setenv("CLYPT_LOCAL_LLM_BASE_URL", "http://127.0.0.1:9000/v1")
     monkeypatch.setenv("CLYPT_LOCAL_LLM_MODEL", "my-qwen")
@@ -453,10 +277,7 @@ def test_load_provider_settings_rejects_removed_local_llm_thinking_env(
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.setenv("CLYPT_LOCAL_LLM_ENABLE_THINKING", "1")
 
     with pytest.raises(ValueError, match="CLYPT_LOCAL_LLM_ENABLE_THINKING"):
@@ -482,9 +303,7 @@ def test_local_openai_qwen_client_parses_json_and_validates_schema(
 
     def _install_payload(payload: dict[str, Any]) -> None:
         mock_resp = MagicMock()
-        mock_resp.__enter__.return_value.read.return_value = json.dumps(
-            payload
-        ).encode("utf-8")
+        mock_resp.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
         mock_resp.__exit__.return_value = None
 
         def _fake_urlopen(req: urllib.request.Request, timeout: float):
@@ -629,7 +448,7 @@ def test_v31_config_defaults_match_recommended_bench_caps() -> None:
 
     config = V31Config()
 
-    # Defaults reflect the bench-validated max-in-flight caps (2026-04-16 Qwen3.6 on H200).
+    # Defaults reflect the bench-validated max-in-flight caps for Qwen3.6.
     assert config.phase2_merge_max_concurrent == 16
     assert config.phase2_boundary_max_concurrent == 16
     assert config.phase3_local_max_concurrent == 24
@@ -680,22 +499,14 @@ def test_build_default_phase24_worker_service_enforces_local_openai_backend(
         ProviderSettings,
         StorageSettings,
         VertexSettings,
-        VibeVoiceAsrServiceSettings,
-        VibeVoiceSettings,
-        VibeVoiceVLLMSettings,
     )
     from backend.providers.openai_local import LocalOpenAIQwenClient
     from backend.runtime import phase24_worker_app
 
     base = dict(
-        vibevoice=VibeVoiceSettings(),
-        vllm_vibevoice=VibeVoiceVLLMSettings(base_url="http://127.0.0.1:8000"),
+        elevenlabs_scribe=None,
         local_generation=LocalGenerationSettings(model="local-qwen"),
         storage=StorageSettings(gcs_bucket="bucket-a"),
-        vibevoice_asr_service=VibeVoiceAsrServiceSettings(
-            service_url="http://10.0.0.5:9100",
-            auth_token="test-audio-token",
-        ),
         node_media_prep=NodeMediaPrepSettings(
             service_url="http://10.0.0.5:9100",
             auth_token="test-prep-token",
@@ -763,10 +574,7 @@ def test_load_provider_settings_exposes_phase24_queue_and_spanner_settings(
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.setenv("CLYPT_SPANNER_INSTANCE", "phase14-instance")
     monkeypatch.setenv("CLYPT_SPANNER_DATABASE", "phase14-db")
     monkeypatch.setenv("CLYPT_SPANNER_DDL_OPERATION_TIMEOUT_S", "42")
@@ -816,10 +624,7 @@ def test_load_provider_settings_exposes_split_generation_and_embedding_retry_set
 ) -> None:
     from backend.providers.config import load_provider_settings
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "clypt-v3")
-    monkeypatch.setenv("GCS_BUCKET", "bucket-a")
-    monkeypatch.setenv("VIBEVOICE_VLLM_BASE_URL", "http://127.0.0.1:8000")
+    _base_env(tmp_path, monkeypatch)
     monkeypatch.setenv("GENAI_GENERATION_API_MAX_RETRIES", "9")
     monkeypatch.setenv("GENAI_GENERATION_API_INITIAL_BACKOFF_S", "0.5")
     monkeypatch.setenv("GENAI_GENERATION_API_MAX_BACKOFF_S", "12.0")

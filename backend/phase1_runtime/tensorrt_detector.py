@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,12 +25,46 @@ if TYPE_CHECKING:
 
     from .visual_config import VisualPipelineConfig
 
-from .rfdetr_detector import COCO_PERSON_CLASS_ID, DetectorMetrics, _require_cuda
-
 logger = logging.getLogger(__name__)
 
+# rfdetr uses 1-indexed COCO class IDs (COCO_CLASSES = {1: "person", 2: "bicycle", ...})
+COCO_PERSON_CLASS_ID = 1
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+@dataclass(slots=True)
+class DetectorMetrics:
+    frames_processed: int = 0
+    total_detector_ms: float = 0.0
+    warmup_ms: float = 0.0
+
+    @property
+    def mean_detector_latency_ms(self) -> float:
+        if self.frames_processed == 0:
+            return 0.0
+        return self.total_detector_ms / self.frames_processed
+
+
+def _require_cuda() -> None:
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "CUDA PyTorch is required for Modal L40S TensorRT visual extraction."
+        ) from exc
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA GPU is required for Modal L40S TensorRT visual extraction. "
+            "Do not fall back to CPU."
+        )
+    cuda_version = getattr(getattr(torch, "version", None), "cuda", None)
+    if not cuda_version:
+        raise RuntimeError(
+            "CUDA PyTorch build is required for Modal L40S TensorRT visual extraction; "
+            "torch.cuda is available, but torch.version.cuda is empty."
+        )
 
 
 class TensorRTDetector:
@@ -395,4 +430,4 @@ class TensorRTDetector:
         logger.info("TensorRT detector unloaded, VRAM released.")
 
 
-__all__ = ["TensorRTDetector"]
+__all__ = ["COCO_PERSON_CLASS_ID", "DetectorMetrics", "TensorRTDetector", "_require_cuda"]
