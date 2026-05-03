@@ -20,6 +20,10 @@ Deploy:
 modal deploy scripts/modal/visual_extract_app.py
 ```
 
+The Modal image is pinned to Python `3.12`. Keep that pin unless the CUDA
+PyTorch/TensorRT wheels in `requirements-modal-visual-l40s.txt` have been
+validated on a newer Python runtime.
+
 Required secret/env:
 
 - `GCS_BUCKET`
@@ -62,6 +66,9 @@ Deploy:
 ```bash
 modal deploy scripts/modal/media_worker_app.py
 ```
+
+The Modal image is pinned to Python `3.12` for parity with the visual app and
+to avoid accidental wheel drift from Modal's default Python runtime.
 
 Required secret/env:
 
@@ -110,3 +117,9 @@ modal logs clypt-media-l40s
 Submit smoke requests with bearer auth and confirm each returns a `call_id` immediately, then poll the corresponding result endpoint.
 
 `GOOGLE_APPLICATION_CREDENTIALS_JSON` should be a real service-account JSON key blob. Avoid token-only `authorized_user` ADC documents for production deploys.
+
+Current known-good deployed endpoints:
+
+- `https://testifytestprep--clypt-visual-l40s-visual-extract.modal.run/tasks/visual-extract`
+- `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/node-media-prep`
+- `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/render-video`

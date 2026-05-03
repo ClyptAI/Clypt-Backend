@@ -125,6 +125,9 @@ CLYPT_MODAL_VISUAL_BACKEND=tensorrt
 ```
 
 The Modal visual worker must fail hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT Python runtime, `trtexec`, or CUDA PyTorch are unavailable.
+The deployed Modal image is pinned to Python `3.12` because the CUDA PyTorch
+and TensorRT wheels used by the visual fast path are not available for every
+new default Python runtime.
 
 ### 3.2 Shared Media Worker
 
@@ -145,6 +148,8 @@ CLYPT_PHASE24_PHASE6_RENDER_TOKEN=<shared-bearer>
 ```
 
 The media worker uses one persistent L40S pool for node-media-prep and render/export with `min_containers=1`, `max_containers=1`. Keep batching inside each job/structure; do not deploy separate warm GPU pools for node media and render in cost-strict mode.
+The media Modal image is also pinned to Python `3.12` for deploy parity and to
+avoid unvalidated dependency wheel drift.
 
 ## 4) Superseded Env Families
 

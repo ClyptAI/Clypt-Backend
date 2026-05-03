@@ -23,7 +23,7 @@ from backend.providers.storage import GCSStorageClient, parse_gcs_uri
 app = modal.App("clypt-visual-l40s")
 web_app = fastapi.FastAPI()
 image = (
-    modal.Image.debian_slim()
+    modal.Image.debian_slim(python_version="3.12")
     .apt_install("ffmpeg")
     .pip_install("google-cloud-storage>=2.19.0")
     .pip_install("google-auth>=2.38.0")

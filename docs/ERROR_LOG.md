@@ -7,6 +7,17 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-05-03 - Modal L40S deploy defaulted to an unsupported Python runtime
+
+- **Date/Time (UTC):** 2026-05-03 19:35-19:45 UTC
+- **Subsystem:** Modal L40S deploy (`scripts/modal/visual_extract_app.py`, `scripts/modal/media_worker_app.py`)
+- **Environment:** Local `AMD-refactor` deploy to Modal profile `testifytestprep`, apps `clypt-visual-l40s` and `clypt-media-l40s`
+- **Symptom / Error signature:** The first visual deploy with Modal's default `debian_slim()` runtime failed while installing the RF-DETR/TensorRT visual deps: `No matching distribution found for torch==2.6.0+cu124`. Modal had selected a newer default Python runtime than the pinned CUDA PyTorch wheel supports.
+- **Root cause:** The Modal images did not pin `python_version`, so dependency resolution depended on Modal's current default Python. The visual requirements intentionally pin CUDA PyTorch/TensorRT wheels and need a runtime with matching wheel support.
+- **Fix applied:** Pinned both Modal app images to `modal.Image.debian_slim(python_version="3.12")` and updated the Modal test fakes to accept image factory kwargs. Refreshed the known-good Modal URLs to the active visual/media app names.
+- **Verification evidence:** Focused Modal script tests passed (`14 passed`), `compileall` passed for `scripts/modal`, both Modal apps deployed successfully, and `GET /health` returned `{"status":"ok"}` for `https://testifytestprep--clypt-visual-l40s-visual-extract.modal.run/health` and `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/health`.
+- **Follow-up guardrails:** Keep Modal image Python pinned until the CUDA PyTorch/TensorRT wheel set is deliberately upgraded and live-smoked. Treat ASGI health as a surface check only; the spawned L40S worker still owns the fail-fast CUDA ffmpeg/TensorRT verification on first real job.
+
 ## 2026-05-02 - Phase1 MI300X smoke exposed VibeVoice repetition recurrence and RF-DETR ROCm throughput gap
 
 - **Date/Time (UTC):** 2026-05-02 06:25-06:45 UTC

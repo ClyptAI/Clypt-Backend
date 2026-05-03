@@ -48,15 +48,11 @@ Required values to set:
 - Modal media endpoint URL
 - GCS / Spanner project-specific values
 
-Optional values to set when turning on remote Phase 6 render/export:
+Current known-good Modal endpoints:
 
-- `CLYPT_PHASE24_PHASE6_RENDER_URL`
-- `CLYPT_PHASE24_PHASE6_RENDER_TOKEN`
-- `CLYPT_PHASE24_PHASE6_RENDER_TIMEOUT_S`
-
-Current known-good Modal endpoint:
-
-- `https://testifytestprep--clypt-node-media-prep-node-media-prep.modal.run/tasks/node-media-prep`
+- Visual RF-DETR: `https://testifytestprep--clypt-visual-l40s-visual-extract.modal.run/tasks/visual-extract`
+- Node-media-prep: `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/node-media-prep`
+- Phase 6 render/export: `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/render-video`
 
 Active AMD-refactor Phase26 values:
 
@@ -70,7 +66,7 @@ Active AMD-refactor Phase26 values:
 - `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096`
 - `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192`
 
-`CLYPT_PHASE24_NODE_MEDIA_PREP_URL` may be set to either the Modal base URL or the full task endpoint URL. The current known-good env uses the full endpoint URL.
+`CLYPT_PHASE1_VISUAL_SERVICE_URL`, `CLYPT_PHASE24_NODE_MEDIA_PREP_URL`, and `CLYPT_PHASE24_PHASE6_RENDER_URL` may be set to either the Modal base URL or the full task endpoint URL. The current known-good env uses the full endpoint URLs.
 
 The Phase26 worker now uses a submit-and-poll contract against Modal:
 

@@ -12,7 +12,7 @@ def _load_app_module():
 
     class _FakeImage:
         @staticmethod
-        def debian_slim():
+        def debian_slim(*_args, **_kwargs):
             return _FakeImage()
 
         def apt_install(self, *_args, **_kwargs):
