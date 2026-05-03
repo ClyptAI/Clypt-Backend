@@ -27,6 +27,7 @@ def create_app(*, store: SQLiteJobStore | None = None, logs_root: str | Path | N
         app.state.logs_root.mkdir(parents=True, exist_ok=True)
         return app.state.logs_root
 
+    @app.get("/health")
     @app.get("/healthz")
     def healthz() -> dict:
         return {

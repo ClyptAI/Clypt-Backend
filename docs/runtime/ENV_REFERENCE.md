@@ -86,15 +86,29 @@ Required by `load_phase26_host_settings()`:
 Current SGLang/Qwen baseline:
 
 ```bash
-SG_DOCKER_IMAGE=lmsysorg/sglang:v0.5.10-rocm720-mi30x
+SG_DOCKER_BASE_IMAGE=lmsysorg/sglang:v0.5.10-rocm720-mi30x
+SG_DOCKER_IMAGE=clypt/sglang:v0.5.10-rocm720-mi30x-clypt1
 SG_MODEL=Qwen/Qwen3.6-35B-A3B
 SG_LAUNCH_PROFILE=final
-SG_ACCEPTANCE_PROFILES=minimal strict_json fp8_kv scheduler_cache speculative
+SG_ACCEPTANCE_PROFILES="minimal strict_json fp8_kv scheduler_cache speculative"
 SG_SCHEDULE_POLICY=lpm
 SG_CHUNKED_PREFILL_SIZE=8192
+SG_MAMBA_SCHEDULER_STRATEGY=no_buffer
 SG_MEM_FRACTION_STATIC=0.78
 SG_CONTEXT_LENGTH=65536
+SG_USE_AITER=0
 ```
+
+The Clypt image is built locally from the pinned upstream SGLang ROCm image during
+Phase26 deployment. It disables Quark quantization imports by default because the
+upstream ROCm 7.2 MI300X image currently imports an incompatible bundled AITER
+path before non-Quark models can start. This branch serves
+`Qwen/Qwen3.6-35B-A3B`, which is not a Quark checkpoint.
+
+AMD uses `SG_MAMBA_SCHEDULER_STRATEGY=no_buffer`. The H200 `extra_buffer` path is
+CUDA-only in this SGLang build. Speculative AMD profiles launch with
+`--disable-radix-cache` because SGLang rejects Qwen3.6 `no_buffer + speculative`
+when radix cache remains enabled.
 
 Phase26 local queue defaults:
 

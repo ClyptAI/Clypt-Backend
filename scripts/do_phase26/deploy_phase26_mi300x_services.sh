@@ -30,6 +30,20 @@ _wait_for_models() {
   fi
 }
 
+_wait_for_url() {
+  local url="$1"
+  local label="$2"
+  local timeout_s="${3:-120}"
+  local deadline=$((SECONDS + timeout_s))
+  until curl -fsS "$url" >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      echo "[deploy-phase26-mi300x] ERROR: timed out waiting for $label at $url" >&2
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
 _strict_json_smoke() {
   local payload_file
   local response_file
@@ -184,16 +198,23 @@ _write_sglang_profile_dropin() {
   install -d -m 0755 "$SG_STAGE_DROPIN_DIR"
   cat >"$SG_STAGE_DROPIN_FILE" <<EOF
 [Service]
-Environment=SG_LAUNCH_PROFILE=$profile
+Environment=SG_LAUNCH_PROFILE_OVERRIDE=$profile
 EOF
   systemctl daemon-reload
+}
+
+_stop_sglang_service() {
+  docker rm -f "${SG_CONTAINER_NAME:-clypt-phase26-sglang-qwen}" >/dev/null 2>&1 || true
+  systemctl stop clypt-phase26-sglang-qwen.service >/dev/null 2>&1 || true
+  systemctl reset-failed clypt-phase26-sglang-qwen.service >/dev/null 2>&1 || true
 }
 
 _restart_sglang_for_profile() {
   local profile="$1"
   echo "[deploy-phase26-mi300x] validating SGLang profile: $profile"
+  _stop_sglang_service
   _write_sglang_profile_dropin "$profile"
-  systemctl restart clypt-phase26-sglang-qwen.service
+  systemctl start clypt-phase26-sglang-qwen.service
   _wait_for_models
   case "$profile" in
     strict_json|fp8_kv|scheduler_cache|speculative|final)
@@ -208,7 +229,12 @@ wait_for_apt_locks() {
   fi
   local waited_s=0
   local max_wait_s="${APT_LOCK_WAIT_S:-600}"
-  local locks=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock)
+  local locks=(
+    /var/lib/dpkg/lock-frontend
+    /var/lib/dpkg/lock
+    /var/cache/apt/archives/lock
+    /var/lib/apt/lists/lock
+  )
   while fuser "${locks[@]}" >/dev/null 2>&1; do
     if (( waited_s >= max_wait_s )); then
       echo "[deploy-phase26-mi300x] ERROR: timed out waiting for apt/dpkg locks." >&2
@@ -221,6 +247,12 @@ wait_for_apt_locks() {
 }
 
 require_root
+exec 9>/var/lock/clypt-phase26-mi300x-deploy.lock
+if ! flock -n 9; then
+  echo "[deploy-phase26-mi300x] ERROR: another deploy_phase26_mi300x_services.sh run is already active." >&2
+  exit 1
+fi
+
 require_dir "$REPO_DIR"
 require_file "$ENV_FILE"
 fail_if_repo_local_env_present "$REPO_DIR" "$ENV_FILE"
@@ -229,7 +261,8 @@ load_env_file "$ENV_FILE"
 
 SG_MODEL="${SG_MODEL:-${GENAI_GENERATION_MODEL:-Qwen/Qwen3.6-35B-A3B}}"
 SG_MODEL_REVISION="${SG_MODEL_REVISION:-${SGLANG_MODEL_REVISION:-main}}"
-SG_DOCKER_IMAGE="${SG_DOCKER_IMAGE:-lmsysorg/sglang:v0.5.10-rocm720-mi30x}"
+SG_DOCKER_BASE_IMAGE="${SG_DOCKER_BASE_IMAGE:-lmsysorg/sglang:v0.5.10-rocm720-mi30x}"
+SG_DOCKER_IMAGE="${SG_DOCKER_IMAGE:-clypt/sglang:v0.5.10-rocm720-mi30x-clypt1}"
 SG_ACCEPTANCE_PROFILES="${SG_ACCEPTANCE_PROFILES:-minimal strict_json fp8_kv scheduler_cache speculative}"
 HF_HOME="${HF_HOME:-/opt/clypt-phase26/.cache/huggingface}"
 TORCH_HOME="${TORCH_HOME:-/opt/clypt-phase26/.cache/torch}"
@@ -274,32 +307,46 @@ install -d -m 0755 "$HF_HOME" "$TORCH_HOME" "$PYTORCH_KERNEL_CACHE_PATH"
 install -d -m 0755 /opt/clypt-phase26/test-bank-cache/audio /opt/clypt-phase26/test-bank-cache/videos
 install -d -m 0755 /var/lib/clypt/phase1 /var/lib/clypt/phase1/work /var/log/clypt/phase1/logs
 HF_HOME="$HF_HOME" HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_OFFLINE=0 HOME=/opt/clypt-phase26 \
-  python - <<PY
+  SG_MODEL="$SG_MODEL" SG_MODEL_REVISION="$SG_MODEL_REVISION" SG_MODEL_ENV_FILE="$SG_MODEL_ENV_FILE" \
+  python - <<'PY'
+import os
 import shlex
 from huggingface_hub import HfApi, snapshot_download
 
-model = "${SG_MODEL}"
-requested_revision = "${SG_MODEL_REVISION}"
+model = os.environ["SG_MODEL"]
+requested_revision = os.environ["SG_MODEL_REVISION"]
+hf_home = os.environ["HF_HOME"]
+model_env_file = os.environ["SG_MODEL_ENV_FILE"]
 info = HfApi().model_info(model, revision=requested_revision)
 resolved_revision = info.sha
 path = snapshot_download(model, revision=resolved_revision)
-container_path = path.replace("${HF_HOME}", "/root/.cache/huggingface", 1)
+container_path = path.replace(hf_home, "/root/.cache/huggingface", 1)
 if container_path == path:
     raise SystemExit(
-        f"[deploy-phase26-mi300x] snapshot path {path!r} is outside HF_HOME=${HF_HOME!r}"
+        f"[deploy-phase26-mi300x] snapshot path {path!r} is outside HF_HOME={hf_home!r}"
     )
 print(f"[deploy-phase26-mi300x] prewarmed {model}@{resolved_revision} at {path}")
-with open("${SG_MODEL_ENV_FILE}", "w", encoding="utf-8") as fh:
+with open(model_env_file, "w", encoding="utf-8") as fh:
     fh.write(f"SG_MODEL={shlex.quote(model)}\n")
     fh.write(f"SG_MODEL_PATH={shlex.quote(container_path)}\n")
     fh.write(f"SG_MODEL_REVISION_RESOLVED={shlex.quote(resolved_revision)}\n")
     fh.write(f"SG_SERVED_MODEL_NAME={shlex.quote(model)}\n")
 PY
 
-docker pull "$SG_DOCKER_IMAGE"
-docker run --rm "$SG_DOCKER_IMAGE" python - <<'PY'
+docker pull "$SG_DOCKER_BASE_IMAGE"
+SG_DOCKER_BASE_IMAGE="$SG_DOCKER_BASE_IMAGE" SG_DOCKER_IMAGE="$SG_DOCKER_IMAGE" \
+  bash scripts/do_phase26/build_sglang_rocm_mi300x_image.sh
+docker run --rm \
+  --device=/dev/kfd \
+  --device=/dev/dri \
+  --group-add video \
+  --ipc=host \
+  --cap-add SYS_PTRACE \
+  --security-opt seccomp=unconfined \
+  "$SG_DOCKER_IMAGE" python - <<'PY'
 import re
 import sglang
+from sglang.srt.layers.quantization import QUANTIZATION_METHODS
 
 version = getattr(sglang, "__version__", "")
 match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
@@ -308,6 +355,8 @@ if not match:
 parsed = tuple(int(part) for part in match.groups())
 if parsed < (0, 5, 10):
     raise SystemExit(f"[deploy-phase26-mi300x] SGLang {version} is too old; need >=0.5.10")
+if "quark" in QUANTIZATION_METHODS or "quark_int4fp8_moe" in QUANTIZATION_METHODS:
+    raise SystemExit("[deploy-phase26-mi300x] Quark quantization is unexpectedly enabled")
 print(f"[deploy-phase26-mi300x] SGLang image version accepted: {version}")
 PY
 
@@ -328,16 +377,16 @@ systemctl enable clypt-phase26-sglang-qwen.service clypt-phase26-dispatch.servic
 systemctl stop clypt-phase1-worker.service clypt-phase1-api.service clypt-phase26-worker.service clypt-phase26-dispatch.service || true
 for profile in $SG_ACCEPTANCE_PROFILES; do
   HF_HUB_OFFLINE=1 _restart_sglang_for_profile "$profile"
-  systemctl stop clypt-phase26-sglang-qwen.service
+  _stop_sglang_service
 done
 HF_HUB_OFFLINE=1 _restart_sglang_for_profile final
 _local_openai_client_smoke
 _long_context_smoke
 
 systemctl restart clypt-phase26-dispatch.service
-curl -fsS http://127.0.0.1:9300/health >/dev/null
+_wait_for_url http://127.0.0.1:9300/health "Phase26 dispatch health"
 systemctl restart clypt-phase1-api.service
-curl -fsS http://127.0.0.1:8080/health >/dev/null
+_wait_for_url http://127.0.0.1:8080/health "Phase1 API health"
 systemctl restart clypt-phase26-worker.service
 systemctl restart clypt-phase1-worker.service
 

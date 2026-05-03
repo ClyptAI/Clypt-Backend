@@ -37,7 +37,7 @@ def test_phase26_mi300x_requirements_avoid_cuda_and_nvidia_deps() -> None:
 def test_rocm_container_launcher_uses_pinned_sglang_and_amd_device_flags() -> None:
     script = _read("scripts/do_phase26/run_sglang_qwen_rocm_container.sh")
 
-    assert "lmsysorg/sglang:v0.5.10-rocm720-mi30x" in script
+    assert "clypt/sglang:v0.5.10-rocm720-mi30x-clypt1" in script
     assert "Qwen/Qwen3.6-35B-A3B" in script
     assert "--device=/dev/kfd" in script
     assert "--device=/dev/dri" in script
@@ -49,6 +49,12 @@ def test_rocm_container_launcher_uses_pinned_sglang_and_amd_device_flags() -> No
     assert "--kv-cache-dtype" in script
     assert "--grammar-backend" in script
     assert "--speculative-algorithm" in script
+    assert "SG_LAUNCH_PROFILE_OVERRIDE" in script
+    assert "no_buffer" in script
+    assert "--disable-radix-cache" in script
+    assert "SGLANG_USE_AITER" in script
+    assert "SGLANG_ROCM_DISABLE_LINEARQUANT=1" in script
+    assert "SGLANG_ENABLE_QUARK_QUANTIZATION=0" in script
 
 
 def test_phase26_mi300x_deploy_prewarms_offline_validates_models_then_starts_worker() -> None:
@@ -63,10 +69,18 @@ def test_phase26_mi300x_deploy_prewarms_offline_validates_models_then_starts_wor
     assert validate < offline
     assert prewarm < offline < dispatch < worker
     assert "docker pull" in script
+    assert "build_sglang_rocm_mi300x_image.sh" in script
     assert "sglang.__version__" in script
+    assert "QUANTIZATION_METHODS" in script
+    assert "SG_LAUNCH_PROFILE_OVERRIDE" in script
+    assert "_stop_sglang_service" in script
     assert "SG_ACCEPTANCE_PROFILES" in script
     assert "run_sglang_qwen_rocm_container.sh" in script
     assert "scripts/do_phase26/systemd/amd" in script
+    assert "flock -n 9" in script
+    assert "another deploy_phase26_mi300x_services.sh run is already active" in script
+    assert "_wait_for_url http://127.0.0.1:9300/health" in script
+    assert "_wait_for_url http://127.0.0.1:8080/health" in script
 
 
 def test_amd_systemd_units_preserve_phase26_boundaries() -> None:
@@ -76,6 +90,7 @@ def test_amd_systemd_units_preserve_phase26_boundaries() -> None:
 
     assert "run_sglang_qwen_rocm_container.sh" in sglang
     assert "HF_HUB_OFFLINE=1" in sglang
+    assert "ExecStop=-/usr/bin/docker rm -f clypt-phase26-sglang-qwen" in sglang
     assert "run_phase26_dispatch_service" in dispatch
     assert "--port 9300" in dispatch
     assert "run_phase26_worker" in worker

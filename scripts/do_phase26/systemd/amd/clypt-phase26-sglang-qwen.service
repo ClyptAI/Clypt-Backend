@@ -18,7 +18,9 @@ Environment=SG_LAUNCH_PROFILE=final
 Restart=always
 RestartSec=5
 TimeoutStartSec=3600
+TimeoutStopSec=30
 ExecStart=/opt/clypt-phase26/run_sglang_qwen_rocm_container.sh
+ExecStop=-/usr/bin/docker rm -f clypt-phase26-sglang-qwen
 
 [Install]
 WantedBy=multi-user.target

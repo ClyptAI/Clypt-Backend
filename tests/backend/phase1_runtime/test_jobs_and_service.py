@@ -95,6 +95,9 @@ def test_phase1_service_app_creates_jobs_and_returns_status(tmp_path):
     logs_root = tmp_path / "logs"
     client = TestClient(create_app(store=store, logs_root=logs_root))
 
+    assert client.get("/health").status_code == 200
+    assert client.get("/healthz").status_code == 200
+
     create_response = client.post(
         "/jobs",
         json={"source_url": "https://youtube.com/watch?v=test"},

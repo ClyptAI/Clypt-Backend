@@ -12,7 +12,12 @@ wait_for_apt_locks() {
   fi
   local waited_s=0
   local max_wait_s="${APT_LOCK_WAIT_S:-600}"
-  local locks=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock)
+  local locks=(
+    /var/lib/dpkg/lock-frontend
+    /var/lib/dpkg/lock
+    /var/cache/apt/archives/lock
+    /var/lib/apt/lists/lock
+  )
   while fuser "${locks[@]}" >/dev/null 2>&1; do
     if (( waited_s >= max_wait_s )); then
       echo "[bootstrap-phase26-mi300x] ERROR: timed out waiting for apt/dpkg locks." >&2

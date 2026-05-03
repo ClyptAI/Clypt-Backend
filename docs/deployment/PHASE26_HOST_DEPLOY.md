@@ -61,8 +61,10 @@ Active AMD-refactor Phase26 values:
 - `CLYPT_LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1`
 - `CLYPT_PHASE24_QUEUE_BACKEND=local_sqlite`
 - `CLYPT_PHASE24_LOCAL_MAX_INFLIGHT=1`
-- `SG_DOCKER_IMAGE=lmsysorg/sglang:v0.5.10-rocm720-mi30x`
-- `SG_ACCEPTANCE_PROFILES=minimal strict_json fp8_kv scheduler_cache speculative`
+- `SG_DOCKER_BASE_IMAGE=lmsysorg/sglang:v0.5.10-rocm720-mi30x`
+- `SG_DOCKER_IMAGE=clypt/sglang:v0.5.10-rocm720-mi30x-clypt1`
+- `SG_ACCEPTANCE_PROFILES="minimal strict_json fp8_kv scheduler_cache speculative"`
+- `SG_MAMBA_SCHEDULER_STRATEGY=no_buffer`
 - `CLYPT_PHASE4_META_MAX_OUTPUT_TOKENS=4096`
 - `CLYPT_PHASE4_POOL_MAX_OUTPUT_TOKENS=8192`
 
@@ -96,6 +98,7 @@ Before running the deploy:
 - expect `deploy_phase26_mi300x_services.sh` to fail fast if `.env` or `.env.local` exists on the droplet
 - expect `deploy_phase26_mi300x_services.sh` to fail fast if `GOOGLE_APPLICATION_CREDENTIALS` is not a service-account key
 - expect the deploy to prewarm Qwen, write `/etc/clypt-phase26/sg-model.env`, restart SGLang with `HF_HUB_OFFLINE=1`, and run staged SGLang acceptance profiles before starting the worker
+- expect speculative AMD profiles to use `--disable-radix-cache`; the H200 `extra_buffer` Mamba scheduler is CUDA-only in this SGLang image
 
 This deploys:
 
