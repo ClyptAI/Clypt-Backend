@@ -12,6 +12,11 @@ def _load_app_module():
         del sys.modules["scripts.modal.node_media_prep_app"]
 
     class _FakeImage:
+        local_dirs: list[tuple[object, object, dict]]
+
+        def __init__(self):
+            self.local_dirs = []
+
         @staticmethod
         def debian_slim(*_args, **_kwargs):
             return _FakeImage()
@@ -20,6 +25,10 @@ def _load_app_module():
             return self
 
         def add_local_python_source(self, *_args, **_kwargs):
+            return self
+
+        def add_local_dir(self, *args, **kwargs):
+            self.local_dirs.append((args[0], kwargs.get("remote_path"), dict(kwargs)))
             return self
 
         def pip_install(self, *_args, **_kwargs):
@@ -273,6 +282,16 @@ def test_modal_function_shapes_separate_cpu_route_from_gpu_worker() -> None:
     assert worker_kwargs["max_containers"] == 1
     assert "gpu" not in route_kwargs
     assert route_kwargs["min_containers"] == 1
+
+
+def test_media_image_includes_pinned_font_assets() -> None:
+    node_media_prep_app = _load_app_module()
+
+    assert (
+        "backend/assets",
+        "/root/backend/assets",
+        {"remote_path": "/root/backend/assets"},
+    ) in node_media_prep_app.image.local_dirs
 
 
 def test_worker_runtime_checks_require_gpu_codecs(monkeypatch) -> None:

@@ -156,12 +156,53 @@ def test_adapt_scribe_response_omits_ambiguous_untimed_tags() -> None:
     assert result.yamnet_payload.events == []
 
 
+def test_adapt_scribe_response_repairs_zero_duration_word_tokens() -> None:
+    result = adapt_scribe_response(
+        {
+            "words": [
+                {
+                    "type": "word",
+                    "text": "Wait",
+                    "start": 5.49,
+                    "end": 5.49,
+                    "speaker_id": "speaker_0",
+                },
+                {
+                    "type": "word",
+                    "text": "what",
+                    "start": 5.49,
+                    "end": 5.49,
+                    "speaker_id": "speaker_0",
+                },
+                {
+                    "type": "word",
+                    "text": "happened",
+                    "start": 5.5,
+                    "end": 5.8,
+                    "speaker_id": "speaker_0",
+                },
+            ]
+        }
+    )
+
+    words = result.diarization_payload.words
+    assert words[0]["start_ms"] == 5490
+    assert words[0]["end_ms"] == 5491
+    assert words[0]["scribe_timing_repaired"] is True
+    assert words[1]["start_ms"] == 5491
+    assert words[1]["end_ms"] == 5492
+    assert words[1]["scribe_timing_repaired"] is True
+    assert words[2]["start_ms"] == 5500
+    assert words[2]["end_ms"] == 5800
+    assert "scribe_timing_repaired" not in words[2]
+    assert result.diarization_payload.turns[0]["transcript_text"] == "Wait what happened"
+
+
 @pytest.mark.parametrize(
     ("raw", "match"),
     [
         ({}, "words list"),
         ({"words": [{"type": "word", "text": "x", "end": 0.2, "speaker_id": "speaker_0"}]}, "start"),
-        ({"words": [{"type": "word", "text": "x", "start": 0.2, "end": 0.2, "speaker_id": "speaker_0"}]}, "greater"),
         ({"words": [{"type": "word", "text": "x", "start": 0.0, "end": 0.2}]}, "speaker_id"),
         ({"words": [{"type": "audio_event", "text": "(music)", "start": 0.0, "end": 0.2}]}, "no timed word"),
     ],

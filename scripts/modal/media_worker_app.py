@@ -33,6 +33,7 @@ image = (
     .pip_install("google-auth>=2.38.0")
     .pip_install_from_requirements("requirements-modal-media-l40s.txt")
     .add_local_python_source("backend")
+    .add_local_dir("backend/assets", remote_path="/root/backend/assets")
 )
 
 

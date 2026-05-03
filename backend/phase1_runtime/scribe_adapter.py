@@ -42,6 +42,20 @@ def _ms(value: Any, *, field_name: str) -> int:
         raise ScribeAdapterError(f"Scribe item has invalid {field_name}: {value!r}") from exc
 
 
+def _repair_non_positive_word_timing(
+    *,
+    start_ms: int,
+    end_ms: int,
+    previous_word_end_ms: int | None,
+) -> tuple[int, int, bool]:
+    if end_ms > start_ms:
+        return start_ms, end_ms, False
+    repaired_start_ms = start_ms
+    if previous_word_end_ms is not None and repaired_start_ms < previous_word_end_ms:
+        repaired_start_ms = previous_word_end_ms
+    return repaired_start_ms, repaired_start_ms + 1, True
+
+
 def _speaker_id(raw_speaker: Any, mapping: dict[str, str]) -> str:
     key = str(raw_speaker or "").strip()
     if not key:
@@ -132,6 +146,7 @@ def adapt_scribe_response(
     speaker_mapping: dict[str, str] = {}
     canonical_words: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
+    previous_word_end_ms: int | None = None
 
     for item in items:
         if not isinstance(item, dict):
@@ -140,8 +155,11 @@ def adapt_scribe_response(
         if item_type == "word":
             start_ms = _ms(item.get("start"), field_name="start")
             end_ms = _ms(item.get("end"), field_name="end")
-            if end_ms <= start_ms:
-                raise ScribeAdapterError("Scribe word end must be greater than start.")
+            start_ms, end_ms, timing_repaired = _repair_non_positive_word_timing(
+                start_ms=start_ms,
+                end_ms=end_ms,
+                previous_word_end_ms=previous_word_end_ms,
+            )
             word_id = f"w_{len(canonical_words) + 1:06d}"
             word = {
                 "word_id": word_id,
@@ -151,7 +169,10 @@ def adapt_scribe_response(
                 "speaker_id": _speaker_id(item.get("speaker_id"), speaker_mapping),
                 "scribe": dict(item),
             }
+            if timing_repaired:
+                word["scribe_timing_repaired"] = True
             canonical_words.append(word)
+            previous_word_end_ms = end_ms
             continue
 
         has_timing = item.get("start") is not None and item.get("end") is not None

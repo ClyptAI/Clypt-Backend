@@ -24,7 +24,20 @@ app = modal.App("clypt-visual-l40s")
 web_app = fastapi.FastAPI()
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("ffmpeg")
+    .apt_install("ffmpeg", "ca-certificates", "gnupg", "wget")
+    .run_commands(
+        "wget -q https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb"
+        " && dpkg -i /tmp/cuda-keyring.deb"
+        " && rm /tmp/cuda-keyring.deb",
+        "apt-get update"
+        " && apt-get install -y --no-install-recommends libnvinfer-bin=10.16.1.11-1+cuda13.2"
+        " && rm -rf /var/lib/apt/lists/*",
+        "if ! command -v trtexec >/dev/null 2>&1; then"
+        " found=$(find /usr -type f -name trtexec -print -quit);"
+        ' test -n "$found";'
+        ' ln -sf "$found" /usr/local/bin/trtexec;'
+        " fi",
+    )
     .pip_install("google-cloud-storage>=2.19.0")
     .pip_install("google-auth>=2.38.0")
     .pip_install_from_requirements("requirements-modal-visual-l40s.txt")
@@ -45,7 +58,17 @@ def _require_ffmpeg() -> None:
 def _require_visual_runtime() -> None:
     _require_codec(["ffmpeg", "-hwaccels"], "cuda")
     _require_codec(["ffmpeg", "-filters"], "scale_cuda")
-    subprocess.check_output(["trtexec", "--version"], text=True)
+    trtexec_check = subprocess.run(
+        ["trtexec", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if trtexec_check.returncode != 0:
+        raise RuntimeError(
+            "trtexec is required for Modal L40S TensorRT visual extraction, "
+            f"but its health check failed: {trtexec_check.stderr[-1000:]}"
+        )
     import tensorrt  # noqa: F401
     import torch
 

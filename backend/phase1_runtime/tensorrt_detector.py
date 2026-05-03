@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 COCO_PERSON_CLASS_ID = 1
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+_RFDETR_CHECKPOINT_PE_GRID = {
+    "nano": 24,
+    "small": 32,
+}
 
 
 @dataclass(slots=True)
@@ -117,7 +121,11 @@ class TensorRTDetector:
                     "Install with: pip install 'rfdetr[onnx]'"
                 ) from exc
 
-            model = RFDETRModel(resolution=self._config.detector_resolution)
+            checkpoint_pe_grid = _RFDETR_CHECKPOINT_PE_GRID[self._config.detector_model]
+            model = RFDETRModel(
+                resolution=self._config.detector_resolution,
+                positional_encoding_size=checkpoint_pe_grid,
+            )
             model.export(
                 output_dir=str(onnx_dir),
                 batch_size=self._config.detector_batch_size,
@@ -155,12 +163,6 @@ class TensorRTDetector:
             "--fp16",
             "--skipInference",
             "--memPoolSize=workspace:4096",
-            f"--optShapes=input:{self._config.detector_batch_size}x3"
-            f"x{self._config.detector_resolution}x{self._config.detector_resolution}",
-            f"--minShapes=input:1x3"
-            f"x{self._config.detector_resolution}x{self._config.detector_resolution}",
-            f"--maxShapes=input:{self._config.detector_batch_size}x3"
-            f"x{self._config.detector_resolution}x{self._config.detector_resolution}",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:

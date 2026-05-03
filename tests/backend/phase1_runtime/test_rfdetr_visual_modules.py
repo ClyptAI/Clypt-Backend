@@ -247,6 +247,52 @@ class TestTensorRTDetector:
 
         assert det._ensure_engine() == config.tensorrt_engine_path
 
+    def test_ensure_engine_preserves_checkpoint_pe_grid_for_640_export(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
+        from backend.phase1_runtime.visual_config import VisualPipelineConfig
+
+        config = VisualPipelineConfig(
+            detector_model="nano",
+            detector_backend="tensorrt_fp16",
+            detector_batch_size=2,
+            detection_threshold=0.35,
+            detector_resolution=640,
+            tracker_backend="bytetrack",
+            tracker_lost_buffer=30,
+            tracker_match_threshold=0.8,
+            frame_decode_backend="gpu",
+            gpu_decode_backend="nvdec",
+            detector_artifact_dir=str(tmp_path / "engines"),
+        )
+        captured: dict[str, object] = {}
+
+        class _FakeRFDETRNano:
+            def __init__(self, **kwargs):
+                captured["init_kwargs"] = kwargs
+
+            def export(self, *, output_dir, **kwargs):
+                captured["export_kwargs"] = kwargs
+                Path(output_dir, "inference_model.onnx").write_bytes(b"onnx")
+
+        fake_rfdetr = SimpleNamespace(RFDETRNano=_FakeRFDETRNano)
+        monkeypatch.setitem(sys.modules, "rfdetr", fake_rfdetr)
+
+        det = TensorRTDetector(config)
+        monkeypatch.setattr(
+            det,
+            "_convert_onnx_to_engine",
+            lambda _onnx_path, engine_path: engine_path.write_bytes(b"engine"),
+        )
+
+        assert det._ensure_engine() == config.tensorrt_engine_path
+        assert captured["init_kwargs"] == {
+            "resolution": 640,
+            "positional_encoding_size": 24,
+        }
+        assert captured["export_kwargs"]["shape"] == (640, 640)
+
     def test_convert_onnx_to_engine_uses_skip_inference_cli(self, tmp_path: Path, monkeypatch):
         from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
 
@@ -269,6 +315,9 @@ class TestTensorRTDetector:
         assert engine_path.exists()
         assert "--skipInference" in captured["cmd"]
         assert f"--saveEngine={engine_path}" in captured["cmd"]
+        assert not any(arg.startswith("--minShapes=") for arg in captured["cmd"])
+        assert not any(arg.startswith("--optShapes=") for arg in captured["cmd"])
+        assert not any(arg.startswith("--maxShapes=") for arg in captured["cmd"])
 
     def test_postprocess_decodes_class_logits_before_thresholding(self, tmp_path: Path, monkeypatch):
         import types

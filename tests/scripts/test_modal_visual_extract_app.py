@@ -11,6 +11,11 @@ def _load_app_module():
         del sys.modules["scripts.modal.visual_extract_app"]
 
     class _FakeImage:
+        commands: list[str]
+
+        def __init__(self):
+            self.commands = []
+
         @staticmethod
         def debian_slim(*_args, **_kwargs):
             return _FakeImage()
@@ -25,6 +30,10 @@ def _load_app_module():
             return self
 
         def pip_install_from_requirements(self, *_args, **_kwargs):
+            return self
+
+        def run_commands(self, *commands, **_kwargs):
+            self.commands.extend(commands)
             return self
 
     class _FakeSecret:
@@ -160,3 +169,47 @@ def test_visual_extract_gpu_function_is_dedicated_l40s() -> None:
     assert kwargs["gpu"] == "L40S"
     assert kwargs["min_containers"] == 1
     assert kwargs["max_containers"] == 1
+
+
+def test_visual_extract_image_installs_trtexec() -> None:
+    visual_extract_app = _load_app_module()
+    commands = "\n".join(visual_extract_app.image.commands)
+    assert "libnvinfer-bin" in commands
+    assert "trtexec" in commands
+
+
+def test_require_visual_runtime_uses_trtexec_help(monkeypatch) -> None:
+    visual_extract_app = _load_app_module()
+
+    monkeypatch.setitem(sys.modules, "tensorrt", types.SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: True),
+        ),
+    )
+
+    check_output_calls: list[list[str]] = []
+
+    def _fake_check_output(cmd, **_kwargs):
+        check_output_calls.append(cmd)
+        if cmd == ["ffmpeg", "-hwaccels"]:
+            return "cuda\n"
+        if cmd == ["ffmpeg", "-filters"]:
+            return "scale_cuda\n"
+        raise AssertionError(f"unexpected check_output command: {cmd}")
+
+    run_calls: list[list[str]] = []
+
+    def _fake_run(cmd, **_kwargs):
+        run_calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(visual_extract_app.subprocess, "check_output", _fake_check_output)
+    monkeypatch.setattr(visual_extract_app.subprocess, "run", _fake_run)
+
+    visual_extract_app._require_visual_runtime()
+
+    assert check_output_calls == [["ffmpeg", "-hwaccels"], ["ffmpeg", "-filters"]]
+    assert run_calls == [["trtexec", "--help"]]

@@ -7,6 +7,28 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-05-03 - Modal L40S visual/media cold-run assets were incomplete
+
+- **Date/Time (UTC):** 2026-05-03 22:00-22:33 UTC
+- **Subsystem:** Modal visual L40S TensorRT RF-DETR (`scripts/modal/visual_extract_app.py`, `backend/phase1_runtime/tensorrt_detector.py`) and Modal media L40S Phase6 render (`scripts/modal/media_worker_app.py`, `backend/runtime/phase6_render.py`)
+- **Environment:** Modal profile `testifytestprep`, apps `clypt-visual-l40s` and `clypt-media-l40s`; DO MI300X orchestrator/Phase26 host `clypt-phase26-mi300x-atl1`; test-bank URL `https://youtu.be/2jW9lmlfiKQ?si=BJTUvwWnSCxDD_f6`
+- **Symptom / Error signature:** The first live end-to-end attempts advanced through Scribe and Phase2-4, then failed at the visual join with sequential RF-DETR/TensorRT bootstrap errors: missing `trtexec`, `trtexec --version` exiting nonzero with `Model missing`, RF-DETR `1.6.5.post0` checkpoint mismatch for `position_embeddings` (`[1, 577, 384]` vs `[1, 1601, 384]`), and TensorRT rejecting `--minShapes/--optShapes/--maxShapes` for a static ONNX export. After visual was fixed, the next run failed in Phase6 render with `ValueError: missing pinned font asset 'montserrat_extra_bold_v1' in /root/backend/assets/fonts`.
+- **Root cause:** The Modal visual image installed the TensorRT Python wheel but not the `trtexec` binary, then checked `trtexec` with an unsupported `--version` probe. RF-DETR Nano needed the checkpoint-native positional-encoding grid (`24`) while still exporting/running at the configured `640` resolution. The TensorRT conversion command assumed a dynamic ONNX graph, but RF-DETR exported a fixed `16x3x640x640` graph. Separately, the Modal media image mounted the Python package but did not mount repo-local font assets needed by libass/Phase6 render.
+- **Fix applied:** Installed pinned TensorRT CLI packages in the Modal visual image, switched the runtime probe to `trtexec --help`, preserved RF-DETR Nano/Small checkpoint PE grids (`24`/`32`) during 640 export, and removed explicit TensorRT shape-profile flags for the static ONNX graph. Mounted `backend/assets` into the Modal media image at `/root/backend/assets` so pinned caption fonts are available to Phase6 render.
+- **Verification evidence:** Focused local suites passed after the fixes (`49 passed, 5 warnings` across Modal media/visual, Phase6 render, RF-DETR visual modules, Scribe adapter, and storage/Phase1 runtime tests), plus compile checks for `scripts/modal`, `backend/runtime`, and `backend/phase1_runtime`. Modal visual and media apps both redeployed and returned `{"status":"ok"}`. Live rerun `job_e9f3565f0d2049b7827a54021a89867f` / Phase26 task `c32819f7-b6e5-473a-b9ff-914eb639f3e7` completed successfully: Scribe `78,471.6 ms`, adapter `9.1 ms`, Phase2 `80,339.2 ms`, Phase3 `37.5 ms`, Phase4 `15,132.3 ms`, visual join `8,410.1 ms` with `43,271` tracks and `60` shot changes, Phase6 render `87,402.0 ms`, and Phase24 terminal success in `198,553.4 ms`.
+- **Follow-up guardrails:** Treat Modal deploy health as only the CPU route smoke. First real L40S job must still prove GPU-side binaries, model export, TensorRT build/load, and repo-local non-Python assets. Any future `add_local_python_source(...)` deployment that uses runtime assets must explicitly mount the asset directory too.
+
+## 2026-05-03 - ElevenLabs Scribe emitted zero-duration word tokens
+
+- **Date/Time (UTC):** 2026-05-03 21:33-21:45 UTC
+- **Subsystem:** Phase1 Scribe v2 adapter (`backend/phase1_runtime/scribe_adapter.py`)
+- **Environment:** MI300X orchestrator `clypt-phase26-mi300x-atl1`, test-bank URL `https://youtu.be/2jW9lmlfiKQ?si=BJTUvwWnSCxDD_f6`, canonical asset `mrbeastflagrant.wav`
+- **Symptom / Error signature:** Phase1 submitted Modal RF-DETR and Scribe successfully, then failed during Scribe adaptation with `ScribeAdapterError: Scribe word end must be greater than start.` The Scribe stage metric still showed a successful API response in about `75,452.6 ms`.
+- **Root cause:** ElevenLabs Scribe v2 can return `type=word` tokens with `start == end`. A focused probe on the same canonical audio returned `1,737` word tokens and `118` zero-duration word tokens. The adapter treated those provider edge-case timestamps as fatal even though the raw token text, speaker, and timestamp anchor were present.
+- **Fix applied:** The adapter still fails hard for missing/non-numeric timing and missing speaker IDs, but now repairs non-positive word durations to a one-millisecond positive interval, preserving the raw Scribe item and marking repaired tokens with `scribe_timing_repaired=true`.
+- **Verification evidence:** Focused Scribe adapter tests passed locally (`13 passed, 1 warning`) including a regression for repeated zero-duration words at the same timestamp. Live rerun `job_e9f3565f0d2049b7827a54021a89867f` on the same test-bank URL completed Scribe in `78,471.6 ms`, adapted `1,710` canonical words and `1,655` audio events in `9.1 ms`, handed off to Phase26, and the downstream Phase26 task completed successfully.
+- **Follow-up guardrails:** Do not drop zero-duration Scribe words; dropping them loses caption/semantic text. Keep the raw Scribe item on each canonical word so future caption tuning can inspect repaired tokens.
+
 ## 2026-05-03 - Modal L40S deploy defaulted to an unsupported Python runtime
 
 - **Date/Time (UTC):** 2026-05-03 19:35-19:45 UTC
