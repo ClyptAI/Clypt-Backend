@@ -5,6 +5,8 @@
 **Owner:** Phase1 runtime / Phase26 runtime / Modal media workers
 **Scope:** Refactor the AMD branch topology so Phase26 keeps self-hosted Qwen on one MI300X, Phase1 replaces VibeVoice + NFA + emotion2vec+ + YAMNet with ElevenLabs Scribe v2, and NVIDIA-native visual/media work moves to two persistent Modal L40S pools: one for RF-DETR visual extraction and one shared by node-media-prep plus Phase 6 render/export.
 
+> 2026-05-04 implementation note: the topology, Scribe path, Modal visual path, and Modal media/render submit-poll path are implemented on `AMD-refactor`, but Phase5-less auto-follow render quality is **not accepted**. Latest reviewed clips rendered as valid vertical MP4s, but tracking/subject selection was poor and crop motion was still not smooth enough. Treat auto-follow rendering as an experimental fallback until a dedicated tracking/crop-quality pass lands; manual Phase5 grounding remains the production-quality route.
+
 ---
 
 ## 1. Locked Decisions
@@ -526,8 +528,10 @@ CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN=<secret>
 CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S=7200
 CLYPT_PHASE1_VISUAL_MODEL=nano
 CLYPT_PHASE1_VISUAL_BATCH_SIZE=16
-CLYPT_PHASE1_VISUAL_THRESHOLD=0.35
+CLYPT_PHASE1_VISUAL_THRESHOLD=0.85
 CLYPT_PHASE1_VISUAL_SHAPE=640
+CLYPT_PHASE1_VISUAL_POSE_VALIDATION=1
+CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH=yolo11s-pose.pt
 ```
 
 ### 7.3 Modal Visual Worker
@@ -538,9 +542,11 @@ GCS_BUCKET=clypt-storage-v3
 GOOGLE_APPLICATION_CREDENTIALS_JSON=<secret>
 CLYPT_MODAL_VISUAL_MODEL=nano
 CLYPT_MODAL_VISUAL_BATCH_SIZE=16
-CLYPT_MODAL_VISUAL_THRESHOLD=0.35
+CLYPT_MODAL_VISUAL_THRESHOLD=0.85
 CLYPT_MODAL_VISUAL_SHAPE=640
 CLYPT_MODAL_VISUAL_BACKEND=tensorrt
+CLYPT_PHASE1_VISUAL_POSE_VALIDATION=1
+CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH=yolo11s-pose.pt
 CLYPT_MODAL_VISUAL_MAX_CONCURRENT_JOBS=1
 ```
 

@@ -17,7 +17,7 @@ class TestVisualPipelineConfig:
         assert config.detector_model == "nano"
         assert config.detector_backend == "tensorrt_fp16"
         assert config.detector_batch_size == 16
-        assert config.detection_threshold == pytest.approx(0.35)
+        assert config.detection_threshold == pytest.approx(0.85)
         assert config.detector_resolution == 640
         assert config.tracker_backend == "bytetrack"
         assert config.frame_decode_backend == "gpu"
@@ -225,6 +225,20 @@ class TestTensorRTDetector:
         with pytest.raises(RuntimeError, match="not loaded"):
             det.detect_batch([np.zeros((10, 10, 3), dtype=np.uint8)])
 
+    def test_prepare_execution_stream_waits_for_current_torch_stream(self, tmp_path: Path):
+        from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
+
+        det = TensorRTDetector(self._make_config(tmp_path))
+        waits: list[object] = []
+        det._stream = SimpleNamespace(wait_stream=lambda stream: waits.append(stream))
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(current_stream=lambda: "torch-default-stream")
+        )
+
+        det._prepare_execution_stream(fake_torch)
+
+        assert waits == ["torch-default-stream"]
+
     def test_require_cuda_fails_without_cuda(self, monkeypatch):
         from backend.phase1_runtime.tensorrt_detector import _require_cuda
 
@@ -355,6 +369,81 @@ class TestTensorRTDetector:
         assert detections[0].xyxy.shape == (1, 4)
         assert detections[0].class_id.tolist() == [COCO_PERSON_CLASS_ID]
 
+    def test_postprocess_decodes_normalized_cxcywh_boxes_to_source_xyxy(
+        self, tmp_path: Path, monkeypatch
+    ):
+        import types
+
+        from backend.phase1_runtime.tensorrt_detector import COCO_PERSON_CLASS_ID, TensorRTDetector
+
+        det = TensorRTDetector(self._make_config(tmp_path))
+
+        class FakeDetections:
+            def __init__(self, *, xyxy, confidence, class_id):
+                self.xyxy = xyxy
+                self.confidence = confidence
+                self.class_id = class_id
+
+        monkeypatch.setitem(
+            sys.modules,
+            "supervision",
+            types.SimpleNamespace(Detections=FakeDetections),
+        )
+
+        boxes = np.array([[[0.5, 0.5, 0.25, 0.5]]], dtype=np.float32)
+        logits = np.full((1, 1, 91), -20.0, dtype=np.float32)
+        logits[0, 0, COCO_PERSON_CLASS_ID] = 8.0
+
+        detections = det._postprocess(
+            boxes=boxes,
+            scores=logits,
+            labels=np.zeros_like(logits, dtype=np.int32),
+            orig_sizes=[(1080, 1920)],
+            batch_len=1,
+        )
+
+        assert detections[0].xyxy.tolist() == [[720.0, 270.0, 1200.0, 810.0]]
+
+    def test_postprocess_applies_person_nms_before_tracking(self, tmp_path: Path, monkeypatch):
+        import types
+
+        from backend.phase1_runtime.tensorrt_detector import COCO_PERSON_CLASS_ID, TensorRTDetector
+
+        det = TensorRTDetector(self._make_config(tmp_path))
+
+        class FakeDetections:
+            def __init__(self, *, xyxy, confidence, class_id):
+                self.xyxy = xyxy
+                self.confidence = confidence
+                self.class_id = class_id
+
+        monkeypatch.setitem(
+            sys.modules,
+            "supervision",
+            types.SimpleNamespace(Detections=FakeDetections),
+        )
+
+        boxes = np.array(
+            [
+                [
+                    [0.5, 0.5, 0.25, 0.5],
+                    [0.51, 0.5, 0.25, 0.5],
+                    [0.1, 0.5, 0.1, 0.4],
+                ]
+            ],
+            dtype=np.float32,
+        )
+        detections = det._postprocess(
+            boxes=boxes,
+            scores=np.array([[0.99, 0.9, 0.8]], dtype=np.float32),
+            labels=np.array([[COCO_PERSON_CLASS_ID, COCO_PERSON_CLASS_ID, COCO_PERSON_CLASS_ID]], dtype=np.int32),
+            orig_sizes=[(1080, 1920)],
+            batch_len=1,
+        )
+
+        assert detections[0].xyxy.shape == (2, 4)
+        assert detections[0].xyxy.tolist()[0] == [720.0, 270.0, 1200.0, 810.0]
+
 
 class TestDetectorFactory:
     def test_factory_rejects_non_tensorrt_backend(self):
@@ -398,6 +487,133 @@ class TestDetectorFactory:
         )
 
         assert isinstance(_make_detector(config), TensorRTDetector)
+
+
+class TestRfdetrTrackingPipeline:
+    def _make_config(self, tmp_path: Path):
+        from backend.phase1_runtime.visual_config import VisualPipelineConfig
+
+        return VisualPipelineConfig(
+            detector_model="nano",
+            detector_backend="tensorrt_fp16",
+            detector_batch_size=16,
+            detection_threshold=0.85,
+            detector_resolution=640,
+            tracker_backend="bytetrack",
+            tracker_lost_buffer=30,
+            tracker_match_threshold=0.8,
+            frame_decode_backend="gpu",
+            gpu_decode_backend="nvdec",
+            detector_artifact_dir=str(tmp_path / "engines"),
+        )
+
+    def test_resets_tracker_at_shot_cut_and_emits_raw_detections(
+        self, monkeypatch, tmp_path: Path
+    ):
+        from backend.phase1_runtime.frame_decode import DecodedFrame
+        from backend.phase1_runtime.tracker_runtime import TrackRow
+        from backend.phase1_runtime.visual import _run_rfdetr_tracking_pipeline
+
+        class FakeDetections:
+            def __init__(self, offset: float) -> None:
+                self.xyxy = np.array([[offset, 20.0, offset + 30.0, 80.0]], dtype=np.float32)
+                self.confidence = np.array([0.91], dtype=np.float32)
+                self.class_id = np.array([1], dtype=np.int32)
+
+            def __len__(self) -> int:
+                return len(self.xyxy)
+
+        class FakeDetector:
+            def __init__(self, _config) -> None:
+                self.metrics = SimpleNamespace(
+                    frames_processed=0,
+                    mean_detector_latency_ms=0.0,
+                    warmup_ms=0.0,
+                )
+
+            def load(self) -> None:
+                return None
+
+            def detect_batch(self, frames, *, orig_sizes=None):  # noqa: ARG002
+                self.metrics.frames_processed += len(frames)
+                return [FakeDetections(float(index * 10)) for index, _ in enumerate(frames)]
+
+            def unload(self) -> None:
+                return None
+
+        events: list[tuple[str, int | None]] = []
+
+        class FakeTracker:
+            def __init__(self, _config) -> None:
+                self.metrics = SimpleNamespace(mean_tracker_latency_ms=0.0, resets=0)
+
+            def initialize(self, *, frame_rate: float = 30.0) -> None:  # noqa: ARG002
+                events.append(("init", None))
+
+            def reset(self) -> None:
+                events.append(("reset", None))
+                self.metrics.resets += 1
+
+            def update(self, *, frame_idx: int, detections) -> list[TrackRow]:
+                events.append(("update", frame_idx))
+                return [
+                    TrackRow(
+                        frame_idx=frame_idx,
+                        track_id=7,
+                        x1=float(detections.xyxy[0][0]),
+                        y1=20.0,
+                        x2=float(detections.xyxy[0][2]),
+                        y2=80.0,
+                        confidence=0.91,
+                        class_id=1,
+                    )
+                ]
+
+        def fake_decode_video_frames(**_kwargs):
+            for frame_idx in (0, 9, 10, 11):
+                yield DecodedFrame(
+                    frame_idx=frame_idx,
+                    rgb=np.zeros((2, 2, 3), dtype=np.uint8),
+                    source_width=1920,
+                    source_height=1080,
+                )
+
+        def fake_batch_frames(frame_stream, *, batch_size):  # noqa: ARG001
+            yield list(frame_stream)
+
+        monkeypatch.setattr("backend.phase1_runtime.visual._make_detector", FakeDetector)
+        monkeypatch.setattr(
+            "backend.phase1_runtime.frame_decode.decode_video_frames",
+            fake_decode_video_frames,
+        )
+        monkeypatch.setattr("backend.phase1_runtime.frame_decode.batch_frames", fake_batch_frames)
+        monkeypatch.setattr(
+            "backend.phase1_runtime.tracker_runtime.ByteTrackTrackerRuntime",
+            FakeTracker,
+        )
+
+        tracks, raw_detections, metrics = _run_rfdetr_tracking_pipeline(
+            video_path=tmp_path / "video.mp4",
+            config=self._make_config(tmp_path),
+            shot_segments=[
+                {"start_time_ms": 0, "end_time_ms": 1000},
+                {"start_time_ms": 1000, "end_time_ms": 2000},
+            ],
+            video_fps=10.0,
+        )
+
+        assert events == [
+            ("init", None),
+            ("update", 0),
+            ("update", 9),
+            ("reset", None),
+            ("update", 10),
+            ("update", 11),
+        ]
+        assert [row["frame_idx"] for row in tracks] == [0, 9, 10, 11]
+        assert [row["frame_idx"] for row in raw_detections] == [0, 9, 10, 11]
+        assert raw_detections[0]["source"] == "rfdetr_raw"
+        assert metrics["tracker_resets_at_shot_boundaries"] == 1
 
 
 class TestVisualExtractorArtifactContract:

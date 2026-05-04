@@ -22,6 +22,17 @@ class VisualPipelineConfig:
     frame_decode_backend: str
     gpu_decode_backend: str
     detector_artifact_dir: str
+    pose_validation_enabled: bool = True
+    pose_model_path: str = "yolo11s-pose.pt"
+    pose_imgsz: int = 640
+    pose_batch_size: int = 16
+    pose_max_samples_per_tracklet: int = 24
+    pose_min_rfdetr_confidence: float = 0.85
+    pose_min_head_evidence_ratio: float = 0.40
+    pose_min_upper_body_anchor_ratio: float = 0.25
+    pose_keypoint_confidence: float = 0.40
+    pose_confidence: float = 0.30
+    pose_crop_padding_ratio: float = 0.08
     torch_compile: bool = False
 
     PERSON_CLASS_ID: int = 0
@@ -32,7 +43,7 @@ class VisualPipelineConfig:
             detector_model=_env("CLYPT_PHASE1_VISUAL_MODEL", "nano"),
             detector_backend=_env("CLYPT_PHASE1_VISUAL_BACKEND", "tensorrt_fp16"),
             detector_batch_size=int(_env("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "16")),
-            detection_threshold=float(_env("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.35")),
+            detection_threshold=float(_env("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.85")),
             detector_resolution=int(_env("CLYPT_PHASE1_VISUAL_SHAPE", "640")),
             tracker_backend=_env("CLYPT_PHASE1_VISUAL_TRACKER", "bytetrack"),
             tracker_lost_buffer=int(_env("CLYPT_PHASE1_VISUAL_TRACKER_BUFFER", "30")),
@@ -44,6 +55,29 @@ class VisualPipelineConfig:
             detector_artifact_dir=_env(
                 "CLYPT_PHASE1_VISUAL_ARTIFACT_DIR",
                 "backend/outputs/phase1_visual",
+            ),
+            pose_validation_enabled=_env("CLYPT_PHASE1_VISUAL_POSE_VALIDATION", "1") == "1",
+            pose_model_path=_env("CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH", "yolo11s-pose.pt"),
+            pose_imgsz=int(_env("CLYPT_PHASE1_VISUAL_POSE_IMGSZ", "640")),
+            pose_batch_size=int(_env("CLYPT_PHASE1_VISUAL_POSE_BATCH_SIZE", "16")),
+            pose_max_samples_per_tracklet=int(
+                _env("CLYPT_PHASE1_VISUAL_POSE_MAX_SAMPLES_PER_TRACKLET", "24")
+            ),
+            pose_min_rfdetr_confidence=float(
+                _env("CLYPT_PHASE1_VISUAL_POSE_MIN_RFDETR_CONFIDENCE", "0.85")
+            ),
+            pose_min_head_evidence_ratio=float(
+                _env("CLYPT_PHASE1_VISUAL_POSE_MIN_HEAD_EVIDENCE_RATIO", "0.40")
+            ),
+            pose_min_upper_body_anchor_ratio=float(
+                _env("CLYPT_PHASE1_VISUAL_POSE_MIN_UPPER_BODY_ANCHOR_RATIO", "0.25")
+            ),
+            pose_keypoint_confidence=float(
+                _env("CLYPT_PHASE1_VISUAL_POSE_KEYPOINT_CONFIDENCE", "0.40")
+            ),
+            pose_confidence=float(_env("CLYPT_PHASE1_VISUAL_POSE_CONFIDENCE", "0.30")),
+            pose_crop_padding_ratio=float(
+                _env("CLYPT_PHASE1_VISUAL_POSE_CROP_PADDING_RATIO", "0.08")
             ),
             torch_compile=_env("CLYPT_PHASE1_VISUAL_TORCH_COMPILE", "0") == "1",
         )
@@ -97,6 +131,12 @@ class VisualPipelineConfig:
             f"_r{self.detector_resolution}"
             f"_fp16.engine"
         )
+        return Path(self.detector_artifact_dir) / name
+
+    @property
+    def pose_engine_path(self) -> Path:
+        model_stem = Path(self.pose_model_path).stem.replace(".", "_")
+        name = f"{model_stem}_b{self.pose_batch_size}_r{self.pose_imgsz}_fp16.engine"
         return Path(self.detector_artifact_dir) / name
 
 

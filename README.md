@@ -86,6 +86,8 @@ Modal currently handles visual extraction plus media-prep/render:
 - one shared warm media `L40S` worker via `media_gpu_job`
 - timeline-batched ffmpeg GPU path for clip extraction/encoding before multimodal embedding
 
+Current render caveat: the Phase5-less auto-follow render fallback is implemented and produces valid vertical MP4s, but the latest reviewed clips were still unacceptable: tracking/subject selection was poor and crop motion was not smooth enough. Treat that fallback as experimental until the tracking and crop planner are repaired; manual Phase5 grounding remains the expected path for production-quality renders.
+
 ## End-to-End Flow
 
 ```mermaid

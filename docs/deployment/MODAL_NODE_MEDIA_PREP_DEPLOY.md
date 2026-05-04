@@ -123,3 +123,12 @@ Current known-good deployed endpoints:
 - `https://testifytestprep--clypt-visual-l40s-visual-extract.modal.run/tasks/visual-extract`
 - `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/node-media-prep`
 - `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/render-video`
+
+For ad hoc live tests, stop the persistent apps when warm GPUs should not remain allocated:
+
+```bash
+modal app stop clypt-visual-l40s --yes
+modal app stop clypt-media-l40s --yes
+```
+
+Stopping the apps is an operator cost-control action; it does not remove the checked-in deploy definitions. Redeploy with the commands above when the next live test begins.

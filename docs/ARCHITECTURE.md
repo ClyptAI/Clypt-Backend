@@ -1,7 +1,7 @@
 # ARCHITECTURE
 
 **Status:** Active Scribe/Modal + Phase26 MI300X topology
-**Last updated:** 2026-05-02
+**Last updated:** 2026-05-04
 
 This document describes the current `AMD-refactor` topology: Phase1 orchestration colocated on the DigitalOcean MI300X host's vCPUs, Phase26/Qwen on the same MI300X GPU host, and two persistent Modal L40S GPU workers.
 
@@ -66,14 +66,20 @@ The active visual fast path is Modal L40S only:
 - Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
 - `CLYPT_PHASE1_VISUAL_MODEL=nano`
 - `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`
-- `CLYPT_PHASE1_VISUAL_THRESHOLD=0.35`
+- `CLYPT_PHASE1_VISUAL_THRESHOLD=0.85`
 - `CLYPT_PHASE1_VISUAL_SHAPE=640`
 - `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
+- sampled YOLO11s-pose TensorRT validation marks `auto_follow_eligible` tracklets and stores source-space pose anchors for Phase5-less render auto-follow
+- Phase5-less render auto-follow locks one pose-qualified subject tracklet per shot and emits a smooth `tracklet_follow_9x16_smooth_inside_person` crop path rather than caption-segment crop jumps
 - Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt`; the worker sets internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`.
 - ByteTrack buffer `30`
 - ByteTrack match threshold `0.7`
 
 The worker fails hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, or RF-DETR dependencies are unavailable. There is no software decode, CPU detector, VAAPI, or PyTorch ROCm fallback path.
+
+### Current Render Quality Caveat
+
+The Phase5-less auto-follow render path is implemented but **not accepted as production-quality**. The latest Modal render replay proved that the technical crop/render contract runs end-to-end and emits valid `1080x1920` MP4s, but the clips still looked terrible in review: crop movement was not smooth enough and subject tracking/selection was visibly wrong in places. Treat `tracklet_follow_9x16_smooth_inside_person` as an experimental fallback for Phase5-less demos only. The production path still needs a tracking/crop-quality pass before it can replace manual Phase5 grounding.
 
 ## 5) Phase26
 

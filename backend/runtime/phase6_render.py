@@ -17,6 +17,10 @@ from backend.pipeline.render.presets import load_caption_presets
 from backend.providers.storage import parse_gcs_uri
 
 
+_TARGET_WIDTH = 1080
+_TARGET_HEIGHT = 1920
+
+
 @dataclass(slots=True)
 class Phase6RenderRequest:
     run_id: str
@@ -67,12 +71,240 @@ def _ass_uri(request: Phase6RenderRequest, clip_id: str) -> str:
     return uri
 
 
-def _ffmpeg_filter(*, ass_path: Path, fonts_dir: Path) -> str:
+def _even(value: float) -> int:
+    return max(2, int(round(value / 2.0) * 2))
+
+
+def _clamp(value: int, lower: int, upper: int) -> int:
+    return max(lower, min(value, upper))
+
+
+def _probe_video_dimensions(source_video_path: Path) -> tuple[int, int]:
+    output = subprocess.check_output(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+            str(source_video_path),
+        ],
+        text=True,
+    )
+    width_text, height_text = output.strip().replace("x", ",").split(",", maxsplit=1)
+    width = int(width_text)
+    height = int(height_text)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"invalid source video dimensions {width}x{height}")
+    return width, height
+
+
+def _step_expression(*, cases: list[tuple[float, float, int]], default_value: int) -> str:
+    expression = str(default_value)
+    for start_s, end_s, value in reversed(cases):
+        expression = f"if(between(t\\,{start_s:.3f}\\,{end_s:.3f})\\,{value}\\,{expression})"
+    return expression
+
+
+def _linear_expression(*, keyframes: list[dict[str, Any]], axis: str, default_value: int) -> str:
+    points = [
+        (max(0.0, float(keyframe.get("time_ms") or 0) / 1000.0), float(keyframe.get(axis) or 0.0))
+        for keyframe in keyframes
+    ]
+    points.sort(key=lambda item: item[0])
+    if not points:
+        return str(default_value)
+    if len(points) == 1:
+        return str(_even(points[0][1]))
+
+    expression = f"{points[-1][1]:.3f}"
+    for (start_s, start_value), (end_s, end_value) in reversed(list(zip(points, points[1:]))):
+        if end_s <= start_s:
+            continue
+        delta = end_value - start_value
+        segment = (
+            f"({start_value:.3f}+({delta:.3f})*(t-{start_s:.3f})/"
+            f"{(end_s - start_s):.3f})"
+        )
+        expression = (
+            f"if(between(t\\,{start_s:.3f}\\,{end_s:.3f})\\,"
+            f"{segment}\\,{expression})"
+        )
+    first_s, first_value = points[0]
+    return f"if(lte(t\\,{first_s:.3f})\\,{first_value:.3f}\\,{expression})"
+
+
+def _interpolated_keyframe_value(
+    *,
+    points: list[tuple[float, float]],
+    timestamp_s: float,
+    default_value: int,
+) -> float:
+    if not points:
+        return float(default_value)
+    if timestamp_s <= points[0][0]:
+        return points[0][1]
+    for (start_s, start_value), (end_s, end_value) in zip(points, points[1:]):
+        if end_s <= start_s:
+            continue
+        if start_s <= timestamp_s <= end_s:
+            progress = (timestamp_s - start_s) / (end_s - start_s)
+            return start_value + ((end_value - start_value) * progress)
+    return points[-1][1]
+
+
+def _write_crop_sendcmd_file(
+    *,
+    keyframes: list[dict[str, Any]],
+    command_path: Path,
+    output_fps: int,
+    default_x: int,
+    default_y: int,
+) -> None:
+    x_points = [
+        (max(0.0, float(keyframe.get("time_ms") or 0) / 1000.0), float(keyframe.get("x") or default_x))
+        for keyframe in keyframes
+    ]
+    y_points = [
+        (max(0.0, float(keyframe.get("time_ms") or 0) / 1000.0), float(keyframe.get("y") or default_y))
+        for keyframe in keyframes
+    ]
+    x_points.sort(key=lambda item: item[0])
+    y_points.sort(key=lambda item: item[0])
+    last_time_s = max([point[0] for point in x_points + y_points], default=0.0)
+    frame_step_s = 1.0 / max(1, int(output_fps))
+    frame_count = max(1, int(last_time_s / frame_step_s) + 2)
+    lines: list[str] = []
+    previous_x: int | None = None
+    previous_y: int | None = None
+    for frame_index in range(frame_count + 1):
+        timestamp_s = min(last_time_s, frame_index * frame_step_s)
+        x = _even(_interpolated_keyframe_value(points=x_points, timestamp_s=timestamp_s, default_value=default_x))
+        y = _even(_interpolated_keyframe_value(points=y_points, timestamp_s=timestamp_s, default_value=default_y))
+        if previous_x == x and previous_y == y and frame_index < frame_count:
+            continue
+        previous_x, previous_y = x, y
+        lines.append(f"{timestamp_s:.3f} crop@follow x {x}, crop@follow y {y};")
+    command_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _crop_filter_from_plan(
+    *,
+    crop_plan: dict[str, Any],
+    source_dimensions: tuple[int, int],
+    crop_command_path: Path | None = None,
+    output_fps: int = 30,
+) -> str:
+    source_width, source_height = source_dimensions
+    keyframes = list(crop_plan.get("keyframes") or [])
+    if keyframes:
+        crop_width = _clamp(
+            _even(float(crop_plan.get("crop_width") or 0)),
+            2,
+            source_width,
+        )
+        crop_height = _clamp(
+            _even(float(crop_plan.get("crop_height") or 0)),
+            2,
+            source_height,
+        )
+        default_x = _even((source_width - crop_width) / 2.0)
+        default_y = _even((source_height - crop_height) / 2.0)
+        if crop_command_path is not None:
+            first_x = _even(float(keyframes[0].get("x") or default_x))
+            first_y = _even(float(keyframes[0].get("y") or default_y))
+            _write_crop_sendcmd_file(
+                keyframes=keyframes,
+                command_path=crop_command_path,
+                output_fps=output_fps,
+                default_x=default_x,
+                default_y=default_y,
+            )
+            return (
+                f"sendcmd=f={crop_command_path},"
+                f"crop@follow={crop_width}:{crop_height}:{first_x}:{first_y},"
+                f"scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}"
+            )
+        x_expr = _linear_expression(
+            keyframes=keyframes,
+            axis="x",
+            default_value=default_x,
+        )
+        y_expr = _linear_expression(
+            keyframes=keyframes,
+            axis="y",
+            default_value=default_y,
+        )
+        return f"crop={crop_width}:{crop_height}:{x_expr}:{y_expr},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}"
+
+    target_aspect = _TARGET_WIDTH / _TARGET_HEIGHT
+    source_aspect = source_width / source_height
+    if source_aspect > target_aspect:
+        crop_width = _even(source_height * target_aspect)
+        crop_height = source_height
+    else:
+        crop_width = source_width
+        crop_height = _even(source_width / target_aspect)
+
+    default_x = _even((source_width - crop_width) / 2.0)
+    default_y = _even((source_height - crop_height) / 2.0)
+    x_cases: list[tuple[float, float, int]] = []
+    y_cases: list[tuple[float, float, int]] = []
+    for segment in crop_plan.get("segments", []):
+        bbox = segment.get("bbox_xyxy") or []
+        if len(bbox) < 4:
+            continue
+        start_s = max(0.0, float(segment.get("start_ms") or 0) / 1000.0)
+        end_s = max(start_s, float(segment.get("end_ms") or 0) / 1000.0)
+        center_x = (float(bbox[0]) + float(bbox[2])) / 2.0
+        center_y = (float(bbox[1]) + float(bbox[3])) / 2.0
+        x = _clamp(_even(center_x - (crop_width / 2.0)), 0, source_width - crop_width)
+        y = _clamp(_even(center_y - (crop_height / 2.0)), 0, source_height - crop_height)
+        x_cases.append((start_s, end_s, x))
+        y_cases.append((start_s, end_s, y))
+
+    if not x_cases:
+        return (
+            f"scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={_TARGET_WIDTH}:{_TARGET_HEIGHT}"
+        )
+
+    x_expr = _step_expression(cases=x_cases, default_value=default_x)
+    y_expr = _step_expression(cases=y_cases, default_value=default_y)
+    return f"crop={crop_width}:{crop_height}:{x_expr}:{y_expr},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}"
+
+
+def _ffmpeg_filter(
+    *,
+    ass_path: Path,
+    fonts_dir: Path,
+    crop_plan: dict[str, Any] | None = None,
+    source_dimensions: tuple[int, int] | None = None,
+    crop_command_path: Path | None = None,
+    output_fps: int = 30,
+) -> str:
     escaped_ass = str(ass_path).replace("\\", "/").replace(":", "\\:")
     escaped_fonts = str(fonts_dir).replace("\\", "/").replace(":", "\\:")
+    if crop_plan and (crop_plan.get("segments") or crop_plan.get("keyframes")):
+        if source_dimensions is None:
+            raise ValueError("source dimensions are required for tracklet crop rendering")
+        video_filter = _crop_filter_from_plan(
+            crop_plan=crop_plan,
+            source_dimensions=source_dimensions,
+            crop_command_path=crop_command_path,
+            output_fps=output_fps,
+        )
+    else:
+        video_filter = (
+            f"scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={_TARGET_WIDTH}:{_TARGET_HEIGHT}"
+        )
     return (
-        "scale=1080:1920:force_original_aspect_ratio=decrease,"
-        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"{video_filter},"
         f"subtitles={escaped_ass}:fontsdir={escaped_fonts}"
     )
 
@@ -145,6 +377,13 @@ def run_phase6_render(
                 gcs_uri=_ass_uri(request, clip_id),
                 local_path=tmp_dir / f"captions_{clip_id}.ass",
             )
+            crop_plan = dict(compiled.get("crop_plan") or {})
+            source_dimensions = (
+                _probe_video_dimensions(source_video_path)
+                if crop_plan.get("segments") or crop_plan.get("keyframes")
+                else None
+            )
+            crop_command_path = tmp_dir / f"crop_{clip_id}.cmd" if crop_plan.get("keyframes") else None
             output_path = tmp_dir / f"{clip_id}.mp4"
             cmd = [
                 "ffmpeg",
@@ -156,7 +395,14 @@ def run_phase6_render(
                 "-i",
                 str(source_video_path),
                 "-vf",
-                _ffmpeg_filter(ass_path=ass_path, fonts_dir=fonts_dir),
+                _ffmpeg_filter(
+                    ass_path=ass_path,
+                    fonts_dir=fonts_dir,
+                    crop_plan=crop_plan,
+                    source_dimensions=source_dimensions,
+                    crop_command_path=crop_command_path,
+                    output_fps=request.output_fps,
+                ),
                 "-r",
                 str(request.output_fps),
                 "-c:v",

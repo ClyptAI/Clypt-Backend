@@ -132,6 +132,8 @@ class ShotTrackletDescriptor(StrictModel):
     shot_id: str
     start_ms: NonNegativeInt
     end_ms: NonNegativeInt
+    auto_follow_eligible: bool = True
+    subject_quality: dict[str, Any] = Field(default_factory=dict)
     representative_thumbnail_uris: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -149,6 +151,9 @@ class TrackletGeometryPoint(StrictModel):
     frame_index: NonNegativeInt
     timestamp_ms: NonNegativeInt
     bbox_xyxy: list[float] = Field(min_length=4, max_length=4)
+    head_center_xy: list[float] | None = Field(default=None, min_length=2, max_length=2)
+    shoulder_center_xy: list[float] | None = Field(default=None, min_length=2, max_length=2)
+    upper_torso_anchor_xy: list[float] | None = Field(default=None, min_length=2, max_length=2)
 
 
 class TrackletGeometryEntry(StrictModel):

@@ -156,6 +156,81 @@ def test_visual_extractor_detects_shots_splits_tracks_and_builds_person_detectio
     assert payload["tracking_metrics"]["camera_cut_split_emitted_segments"] == 2
 
 
+def test_visual_extractor_applies_pose_subject_quality_without_duration_gate(tmp_path: Path):
+    from backend.phase1_runtime.models import Phase1Workspace
+    from backend.phase1_runtime.visual import V31VisualExtractor
+
+    workspace = Phase1Workspace.create(root=tmp_path, run_id="run_pose")
+    workspace.video_path.write_text("video", encoding="utf-8")
+
+    def fake_pose_validator(*, video_path, tracks, metadata, config):
+        del video_path, metadata, config
+        assert {track["track_id"] for track in tracks} == {"track_1", "track_2"}
+        return {
+            "track_1": {
+                "auto_follow_eligible": True,
+                "subject_quality": {
+                    "pose_backend": "fake_pose",
+                    "sampled_frames": 1,
+                    "head_evidence_ratio": 1.0,
+                    "upper_body_anchor_ratio": 1.0,
+                    "median_rfdetr_confidence": 0.92,
+                },
+            },
+            "track_2": {
+                "auto_follow_eligible": False,
+                "subject_quality": {
+                    "pose_backend": "fake_pose",
+                    "sampled_frames": 1,
+                    "head_evidence_ratio": 0.0,
+                    "upper_body_anchor_ratio": 0.0,
+                    "median_rfdetr_confidence": 0.97,
+                },
+            },
+        }
+
+    extractor = V31VisualExtractor(
+        metadata_probe=lambda video_path: {
+            "width": 1280,
+            "height": 720,
+            "fps": 25.0,
+            "duration_ms": 1000,
+        },
+        shot_detector=lambda video_path, duration_ms: [],
+        tracker_runner=lambda video_path: [
+            {"frame_idx": 3, "track_id": "1", "x1": 10.0, "y1": 20.0, "x2": 150.0, "y2": 300.0, "confidence": 0.92},
+            {"frame_idx": 4, "track_id": "2", "x1": 500.0, "y1": 500.0, "x2": 800.0, "y2": 710.0, "confidence": 0.97},
+        ],
+        pose_validator=fake_pose_validator,
+    )
+
+    payload = extractor.extract(video_path=workspace.video_path, workspace=workspace)
+
+    by_track_id = {track["track_id"]: track for track in payload["tracks"]}
+    assert by_track_id["track_1"]["auto_follow_eligible"] is True
+    assert by_track_id["track_1"]["subject_quality"]["head_evidence_ratio"] == 1.0
+    assert by_track_id["track_2"]["auto_follow_eligible"] is False
+    assert by_track_id["track_2"]["subject_quality"]["head_evidence_ratio"] == 0.0
+    assert payload["visual_identities"] == [
+        {
+            "track_id": "track_1",
+            "auto_follow_eligible": True,
+            "subject_quality": by_track_id["track_1"]["subject_quality"],
+            "source": "pose_subject_validator",
+            "provenance": "v31_visual_extractor",
+        },
+        {
+            "track_id": "track_2",
+            "auto_follow_eligible": False,
+            "subject_quality": by_track_id["track_2"]["subject_quality"],
+            "source": "pose_subject_validator",
+            "provenance": "v31_visual_extractor",
+        },
+    ]
+    assert payload["tracking_metrics"]["pose_validated_tracklets"] == 2
+    assert payload["tracking_metrics"]["pose_auto_follow_eligible_tracklets"] == 1
+
+
 def test_visual_extractor_fails_hard_when_tracker_not_available(tmp_path: Path):
     from backend.phase1_runtime.models import Phase1Workspace
     from backend.phase1_runtime.visual import V31VisualExtractor

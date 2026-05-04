@@ -59,8 +59,12 @@ Modal visual routing:
 | `CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S` | `7200` | Poll timeout for RF-DETR completion. |
 | `CLYPT_PHASE1_VISUAL_MODEL` | `nano` | Preserve current RF-DETR model. |
 | `CLYPT_PHASE1_VISUAL_BATCH_SIZE` | `16` | Preserve current fast path. |
-| `CLYPT_PHASE1_VISUAL_THRESHOLD` | `0.35` | Preserve current tuning. |
+| `CLYPT_PHASE1_VISUAL_THRESHOLD` | `0.85` | Current high-confidence RF-DETR tracking test threshold. |
 | `CLYPT_PHASE1_VISUAL_SHAPE` | `640` | Preserve current input shape. |
+| `CLYPT_PHASE1_VISUAL_POSE_VALIDATION` | `1` | Run sampled YOLO11s-pose validation after RF-DETR/ByteTrack. |
+| `CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH` | `yolo11s-pose.pt` | YOLO pose source model for TensorRT export. |
+| `CLYPT_PHASE1_VISUAL_POSE_MIN_HEAD_EVIDENCE_RATIO` | `0.40` | Auto-follow requires head/face/ear/nose evidence in at least this share of sampled frames. |
+| `CLYPT_PHASE1_VISUAL_POSE_MIN_UPPER_BODY_ANCHOR_RATIO` | `0.25` | Auto-follow requires shoulder/upper-body evidence in at least this share of sampled frames. |
 
 Phase1 handoff invariant:
 
@@ -133,9 +137,11 @@ Fast path:
 ```bash
 CLYPT_MODAL_VISUAL_MODEL=nano
 CLYPT_MODAL_VISUAL_BATCH_SIZE=16
-CLYPT_MODAL_VISUAL_THRESHOLD=0.35
+CLYPT_MODAL_VISUAL_THRESHOLD=0.85
 CLYPT_MODAL_VISUAL_SHAPE=640
 CLYPT_MODAL_VISUAL_BACKEND=tensorrt
+CLYPT_PHASE1_VISUAL_POSE_VALIDATION=1
+CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH=yolo11s-pose.pt
 ```
 
 The Modal visual worker must fail hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT Python runtime, `trtexec`, or CUDA PyTorch are unavailable.

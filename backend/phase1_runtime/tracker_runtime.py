@@ -30,6 +30,7 @@ class TrackerMetrics:
     total_tracker_ms: float = 0.0
     total_detections_in: int = 0
     total_tracked_out: int = 0
+    resets: int = 0
 
     @property
     def mean_tracker_latency_ms(self) -> float:
@@ -59,12 +60,13 @@ class ByteTrackTrackerRuntime:
         self._config = config
         self._tracker = None
         self._metrics = TrackerMetrics()
+        self._frame_rate = 30.0
 
     @property
     def metrics(self) -> TrackerMetrics:
         return self._metrics
 
-    def initialize(self, *, frame_rate: float = 30.0) -> None:
+    def _create_tracker(self, *, frame_rate: float):
         try:
             from trackers import ByteTrackTracker
         except ImportError as exc:
@@ -73,19 +75,28 @@ class ByteTrackTrackerRuntime:
                 "Install with: pip install trackers"
             ) from exc
 
-        self._tracker = ByteTrackTracker(
+        return ByteTrackTracker(
             lost_track_buffer=self._config.tracker_lost_buffer,
             frame_rate=frame_rate,
             # track_activation_threshold: min confidence to activate a new track
             track_activation_threshold=self._config.tracker_match_threshold,
         )
+
+    def initialize(self, *, frame_rate: float = 30.0) -> None:
+        self._frame_rate = float(frame_rate or 30.0)
+        self._tracker = self._create_tracker(frame_rate=self._frame_rate)
         logger.info(
             "ByteTrackTracker initialized (backend=%s, lost_buffer=%d, fps=%.2f, activation_thresh=%.2f)",
             self._config.tracker_backend,
             self._config.tracker_lost_buffer,
-            frame_rate,
+            self._frame_rate,
             self._config.tracker_match_threshold,
         )
+
+    def reset(self) -> None:
+        """Drop ByteTrack state at hard camera cuts before processing the next frame."""
+        self._tracker = self._create_tracker(frame_rate=self._frame_rate)
+        self._metrics.resets += 1
 
     def update(self, *, frame_idx: int, detections: sv.Detections) -> list[TrackRow]:
         """Feed one frame's detections into the tracker and return track rows.

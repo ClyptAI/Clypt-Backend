@@ -37,6 +37,69 @@ _RFDETR_CHECKPOINT_PE_GRID = {
 }
 
 
+def _decode_rfdetr_boxes_to_source_xyxy(
+    boxes: np.ndarray,
+    *,
+    source_height: int,
+    source_width: int,
+) -> np.ndarray:
+    """Decode RF-DETR ONNX boxes to source-frame xyxy pixels.
+
+    RF-DETR's exported ONNX head emits normalized ``cx, cy, w, h`` boxes. The
+    TensorRT path runs outside RF-DETR's Python predictor, so we need to apply
+    the same decode here before handing detections to ByteTrack.
+    """
+    decoded = np.asarray(boxes, dtype=np.float32).copy()
+    if decoded.size == 0:
+        return decoded.reshape((-1, 4))
+    cx = decoded[:, 0]
+    cy = decoded[:, 1]
+    width = decoded[:, 2]
+    height = decoded[:, 3]
+    x1 = (cx - (width / 2.0)) * float(source_width)
+    y1 = (cy - (height / 2.0)) * float(source_height)
+    x2 = (cx + (width / 2.0)) * float(source_width)
+    y2 = (cy + (height / 2.0)) * float(source_height)
+    xyxy = np.stack([x1, y1, x2, y2], axis=-1)
+    xyxy[:, [0, 2]] = np.clip(xyxy[:, [0, 2]], 0.0, float(source_width))
+    xyxy[:, [1, 3]] = np.clip(xyxy[:, [1, 3]], 0.0, float(source_height))
+    return xyxy
+
+
+def _nms_xyxy(boxes: np.ndarray, scores: np.ndarray, *, iou_threshold: float = 0.5) -> np.ndarray:
+    if len(boxes) == 0:
+        return np.empty(0, dtype=np.int64)
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+    areas = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+    order = np.argsort(scores)[::-1]
+    keep: list[int] = []
+    while order.size > 0:
+        current = int(order[0])
+        keep.append(current)
+        if order.size == 1:
+            break
+        rest = order[1:]
+        xx1 = np.maximum(x1[current], x1[rest])
+        yy1 = np.maximum(y1[current], y1[rest])
+        xx2 = np.minimum(x2[current], x2[rest])
+        yy2 = np.minimum(y2[current], y2[rest])
+        inter_w = np.maximum(0.0, xx2 - xx1)
+        inter_h = np.maximum(0.0, yy2 - yy1)
+        intersection = inter_w * inter_h
+        union = areas[current] + areas[rest] - intersection
+        iou = np.divide(
+            intersection,
+            np.maximum(union, 1e-6),
+            out=np.zeros_like(intersection),
+            where=union > 0,
+        )
+        order = rest[iou <= iou_threshold]
+    return np.array(keep, dtype=np.int64)
+
+
 @dataclass(slots=True)
 class DetectorMetrics:
     frames_processed: int = 0
@@ -284,6 +347,12 @@ class TensorRTDetector:
         batch = batch.div_(self._torch_std)
         return batch
 
+    def _prepare_execution_stream(self, torch) -> None:
+        """Make the TensorRT stream wait for PyTorch preprocessing/copy work."""
+        if self._stream is None:
+            raise RuntimeError("TensorRT CUDA stream is not initialized.")
+        self._stream.wait_stream(torch.cuda.current_stream())
+
     def _postprocess(
         self,
         boxes: np.ndarray,
@@ -319,15 +388,29 @@ class TensorRTDetector:
 
             if len(f_boxes) > 0:
                 oh, ow = orig_sizes[i]
-                res = self._config.detector_resolution
-                f_boxes[:, [0, 2]] *= ow / res
-                f_boxes[:, [1, 3]] *= oh / res
+                f_boxes = _decode_rfdetr_boxes_to_source_xyxy(
+                    f_boxes,
+                    source_height=int(oh),
+                    source_width=int(ow),
+                )
 
             person_mask = f_labels == COCO_PERSON_CLASS_ID
+            if person_mask.any():
+                person_boxes = f_boxes[person_mask].astype(np.float32)
+                person_scores = f_scores[person_mask].astype(np.float32)
+                person_class_ids = f_labels[person_mask].astype(np.int32)
+                nms_keep = _nms_xyxy(person_boxes, person_scores)
+                person_boxes = person_boxes[nms_keep]
+                person_scores = person_scores[nms_keep]
+                person_class_ids = person_class_ids[nms_keep]
+            else:
+                person_boxes = np.empty((0, 4), dtype=np.float32)
+                person_scores = np.empty(0, dtype=np.float32)
+                person_class_ids = np.empty(0, dtype=np.int32)
             det = sv.Detections(
-                xyxy=f_boxes[person_mask].astype(np.float32) if person_mask.any() else np.empty((0, 4), dtype=np.float32),
-                confidence=f_scores[person_mask].astype(np.float32) if person_mask.any() else np.empty(0, dtype=np.float32),
-                class_id=f_labels[person_mask] if person_mask.any() else np.empty(0, dtype=np.int32),
+                xyxy=person_boxes,
+                confidence=person_scores,
+                class_id=person_class_ids,
             )
             detections_list.append(det)
         return detections_list
@@ -373,6 +456,7 @@ class TensorRTDetector:
             if buffer_dtype is not None:
                 input_tensor = input_tensor.to(dtype=buffer_dtype)
             input_binding["buffer"].copy_(input_tensor)
+            self._prepare_execution_stream(torch)
 
             t0 = time.perf_counter()
             self._context.execute_async_v3(self._stream.cuda_stream)

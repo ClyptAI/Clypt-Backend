@@ -83,6 +83,31 @@ def _shot_tracklets() -> ShotTrackletIndex:
     )
 
 
+def _shot_tracklets_ineligible_then_eligible() -> ShotTrackletIndex:
+    return ShotTrackletIndex(
+        tracklets=[
+            ShotTrackletDescriptor(
+                tracklet_id="tracklet_bad",
+                shot_id="shot_1",
+                start_ms=0,
+                end_ms=610,
+                auto_follow_eligible=False,
+                subject_quality={"head_evidence_ratio": 0.0},
+                representative_thumbnail_uris=[],
+            ),
+            ShotTrackletDescriptor(
+                tracklet_id="tracklet_good",
+                shot_id="shot_1",
+                start_ms=0,
+                end_ms=610,
+                auto_follow_eligible=True,
+                subject_quality={"head_evidence_ratio": 1.0},
+                representative_thumbnail_uris=[],
+            ),
+        ]
+    )
+
+
 def _tracklet_geometry() -> TrackletGeometry:
     return TrackletGeometry(
         tracklets=[
@@ -99,6 +124,175 @@ def _tracklet_geometry() -> TrackletGeometry:
             )
         ]
     )
+
+
+def _tracklet_geometry_bad_and_good() -> TrackletGeometry:
+    return TrackletGeometry(
+        tracklets=[
+            TrackletGeometryEntry(
+                tracklet_id="tracklet_bad",
+                shot_id="shot_1",
+                points=[
+                    TrackletGeometryPoint(
+                        frame_index=0,
+                        timestamp_ms=0,
+                        bbox_xyxy=[0.0, 600.0, 500.0, 1080.0],
+                    )
+                ],
+            ),
+            TrackletGeometryEntry(
+                tracklet_id="tracklet_good",
+                shot_id="shot_1",
+                points=[
+                    TrackletGeometryPoint(
+                        frame_index=0,
+                        timestamp_ms=0,
+                        bbox_xyxy=[220.0, 120.0, 820.0, 1020.0],
+                    )
+                ],
+            ),
+        ]
+    )
+
+
+def _shot_tracklets_two_segments_same_shot() -> ShotTrackletIndex:
+    return ShotTrackletIndex(
+        tracklets=[
+            ShotTrackletDescriptor(
+                tracklet_id="tracklet_left",
+                shot_id="shot_1",
+                start_ms=0,
+                end_ms=1000,
+                auto_follow_eligible=True,
+                subject_quality={
+                    "head_evidence_ratio": 0.45,
+                    "upper_body_anchor_ratio": 0.25,
+                    "median_rfdetr_confidence": 0.92,
+                },
+                representative_thumbnail_uris=[],
+            ),
+            ShotTrackletDescriptor(
+                tracklet_id="tracklet_right",
+                shot_id="shot_1",
+                start_ms=0,
+                end_ms=1000,
+                auto_follow_eligible=True,
+                subject_quality={
+                    "head_evidence_ratio": 0.92,
+                    "upper_body_anchor_ratio": 0.88,
+                    "median_rfdetr_confidence": 0.91,
+                },
+                representative_thumbnail_uris=[],
+            ),
+        ]
+    )
+
+
+def _tracklet_geometry_two_segments_same_shot() -> TrackletGeometry:
+    return TrackletGeometry(
+        tracklets=[
+            TrackletGeometryEntry(
+                tracklet_id="tracklet_left",
+                shot_id="shot_1",
+                points=[
+                    TrackletGeometryPoint(
+                        frame_index=0,
+                        timestamp_ms=0,
+                        bbox_xyxy=[100.0, 100.0, 500.0, 900.0],
+                    ),
+                    TrackletGeometryPoint(
+                        frame_index=1,
+                        timestamp_ms=1000,
+                        bbox_xyxy=[160.0, 120.0, 560.0, 920.0],
+                    ),
+                ],
+            ),
+            TrackletGeometryEntry(
+                tracklet_id="tracklet_right",
+                shot_id="shot_1",
+                points=[
+                    TrackletGeometryPoint(
+                        frame_index=0,
+                        timestamp_ms=0,
+                        bbox_xyxy=[900.0, 110.0, 1320.0, 990.0],
+                    ),
+                    TrackletGeometryPoint(
+                        frame_index=1,
+                        timestamp_ms=500,
+                        bbox_xyxy=[980.0, 130.0, 1400.0, 1010.0],
+                    ),
+                    TrackletGeometryPoint(
+                        frame_index=2,
+                        timestamp_ms=1000,
+                        bbox_xyxy=[1040.0, 150.0, 1460.0, 1030.0],
+                    ),
+                ],
+            ),
+        ]
+    )
+
+
+def _caption_plan_two_segments() -> dict:
+    return {
+        "run_id": "run_phase6",
+        "clips": [
+            {
+                "clip_id": "clip_001",
+                "clip_start_ms": 0,
+                "clip_end_ms": 1000,
+                "preset_id": "karaoke_focus",
+                "default_zone": "lower_safe",
+                "segments": [
+                    {
+                        "segment_id": "clip_001_seg_001",
+                        "start_ms": 0,
+                        "end_ms": 500,
+                        "text": "Nobody saw",
+                        "word_ids": ["w1"],
+                        "speaker_ids": ["SPEAKER_0"],
+                        "turn_ids": ["t1"],
+                        "placement_zone": "lower_safe",
+                        "highlight_mode": "word_highlight",
+                        "review_needed": False,
+                        "review_reason": "",
+                        "active_word_timings": [],
+                    },
+                    {
+                        "segment_id": "clip_001_seg_002",
+                        "start_ms": 500,
+                        "end_ms": 1000,
+                        "text": "this coming",
+                        "word_ids": ["w2"],
+                        "speaker_ids": ["SPEAKER_0"],
+                        "turn_ids": ["t1"],
+                        "placement_zone": "lower_safe",
+                        "highlight_mode": "word_highlight",
+                        "review_needed": False,
+                        "review_reason": "",
+                        "active_word_timings": [],
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def _publish_metadata_basic() -> dict:
+    return {
+        "run_id": "run_phase6",
+        "clips": [
+            {
+                "clip_id": "clip_001",
+                "title_primary": "Nobody Saw This Coming",
+                "title_alternates": [],
+                "description_short": "A surprise reveal lands fast.",
+                "thumbnail_text": "NOBODY SAW THIS",
+                "topic_tags": [],
+                "hashtags": [],
+                "generation_inputs_summary": {},
+            }
+        ],
+    }
 
 
 def _camera_intent_follow(*, end_ms: int = 610, primary_tracklet_id: str = "tracklet_1") -> dict[str, object]:
@@ -291,6 +485,171 @@ def test_run_phase6_writes_caption_metadata_render_and_ass_artifacts(tmp_path: P
     assert "PlayResY: 1920" in ass_text
     assert "karaoke_focus" in ass_text
     assert ass_text.count("Dialogue:") >= 2
+    assert "Dialogue: 0" not in ass_text
+    assert "&H0000FF25" in ass_text
+
+
+def test_compile_render_plan_selects_tracklet_crop_without_camera_intent() -> None:
+    from backend.pipeline.render.compiler import compile_render_plan
+
+    render_plan = compile_render_plan(
+        run_id="run_phase6",
+        caption_plan={
+            "run_id": "run_phase6",
+            "clips": [
+                {
+                    "clip_id": "clip_001",
+                    "clip_start_ms": 0,
+                    "clip_end_ms": 610,
+                    "preset_id": "karaoke_focus",
+                    "default_zone": "lower_safe",
+                    "segments": [
+                        {
+                            "segment_id": "clip_001_seg_001",
+                            "start_ms": 0,
+                            "end_ms": 610,
+                            "text": "Nobody saw this coming",
+                            "word_ids": ["w1", "w2", "w3", "w4"],
+                            "speaker_ids": ["SPEAKER_0"],
+                            "turn_ids": ["t1"],
+                            "placement_zone": "lower_safe",
+                            "highlight_mode": "word_highlight",
+                            "review_needed": False,
+                            "review_reason": "",
+                            "active_word_timings": [],
+                        }
+                    ],
+                }
+            ],
+        },
+        publish_metadata={
+            "run_id": "run_phase6",
+            "clips": [
+                {
+                    "clip_id": "clip_001",
+                    "title_primary": "Nobody Saw This Coming",
+                    "title_alternates": ["This Was Unexpected", "Nobody Saw It"],
+                    "description_short": "A surprise reveal lands fast.",
+                    "thumbnail_text": "NOBODY SAW THIS",
+                    "topic_tags": ["surprise", "reveal", "interview"],
+                    "hashtags": ["#surprise", "#reveal", "#interview"],
+                    "generation_inputs_summary": {},
+                }
+            ],
+        },
+        shot_tracklet_index=_shot_tracklets().model_dump(mode="json"),
+        tracklet_geometry=_tracklet_geometry().model_dump(mode="json"),
+    )
+
+    clip = render_plan["clips"][0]
+    segment = clip["segments"][0]
+    assert segment["shot_id"] == "shot_1"
+    assert segment["layout_mode"] == "auto_follow"
+    assert segment["primary_tracklet_id"] == "tracklet_1"
+    assert clip["crop_plan"]["mode"] == "tracklet_follow_9x16_smooth_inside_person"
+    assert clip["crop_plan"]["segments"][0]["tracklet_id"] == "tracklet_1"
+    assert clip["crop_plan"]["keyframes"][0]["bbox_xyxy"] == [220.0, 420.0, 820.0, 1520.0]
+
+
+def test_compile_render_plan_skips_pose_ineligible_auto_tracklets() -> None:
+    from backend.pipeline.render.compiler import compile_render_plan
+
+    render_plan = compile_render_plan(
+        run_id="run_phase6",
+        caption_plan={
+            "run_id": "run_phase6",
+            "clips": [
+                {
+                    "clip_id": "clip_001",
+                    "clip_start_ms": 0,
+                    "clip_end_ms": 610,
+                    "preset_id": "karaoke_focus",
+                    "default_zone": "lower_safe",
+                    "segments": [
+                        {
+                            "segment_id": "clip_001_seg_001",
+                            "start_ms": 0,
+                            "end_ms": 610,
+                            "text": "Nobody saw this coming",
+                            "word_ids": ["w1"],
+                            "speaker_ids": ["SPEAKER_0"],
+                            "turn_ids": ["t1"],
+                            "placement_zone": "lower_safe",
+                            "highlight_mode": "word_highlight",
+                            "review_needed": False,
+                            "review_reason": "",
+                            "active_word_timings": [],
+                        }
+                    ],
+                }
+            ],
+        },
+        publish_metadata={
+            "run_id": "run_phase6",
+            "clips": [
+                {
+                    "clip_id": "clip_001",
+                    "title_primary": "Nobody Saw This Coming",
+                    "title_alternates": [],
+                    "description_short": "A surprise reveal lands fast.",
+                    "thumbnail_text": "NOBODY SAW THIS",
+                    "topic_tags": [],
+                    "hashtags": [],
+                    "generation_inputs_summary": {},
+                }
+            ],
+        },
+        shot_tracklet_index=_shot_tracklets_ineligible_then_eligible().model_dump(mode="json"),
+        tracklet_geometry=_tracklet_geometry_bad_and_good().model_dump(mode="json"),
+    )
+
+    segment = render_plan["clips"][0]["segments"][0]
+    assert segment["layout_mode"] == "auto_follow"
+    assert segment["primary_tracklet_id"] == "tracklet_good"
+    assert render_plan["clips"][0]["crop_plan"]["segments"][0]["tracklet_id"] == "tracklet_good"
+
+
+def test_compile_render_plan_locks_best_pose_subject_for_entire_shot() -> None:
+    from backend.pipeline.render.compiler import compile_render_plan
+
+    render_plan = compile_render_plan(
+        run_id="run_phase6",
+        caption_plan=_caption_plan_two_segments(),
+        publish_metadata=_publish_metadata_basic(),
+        shot_tracklet_index=_shot_tracklets_two_segments_same_shot().model_dump(mode="json"),
+        tracklet_geometry=_tracklet_geometry_two_segments_same_shot().model_dump(mode="json"),
+    )
+
+    segments = render_plan["clips"][0]["segments"]
+    assert [segment["primary_tracklet_id"] for segment in segments] == [
+        "tracklet_right",
+        "tracklet_right",
+    ]
+    assert {segment["shot_id"] for segment in segments} == {"shot_1"}
+
+
+def test_compile_render_plan_builds_smooth_person_box_contained_crop_path() -> None:
+    from backend.pipeline.render.compiler import compile_render_plan
+
+    render_plan = compile_render_plan(
+        run_id="run_phase6",
+        caption_plan=_caption_plan_two_segments(),
+        publish_metadata=_publish_metadata_basic(),
+        shot_tracklet_index=_shot_tracklets_two_segments_same_shot().model_dump(mode="json"),
+        tracklet_geometry=_tracklet_geometry_two_segments_same_shot().model_dump(mode="json"),
+    )
+
+    crop_plan = render_plan["clips"][0]["crop_plan"]
+    assert crop_plan["mode"] == "tracklet_follow_9x16_smooth_inside_person"
+    assert crop_plan["crop_width"] < 420
+    assert crop_plan["crop_height"] < 880
+    assert crop_plan["tracklet_ids"] == ["tracklet_right"]
+    assert len(crop_plan["keyframes"]) >= 3
+    for keyframe in crop_plan["keyframes"]:
+        bbox = keyframe["bbox_xyxy"]
+        assert bbox[0] <= keyframe["x"] <= bbox[2] - crop_plan["crop_width"]
+        assert bbox[1] <= keyframe["y"] <= bbox[3] - crop_plan["crop_height"]
+        assert keyframe["anchor_source"] in {"pose", "bbox_upper_third", "bbox_center"}
 
 
 def test_run_phase6_fails_fast_for_partial_namespace_timelines_without_canonical_words(tmp_path: Path) -> None:

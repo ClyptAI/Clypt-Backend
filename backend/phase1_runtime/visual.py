@@ -109,10 +109,67 @@ def _make_detector(config):
     return TensorRTDetector(config)
 
 
-def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dict], dict]:
+def _shot_cut_frame_indices(
+    *,
+    shot_segments: list[dict[str, Any]] | None,
+    video_fps: float,
+) -> list[int]:
+    if not shot_segments or len(shot_segments) <= 1:
+        return []
+    fps = float(video_fps) if float(video_fps) > 1e-6 else 30.0
+    cut_frames = {
+        max(0, int(round((float(segment.get("start_time_ms") or 0) / 1000.0) * fps)))
+        for segment in shot_segments[1:]
+    }
+    return sorted(frame_idx for frame_idx in cut_frames if frame_idx > 0)
+
+
+def _serialize_raw_detections(*, frame_idx: int, detections) -> list[dict]:
+    rows: list[dict] = []
+    if len(detections) == 0:
+        return rows
+    for index in range(len(detections)):
+        xyxy = detections.xyxy[index]
+        confidence = (
+            float(detections.confidence[index])
+            if getattr(detections, "confidence", None) is not None
+            else 0.0
+        )
+        class_id = (
+            int(detections.class_id[index])
+            if getattr(detections, "class_id", None) is not None
+            else 0
+        )
+        rows.append(
+            {
+                "frame_idx": int(frame_idx),
+                "local_frame_idx": int(frame_idx),
+                "chunk_idx": 0,
+                "detection_id": f"raw_{int(frame_idx)}_{index}",
+                "class_id": class_id,
+                "label": "person" if class_id == 1 else str(class_id),
+                "confidence": confidence,
+                "x1": float(xyxy[0]),
+                "y1": float(xyxy[1]),
+                "x2": float(xyxy[2]),
+                "y2": float(xyxy[3]),
+                "source": "rfdetr_raw",
+                "geometry_type": "aabb",
+            }
+        )
+    return rows
+
+
+def _run_rfdetr_tracking_pipeline(
+    *,
+    video_path: Path,
+    config,
+    shot_segments: list[dict[str, Any]] | None = None,
+    video_fps: float | None = None,
+) -> tuple[list[dict], list[dict], dict]:
     """Decode frames, run RF-DETR detection, then ByteTrack tracking.
 
-    Returns (track_rows, runtime_metrics).
+    Returns (track_rows, raw_detection_rows, runtime_metrics).
     """
     from .frame_decode import batch_frames, decode_video_frames
     from .tracker_runtime import ByteTrackTrackerRuntime
@@ -122,21 +179,24 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
 
     detector.load()
 
-    # Determine actual video fps for ByteTrack's lost-track timer
-    _fps = 30.0
-    try:
-        import cv2 as _cv2
-        _cap2 = _cv2.VideoCapture(str(video_path))
-        _raw_fps = _cap2.get(_cv2.CAP_PROP_FPS)
-        _cap2.release()
-        if _raw_fps and _raw_fps > 0:
-            _fps = float(_raw_fps)
-    except ImportError:
-        pass
+    _fps = float(video_fps) if video_fps and video_fps > 0 else 30.0
+    if video_fps is None:
+        try:
+            import cv2 as _cv2
+            _cap2 = _cv2.VideoCapture(str(video_path))
+            _raw_fps = _cap2.get(_cv2.CAP_PROP_FPS)
+            _cap2.release()
+            if _raw_fps and _raw_fps > 0:
+                _fps = float(_raw_fps)
+        except ImportError:
+            pass
 
     tracker.initialize(frame_rate=_fps)
+    cut_frames = _shot_cut_frame_indices(shot_segments=shot_segments, video_fps=_fps)
+    next_cut_index = 0
 
     all_track_rows: list[dict] = []
+    all_raw_detection_rows: list[dict] = []
     pipeline_start = time.perf_counter()
 
     # Estimate total frames for progress display
@@ -169,6 +229,12 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
             detections_list = detector.detect_batch(rgb_arrays, orig_sizes=orig_sizes)
 
             for frame_idx, detections in zip(frame_indices, detections_list, strict=True):
+                all_raw_detection_rows.extend(
+                    _serialize_raw_detections(frame_idx=frame_idx, detections=detections)
+                )
+                while next_cut_index < len(cut_frames) and frame_idx >= cut_frames[next_cut_index]:
+                    tracker.reset()
+                    next_cut_index += 1
                 track_rows = tracker.update(frame_idx=frame_idx, detections=detections)
                 for row in track_rows:
                     width = max(0.0, row.x2 - row.x1)
@@ -243,8 +309,10 @@ def _run_rfdetr_tracking_pipeline(*, video_path: Path, config) -> tuple[list[dic
         "effective_fps": round(effective_fps, 1),
         "warmup_ms": round(det_metrics.warmup_ms, 1),
         "pipeline_elapsed_ms": round(pipeline_elapsed_ms, 1),
+        "tracker_resets_at_shot_boundaries": int(getattr(trk_metrics, "resets", 0)),
+        "raw_detection_rows": len(all_raw_detection_rows),
     }
-    return all_track_rows, runtime_metrics
+    return all_track_rows, all_raw_detection_rows, runtime_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +483,47 @@ def _build_person_detections(*, tracks: list[dict], metadata: dict) -> list[dict
     return person_detections
 
 
+def _apply_pose_subject_reports(
+    *,
+    tracks: list[dict],
+    reports: dict[str, dict[str, Any]],
+) -> tuple[list[dict], list[dict], dict[str, int]]:
+    if not reports:
+        return [dict(track) for track in tracks], [], {
+            "pose_validated_tracklets": 0,
+            "pose_auto_follow_eligible_tracklets": 0,
+        }
+    enriched_tracks: list[dict] = []
+    for track in tracks:
+        track_id = str(track.get("track_id"))
+        report = reports.get(track_id)
+        enriched = dict(track)
+        if report is not None:
+            enriched["auto_follow_eligible"] = bool(report.get("auto_follow_eligible"))
+            enriched["subject_quality"] = dict(report.get("subject_quality") or {})
+        enriched_tracks.append(enriched)
+
+    identities: list[dict] = []
+    for track_id in sorted(reports):
+        report = reports[track_id]
+        identities.append(
+            {
+                "track_id": track_id,
+                "auto_follow_eligible": bool(report.get("auto_follow_eligible")),
+                "subject_quality": dict(report.get("subject_quality") or {}),
+                "source": "pose_subject_validator",
+                "provenance": "v31_visual_extractor",
+            }
+        )
+    metrics = {
+        "pose_validated_tracklets": len(reports),
+        "pose_auto_follow_eligible_tracklets": sum(
+            1 for report in reports.values() if bool(report.get("auto_follow_eligible"))
+        ),
+    }
+    return enriched_tracks, identities, metrics
+
+
 # ---------------------------------------------------------------------------
 # Main extractor class
 # ---------------------------------------------------------------------------
@@ -432,21 +541,31 @@ class V31VisualExtractor:
         metadata_probe=None,
         shot_detector=None,
         tracker_runner=None,
+        pose_validator=None,
         visual_config=None,
     ) -> None:
         self._metadata_probe = metadata_probe or probe_video_metadata
         self._shot_detector = shot_detector or detect_shot_boundaries_ms
         self._tracker_runner = tracker_runner
+        self._pose_validator = pose_validator
         self._visual_config = visual_config
 
-    def _default_tracker_runner(self, *, video_path: Path) -> list[dict]:
+    def _default_tracker_runner(
+        self,
+        *,
+        video_path: Path,
+        shot_changes: list[dict[str, Any]],
+        fps: float,
+    ) -> list[dict]:
         """Run the live RF-DETR + ByteTrack pipeline."""
         from .visual_config import VisualPipelineConfig
 
         config = self._visual_config or VisualPipelineConfig.from_env()
-        tracks, self._last_runtime_metrics = _run_rfdetr_tracking_pipeline(
+        tracks, self._last_raw_detections, self._last_runtime_metrics = _run_rfdetr_tracking_pipeline(
             video_path=video_path,
             config=config,
+            shot_segments=shot_changes,
+            video_fps=fps,
         )
         return tracks
 
@@ -454,6 +573,7 @@ class V31VisualExtractor:
         from .visual_config import VisualPipelineConfig
 
         self._last_runtime_metrics: dict[str, Any] = {}
+        self._last_raw_detections: list[dict] = []
         config = self._visual_config or VisualPipelineConfig.from_env()
 
         logger.info("[visual]  probing metadata: %s", video_path.name)
@@ -491,7 +611,11 @@ class V31VisualExtractor:
         if self._tracker_runner is not None:
             raw_tracks = list(self._tracker_runner(video_path=video_path))
         else:
-            raw_tracks = self._default_tracker_runner(video_path=video_path)
+            raw_tracks = self._default_tracker_runner(
+                video_path=video_path,
+                shot_changes=shot_changes,
+                fps=fps,
+            )
 
         normalized_tracks = [
             _normalize_track_row(track=track, metadata=metadata)
@@ -502,6 +626,36 @@ class V31VisualExtractor:
             shot_timeline_ms=shot_changes,
             video_fps=fps,
         )
+        pose_reports: dict[str, dict[str, Any]] = {}
+        pose_validator = self._pose_validator
+        if (
+            pose_validator is None
+            and self._tracker_runner is None
+            and config.pose_validation_enabled
+            and tracks
+        ):
+            from .pose_subject_validator import YoloPoseSubjectValidator
+
+            pose_validator = YoloPoseSubjectValidator(config=config)
+        if pose_validator is not None and tracks:
+            pose_reports = dict(
+                pose_validator(
+                    video_path=video_path,
+                    tracks=tracks,
+                    metadata=metadata,
+                    config=config,
+                )
+            )
+            tracks, visual_identities, pose_metrics = _apply_pose_subject_reports(
+                tracks=tracks,
+                reports=pose_reports,
+            )
+        else:
+            visual_identities = []
+            pose_metrics = {
+                "pose_validated_tracklets": 0,
+                "pose_auto_follow_eligible_tracklets": 0,
+            }
         person_detections = _build_person_detections(tracks=tracks, metadata=metadata)
         logger.info(
             "[visual]  done — %d raw track rows → %d tracks → %d person segments",
@@ -517,15 +671,17 @@ class V31VisualExtractor:
             "emitted_person_detection_segments": len(person_detections),
             "shot_count": len(shot_changes),
             **split_metrics,
+            **pose_metrics,
             **self._last_runtime_metrics,
         }
         return {
             "video_metadata": metadata,
             "shot_changes": shot_changes,
             "tracks": tracks,
+            "raw_person_detections": self._last_raw_detections,
             "person_detections": person_detections,
             "face_detections": [],
-            "visual_identities": [],
+            "visual_identities": visual_identities,
             "mask_stability_signals": [],
             "tracking_metrics": tracking_metrics,
         }

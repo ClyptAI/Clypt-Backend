@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-05-02
+**Last updated:** 2026-05-04
 
 This is the runtime source of truth for the current AMD-refactor state.
 
@@ -82,22 +82,34 @@ Current visual settings are preserved unless explicitly retuned:
 - Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
 - `CLYPT_PHASE1_VISUAL_MODEL=nano`
 - `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`
-- `CLYPT_PHASE1_VISUAL_THRESHOLD=0.35`
+- `CLYPT_PHASE1_VISUAL_THRESHOLD=0.85`
 - `CLYPT_PHASE1_VISUAL_SHAPE=640`
 - `CLYPT_PHASE1_VISUAL_TRACKER=bytetrack`
 - `CLYPT_PHASE1_VISUAL_TRACKER_BUFFER=30`
 - `CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH=0.7`
 - `CLYPT_PHASE1_VISUAL_DECODE=gpu`
 - `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
+- `CLYPT_PHASE1_VISUAL_POSE_VALIDATION=1`
+- `CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH=yolo11s-pose.pt`
+- `CLYPT_PHASE1_VISUAL_POSE_MIN_RFDETR_CONFIDENCE=0.85`
+- `CLYPT_PHASE1_VISUAL_POSE_MIN_HEAD_EVIDENCE_RATIO=0.40`
+- `CLYPT_PHASE1_VISUAL_POSE_MIN_UPPER_BODY_ANCHOR_RATIO=0.25`
 - Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt`; the worker sets internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16` before constructing the RF-DETR pipeline.
 
 Operationally:
 
 ```text
 NVDEC/CUDA decode+resize -> hwdownload -> TensorRT FP16 RF-DETR -> ByteTrack
+-> sampled YOLO11s-pose TensorRT subject validation for auto-follow eligibility
 ```
 
-The worker fails hard if CUDA ffmpeg support, `scale_cuda`, TensorRT, `trtexec`, or CUDA PyTorch are unavailable. It must not fall back to software decode or CPU RF-DETR.
+The worker fails hard if CUDA ffmpeg support, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, RF-DETR, or YOLO11s-pose validation are unavailable. It must not fall back to software decode or CPU RF-DETR.
+
+YOLO pose validation does not delete raw RF-DETR/ByteTrack rows. It annotates tracklets with `auto_follow_eligible`, `subject_quality`, and sampled source-space pose anchors; Phase5-less render auto-follow skips pose-ineligible tracklets so high-confidence headless body fragments are not selected as crop targets.
+
+Phase5-less render auto-follow is shot-locked: the render compiler picks one pose-qualified subject tracklet per shot and every render segment in that shot inherits the same `primary_tracklet_id`. Its crop plan uses a smooth keyframed `tracklet_follow_9x16_smooth_inside_person` path: the 9:16 crop is intentionally fit inside the selected person bbox, anchored to face/head/shoulder/upper-torso pose points when available, and otherwise anchored to the bbox upper-third fallback.
+
+Current caveat: the Phase5-less auto-follow render path is **not production-ready**. It now renders valid vertical MP4s and no longer uses the old black-bar/double-caption path, but the latest human review still found the rendered clips terrible: crop movement remained insufficiently smooth and tracking/subject selection was unreliable. Keep this path as an experimental fallback until the tracker/crop planner is repaired and manually reviewed again. Manual Phase5 grounding remains the expected production-quality route.
 
 ## 4) Phase26 Worker Contract
 
@@ -149,6 +161,7 @@ Current Phase26 AMD-refactor baseline is [known-good-phase26-mi300x.env](/Users/
 - render/export must expose working `h264_nvenc`.
 - node-media-prep requests remain timeline-local batches.
 - Phase26 starts multimodal embedding batch-by-batch as node-media-prep results arrive.
+- Dynamic Phase6 crop motion must use a compact control surface such as FFmpeg `sendcmd`; do not encode long crop paths as nested inline `if(between(t...))` expressions.
 
 ## 7) Canonical Runtime Files
 

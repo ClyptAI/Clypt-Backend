@@ -31,6 +31,7 @@ class VisualPayload(_StrictModel):
     video_metadata: dict[str, Any] = Field(default_factory=dict)
     shot_changes: list[dict[str, Any]] = Field(default_factory=list)
     tracks: list[dict[str, Any]] = Field(default_factory=list)
+    raw_person_detections: list[dict[str, Any]] = Field(default_factory=list)
     person_detections: list[dict[str, Any]] = Field(default_factory=list)
     face_detections: list[dict[str, Any]] = Field(default_factory=list)
     visual_identities: list[dict[str, Any]] = Field(default_factory=list)

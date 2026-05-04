@@ -44,3 +44,6 @@ def test_load_caption_presets_exposes_required_ids_and_schema_fields() -> None:
     assert required_fields.issubset(karaoke.model_dump().keys())
     assert karaoke.highlight_mode == "word_highlight"
     assert karaoke.default_zone in {"center_band", "lower_safe"}
+    assert karaoke.active_fill_color == "#25FF00"
+    assert karaoke.max_words_per_segment <= 5
+    assert karaoke.active_scale == 1.0

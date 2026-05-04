@@ -1,7 +1,7 @@
 # RUN REFERENCE
 
 **Status:** Active  
-**Last updated:** 2026-05-02
+**Last updated:** 2026-05-04
 
 This document tracks reference runs and validation targets for the Scribe/Modal + Phase26 MI300X topology.
 
@@ -53,8 +53,10 @@ For every new benchmark, record:
 4. Modal visual uses TensorRT FP16 RF-DETR with CUDA/NVDEC decode and no software/CPU fallback.
 5. Phase26 worker calls Modal for node-media-prep and render/export, not local ffmpeg fallbacks.
 6. SGLang staged profiles pass on the MI300X host before the worker starts.
+7. Phase6 render outputs must pass human visual review for tracking and crop smoothness, not only `1080x1920` ffprobe validation. The current Phase5-less auto-follow fallback failed that review on 2026-05-04 and remains experimental.
 
 ## 4) Notes
 
 - Add new entries here after the first successful Scribe/Modal + Phase26 MI300X benchmark pass.
 - Log major deployment or runtime recoveries in [ERROR_LOG.md](/Users/rithvik/Clypt-Backend/docs/ERROR_LOG.md).
+- When testing persistent Modal workers ad hoc, stop `clypt-visual-l40s` and `clypt-media-l40s` after the session if they should not stay warm.

@@ -173,6 +173,7 @@ class RenderPlanClip(StrictModel):
     review_needed: bool = False
     review_reasons: list[str] = Field(default_factory=list)
     overlays: list[dict[str, Any]] = Field(default_factory=list)
+    crop_plan: dict[str, Any] = Field(default_factory=dict)
     segments: list[RenderPlanSegment] = Field(default_factory=list)
 
     @model_validator(mode="after")

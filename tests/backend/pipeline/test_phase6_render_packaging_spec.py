@@ -315,7 +315,9 @@ def test_phase6_render_plan_references_caption_and_metadata_artifacts_and_compil
     assert "PlayResX: 1080" in ass_text
     assert "PlayResY: 1920" in ass_text
     assert "karaoke_focus" in ass_text
-    assert ass_text.count("Dialogue:") == 3
+    assert ass_text.count("Dialogue:") == 2
+    assert "Dialogue: 0" not in ass_text
+    assert "&H0000FF25" in ass_text
 
 
 def test_phase6_render_plan_logs_zone_fallbacks_for_collision_review_cases() -> None:

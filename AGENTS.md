@@ -113,11 +113,16 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
   - Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt` and internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`
   - batch size `16`
-  - threshold `0.35`
+  - threshold `0.85`
   - shape `640`
+  - sampled YOLO11s-pose TensorRT subject validation enabled for auto-follow eligibility
   - ByteTrack buffer `30`
   - ByteTrack match threshold `0.7`
   - GPU decode through `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
+- Phase5-less render auto-follow is implemented but currently experimental and **not production-quality**:
+  - latest reviewed clips still had poor tracking/subject selection and insufficiently smooth crop motion
+  - do not treat generated auto-follow renders as accepted visual-quality baselines
+  - manual Phase5 grounding remains the production-quality path until tracking/crop planning is repaired and reviewed again
 - There is **no local fallback**:
   - Phase1 requires `CLYPT_PHASE1_VISUAL_SERVICE_*`
   - Phase1 requires `CLYPT_PHASE24_DISPATCH_*`
@@ -154,7 +159,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (3961 symbols, 10022 relationships, 241 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (4122 symbols, 10398 relationships, 247 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
