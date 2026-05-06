@@ -1,8 +1,8 @@
 """Phase 1 Scribe + Modal visual orchestration.
 
-Phase 1 now submits the Modal RF-DETR visual job, runs ElevenLabs Scribe v2
+Phase 1 now submits the Modal RF-DETR-Seg visual job, runs ElevenLabs Scribe v2
 synchronously from a signed GCS audio URL, adapts the Scribe response into the
-canonical audio payloads, then hands off to Phase26 while RF-DETR is still
+canonical audio payloads, then hands off to Phase26 while RF-DETR-Seg is still
 pending. There is no local VibeVoice/NFA/emotion2vec+/YAMNet fallback on this
 branch.
 """
@@ -104,7 +104,7 @@ def _run_phase1_sidecars_scribe(
     from .scribe_adapter import adapt_scribe_response
 
     t_total = time.perf_counter()
-    logger.info("[extract] submitting Modal RF-DETR visual future ...")
+    logger.info("[extract] submitting Modal RF-DETR-Seg visual future ...")
     t_visual_submit = time.perf_counter()
     try:
         visual_future = visual_extractor.submit(
@@ -206,7 +206,7 @@ def _run_phase1_sidecars_scribe(
     )
     if on_audio_chain_complete is not None:
         on_audio_chain_complete(outputs)
-        logger.info("[extract] Scribe callback fired — Phase26 can start while RF-DETR runs")
+        logger.info("[extract] Scribe callback fired — Phase26 can start while RF-DETR-Seg runs")
 
     logger.info("[extract] Scribe audio path done in %.1f s", time.perf_counter() - t_total)
     return outputs

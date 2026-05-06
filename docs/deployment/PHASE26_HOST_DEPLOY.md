@@ -50,7 +50,7 @@ Required values to set:
 
 Current known-good Modal endpoints:
 
-- Visual RF-DETR: `https://testifytestprep--clypt-visual-l40s-visual-extract.modal.run/tasks/visual-extract`
+- Visual RF-DETR-Seg: `https://testifytestprep--clypt-visual-l40s-visual-extract.modal.run/tasks/visual-extract`
 - Node-media-prep: `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/node-media-prep`
 - Phase 6 render/export: `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/render-video`
 

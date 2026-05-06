@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+from .masks import encode_mask_rle
 
 if TYPE_CHECKING:
     import supervision as sv
@@ -51,6 +53,23 @@ class TrackRow:
     y2: float
     confidence: float
     class_id: int = 0
+    mask_rle: dict[str, Any] | None = None
+
+
+def _box_iou_one_to_many(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+    if len(boxes) == 0:
+        return np.empty(0, dtype=np.float32)
+    x1 = np.maximum(float(box[0]), boxes[:, 0])
+    y1 = np.maximum(float(box[1]), boxes[:, 1])
+    x2 = np.minimum(float(box[2]), boxes[:, 2])
+    y2 = np.minimum(float(box[3]), boxes[:, 3])
+    inter = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+    box_area = max(0.0, float(box[2] - box[0])) * max(0.0, float(box[3] - box[1]))
+    boxes_area = np.maximum(0.0, boxes[:, 2] - boxes[:, 0]) * np.maximum(
+        0.0, boxes[:, 3] - boxes[:, 1]
+    )
+    union = box_area + boxes_area - inter
+    return np.divide(inter, np.maximum(union, 1e-6), out=np.zeros_like(inter), where=union > 0)
 
 
 class ByteTrackTrackerRuntime:
@@ -107,9 +126,19 @@ class ByteTrackTrackerRuntime:
             raise RuntimeError("Tracker not initialized. Call initialize() first.")
 
         n_in = len(detections)
+        source_masks = getattr(detections, "mask", None)
+        if source_masks is None:
+            raise RuntimeError("RF-DETR-Seg detections must include masks before ByteTrack.")
 
         t0 = time.perf_counter()
-        tracked = self._tracker.update(detections)
+        import supervision as sv
+
+        box_only = sv.Detections(
+            xyxy=detections.xyxy,
+            confidence=getattr(detections, "confidence", None),
+            class_id=getattr(detections, "class_id", None),
+        )
+        tracked = self._tracker.update(box_only)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
         self._metrics.frames_processed += 1
@@ -125,6 +154,12 @@ class ByteTrackTrackerRuntime:
             if tid is None:
                 continue
             xyxy = tracked.xyxy[i]
+            ious = _box_iou_one_to_many(np.asarray(xyxy, dtype=np.float32), detections.xyxy)
+            if ious.size == 0 or float(np.max(ious)) <= 0.0:
+                raise RuntimeError(
+                    "RF-DETR-Seg mask association failed: tracked row has no same-frame source mask."
+                )
+            mask_index = int(np.argmax(ious))
             conf = float(tracked.confidence[i]) if tracked.confidence is not None else 0.0
             cid = int(tracked.class_id[i]) if tracked.class_id is not None else 0
             rows.append(
@@ -137,6 +172,7 @@ class ByteTrackTrackerRuntime:
                     y2=float(xyxy[3]),
                     confidence=conf,
                     class_id=cid,
+                    mask_rle=encode_mask_rle(source_masks[mask_index]),
                 )
             )
 

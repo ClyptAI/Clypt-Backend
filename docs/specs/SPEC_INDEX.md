@@ -5,7 +5,7 @@ Active specification documents for current and planned backend work.
 ## Active Specs
 
 - [2026-05-02_scribe_v2_modal_l40s_phase1_phase26_refactor_spec.md](2026-05-02_scribe_v2_modal_l40s_phase1_phase26_refactor_spec.md)
-  Active topology refactor: Phase1 uses ElevenLabs Scribe v2 and Modal RF-DETR, Phase26 keeps Qwen on one MI300X, node-media-prep/render share a second Modal L40S, and Scribe word timings are canonical for caption timing.
+  Active topology refactor: Phase1 uses ElevenLabs Scribe v2 and Modal RF-DETR-Seg, Phase26 keeps Qwen on one MI300X, node-media-prep/render share a second Modal L40S, and Scribe word timings are canonical for caption timing.
 
 - [2026-05-02_phase26_amd_mi300x_sglang_qwen_spec.md](2026-05-02_phase26_amd_mi300x_sglang_qwen_spec.md)
   Phase26 MI300X SGLang/Qwen runtime contract: local SQLite queue, local OpenAI-compatible generation, ROCm SGLang acceptance profiles, and no Nebius or alternate GPU-host fallback.

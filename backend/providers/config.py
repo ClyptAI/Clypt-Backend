@@ -284,7 +284,7 @@ class ElevenLabsScribeSettings:
 
 @dataclass(slots=True)
 class Phase1VisualServiceSettings:
-    """Settings for the dedicated Modal RF-DETR visual service."""
+    """Settings for the dedicated Modal RF-DETR-Seg visual service."""
 
     service_url: str
     auth_token: str
@@ -438,9 +438,9 @@ def load_provider_settings(
     visual_url = _read_env("CLYPT_PHASE1_VISUAL_SERVICE_URL")
     visual_token = _read_env("CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN")
     if require_phase1_visual_service and not visual_url:
-        raise ValueError("CLYPT_PHASE1_VISUAL_SERVICE_URL is required for the Modal RF-DETR visual service.")
+        raise ValueError("CLYPT_PHASE1_VISUAL_SERVICE_URL is required for the Modal RF-DETR-Seg visual service.")
     if require_phase1_visual_service and not visual_token:
-        raise ValueError("CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN is required for the Modal RF-DETR visual service.")
+        raise ValueError("CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN is required for the Modal RF-DETR-Seg visual service.")
     phase1_visual_service = (
         Phase1VisualServiceSettings(
             service_url=(visual_url or "").rstrip("/"),

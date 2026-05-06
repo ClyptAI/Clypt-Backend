@@ -23,14 +23,14 @@ The current topology to validate is:
   - canonical media preparation
   - signed HTTPS GCS URL generation
   - synchronous ElevenLabs Scribe v2
-  - Modal RF-DETR visual future submit
+  - Modal RF-DETR-Seg visual future submit
   - immediate Phase26 dispatch after Scribe adaptation
 - Phase26 MI300X:
   - remote enqueue API
   - local SQLite queue + worker
   - SGLang ROCm Qwen on `:8001`
 - Modal:
-  - dedicated L40S RF-DETR visual worker
+  - dedicated L40S RF-DETR-Seg visual worker
   - shared L40S media-prep/render worker
 
 For every new benchmark, record:
@@ -50,7 +50,7 @@ For every new benchmark, record:
 1. Phase1 dispatches to Phase26 as soon as Scribe audio artifacts are adapted.
 2. Phase26 can advance Phase2-4 while the visual future is still pending.
 3. Phase26 joins/fails-hard on the visual future before Phase5/frontend grounding or Phase6 visual use.
-4. Modal visual uses TensorRT FP16 RF-DETR with CUDA/NVDEC decode and no software/CPU fallback.
+4. Modal visual uses TensorRT FP16 RF-DETR-Seg Nano with CUDA/NVDEC decode, box-only ByteTrack, retained masks, and no software/CPU/detection-only fallback.
 5. Phase26 worker calls Modal for node-media-prep and render/export, not local ffmpeg fallbacks.
 6. SGLang staged profiles pass on the MI300X host before the worker starts.
 7. Phase6 render outputs must pass human visual review for tracking and crop smoothness, not only `1080x1920` ffprobe validation. The current Phase5-less auto-follow fallback failed that review on 2026-05-04 and remains experimental.

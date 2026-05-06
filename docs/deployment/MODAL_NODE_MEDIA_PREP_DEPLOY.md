@@ -4,7 +4,7 @@ Deploy the Modal L40S services used by the Scribe/Modal topology.
 
 There are two GPU pools:
 
-- **Visual pool:** dedicated RF-DETR worker.
+- **Visual pool:** dedicated RF-DETR-Seg Nano worker.
 - **Media pool:** one shared worker for node-media-prep and render/export.
 
 ```mermaid
@@ -15,7 +15,7 @@ flowchart TD
   subgraph visual["clypt-visual-l40s"]
     visualApi["CPU visual submit/poll routes"]
     visualJob["visual_extract_job L40S"]
-    visualPath["NVDEC -> TensorRT RF-DETR -> ByteTrack -> pose validation"]
+    visualPath["NVDEC -> TensorRT RF-DETR-Seg boxes+masks -> ByteTrack boxes -> mask association -> pose validation"]
   end
 
   subgraph media["clypt-media-l40s"]
@@ -31,7 +31,7 @@ flowchart TD
   phase26 --> renderApi --> lease --> render
 ```
 
-## 1) Visual RF-DETR App
+## 1) Visual RF-DETR-Seg App
 
 Source:
 
@@ -73,8 +73,9 @@ Required fast-path capabilities:
 - TensorRT Python runtime
 - `trtexec`
 - CUDA PyTorch
+- RF-DETR-Seg Nano export/inference with a usable mask output binding
 
-The worker fails hard if any of these are missing. It must not fall back to software decode or CPU RF-DETR.
+The worker fails hard if any of these are missing. It must not fall back to software decode, CPU RF-DETR, or detection-only RF-DETR. Masks are persisted as `rle_row_major_v1` artifacts for future caption negative-space work; current Phase6 crop/caption code does not consume them.
 
 ## 2) Shared Media App
 

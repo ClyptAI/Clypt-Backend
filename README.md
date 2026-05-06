@@ -22,7 +22,7 @@ This repository is the backend system that powers it.
 
 This repo currently implements **Phases 1-4** of Clypt’s backend:
 
-1. **Phase 1**: ingest long-form video, run Scribe v2 ASR/diarization/audio tagging, submit RF-DETR visual extraction, and hand off audio-first artifacts downstream.
+1. **Phase 1**: ingest long-form video, run Scribe v2 ASR/diarization/audio tagging, submit RF-DETR-Seg visual extraction, and hand off audio-first artifacts downstream.
 2. **Phase 2**: build semantic nodes, prepare clip media, and generate retrieval-ready embeddings.
 3. **Phase 3**: construct the video-level knowledge graph.
 4. **Phase 4**: retrieve, review, and rank clip candidates.
@@ -63,8 +63,8 @@ flowchart TD
     visualApi["CPU submit/poll API"]
     visualGpu["visual_extract_job"]
     decode["NVDEC/CUDA decode"]
-    rfdetr["TensorRT RF-DETR"]
-    track["ByteTrack + pose validation"]
+    rfdetr["TensorRT RF-DETR-Seg Nano boxes + masks"]
+    track["ByteTrack boxes -> mask association -> pose validation"]
   end
 
   subgraph mediaPool["Modal media L40S"]
@@ -95,7 +95,7 @@ Phase 1 runs on the MI300X host's vCPUs and owns ingestion/orchestration, but no
 - Phase 1 runner/orchestrator
 - signed HTTPS GCS audio URL generation for ElevenLabs Scribe v2
 - Scribe response adaptation into canonical diarization/audio-event payloads
-- Modal RF-DETR visual future submission
+- Modal RF-DETR-Seg visual future submission
 - immediate Phase26 handoff after audio is ready
 
 ### Phase26 host
@@ -119,6 +119,8 @@ Modal currently handles visual extraction plus media-prep/render:
 - one dedicated warm visual `L40S` worker via `visual_extract_job`
 - one shared warm media `L40S` worker via `media_gpu_job`
 - timeline-batched ffmpeg GPU path for clip extraction/encoding before multimodal embedding
+
+RF-DETR-Seg masks are retained with the same visual payloads as boxes and tracklets. The immediate runtime still tracks by boxes and renders Phase6 crops from bbox+pose data, but masks create a path for future person-aware caption placement, motion graphics and overlay placement within the same short/reel frame, and improved crop/negative-space decisions. Those mask-consuming render integrations are not implemented yet.
 
 Current render caveat: the Phase5-less auto-follow render fallback is implemented and produces valid vertical MP4s, but the latest reviewed clips were still unacceptable: tracking/subject selection was poor and crop motion was not smooth enough. The current implementation uses `tracklet_follow_9x16_pose_x_dynamic_inside_person`, but it remains experimental until a fresh human render review accepts it; manual Phase5 grounding remains the expected path for production-quality renders.
 
@@ -151,13 +153,13 @@ flowchart TD
   phase4 --> visualJoin --> phase5 --> phase6
 ```
 
-One important runtime property: Phase26 starts as soon as Scribe audio artifacts are ready. It does **not** wait for RF-DETR; Phase26 joins the visual future before Phase5/frontend grounding or Phase6 visual use.
+One important runtime property: Phase26 starts as soon as Scribe audio artifacts are ready. It does **not** wait for RF-DETR-Seg; Phase26 joins the visual future before Phase5/frontend grounding or Phase6 visual use.
 
 ## Core Capabilities Today
 
 - Long-form video ingestion
 - ElevenLabs Scribe v2 ASR, diarization, word timings, and coarse audio tags
-- Modal RF-DETR + ByteTrack visual extraction
+- Modal RF-DETR-Seg + ByteTrack visual extraction, with person masks retained for future caption, overlay/motion-graphics, and crop/negative-space work
 - semantic node construction
 - clip media extraction for multimodal embedding
 - video-level graph construction

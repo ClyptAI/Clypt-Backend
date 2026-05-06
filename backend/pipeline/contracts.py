@@ -151,6 +151,7 @@ class TrackletGeometryPoint(StrictModel):
     frame_index: NonNegativeInt
     timestamp_ms: NonNegativeInt
     bbox_xyxy: list[float] = Field(min_length=4, max_length=4)
+    mask_rle: dict[str, Any] | None = None
     head_center_xy: list[float] | None = Field(default=None, min_length=2, max_length=2)
     shoulder_center_xy: list[float] | None = Field(default=None, min_length=2, max_length=2)
     upper_torso_anchor_xy: list[float] | None = Field(default=None, min_length=2, max_length=2)

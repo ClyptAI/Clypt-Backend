@@ -86,7 +86,7 @@ def test_simple_visual_extractor_emits_single_shot_payload(tmp_path: Path):
     assert payload["face_detections"] == []
     assert payload["visual_identities"] == []
     assert payload["mask_stability_signals"] == []
-    assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_nano_bytetrack"
+    assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_seg_nano_bytetrack"
     assert payload["tracking_metrics"]["input_track_rows"] == 0
     assert payload["tracking_metrics"]["emitted_track_rows"] == 0
     assert payload["tracking_metrics"]["emitted_person_detection_segments"] == 0
@@ -110,7 +110,22 @@ def test_visual_extractor_detects_shots_splits_tracks_and_builds_person_detectio
         shot_detector=lambda video_path, duration_ms: [500, 3000],
         tracker_runner=lambda video_path: [
             {"frame_idx": 12, "track_id": "1", "x1": 10.0, "y1": 20.0, "x2": 50.0, "y2": 80.0, "confidence": 0.8},
-            {"frame_idx": 13, "track_id": "1", "x1": 12.0, "y1": 22.0, "x2": 52.0, "y2": 82.0, "confidence": 0.85},
+            {
+                "frame_idx": 13,
+                "track_id": "1",
+                "x1": 12.0,
+                "y1": 22.0,
+                "x2": 52.0,
+                "y2": 82.0,
+                "confidence": 0.85,
+                "mask_rle": {
+                    "encoding": "rle_row_major_v1",
+                    "size": [720, 1280],
+                    "counts": [0, 5],
+                    "threshold": 0.5,
+                    "source": "rfdetr_seg_nano_tensorrt",
+                },
+            },
             {"frame_idx": 60, "track_id": 2, "x1": 100.0, "y1": 120.0, "x2": 180.0, "y2": 260.0, "confidence": 0.7},
         ],
     )
@@ -146,7 +161,11 @@ def test_visual_extractor_detects_shots_splits_tracks_and_builds_person_detectio
         "right": pytest.approx(50.0 / 1280.0, abs=1e-6),
         "bottom": pytest.approx(80.0 / 720.0, abs=1e-6),
     }
-    assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_nano_bytetrack"
+    assert (
+        payload["person_detections"][1]["timestamped_objects"][0]["mask_rle"]
+        == payload["tracks"][1]["mask_rle"]
+    )
+    assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_seg_nano_bytetrack"
     assert payload["tracking_metrics"]["input_track_rows"] == 3
     assert payload["tracking_metrics"]["emitted_track_rows"] == 3
     assert payload["tracking_metrics"]["emitted_person_detection_segments"] == 3

@@ -1,4 +1,4 @@
-"""GPU decode for Modal L40S RF-DETR visual extraction.
+"""GPU decode for Modal L40S RF-DETR-Seg visual extraction.
 
 Responsibilities:
 - Decode frames with ffmpeg CUDA/NVDEC

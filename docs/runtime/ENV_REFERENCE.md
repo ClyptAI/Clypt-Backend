@@ -5,7 +5,7 @@
 
 This is the code-backed env catalog for the current AMD-refactor topology:
 
-- Phase1 vCPU orchestrator colocated on the Phase26 MI300X host with ElevenLabs Scribe v2 and Modal RF-DETR.
+- Phase1 vCPU orchestrator colocated on the Phase26 MI300X host with ElevenLabs Scribe v2 and Modal RF-DETR-Seg.
 - Phase26 MI300X GPU service with local SGLang/Qwen.
 - Modal L40S visual worker plus one shared Modal L40S media worker.
 
@@ -53,11 +53,11 @@ Modal visual routing:
 
 | Env | Default | Notes |
 | --- | --- | --- |
-| `CLYPT_PHASE1_VISUAL_BACKEND` | `modal_rfdetr` | Remote Modal RF-DETR path. |
+| `CLYPT_PHASE1_VISUAL_BACKEND` | `modal_rfdetr` | Remote Modal RF-DETR-Seg path. |
 | `CLYPT_PHASE1_VISUAL_SERVICE_URL` | required | Modal app base URL or `/tasks/visual-extract` URL. |
 | `CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN` | required | Bearer token for submit/poll. |
-| `CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S` | `7200` | Poll timeout for RF-DETR completion. |
-| `CLYPT_PHASE1_VISUAL_MODEL` | `nano` | Preserve current RF-DETR model. |
+| `CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S` | `7200` | Poll timeout for RF-DETR-Seg completion. |
+| `CLYPT_PHASE1_VISUAL_MODEL` | `seg_nano` | Active RF-DETR-Seg Nano model; detection-only RF-DETR values are rejected. |
 | `CLYPT_PHASE1_VISUAL_BATCH_SIZE` | `16` | Preserve current fast path. |
 | `CLYPT_PHASE1_VISUAL_THRESHOLD` | `0.85` | Current high-confidence RF-DETR tracking test threshold. |
 | `CLYPT_PHASE1_VISUAL_SHAPE` | `640` | Preserve current input shape. |
@@ -70,8 +70,8 @@ Phase1 handoff invariant:
 
 - Phase1 uploads canonical audio/video to GCS.
 - Phase1 calls Scribe synchronously using a signed HTTPS GCS audio URL.
-- Phase1 submits Modal RF-DETR immediately and carries the returned `visual_future`.
-- Phase1 enqueues Phase26 as soon as Scribe audio is adapted, without waiting for RF-DETR.
+- Phase1 submits Modal RF-DETR-Seg immediately and carries the returned `visual_future`.
+- Phase1 enqueues Phase26 as soon as Scribe audio is adapted, without waiting for RF-DETR-Seg.
 - Phase26 must hard-join the visual future before Phase5/frontend grounding or Phase6 visual use.
 
 ## 2) Phase26 MI300X
@@ -124,7 +124,7 @@ CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1
 
 ## 3) Modal L40S Workers
 
-### 3.1 Visual RF-DETR Worker
+### 3.1 Visual RF-DETR-Seg Worker
 
 Runtime env:
 
@@ -135,7 +135,7 @@ Runtime env:
 Fast path:
 
 ```bash
-CLYPT_MODAL_VISUAL_MODEL=nano
+CLYPT_MODAL_VISUAL_MODEL=seg_nano
 CLYPT_MODAL_VISUAL_BATCH_SIZE=16
 CLYPT_MODAL_VISUAL_THRESHOLD=0.85
 CLYPT_MODAL_VISUAL_SHAPE=640
@@ -144,7 +144,7 @@ CLYPT_PHASE1_VISUAL_POSE_VALIDATION=1
 CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH=yolo11s-pose.pt
 ```
 
-The Modal visual worker must fail hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT Python runtime, `trtexec`, or CUDA PyTorch are unavailable.
+The Modal visual worker must fail hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT Python runtime, `trtexec`, CUDA PyTorch, RF-DETR-Seg, or a usable mask output binding are unavailable. The worker retains `mask_rle` rows for future person-aware captions, motion graphics/overlays, and crop/negative-space decisions, but Phase6 crop/caption placement does not consume masks yet.
 The deployed Modal image is pinned to Python `3.12` because the CUDA PyTorch
 and TensorRT wheels used by the visual fast path are not available for every
 new default Python runtime.

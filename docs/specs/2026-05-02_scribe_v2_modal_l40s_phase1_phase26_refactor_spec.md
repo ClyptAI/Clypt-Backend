@@ -3,11 +3,13 @@
 **Status:** Active planning spec
 **Date:** 2026-05-02
 **Owner:** Phase1 runtime / Phase26 runtime / Modal media workers
-**Scope:** Refactor the AMD branch topology so Phase26 keeps self-hosted Qwen on one MI300X, Phase1 replaces VibeVoice + NFA + emotion2vec+ + YAMNet with ElevenLabs Scribe v2, and NVIDIA-native visual/media work moves to two persistent Modal L40S pools: one for RF-DETR visual extraction and one shared by node-media-prep plus Phase 6 render/export.
+**Scope:** Refactor the AMD branch topology so Phase26 keeps self-hosted Qwen on one MI300X, Phase1 replaces VibeVoice + NFA + emotion2vec+ + YAMNet with ElevenLabs Scribe v2, and NVIDIA-native visual/media work moves to two persistent Modal L40S pools: one for RF-DETR-Seg visual extraction and one shared by node-media-prep plus Phase 6 render/export.
 
 > 2026-05-04 implementation note: the topology, Scribe path, Modal visual path, and Modal media/render submit-poll path are implemented on `AMD-refactor`, but Phase5-less auto-follow render quality is **not accepted**. Latest reviewed clips rendered as valid vertical MP4s, but tracking/subject selection was poor and crop motion was still not smooth enough. Treat auto-follow rendering as an experimental fallback until a dedicated tracking/crop-quality pass lands; manual Phase5 grounding remains the production-quality route.
 >
 > 2026-05-05 crop-plan update: `tracklet_follow_9x16_smooth_inside_person` is superseded by `tracklet_follow_9x16_pose_x_dynamic_inside_person`. The new plan computes per-keyframe 9:16 crops inside the selected person bbox, uses pose only for horizontal head/face anchoring, keeps vertical placement bbox-top anchored, drives dynamic `x/y/w/h` through FFmpeg `sendcmd`, and treats shot or primary-tracklet changes as hard crop cuts instead of animated pans.
+>
+> 2026-05-06 visual-model update: the active Modal visual path now targets `RFDETRSegNano` instead of detection-only RF-DETR Nano. The TensorRT pass must expose boxes, scores/classes, and masks; masks are retained as `rle_row_major_v1` artifacts after box-only ByteTrack ID assignment. Segmentation was added for future person-aware captions, motion graphics/overlays inside the short/reel frame, and crop/negative-space decisions. Phase6 crop math and captions do not consume masks yet.
 
 ---
 
@@ -18,10 +20,10 @@
 3. Phase1 audio uses **ElevenLabs Scribe v2** as the primary transcription, diarization, word-timing, and coarse audio-tag backend.
 4. Phase1 sends Scribe v2 a **signed HTTPS GCS URL** for the canonical audio object through the non-deprecated `source_url` request field, not a multipart upload, unless the signed URL path is proven incompatible in live API testing.
 5. V1 uses **synchronous Scribe requests** from Phase1. ElevenLabs webhooks remain a later optimization and are not required for the first implementation.
-6. Phase26 starts immediately after Scribe audio artifacts are ready. Phase1/Phase26 must not wait for RF-DETR before beginning audio/text Phase26 work.
-7. RF-DETR visual output joins whenever it is ready. The hard requirement is that Phase5 must not start until RF-DETR is complete and visual artifacts have been persisted.
-   - "Phase5 start" includes the frontend/user review entry point where users inspect tracks, draw or adjust boxes, and perform grounding. The frontend must not expose that workflow until RF-DETR artifacts are ready.
-8. Phase26 owns the pending RF-DETR Modal `call_id`. Phase1 submits Modal RF-DETR, passes the `visual_call_id` to Phase26 with the audio-first enqueue payload, and Phase26 polls/joins that call when it reaches the visual-ready point.
+6. Phase26 starts immediately after Scribe audio artifacts are ready. Phase1/Phase26 must not wait for RF-DETR-Seg before beginning audio/text Phase26 work.
+7. RF-DETR-Seg visual output joins whenever it is ready. The hard requirement is that Phase5 must not start until RF-DETR-Seg is complete and visual artifacts have been persisted.
+   - "Phase5 start" includes the frontend/user review entry point where users inspect tracks, draw or adjust boxes, and perform grounding. The frontend must not expose that workflow until RF-DETR-Seg artifacts are ready.
+8. Phase26 owns the pending RF-DETR-Seg Modal `call_id`. Phase1 submits Modal RF-DETR-Seg, passes the `visual_call_id` to Phase26 with the audio-first enqueue payload, and Phase26 polls/joins that call when it reaches the visual-ready point.
 9. Scribe speaker-count behavior has exactly two supported modes:
    - default: omit `num_speakers` and let Scribe detect the speaker count
    - explicit: pass `num_speakers` from a future frontend/user option
@@ -32,8 +34,8 @@
 12. Scribe entity detection/redaction is entirely disabled in V1 and must not be sent in the default request.
 13. Scribe `temperature` is configurable as a backend/eval knob and defaults to `0`. It is not a frontend product option in V1.
 14. Scribe `seed` is unset by default and may only be set through env for controlled eval/debug runs. Do not claim deterministic Scribe output.
-15. Modal RF-DETR must target the proven NVIDIA fast path first: NVDEC/CUDA decode + RF-DETR TensorRT + ByteTrack on L40S. CUDA PyTorch is not the target implementation unless TensorRT is proven impossible and explicitly approved.
-16. The main-branch TensorRT/NVIDIA RF-DETR implementation is the preferred port source if the current AMD branch visual code has diverged.
+15. Modal RF-DETR-Seg must target the proven NVIDIA fast path first: NVDEC/CUDA decode + RF-DETR-Seg TensorRT + ByteTrack on boxes + mask association on L40S. CUDA PyTorch is not the target implementation unless TensorRT is proven impossible and explicitly approved.
+16. The main-branch TensorRT/NVIDIA RF-DETR implementation remains the preferred port source for decode/TensorRT/ByteTrack structure, but detection-only RF-DETR models are superseded by `RFDETRSegNano`.
 17. The following Phase1 audio components are superseded and must not remain in the active path:
    - VibeVoice vLLM sidecar
    - VibeVoice ASR service
@@ -41,13 +43,13 @@
    - emotion2vec+
    - YAMNet
 18. Phase1 orchestration continues to run as a CPU-only service/runner. The canonical deployment target is a non-GPU DigitalOcean runtime under the Clypt project, or the existing backend runner if that becomes the production owner; it must not reserve a Phase1 GPU.
-19. RF-DETR visual extraction runs on a dedicated persistent Modal `L40S` worker pool.
+19. RF-DETR-Seg visual extraction runs on a dedicated persistent Modal `L40S` worker pool.
 20. Node-media-prep and Phase 6 render/export share a separate persistent Modal `L40S` worker pool because they are not expected to run concurrently for the same pipeline and both are ffmpeg/NVDEC/NVENC shaped.
 21. The first implementation uses **two persistent Modal L40S pools**, not one:
-   - `modal-visual-l40s`: RF-DETR + ByteTrack only, `min_containers=1`, `max_containers=1`
+   - `modal-visual-l40s`: RF-DETR-Seg + ByteTrack + mask association only, `min_containers=1`, `max_containers=1`
    - `modal-media-l40s`: node-media-prep + render/export, `min_containers=1`, `max_containers=1`
 22. There must be exactly one persistent visual L40S worker and exactly one persistent media L40S worker in V1. Do not create separate warm L40S pools for node-media-prep and render/export.
-23. Modal visual submit/poll accepts multiple submissions, but the `modal-visual-l40s` pool runs only one active RF-DETR job at a time. Additional visual jobs queue behind `max_containers=1` and must expose queue-wait metrics.
+23. Modal visual submit/poll accepts multiple submissions, but the `modal-visual-l40s` pool runs only one active RF-DETR-Seg job at a time. Additional visual jobs queue behind `max_containers=1` and must expose queue-wait metrics.
 24. Modal media runs in **cost-strict mode**: `min_containers=1`, `max_containers=1`, one warm L40S container, and queued submit/poll jobs. It must still preserve the main-branch timeline-batched node-media-prep structure inside each job.
 25. Node-media-prep keeps main-branch internal batching behavior:
    - timeline-local batches
@@ -59,8 +61,8 @@
 26. A later one-L40S consolidation experiment is explicitly out of scope for the first implementation, but the spec must keep the queue/lease boundary clear enough to test it later.
 27. Phase1 must preserve the long-video overlap property:
    - Scribe v2 audio output can dispatch Phase26 early.
-   - RF-DETR continues on Modal while Phase26 begins Qwen-heavy audio/text reasoning on the MI300X.
-   - Visual-dependent graph work hard-joins when RF-DETR output is available.
+   - RF-DETR-Seg continues on Modal while Phase26 begins Qwen-heavy audio/text reasoning on the MI300X.
+   - Visual-dependent graph work hard-joins when RF-DETR-Seg output is available.
 28. There is no local VibeVoice/NFA fallback on this branch. If Scribe v2 fails, the job fails fast with enough metadata to retry or diagnose.
 29. Existing Spanner run telemetry remains the comparison baseline. No new H200 baseline capture is required before this refactor starts.
 30. Existing Modal L40S node-media-prep and render submit/poll patterns should be reused where possible, but their GPU-backed workers should be reorganized so the persistent pools match this topology.
@@ -117,9 +119,11 @@ flowchart TD
     VAPI["CPU visual submit/poll API"]
     VJOB["visual_extract_job"]
     VDECODE["NVDEC/CUDA decode"]
-    VDET["TensorRT RF-DETR"]
-    VTRACK["ByteTrack + pose validation"]
-    VOUT["visual artifacts"]
+    VDET["TensorRT RF-DETR-Seg boxes + masks"]
+    VTRACK["ByteTrack boxes"]
+    VMASK["mask association"]
+    VPOSE["pose validation"]
+    VOUT["visual artifacts + mask_rle"]
   end
 
   subgraph P26["MI300X host: Phase26"]
@@ -141,7 +145,7 @@ flowchart TD
 
   USER --> INGEST --> GCS
   GCS --> SIGN --> SCRIBE --> ADAPT --> P26POST --> Q --> W
-  GCS --> VSUB --> VAPI --> VJOB --> VDECODE --> VDET --> VTRACK --> VOUT
+  GCS --> VSUB --> VAPI --> VJOB --> VDECODE --> VDET --> VTRACK --> VMASK --> VPOSE --> VOUT
   W --> SGL --> AUD --> RANK
   VOUT --> JOIN
   RANK --> JOIN --> P56
@@ -175,7 +179,7 @@ sequenceDiagram
   participant P1 as Phase1 orchestrator
   participant GCS as GCS
   participant EL as ElevenLabs Scribe v2
-  participant VIS as Modal RF-DETR L40S
+  participant VIS as Modal RF-DETR-Seg L40S
   participant P26 as Phase26 MI300X
   participant MED as Modal media L40S
 
@@ -204,12 +208,13 @@ flowchart TD
     VPOLL["CPU GET /tasks/visual-extract/result/{call_id}"]
     VJOB["persistent L40S visual worker min=1 max=1"]
     VDECODE["NVDEC/CUDA decode + resize"]
-    VRFD["TensorRT RF-DETR"]
-    VTRACK["ByteTrack"]
+    VRFD["TensorRT RF-DETR-Seg boxes + masks"]
+    VTRACK["ByteTrack boxes"]
+    VMASK["mask association"]
     VPOSE["YOLO11s-pose validation"]
     VAPI --> VJOB
     VPOLL --> VJOB
-    VJOB --> VDECODE --> VRFD --> VTRACK --> VPOSE
+    VJOB --> VDECODE --> VRFD --> VTRACK --> VMASK --> VPOSE
   end
 
   subgraph MEDPOOL["modal-media-l40s"]
@@ -288,10 +293,10 @@ Responsibilities:
 1. Resolve test-bank or source URL input.
 2. Ensure canonical audio and source video are available locally or in GCS.
 3. Submit Scribe v2 transcription.
-4. Submit Modal RF-DETR visual extraction and receive the pending `visual_call_id`.
+4. Submit Modal RF-DETR-Seg visual extraction and receive the pending `visual_call_id`.
 5. Convert Scribe output into current downstream payload shapes.
 6. Enqueue Phase26 as soon as audio artifacts are ready.
-7. Pass the Modal RF-DETR `visual_call_id` to Phase26 with the audio-first enqueue payload.
+7. Pass the Modal RF-DETR-Seg `visual_call_id` to Phase26 with the audio-first enqueue payload.
 8. Fail hard on missing Scribe word timestamps, missing speaker labels when diarization is required, Modal visual submit failure, or missing Modal `visual_call_id`.
 
 ### 5.2 ElevenLabs Scribe Provider
@@ -360,7 +365,7 @@ Responsibilities:
 6. Emit an empty `EmotionSegmentsPayload` only if downstream schemas still require the field during the transition; mark it as `source=scribe_v2_no_emotion_scores` in metadata if the schema supports metadata.
 7. Fail hard if caption-critical word timings are absent.
 
-### 5.4 Modal RF-DETR Visual Service
+### 5.4 Modal RF-DETR-Seg Visual Service
 
 New Modal app target:
 
@@ -392,9 +397,11 @@ Responsibilities:
 1. Download or mount the source video.
 2. Use the proven NVIDIA visual path as the required target:
    - NVDEC / CUDA decode
-   - RF-DETR Nano or configured model
+   - RFDETRSegNano only (`CLYPT_PHASE1_VISUAL_MODEL=seg_nano`)
    - TensorRT engine build/load/execute
-   - ByteTrack
+   - ByteTrack on boxes only
+   - same-frame IoU association of segmentation masks back to tracked rows
+   - retained `mask_rle` rows for raw detections, tracks, person detections, and tracklet geometry
 3. Prefer porting the main-branch TensorRT/NVIDIA visual implementation if this branch's AMD visual code has removed or replaced those files.
 4. Upload visual artifacts to GCS.
 5. Return the same logical visual payload expected by Phase1:
@@ -575,7 +582,7 @@ CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr
 CLYPT_PHASE1_VISUAL_SERVICE_URL=https://<modal-visual-app>/tasks/visual-extract
 CLYPT_PHASE1_VISUAL_SERVICE_AUTH_TOKEN=<secret>
 CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S=7200
-CLYPT_PHASE1_VISUAL_MODEL=nano
+CLYPT_PHASE1_VISUAL_MODEL=seg_nano
 CLYPT_PHASE1_VISUAL_BATCH_SIZE=16
 CLYPT_PHASE1_VISUAL_THRESHOLD=0.85
 CLYPT_PHASE1_VISUAL_SHAPE=640
@@ -589,7 +596,7 @@ CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH=yolo11s-pose.pt
 VISUAL_EXTRACT_AUTH_TOKEN=<secret>
 GCS_BUCKET=clypt-storage-v3
 GOOGLE_APPLICATION_CREDENTIALS_JSON=<secret>
-CLYPT_MODAL_VISUAL_MODEL=nano
+CLYPT_MODAL_VISUAL_MODEL=seg_nano
 CLYPT_MODAL_VISUAL_BATCH_SIZE=16
 CLYPT_MODAL_VISUAL_THRESHOLD=0.85
 CLYPT_MODAL_VISUAL_SHAPE=640
@@ -664,7 +671,7 @@ If files are edited in place rather than replaced, rename them to semantically m
 
 - `backend/phase1_runtime/extract.py`
   - Replace VibeVoice/audio-post orchestration with Scribe submission + adapter.
-  - Preserve audio-first Phase26 handoff while Modal RF-DETR continues.
+  - Preserve audio-first Phase26 handoff while Modal RF-DETR-Seg continues.
 
 - `backend/phase1_runtime/runner.py`
   - Preserve early Phase26 enqueue semantics.
@@ -719,7 +726,7 @@ Do not delete these until the replacement Scribe + Modal visual deploy path is w
 
 ## 9. Phase26 Concurrency Contract
 
-The key product requirement is that long videos do not wait for full RF-DETR completion before Phase26 starts.
+The key product requirement is that long videos do not wait for full RF-DETR-Seg completion before Phase26 starts.
 
 Current code note:
 
@@ -727,13 +734,13 @@ Current code note:
 
 Target behavior:
 
-1. Phase1 starts Scribe and Modal RF-DETR in parallel.
+1. Phase1 starts Scribe and Modal RF-DETR-Seg in parallel.
 2. When Scribe returns, Phase1 writes audio artifacts and enqueues Phase26.
 3. Phase1 includes `phase1_visual_status="pending"`, `visual_call_id`, source video metadata, visual service identifier, and visual result path/poll URL in the Phase26 enqueue payload.
 4. Phase26 starts stages that only require transcript/audio semantics.
-5. Modal RF-DETR continues independently.
-6. Phase26 must not wait for RF-DETR before starting audio/text Qwen work.
-7. Phase26 may poll and join the Modal RF-DETR result whenever the visual future is useful or ready.
+5. Modal RF-DETR-Seg continues independently.
+6. Phase26 must not wait for RF-DETR-Seg before starting audio/text Qwen work.
+7. Phase26 may poll and join the Modal RF-DETR-Seg result whenever the visual future is useful or ready.
 8. Phase26 persists the visual artifact URI/result metadata after the Modal result is available.
 9. Phase26 may complete Phase4 before or after the visual join, as long as visual-dependent artifacts are not fabricated.
 10. Phase26 must block Phase5 start until visual artifacts are persisted and validated. This includes blocking any frontend/user review or grounding workflow that depends on tracks, boxes, or visual candidates.
@@ -770,14 +777,14 @@ Audio-only work allowed before visual join:
 Visual-ready point:
 
 - The first strict join point is any Phase26 step that calls `build_tracklet_artifacts`, consumes `shot_tracklet_index.json`, reads `tracklet_geometry.json`, creates visual evidence for candidates, or prepares Phase5 grounding inputs.
-- If no earlier step needs those artifacts, the absolute join point is the Phase5 gate. Phase5 backend setup and the frontend/user grounding entry point must not start until the validated RF-DETR result is available.
+- If no earlier step needs those artifacts, the absolute join point is the Phase5 gate. Phase5 backend setup and the frontend/user grounding entry point must not start until the validated RF-DETR-Seg result is available.
 
 Recovery requirements:
 
 1. If the Phase1 process exits after enqueue, Phase26 can still poll the `visual_call_id`.
 2. If the Phase26 worker crashes before the visual-ready point, the leased retry uses the persisted `visual_call_id`.
 3. If Modal reports an unknown or expired `visual_call_id`, Phase26 fails hard and records the missing visual future in Spanner/error logs.
-4. Phase26 must not submit duplicate RF-DETR jobs during normal lease retry unless the previous `visual_call_id` is terminally failed or expired.
+4. Phase26 must not submit duplicate RF-DETR-Seg jobs during normal lease retry unless the previous `visual_call_id` is terminally failed or expired.
 
 ---
 
@@ -810,7 +817,7 @@ Fail hard for:
 
 - no `call_id`
 - result timeout
-- RF-DETR model load failure
+- RF-DETR-Seg model load or mask-binding failure
 - missing codec support
 - visual payload missing tracks/shot changes fields
 - FPS below the configured gate unless the user explicitly approves the regression
@@ -860,7 +867,7 @@ Add tests for:
 - media worker lease prevents concurrent node-media-prep and render jobs
 - media worker is capped at one warm L40S container
 - node-media-prep preserves main-branch timeline batching and per-job clip concurrency
-- visual submit/poll accepts multiple calls while only one RF-DETR job executes at a time
+- visual submit/poll accepts multiple calls while only one RF-DETR-Seg job executes at a time
 - visual queue wait is recorded in the result payload and Spanner stage metrics
 
 Likely test files:
@@ -918,9 +925,9 @@ Hard gates:
 
 - no missing word timings
 - no missing speaker ids when diarization is required
-- no RF-DETR FPS regression beyond the approved threshold
+- no RF-DETR-Seg FPS regression beyond the approved threshold
 - visual queue wait is observable and not confused with RF-DETR processing time
-- Phase26 must begin before RF-DETR completes on long videos
+- Phase26 must begin before RF-DETR-Seg completes on long videos
 - no accidental startup of VibeVoice/NFA/emotion/YAMNet services
 
 ---
@@ -948,11 +955,11 @@ Hard gates:
    - `phase1_visual_extract_join`
 5. Remove active VibeVoice/NFA/emotion/YAMNet env requirements.
 
-### Slice 3: Modal RF-DETR Visual Worker
+### Slice 3: Modal RF-DETR-Seg Visual Worker
 
 1. Create `scripts/modal/visual_extract_app.py`.
-2. Port the main-branch NVIDIA/TensorRT RF-DETR path if needed.
-3. Build/load RF-DETR TensorRT engines in the Modal visual worker cache.
+2. Port the main-branch NVIDIA/TensorRT RF-DETR path structure if needed, but use `RFDETRSegNano`.
+3. Build/load RF-DETR-Seg TensorRT engines in the Modal visual worker cache.
 4. Use L40S NVDEC/CUDA decode and TensorRT inference as the required fast path.
 5. Add submit/poll client.
 6. Add smoke checks for `nvidia-smi`, ffmpeg CUDA/NVDEC support, TensorRT engine build/load, model load, and one small visual extraction.
@@ -995,7 +1002,7 @@ Initial target:
 | Workload | Placement | GPU count |
 |---|---|---:|
 | Qwen/SGLang Phase26 | DigitalOcean MI300X | 1 always-on while testing |
-| RF-DETR visual extraction | Modal persistent L40S visual pool | 1 warm pool |
+| RF-DETR-Seg visual extraction | Modal persistent L40S visual pool | 1 warm pool |
 | node-media-prep | Modal persistent L40S media pool | shared |
 | Phase 6 render/export | Modal persistent L40S media pool | shared |
 | Scribe v2 STT | ElevenLabs API | 0 local |
@@ -1035,8 +1042,8 @@ This spec also supersedes the Phase 6 caption-timing assumption that names NFA-b
 1. Phase1 can run without a Phase1 GPU host.
 2. Scribe v2 returns word timings and diarization for canonical test-bank assets.
 3. Scribe adapter produces valid `DiarizationPayload` and audio-event payloads.
-4. Phase26 starts after Scribe audio artifacts are ready and before RF-DETR completes on long videos.
-5. Modal RF-DETR L40S produces visual artifacts at or above the approved FPS gate.
+4. Phase26 starts after Scribe audio artifacts are ready and before RF-DETR-Seg completes on long videos.
+5. Modal RF-DETR-Seg L40S produces visual artifacts at or above the approved FPS gate.
 6. Node-media-prep and render/export share one persistent media L40S pool and do not reserve separate warm GPUs.
 7. No active service, env file, deploy doc, or `AGENTS.md` runtime truth still claims VibeVoice/NFA/emotion2vec/YAMNet are active.
 8. Existing offline pipeline/runtime tests pass.

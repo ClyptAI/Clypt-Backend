@@ -1,11 +1,11 @@
-"""V3.1 visual extraction pipeline for the Modal L40S RF-DETR worker.
+"""V3.1 visual extraction pipeline for the Modal L40S RF-DETR-Seg worker.
 
 This module orchestrates:
 1. video metadata probing
 2. shot boundary detection
 3. frame decoding (NVIDIA NVDEC/CUDA GPU decode)
-4. RF-DETR person detection (TensorRT FP16)
-5. ByteTrack tracking
+4. RF-DETR-Seg person boxes+masks (TensorRT FP16)
+5. ByteTrack box tracking + mask association
 6. post-processing into the canonical artifact schemas
 
 It delegates to dedicated modules for detection, tracking, and decoding.
@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .masks import MASK_RLE_ENCODING, encode_mask_rle
 from .tracking_post import frame_time_ms, split_tracks_at_shot_boundaries
 
 logger = logging.getLogger(__name__)
@@ -97,11 +98,11 @@ def detect_shot_boundaries_ms(*, video_path: Path, duration_ms: int, threshold: 
 
 
 # ---------------------------------------------------------------------------
-# RF-DETR + ByteTrack extraction pipeline
+# RF-DETR-Seg + ByteTrack extraction pipeline
 # ---------------------------------------------------------------------------
 
 def _make_detector(config):
-    """Create the active RF-DETR detector backend."""
+    """Create the active RF-DETR-Seg detector backend."""
     from .tensorrt_detector import TensorRTDetector
 
     if not config.use_tensorrt:
@@ -140,6 +141,10 @@ def _serialize_raw_detections(*, frame_idx: int, detections) -> list[dict]:
             if getattr(detections, "class_id", None) is not None
             else 0
         )
+        mask_rle = None
+        masks = getattr(detections, "mask", None)
+        if masks is not None:
+            mask_rle = encode_mask_rle(masks[index])
         rows.append(
             {
                 "frame_idx": int(frame_idx),
@@ -155,6 +160,7 @@ def _serialize_raw_detections(*, frame_idx: int, detections) -> list[dict]:
                 "y2": float(xyxy[3]),
                 "source": "rfdetr_raw",
                 "geometry_type": "aabb",
+                **({"mask_rle": mask_rle} if mask_rle is not None else {}),
             }
         )
     return rows
@@ -167,7 +173,7 @@ def _run_rfdetr_tracking_pipeline(
     shot_segments: list[dict[str, Any]] | None = None,
     video_fps: float | None = None,
 ) -> tuple[list[dict], list[dict], dict]:
-    """Decode frames, run RF-DETR detection, then ByteTrack tracking.
+    """Decode frames, run RF-DETR-Seg detection, then ByteTrack tracking.
 
     Returns (track_rows, raw_detection_rows, runtime_metrics).
     """
@@ -259,6 +265,7 @@ def _run_rfdetr_tracking_pipeline(
                             "height": height,
                             "source": "detector",
                             "geometry_type": "aabb",
+                            **({"mask_rle": row.mask_rle} if row.mask_rle is not None else {}),
                         }
                     )
                 _frames_seen += 1
@@ -271,12 +278,12 @@ def _run_rfdetr_tracking_pipeline(
                     pct = _frames_seen / total_frames * 100
                     eta_s = (total_frames - _frames_seen) / fps_live if fps_live > 0 else 0.0
                     logger.info(
-                        "[visual]  RF-DETR %d/%d frames  (%.0f%%)  %.1f fps  ETA %.0f s",
+                        "[visual]  RF-DETR-Seg %d/%d frames  (%.0f%%)  %.1f fps  ETA %.0f s",
                         _frames_seen, total_frames, pct, fps_live, eta_s,
                     )
                 else:
                     logger.info(
-                        "[visual]  RF-DETR %d frames processed  %.1f fps",
+                        "[visual]  RF-DETR-Seg %d frames processed  %.1f fps",
                         _frames_seen, fps_live,
                     )
                 _last_log_frame = _frames_seen
@@ -311,6 +318,11 @@ def _run_rfdetr_tracking_pipeline(
         "pipeline_elapsed_ms": round(pipeline_elapsed_ms, 1),
         "tracker_resets_at_shot_boundaries": int(getattr(trk_metrics, "resets", 0)),
         "raw_detection_rows": len(all_raw_detection_rows),
+        "segmentation_enabled": True,
+        "mask_rows": int(getattr(det_metrics, "mask_rows", 0))
+        or sum(1 for row in all_track_rows if row.get("mask_rle")),
+        "mask_encoding": MASK_RLE_ENCODING,
+        "mask_output_tensor": getattr(det_metrics, "mask_output_tensor", None),
     }
     return all_track_rows, all_raw_detection_rows, runtime_metrics
 
@@ -389,7 +401,7 @@ def _normalize_track_row(*, track: dict, metadata: dict) -> dict:
     x_center = float(track.get("x_center") or (x1 + (width / 2.0)))
     y_center = float(track.get("y_center") or (y1 + (height / 2.0)))
     bbox_norm_xywh = dict(track.get("bbox_norm_xywh") or {})
-    return {
+    normalized = {
         "frame_idx": int(track.get("frame_idx") or 0),
         "local_frame_idx": int(track.get("local_frame_idx", track.get("frame_idx") or 0)),
         "chunk_idx": int(track.get("chunk_idx") or 0),
@@ -415,6 +427,9 @@ def _normalize_track_row(*, track: dict, metadata: dict) -> dict:
             "height": float(bbox_norm_xywh.get("height", height / frame_height)),
         },
     }
+    if isinstance(track.get("mask_rle"), dict):
+        normalized["mask_rle"] = dict(track["mask_rle"])
+    return normalized
 
 
 def _normalize_bbox_xyxy(*, x1: float, y1: float, x2: float, y2: float, frame_width: int, frame_height: int) -> dict:
@@ -446,23 +461,24 @@ def _build_person_detections(*, tracks: list[dict], metadata: dict) -> list[dict
         timestamped_objects = []
         for track in ordered_tracks:
             timestamp_ms = frame_time_ms(int(track["frame_idx"]), video_fps=fps)
-            timestamped_objects.append(
-                {
-                    "time_ms": timestamp_ms,
-                    "track_id": track_id,
-                    "confidence": float(track.get("confidence") or 0.0),
-                    "bounding_box": _normalize_bbox_xyxy(
-                        x1=float(track["x1"]),
-                        y1=float(track["y1"]),
-                        x2=float(track["x2"]),
-                        y2=float(track["y2"]),
-                        frame_width=frame_width,
-                        frame_height=frame_height,
-                    ),
-                    "source": "person_tracker",
-                    "provenance": "v31_visual_extractor",
-                }
-            )
+            timestamped_object = {
+                "time_ms": timestamp_ms,
+                "track_id": track_id,
+                "confidence": float(track.get("confidence") or 0.0),
+                "bounding_box": _normalize_bbox_xyxy(
+                    x1=float(track["x1"]),
+                    y1=float(track["y1"]),
+                    x2=float(track["x2"]),
+                    y2=float(track["y2"]),
+                    frame_width=frame_width,
+                    frame_height=frame_height,
+                ),
+                "source": "person_tracker",
+                "provenance": "v31_visual_extractor",
+            }
+            if isinstance(track.get("mask_rle"), dict):
+                timestamped_object["mask_rle"] = dict(track["mask_rle"])
+            timestamped_objects.append(timestamped_object)
         if not timestamped_objects:
             continue
         person_detections.append(
@@ -531,7 +547,7 @@ def _apply_pose_subject_reports(
 class V31VisualExtractor:
     """Orchestrates the full visual extraction pipeline.
 
-    In production the default tracker_runner uses RF-DETR + ByteTrack on GPU.
+    In production the default tracker_runner uses RF-DETR-Seg + ByteTrack on GPU.
     For testing, inject a callable tracker_runner that returns raw track dicts.
     """
 
@@ -557,7 +573,7 @@ class V31VisualExtractor:
         shot_changes: list[dict[str, Any]],
         fps: float,
     ) -> list[dict]:
-        """Run the live RF-DETR + ByteTrack pipeline."""
+        """Run the live RF-DETR-Seg + ByteTrack pipeline."""
         from .visual_config import VisualPipelineConfig
 
         config = self._visual_config or VisualPipelineConfig.from_env()

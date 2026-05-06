@@ -37,10 +37,18 @@ class VisualPipelineConfig:
 
     PERSON_CLASS_ID: int = 0
 
+    def __post_init__(self) -> None:
+        if self.detector_model != "seg_nano":
+            raise ValueError(
+                "Unsupported CLYPT_PHASE1_VISUAL_MODEL="
+                f"{self.detector_model!r}; expected 'seg_nano'. "
+                "Detection-only RF-DETR models are not supported on the active Modal path."
+            )
+
     @classmethod
     def from_env(cls) -> VisualPipelineConfig:
         config = cls(
-            detector_model=_env("CLYPT_PHASE1_VISUAL_MODEL", "nano"),
+            detector_model=_env("CLYPT_PHASE1_VISUAL_MODEL", "seg_nano"),
             detector_backend=_env("CLYPT_PHASE1_VISUAL_BACKEND", "tensorrt_fp16"),
             detector_batch_size=int(_env("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "16")),
             detection_threshold=float(_env("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.85")),
@@ -90,11 +98,6 @@ class VisualPipelineConfig:
             raise ValueError(
                 "Unsupported CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND="
                 f"{config.gpu_decode_backend!r}; expected 'nvdec' or 'cuda' for Modal L40S."
-            )
-        if config.detector_model not in {"nano", "small"}:
-            raise ValueError(
-                "Unsupported CLYPT_PHASE1_VISUAL_MODEL="
-                f"{config.detector_model!r}; expected 'nano' or 'small'."
             )
         if not config.use_tensorrt:
             raise ValueError(

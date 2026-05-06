@@ -29,9 +29,11 @@ flowchart TD
     visualApi["POST /tasks/visual-extract"]
     visualJob["visual_extract_job"]
     decode["NVDEC/CUDA decode + resize"]
-    detect["TensorRT RF-DETR"]
-    track["ByteTrack + YOLO pose validation"]
-    visualResult["tracks + shots + pose anchors"]
+    detect["TensorRT RF-DETR-Seg Nano boxes + masks"]
+    track["ByteTrack on boxes"]
+    maskAssoc["same-frame mask association"]
+    pose["YOLO pose validation"]
+    visualResult["tracks + masks + shots + pose anchors"]
   end
 
   subgraph p26["MI300X host: Phase26"]
@@ -57,7 +59,7 @@ flowchart TD
   source --> ingest --> upload --> gcs
   sign --> scribe --> adapt
   gcs --> sign
-  gcs --> submitVisual --> visualApi --> visualJob --> decode --> detect --> track --> visualResult
+  gcs --> submitVisual --> visualApi --> visualJob --> decode --> detect --> track --> maskAssoc --> pose --> visualResult
   adapt --> enqueue --> dispatch --> queue --> worker
   worker --> qwen --> phase2
   phase2 --> mediaApi --> mediaLease --> nodePrep --> worker
@@ -69,14 +71,14 @@ flowchart TD
   phase4 --> spanner --> terminal
 ```
 
-Phase26 starts as soon as Scribe audio artifacts are adapted. It does not wait for RF-DETR before Phase2-4, but it must join and fail hard on the visual future before Phase5/frontend grounding or any Phase6 visual use.
+Phase26 starts as soon as Scribe audio artifacts are adapted. It does not wait for RF-DETR-Seg before Phase2-4, but it must join and fail hard on the visual future before Phase5/frontend grounding or any Phase6 visual use.
 
 ## 2) Surfaces
 
 | Surface | Runs |
 | --- | --- |
 | **Phase1 orchestrator** | Runs on the MI300X host's vCPUs. Test-bank ingress, canonical media upload, signed HTTPS GCS URL creation, synchronous ElevenLabs Scribe v2 call, Modal visual future submission, and Phase26 dispatch. No local GPU service. |
-| **Modal visual L40S** | `POST /tasks/visual-extract` submit/poll API plus one warm `visual_extract_job` using CUDA/NVDEC decode, TensorRT FP16 RF-DETR, and ByteTrack. |
+| **Modal visual L40S** | `POST /tasks/visual-extract` submit/poll API plus one warm `visual_extract_job` using CUDA/NVDEC decode, TensorRT FP16 RF-DETR-Seg Nano, ByteTrack on boxes, mask association, and YOLO pose validation. |
 | **Phase26 MI300X** | `POST /tasks/phase26-enqueue`, local SQLite queue, Phase2-4 worker/runtime, SGLang ROCm Qwen on `127.0.0.1:8001`, future Phase5-6 orchestration boundary. |
 | **Modal media L40S** | `POST /tasks/node-media-prep` and `POST /tasks/render-video` submit/poll APIs, both backed by one warm `media_gpu_job` worker. |
 
@@ -98,11 +100,13 @@ There is no VibeVoice, local NFA, emotion2vec+, YAMNet, local RF-DETR, local vLL
 The active visual fast path is Modal L40S only:
 
 - Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
-- `CLYPT_PHASE1_VISUAL_MODEL=nano`
+- `CLYPT_PHASE1_VISUAL_MODEL=seg_nano`
 - `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`
 - `CLYPT_PHASE1_VISUAL_THRESHOLD=0.85`
 - `CLYPT_PHASE1_VISUAL_SHAPE=640`
 - `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
+- RF-DETR-Seg masks are retained as `mask_rle` using `rle_row_major_v1` in raw detections, tracked rows, person detections, and tracklet geometry.
+- Segmentation is present to enable future person-aware captions, motion graphics/overlays inside the short/reel frame, and better crop/negative-space decisions. Phase6 crop math and caption placement do not consume masks yet.
 - sampled YOLO11s-pose TensorRT validation marks `auto_follow_eligible` tracklets and stores source-space pose anchors for Phase5-less render auto-follow
 - Phase5-less render auto-follow uses the two-step subject model: manual/frontend `primary_tracklet_id` wins when present; otherwise the compiler locks one pose-qualified subject tracklet per shot
 - the active auto-follow crop mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`: each crop keyframe is the largest 9:16 rectangle inside that frame's selected person bbox, pose controls horizontal head/face anchoring only, vertical placement is bbox-top anchored, and crop `x/y/w/h` may change per keyframe
@@ -111,7 +115,7 @@ The active visual fast path is Modal L40S only:
 - ByteTrack buffer `30`
 - ByteTrack match threshold `0.7`
 
-The worker fails hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, or RF-DETR dependencies are unavailable. There is no software decode, CPU detector, VAAPI, or PyTorch ROCm fallback path.
+The worker fails hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, RF-DETR-Seg dependencies, or a usable mask output binding are unavailable. There is no software decode, CPU detector, detection-only RF-DETR, VAAPI, or PyTorch ROCm fallback path.
 
 ### Current Render Quality Caveat
 

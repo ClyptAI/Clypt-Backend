@@ -178,6 +178,21 @@ def test_visual_extract_image_installs_trtexec() -> None:
     assert "trtexec" in commands
 
 
+def test_visual_defaults_use_modal_segmentation_model_env(monkeypatch) -> None:
+    visual_extract_app = _load_app_module()
+    monkeypatch.setenv("CLYPT_MODAL_VISUAL_MODEL", "seg_nano")
+    monkeypatch.setenv("CLYPT_MODAL_VISUAL_BATCH_SIZE", "8")
+    monkeypatch.delenv("CLYPT_PHASE1_VISUAL_MODEL", raising=False)
+    monkeypatch.delenv("CLYPT_PHASE1_VISUAL_BATCH_SIZE", raising=False)
+
+    visual_extract_app._set_visual_defaults()
+
+    import os
+
+    assert os.environ["CLYPT_PHASE1_VISUAL_MODEL"] == "seg_nano"
+    assert os.environ["CLYPT_PHASE1_VISUAL_BATCH_SIZE"] == "8"
+
+
 def test_require_visual_runtime_uses_trtexec_help(monkeypatch) -> None:
     visual_extract_app = _load_app_module()
 

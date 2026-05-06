@@ -13,7 +13,7 @@ The active topology is:
   - `python -m backend.runtime.run_phase1`
   - test-bank media ingestion and canonical audio preparation
   - signed HTTPS GCS URL generation for ElevenLabs Scribe v2
-  - Modal RF-DETR visual future submit
+  - Modal RF-DETR-Seg visual future submit
   - immediate Phase26 dispatch after Scribe audio adaptation
 - **ElevenLabs Scribe v2**
   - synchronous `POST /v1/speech-to-text`
@@ -21,7 +21,7 @@ The active topology is:
 - **Modal visual L40S**
   - `POST /tasks/visual-extract`
   - one warm `L40S` `visual_extract_job`
-  - TensorRT FP16 RF-DETR + NVIDIA GPU decode/resize + ByteTrack
+  - TensorRT FP16 RF-DETR-Seg Nano boxes+masks + NVIDIA GPU decode/resize + ByteTrack
 - **Phase26 host (same MI300X droplet)**
   - `POST /tasks/phase26-enqueue`
   - local SQLite queue + local worker
@@ -68,7 +68,7 @@ Scribe defaults:
 Execution invariant:
 
 1. Phase1 prepares/uploads canonical audio and source video.
-2. Phase1 submits Modal RF-DETR and receives a `visual_future`.
+2. Phase1 submits Modal RF-DETR-Seg and receives a `visual_future`.
 3. Phase1 calls Scribe synchronously.
 4. Phase1 adapts Scribe into `diarization_payload`, empty `emotion2vec_payload`, and Scribe-backed `yamnet_payload`.
 5. Phase1 enqueues Phase26 immediately with `phase1_visual_status="pending"` and `visual_future`.
@@ -108,7 +108,7 @@ flowchart TD
 Current visual settings are preserved unless explicitly retuned:
 
 - Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
-- `CLYPT_PHASE1_VISUAL_MODEL=nano`
+- `CLYPT_PHASE1_VISUAL_MODEL=seg_nano`
 - `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`
 - `CLYPT_PHASE1_VISUAL_THRESHOLD=0.85`
 - `CLYPT_PHASE1_VISUAL_SHAPE=640`
@@ -127,8 +127,9 @@ Current visual settings are preserved unless explicitly retuned:
 Operationally:
 
 ```text
-NVDEC/CUDA decode+resize -> hwdownload -> TensorRT FP16 RF-DETR -> ByteTrack
--> sampled YOLO11s-pose TensorRT subject validation for auto-follow eligibility
+NVDEC/CUDA decode+resize -> hwdownload -> TensorRT FP16 RF-DETR-Seg Nano boxes+masks
+-> ByteTrack on boxes -> same-frame mask association -> sampled YOLO11s-pose
+TensorRT subject validation for auto-follow eligibility
 ```
 
 Visual worker component graph:
@@ -140,16 +141,21 @@ flowchart LR
   job["visual_extract_job on L40S"]
   decode["NVDEC/CUDA decode"]
   resize["scale_cuda resize"]
-  trt["TensorRT FP16 RF-DETR"]
+  trt["TensorRT FP16 RF-DETR-Seg Nano"]
   stream["ordered CUDA stream handoff"]
-  tracker["ByteTrack with hard-cut resets"]
+  tracker["ByteTrack boxes with hard-cut resets"]
+  maskAssoc["associate masks back to tracked rows"]
   pose["sampled YOLO11s-pose validation"]
-  payload["tracks + raw detections + shots + pose anchors"]
+  payload["tracks + raw detections + masks + shots + pose anchors"]
 
-  req --> callId --> job --> decode --> resize --> trt --> stream --> tracker --> pose --> payload
+  req --> callId --> job --> decode --> resize --> trt --> stream --> tracker --> maskAssoc --> pose --> payload
 ```
 
-The worker fails hard if CUDA ffmpeg support, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, RF-DETR, or YOLO11s-pose validation are unavailable. It must not fall back to software decode or CPU RF-DETR.
+The worker fails hard if CUDA ffmpeg support, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, RF-DETR-Seg, a usable segmentation mask output binding, or YOLO11s-pose validation are unavailable. It must not fall back to software decode, CPU RF-DETR, or detection-only RF-DETR models.
+
+RF-DETR-Seg masks are retained as `mask_rle` using `rle_row_major_v1` in `raw_person_detections`, `tracks`, `person_detections[].timestamped_objects`, and downstream `TrackletGeometryPoint` records. ByteTrack stays strictly box-based; masks are associated back to tracked rows by same-frame box IoU after identity assignment.
+
+The reason to keep masks in the payload now is future render intelligence: person-aware caption placement, motion graphics/overlays that fit inside the actual short/reel frame, and better crop/negative-space decisions. Current Phase6 crop selection and caption placement do not consume masks yet.
 
 YOLO pose validation does not delete raw RF-DETR/ByteTrack rows. It annotates tracklets with `auto_follow_eligible`, `subject_quality`, and sampled source-space pose anchors; Phase5-less render auto-follow skips pose-ineligible tracklets so high-confidence headless body fragments are not selected as crop targets. The pose anchor coordinates must survive into Phase6 render planning.
 

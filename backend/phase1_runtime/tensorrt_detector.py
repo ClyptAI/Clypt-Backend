@@ -1,10 +1,10 @@
-"""TensorRT-based RF-DETR person detector for Phase 1 visual extraction.
+"""TensorRT-based RF-DETR-Seg person detector for Phase 1 visual extraction.
 
 Full pipeline:
-1. Export the configured RF-DETR model to ONNX via rfdetr's model.export()
+1. Export the configured RF-DETR-Seg model to ONNX via rfdetr's model.export()
 2. Convert ONNX to TensorRT engine via trtexec (must run on target GPU)
 3. Load the .engine and run native TensorRT FP16 inference
-4. Post-process raw outputs into sv.Detections filtered to person class
+4. Post-process raw box/mask outputs into sv.Detections filtered to person class
 
 The engine is cached on disk. If it already exists for the current
 resolution/batch_size/precision combo, steps 1-2 are skipped.
@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from .masks import resize_mask_nearest
+
 if TYPE_CHECKING:
     import supervision as sv
 
@@ -32,8 +34,7 @@ COCO_PERSON_CLASS_ID = 1
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 _RFDETR_CHECKPOINT_PE_GRID = {
-    "nano": 24,
-    "small": 32,
+    "seg_nano": 24,
 }
 
 
@@ -100,11 +101,30 @@ def _nms_xyxy(boxes: np.ndarray, scores: np.ndarray, *, iou_threshold: float = 0
     return np.array(keep, dtype=np.int64)
 
 
+def _frame_masks_for_index(masks: np.ndarray, *, frame_index: int) -> np.ndarray:
+    frame_masks = masks[frame_index] if masks.ndim >= 4 else masks
+    frame_masks = np.asarray(frame_masks)
+    if frame_masks.ndim == 4 and frame_masks.shape[0] == 1:
+        frame_masks = frame_masks[0]
+    if frame_masks.ndim == 4 and frame_masks.shape[1] == 1:
+        frame_masks = frame_masks[:, 0]
+    if frame_masks.ndim == 4 and frame_masks.shape[-1] == 1:
+        frame_masks = frame_masks[..., 0]
+    if frame_masks.ndim != 3:
+        raise RuntimeError(
+            "RF-DETR-Seg mask output must resolve to [queries, height, width]; "
+            f"got shape {frame_masks.shape!r}"
+        )
+    return frame_masks
+
+
 @dataclass(slots=True)
 class DetectorMetrics:
     frames_processed: int = 0
     total_detector_ms: float = 0.0
     warmup_ms: float = 0.0
+    mask_rows: int = 0
+    mask_output_tensor: str | None = None
 
     @property
     def mean_detector_latency_ms(self) -> float:
@@ -135,7 +155,7 @@ def _require_cuda() -> None:
 
 
 class TensorRTDetector:
-    """Runs the configured RF-DETR person detector via a native TensorRT engine."""
+    """Runs the configured RF-DETR-Seg person detector via a native TensorRT engine."""
 
     def __init__(self, config: VisualPipelineConfig) -> None:
         self._config = config
@@ -169,19 +189,15 @@ class TensorRTDetector:
 
         if not onnx_path.exists():
             logger.info(
-                "Exporting RFDETR%s to ONNX at %s ...",
-                self._config.detector_model.capitalize(),
+                "Exporting RFDETRSegNano to ONNX at %s ...",
                 onnx_path,
             )
             try:
-                if self._config.detector_model == "nano":
-                    from rfdetr import RFDETRNano as RFDETRModel
-                else:
-                    from rfdetr import RFDETRSmall as RFDETRModel
+                from rfdetr import RFDETRSegNano as RFDETRModel
             except ImportError as exc:
                 raise RuntimeError(
-                    "rfdetr is required for TensorRT engine build. "
-                    "Install with: pip install 'rfdetr[onnx]'"
+                    "rfdetr with RFDETRSegNano is required for TensorRT engine build. "
+                    "Install with: pip install 'rfdetr[onnx]>=1.5.1'"
                 ) from exc
 
             checkpoint_pe_grid = _RFDETR_CHECKPOINT_PE_GRID[self._config.detector_model]
@@ -283,6 +299,7 @@ class TensorRTDetector:
         self._metrics.warmup_ms = (time.perf_counter() - warmup_start) * 1000.0
         self._metrics.frames_processed = 0
         self._metrics.total_detector_ms = 0.0
+        self._metrics.mask_rows = 0
         logger.info("TensorRT warmup complete in %.1f ms", self._metrics.warmup_ms)
 
     def _allocate_buffers(self, torch) -> None:
@@ -358,17 +375,22 @@ class TensorRTDetector:
         boxes: np.ndarray,
         scores: np.ndarray,
         labels: np.ndarray,
+        masks: np.ndarray | None,
         orig_sizes: list[tuple[int, int]],
         batch_len: int,
     ) -> list:
         """Convert raw TRT outputs to sv.Detections per frame."""
         import supervision as sv
 
+        if masks is None:
+            raise RuntimeError("RF-DETR-Seg TensorRT engine did not expose a usable mask output.")
+
         detections_list = []
         for i in range(batch_len):
             frame_scores = scores[i] if scores.ndim > 1 else scores
             frame_labels = labels[i] if labels.ndim > 1 else labels
             frame_boxes = boxes[i] if boxes.ndim > 2 else boxes
+            frame_masks = _frame_masks_for_index(masks, frame_index=i)
 
             # RF-DETR ONNX/TensorRT export returns per-query class logits with
             # shape [num_queries, num_classes(+background)], not final scores.
@@ -385,6 +407,7 @@ class TensorRTDetector:
             f_scores = frame_scores[keep]
             f_labels = frame_labels[keep].astype(np.int32)
             f_boxes = frame_boxes[keep]
+            f_masks = frame_masks[keep]
 
             if len(f_boxes) > 0:
                 oh, ow = orig_sizes[i]
@@ -399,19 +422,33 @@ class TensorRTDetector:
                 person_boxes = f_boxes[person_mask].astype(np.float32)
                 person_scores = f_scores[person_mask].astype(np.float32)
                 person_class_ids = f_labels[person_mask].astype(np.int32)
+                person_masks = f_masks[person_mask]
                 nms_keep = _nms_xyxy(person_boxes, person_scores)
                 person_boxes = person_boxes[nms_keep]
                 person_scores = person_scores[nms_keep]
                 person_class_ids = person_class_ids[nms_keep]
+                person_masks = person_masks[nms_keep]
+                oh, ow = orig_sizes[i]
+                source_masks = np.stack(
+                    [
+                        resize_mask_nearest(mask, height=int(oh), width=int(ow)) > 0.5
+                        for mask in person_masks
+                    ],
+                    axis=0,
+                ).astype(bool)
             else:
                 person_boxes = np.empty((0, 4), dtype=np.float32)
                 person_scores = np.empty(0, dtype=np.float32)
                 person_class_ids = np.empty(0, dtype=np.int32)
+                oh, ow = orig_sizes[i]
+                source_masks = np.empty((0, int(oh), int(ow)), dtype=bool)
             det = sv.Detections(
                 xyxy=person_boxes,
                 confidence=person_scores,
                 class_id=person_class_ids,
+                mask=source_masks,
             )
+            self._metrics.mask_rows += int(len(source_masks))
             detections_list.append(det)
         return detections_list
 
@@ -469,7 +506,7 @@ class TensorRTDetector:
                     output_arrays[name] = info["buffer"].cpu().numpy()
 
             out_names = sorted(output_arrays.keys())
-            if len(out_names) >= 2:
+            if len(out_names) >= 3:
                 boxes_key = next(
                     (k for k in out_names if "box" in k.lower()), out_names[0]
                 )
@@ -478,20 +515,48 @@ class TensorRTDetector:
                     (k for k in remaining if "score" in k.lower() or "logit" in k.lower()),
                     remaining[0],
                 )
+                mask_key = next(
+                    (
+                        k
+                        for k in remaining
+                        if "mask" in k.lower() or "seg" in k.lower()
+                    ),
+                    None,
+                )
+                if mask_key is None:
+                    raise RuntimeError(
+                        "RF-DETR-Seg TensorRT engine did not expose a mask output. "
+                        f"Output tensors: {out_names}"
+                    )
                 labels_key = next(
-                    (k for k in remaining if "label" in k.lower() or "class" in k.lower()),
-                    remaining[-1] if len(remaining) > 1 else scores_key,
+                    (
+                        k
+                        for k in remaining
+                        if k != mask_key and ("label" in k.lower() or "class" in k.lower())
+                    ),
+                    None,
                 )
                 raw_boxes = output_arrays[boxes_key]
                 raw_scores = output_arrays[scores_key]
-                raw_labels = output_arrays.get(labels_key, np.zeros_like(raw_scores, dtype=np.int32))
+                raw_labels = (
+                    output_arrays[labels_key]
+                    if labels_key is not None
+                    else np.zeros_like(raw_scores, dtype=np.int32)
+                )
+                raw_masks = output_arrays[mask_key]
+                self._metrics.mask_output_tensor = str(mask_key)
             else:
                 raise RuntimeError(
-                    f"Expected at least 2 output tensors from TRT engine, got {len(out_names)}: {out_names}"
+                    f"Expected boxes, scores, and masks from TRT engine, got {len(out_names)} tensors: {out_names}"
                 )
 
             dets = self._postprocess(
-                raw_boxes, raw_scores, raw_labels, batch_orig_sizes, actual_batch_len
+                raw_boxes,
+                raw_scores,
+                raw_labels,
+                raw_masks,
+                batch_orig_sizes,
+                actual_batch_len,
             )
             all_detections.extend(dets)
 

@@ -70,7 +70,7 @@ The AMD switchover should preserve the semantic serving contract while changing 
 flowchart TD
   SCRIBE["ElevenLabs Scribe v2 audio artifacts"]
   VISF["Persisted Modal visual_future"]
-  VIS["Modal RF-DETR visual result"]
+  VIS["Modal RF-DETR-Seg visual result"]
   MOD["Modal node-media-prep"]
   RENDER["Modal render/export"]
   SP["Spanner repository"]

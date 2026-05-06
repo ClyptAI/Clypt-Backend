@@ -1,4 +1,4 @@
-# Modal dedicated RF-DETR visual extraction worker deps.
+# Modal dedicated RF-DETR-Seg visual extraction worker deps.
 #
 # This worker is NVIDIA-only and intentionally uses the old fast path:
 # TensorRT FP16 inference plus CUDA/NVDEC ffmpeg decode on a persistent L40S.
@@ -17,7 +17,7 @@ uvicorn>=0.35.0
 torch==2.6.0+cu124
 torchvision==0.21.0+cu124
 opencv-python-headless>=4.12.0
-rfdetr[onnx]>=1.3.0
+rfdetr[onnx]>=1.5.1
 ultralytics>=8.3.0
 supervision>=0.25.0
 trackers>=2.1.0

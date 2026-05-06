@@ -14,7 +14,7 @@ class TestVisualPipelineConfig:
 
         config = VisualPipelineConfig.from_env()
 
-        assert config.detector_model == "nano"
+        assert config.detector_model == "seg_nano"
         assert config.detector_backend == "tensorrt_fp16"
         assert config.detector_batch_size == 16
         assert config.detection_threshold == pytest.approx(0.85)
@@ -50,11 +50,19 @@ class TestVisualPipelineConfig:
         with pytest.raises(ValueError, match="'nvdec' or 'cuda'"):
             VisualPipelineConfig.from_env()
 
+    def test_from_env_rejects_detection_only_model(self, monkeypatch):
+        from backend.phase1_runtime.visual_config import VisualPipelineConfig
+
+        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_MODEL", "nano")
+
+        with pytest.raises(ValueError, match="seg_nano"):
+            VisualPipelineConfig.from_env()
+
     def test_tensorrt_engine_path_uses_artifact_dir(self, tmp_path: Path):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig(
-            detector_model="nano",
+            detector_model="seg_nano",
             detector_backend="tensorrt_fp16",
             detector_batch_size=4,
             detection_threshold=0.35,
@@ -67,7 +75,7 @@ class TestVisualPipelineConfig:
             detector_artifact_dir=str(tmp_path),
         )
 
-        assert config.tensorrt_engine_path == tmp_path / "rfdetr_nano_b4_r560_fp16.engine"
+        assert config.tensorrt_engine_path == tmp_path / "rfdetr_seg_nano_b4_r560_fp16.engine"
 
 
 class TestFrameDecode:
@@ -204,7 +212,7 @@ class TestTensorRTDetector:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         return VisualPipelineConfig(
-            detector_model="nano",
+            detector_model="seg_nano",
             detector_backend="tensorrt_fp16",
             detector_batch_size=2,
             detection_threshold=0.35,
@@ -268,7 +276,7 @@ class TestTensorRTDetector:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig(
-            detector_model="nano",
+            detector_model="seg_nano",
             detector_backend="tensorrt_fp16",
             detector_batch_size=2,
             detection_threshold=0.35,
@@ -282,7 +290,7 @@ class TestTensorRTDetector:
         )
         captured: dict[str, object] = {}
 
-        class _FakeRFDETRNano:
+        class _FakeRFDETRSegNano:
             def __init__(self, **kwargs):
                 captured["init_kwargs"] = kwargs
 
@@ -290,7 +298,7 @@ class TestTensorRTDetector:
                 captured["export_kwargs"] = kwargs
                 Path(output_dir, "inference_model.onnx").write_bytes(b"onnx")
 
-        fake_rfdetr = SimpleNamespace(RFDETRNano=_FakeRFDETRNano)
+        fake_rfdetr = SimpleNamespace(RFDETRSegNano=_FakeRFDETRSegNano)
         monkeypatch.setitem(sys.modules, "rfdetr", fake_rfdetr)
 
         det = TensorRTDetector(config)
@@ -341,10 +349,11 @@ class TestTensorRTDetector:
         det = TensorRTDetector(self._make_config(tmp_path))
 
         class FakeDetections:
-            def __init__(self, *, xyxy, confidence, class_id):
+            def __init__(self, *, xyxy, confidence, class_id, mask=None):
                 self.xyxy = xyxy
                 self.confidence = confidence
                 self.class_id = class_id
+                self.mask = mask
 
         monkeypatch.setitem(
             sys.modules,
@@ -361,6 +370,7 @@ class TestTensorRTDetector:
             boxes=boxes,
             scores=logits,
             labels=np.zeros_like(logits, dtype=np.int32),
+            masks=np.ones((1, 2, 560, 560), dtype=np.float32),
             orig_sizes=[(560, 560)],
             batch_len=1,
         )
@@ -368,6 +378,7 @@ class TestTensorRTDetector:
         assert len(detections) == 1
         assert detections[0].xyxy.shape == (1, 4)
         assert detections[0].class_id.tolist() == [COCO_PERSON_CLASS_ID]
+        assert detections[0].mask.shape == (1, 560, 560)
 
     def test_postprocess_decodes_normalized_cxcywh_boxes_to_source_xyxy(
         self, tmp_path: Path, monkeypatch
@@ -379,10 +390,11 @@ class TestTensorRTDetector:
         det = TensorRTDetector(self._make_config(tmp_path))
 
         class FakeDetections:
-            def __init__(self, *, xyxy, confidence, class_id):
+            def __init__(self, *, xyxy, confidence, class_id, mask=None):
                 self.xyxy = xyxy
                 self.confidence = confidence
                 self.class_id = class_id
+                self.mask = mask
 
         monkeypatch.setitem(
             sys.modules,
@@ -398,11 +410,13 @@ class TestTensorRTDetector:
             boxes=boxes,
             scores=logits,
             labels=np.zeros_like(logits, dtype=np.int32),
+            masks=np.ones((1, 1, 560, 560), dtype=np.float32),
             orig_sizes=[(1080, 1920)],
             batch_len=1,
         )
 
         assert detections[0].xyxy.tolist() == [[720.0, 270.0, 1200.0, 810.0]]
+        assert detections[0].mask.shape == (1, 1080, 1920)
 
     def test_postprocess_applies_person_nms_before_tracking(self, tmp_path: Path, monkeypatch):
         import types
@@ -412,10 +426,11 @@ class TestTensorRTDetector:
         det = TensorRTDetector(self._make_config(tmp_path))
 
         class FakeDetections:
-            def __init__(self, *, xyxy, confidence, class_id):
+            def __init__(self, *, xyxy, confidence, class_id, mask=None):
                 self.xyxy = xyxy
                 self.confidence = confidence
                 self.class_id = class_id
+                self.mask = mask
 
         monkeypatch.setitem(
             sys.modules,
@@ -437,12 +452,44 @@ class TestTensorRTDetector:
             boxes=boxes,
             scores=np.array([[0.99, 0.9, 0.8]], dtype=np.float32),
             labels=np.array([[COCO_PERSON_CLASS_ID, COCO_PERSON_CLASS_ID, COCO_PERSON_CLASS_ID]], dtype=np.int32),
+            masks=np.ones((1, 3, 560, 560), dtype=np.float32),
             orig_sizes=[(1080, 1920)],
             batch_len=1,
         )
 
         assert detections[0].xyxy.shape == (2, 4)
         assert detections[0].xyxy.tolist()[0] == [720.0, 270.0, 1200.0, 810.0]
+        assert detections[0].mask.shape == (2, 1080, 1920)
+
+    def test_postprocess_fails_hard_without_mask_output(self, tmp_path: Path, monkeypatch):
+        import types
+
+        from backend.phase1_runtime.tensorrt_detector import COCO_PERSON_CLASS_ID, TensorRTDetector
+
+        det = TensorRTDetector(self._make_config(tmp_path))
+
+        class FakeDetections:
+            def __init__(self, *, xyxy, confidence, class_id, mask=None):
+                self.xyxy = xyxy
+                self.confidence = confidence
+                self.class_id = class_id
+                self.mask = mask
+
+        monkeypatch.setitem(
+            sys.modules,
+            "supervision",
+            types.SimpleNamespace(Detections=FakeDetections),
+        )
+
+        with pytest.raises(RuntimeError, match="mask output"):
+            det._postprocess(
+                boxes=np.array([[[0.5, 0.5, 0.25, 0.5]]], dtype=np.float32),
+                scores=np.array([[0.99]], dtype=np.float32),
+                labels=np.array([[COCO_PERSON_CLASS_ID]], dtype=np.int32),
+                masks=None,
+                orig_sizes=[(1080, 1920)],
+                batch_len=1,
+            )
 
 
 class TestDetectorFactory:
@@ -451,7 +498,7 @@ class TestDetectorFactory:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig(
-            detector_model="nano",
+            detector_model="seg_nano",
             detector_backend="pytorch_cuda_fp16",
             detector_batch_size=4,
             detection_threshold=0.35,
@@ -473,7 +520,7 @@ class TestDetectorFactory:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         config = VisualPipelineConfig(
-            detector_model="nano",
+            detector_model="seg_nano",
             detector_backend="tensorrt_fp16",
             detector_batch_size=4,
             detection_threshold=0.35,
@@ -494,7 +541,7 @@ class TestRfdetrTrackingPipeline:
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
         return VisualPipelineConfig(
-            detector_model="nano",
+            detector_model="seg_nano",
             detector_backend="tensorrt_fp16",
             detector_batch_size=16,
             detection_threshold=0.85,
@@ -519,6 +566,7 @@ class TestRfdetrTrackingPipeline:
                 self.xyxy = np.array([[offset, 20.0, offset + 30.0, 80.0]], dtype=np.float32)
                 self.confidence = np.array([0.91], dtype=np.float32)
                 self.class_id = np.array([1], dtype=np.int32)
+                self.mask = np.ones((1, 1080, 1920), dtype=bool)
 
             def __len__(self) -> int:
                 return len(self.xyxy)
@@ -566,6 +614,13 @@ class TestRfdetrTrackingPipeline:
                         y2=80.0,
                         confidence=0.91,
                         class_id=1,
+                        mask_rle={
+                            "encoding": "rle_row_major_v1",
+                            "size": [1080, 1920],
+                            "counts": [0, 2073600],
+                            "threshold": 0.5,
+                            "source": "rfdetr_seg_nano_tensorrt",
+                        },
                     )
                 ]
 
@@ -613,7 +668,102 @@ class TestRfdetrTrackingPipeline:
         assert [row["frame_idx"] for row in tracks] == [0, 9, 10, 11]
         assert [row["frame_idx"] for row in raw_detections] == [0, 9, 10, 11]
         assert raw_detections[0]["source"] == "rfdetr_raw"
+        assert raw_detections[0]["mask_rle"]["encoding"] == "rle_row_major_v1"
+        assert tracks[0]["mask_rle"]["encoding"] == "rle_row_major_v1"
+        assert metrics["segmentation_enabled"] is True
+        assert metrics["mask_rows"] == 4
+        assert metrics["mask_encoding"] == "rle_row_major_v1"
         assert metrics["tracker_resets_at_shot_boundaries"] == 1
+
+
+class TestByteTrackMaskAssociation:
+    def test_tracker_passes_box_only_detections_and_recovers_mask_rle(
+        self, monkeypatch, tmp_path: Path
+    ):
+        import types
+
+        from backend.phase1_runtime.tracker_runtime import ByteTrackTrackerRuntime
+        from backend.phase1_runtime.visual_config import VisualPipelineConfig
+
+        config = VisualPipelineConfig(
+            detector_model="seg_nano",
+            detector_backend="tensorrt_fp16",
+            detector_batch_size=4,
+            detection_threshold=0.85,
+            detector_resolution=640,
+            tracker_backend="bytetrack",
+            tracker_lost_buffer=30,
+            tracker_match_threshold=0.8,
+            frame_decode_backend="gpu",
+            gpu_decode_backend="nvdec",
+            detector_artifact_dir=str(tmp_path / "engines"),
+        )
+        captured_tracker_input: list[object] = []
+
+        class FakeDetections:
+            def __init__(
+                self,
+                *,
+                xyxy,
+                confidence=None,
+                class_id=None,
+                tracker_id=None,
+                mask=None,
+            ):
+                self.xyxy = np.asarray(xyxy, dtype=np.float32)
+                self.confidence = confidence
+                self.class_id = class_id
+                self.tracker_id = tracker_id
+                self.mask = mask
+
+            def __len__(self) -> int:
+                return len(self.xyxy)
+
+        class FakeByteTrackTracker:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def update(self, detections):
+                captured_tracker_input.append(detections)
+                return FakeDetections(
+                    xyxy=np.array([[10.0, 20.0, 50.0, 80.0]], dtype=np.float32),
+                    confidence=np.array([0.91], dtype=np.float32),
+                    class_id=np.array([1], dtype=np.int32),
+                    tracker_id=np.array([42], dtype=np.int32),
+                )
+
+        monkeypatch.setitem(
+            sys.modules,
+            "supervision",
+            types.SimpleNamespace(Detections=FakeDetections),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "trackers",
+            types.SimpleNamespace(ByteTrackTracker=FakeByteTrackTracker),
+        )
+
+        runtime = ByteTrackTrackerRuntime(config)
+        runtime.initialize(frame_rate=30.0)
+        rows = runtime.update(
+            frame_idx=5,
+            detections=FakeDetections(
+                xyxy=np.array([[10.0, 20.0, 50.0, 80.0]], dtype=np.float32),
+                confidence=np.array([0.91], dtype=np.float32),
+                class_id=np.array([1], dtype=np.int32),
+                mask=np.ones((1, 4, 4), dtype=bool),
+            ),
+        )
+
+        assert captured_tracker_input[0].mask is None
+        assert rows[0].track_id == 42
+        assert rows[0].mask_rle == {
+            "encoding": "rle_row_major_v1",
+            "size": [4, 4],
+            "counts": [0, 16],
+            "threshold": 0.5,
+            "source": "rfdetr_seg_nano_tensorrt",
+        }
 
 
 class TestVisualExtractorArtifactContract:
@@ -636,7 +786,7 @@ class TestVisualExtractorArtifactContract:
         ext = self._make_extractor(tracks=[])
         payload = ext.extract(video_path=workspace.video_path, workspace=workspace)
 
-        assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_nano_bytetrack"
+        assert payload["tracking_metrics"]["tracker_backend"] == "rfdetr_seg_nano_bytetrack"
 
     def test_person_detections_schema_stable(self, tmp_path: Path):
         from backend.phase1_runtime.models import Phase1Workspace
@@ -654,6 +804,13 @@ class TestVisualExtractorArtifactContract:
                     "x2": 50.0,
                     "y2": 80.0,
                     "confidence": 0.9,
+                    "mask_rle": {
+                        "encoding": "rle_row_major_v1",
+                        "size": [1080, 1920],
+                        "counts": [2, 3, 4],
+                        "threshold": 0.5,
+                        "source": "rfdetr_seg_nano_tensorrt",
+                    },
                 }
             ],
         )
@@ -662,3 +819,8 @@ class TestVisualExtractorArtifactContract:
 
         assert len(payload["person_detections"]) == 1
         assert payload["person_detections"][0]["track_id"] == "track_1"
+        assert payload["tracks"][0]["mask_rle"]["encoding"] == "rle_row_major_v1"
+        assert (
+            payload["person_detections"][0]["timestamped_objects"][0]["mask_rle"]
+            == payload["tracks"][0]["mask_rle"]
+        )

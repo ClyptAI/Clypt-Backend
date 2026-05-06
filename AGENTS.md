@@ -10,7 +10,7 @@ Operational startup and maintenance guide for coding agents.
 - Active topology: **Colocated Phase1 vCPU orchestrator + Phase26 MI300X GPU + Modal L40S x2**
   - **Phase1 orchestrator**: Phase 1 runner, test-bank media ingress, signed HTTPS GCS URL generation for ElevenLabs Scribe v2, Modal RF-DETR submit, and Phase26 dispatch. It runs on the Phase26 MI300X droplet's vCPUs. It does not run local ASR, forced alignment, emotion2vec+, YAMNet, RF-DETR, VibeVoice, vLLM, SGLang, or any local GPU service.
   - **Phase26 host (MI300X)**: the same droplet also owns `POST /tasks/phase26-enqueue`, local SQLite queue + worker, SGLang ROCm Qwen on `:8001`, current Phase 2-4 runtime, future Phase 5-6 orchestration.
-  - **Modal visual L40S**: CPU `POST /tasks/visual-extract` submit/poll surface plus one warm `L40S` `visual_extract_job` worker using TensorRT/NVDEC RF-DETR.
+  - **Modal visual L40S**: CPU `POST /tasks/visual-extract` submit/poll surface plus one warm `L40S` `visual_extract_job` worker using TensorRT/NVDEC RF-DETR-Seg Nano.
   - **Modal media L40S**: CPU submit/poll surfaces for `POST /tasks/node-media-prep` and `POST /tasks/render-video`; both dispatch to one shared warm `L40S` `media_gpu_job` worker.
 - Current Phase 2-4 local runtime: SQLite queue + local worker + local OpenAI-compatible generation endpoint on the Phase26 host.
 
@@ -107,15 +107,17 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
 - Phase 1 visual extraction is a Modal future:
   - Phase1 submits `POST /tasks/visual-extract` to the dedicated Modal visual L40S service.
   - Phase1 enqueues Phase26 immediately after Scribe audio adaptation completes.
-  - Phase26 may run Phase2-4 while RF-DETR continues, but must join/fail-hard on the visual future before Phase5/frontend grounding or Phase6 visual use.
+  - Phase26 may run Phase2-4 while RF-DETR-Seg continues, but must join/fail-hard on the visual future before Phase5/frontend grounding or Phase6 visual use.
   - Do not document or draw the MI300X host as a generic fan-out hub. The event flow is: canonical media upload -> parallel Scribe + Modal visual submit -> Scribe audio adaptation -> Phase26 enqueue -> Phase2-4 audio/text work while visual remains pending -> visual hard join before Phase5/visual use -> Modal media prep/render when those stages need it.
 - Current Modal visual settings must stay intact unless the user explicitly approves retuning:
-  - `CLYPT_PHASE1_VISUAL_MODEL=nano`
+  - `CLYPT_PHASE1_VISUAL_MODEL=seg_nano`
   - Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
   - Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt` and internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`
   - batch size `16`
   - threshold `0.85`
   - shape `640`
+  - RF-DETR-Seg masks are retained as `rle_row_major_v1` alongside raw detections, tracked rows, person detections, and tracklet geometry. ByteTrack remains box-only; masks are associated back to tracked rows after ID assignment and are not used for identity decisions.
+  - Segmentation was added to support future person-aware caption placement, motion-graphics/overlay placement, and short/reel crop decisions. Current Phase6 crop planning and caption placement do **not** consume masks yet; those integrations are future-sprint work.
   - sampled YOLO11s-pose TensorRT subject validation enabled for auto-follow eligibility
   - ByteTrack buffer `30`
   - ByteTrack match threshold `0.7`
@@ -161,7 +163,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (4139 symbols, 10476 relationships, 251 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (4160 symbols, 10523 relationships, 251 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

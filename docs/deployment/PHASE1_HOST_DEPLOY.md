@@ -7,7 +7,7 @@ Phase1 now owns orchestration only and runs beside the Phase26 services:
 - test-bank media ingress
 - canonical audio/video upload to GCS
 - signed HTTPS GCS audio URL generation for ElevenLabs Scribe v2
-- Modal RF-DETR visual future submission
+- Modal RF-DETR-Seg visual future submission
 - Phase26 dispatch after Scribe audio adaptation
 
 Phase1 must not start or require local VibeVoice, VibeVoice vLLM, NFA, emotion2vec+, YAMNet, local RF-DETR, ROCm, VAAPI, TensorRT, or any GPU service. The `Phase26` host/project name is retained because the same droplet still owns the downstream queue, Qwen GPU service, and Phase 5-6 boundary.
@@ -90,7 +90,7 @@ Phase1 must enqueue Phase26 as soon as Scribe audio artifacts are adapted. The e
 - `visual_future`
 - source video GCS metadata
 
-Phase26 may run Phase2-4 before RF-DETR is complete, but must join/fail-hard on the visual future before Phase5/frontend grounding or Phase6 visual use.
+Phase26 may run Phase2-4 before RF-DETR-Seg is complete, but must join/fail-hard on the visual future before Phase5/frontend grounding or Phase6 visual use.
 
 ```mermaid
 flowchart TD

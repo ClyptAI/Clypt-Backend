@@ -1,4 +1,4 @@
-"""Modal app for dedicated RF-DETR visual extraction on L40S."""
+"""Modal app for dedicated RF-DETR-Seg visual extraction on L40S."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def _require_visual_runtime() -> None:
     import torch
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for Modal L40S RF-DETR visual extraction.")
+        raise RuntimeError("CUDA is required for Modal L40S RF-DETR-Seg visual extraction.")
 
 
 def _require_auth_header(authorization: str | None) -> None:
@@ -114,11 +114,23 @@ def _build_storage_client() -> GCSStorageClient:
 
 
 def _set_visual_defaults() -> None:
-    os.environ.setdefault("CLYPT_PHASE1_VISUAL_MODEL", "nano")
+    os.environ.setdefault(
+        "CLYPT_PHASE1_VISUAL_MODEL",
+        os.environ.get("CLYPT_MODAL_VISUAL_MODEL", "seg_nano"),
+    )
     os.environ.setdefault("CLYPT_PHASE1_VISUAL_BACKEND", "tensorrt_fp16")
-    os.environ.setdefault("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "16")
-    os.environ.setdefault("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.85")
-    os.environ.setdefault("CLYPT_PHASE1_VISUAL_SHAPE", "640")
+    os.environ.setdefault(
+        "CLYPT_PHASE1_VISUAL_BATCH_SIZE",
+        os.environ.get("CLYPT_MODAL_VISUAL_BATCH_SIZE", "16"),
+    )
+    os.environ.setdefault(
+        "CLYPT_PHASE1_VISUAL_THRESHOLD",
+        os.environ.get("CLYPT_MODAL_VISUAL_THRESHOLD", "0.85"),
+    )
+    os.environ.setdefault(
+        "CLYPT_PHASE1_VISUAL_SHAPE",
+        os.environ.get("CLYPT_MODAL_VISUAL_SHAPE", "640"),
+    )
     os.environ.setdefault("CLYPT_PHASE1_VISUAL_TRACKER", "bytetrack")
     os.environ.setdefault("CLYPT_PHASE1_VISUAL_TRACKER_BUFFER", "30")
     os.environ.setdefault("CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH", "0.7")
