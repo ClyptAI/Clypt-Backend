@@ -1,7 +1,7 @@
 # ARCHITECTURE
 
 **Status:** Active Scribe/Modal + Phase26 MI300X topology
-**Last updated:** 2026-05-04
+**Last updated:** 2026-05-06
 
 This document describes the current `AMD-refactor` topology: Phase1 orchestration colocated on the DigitalOcean MI300X host's vCPUs, Phase26/Qwen on the same MI300X GPU host, and two persistent Modal L40S GPU workers.
 
@@ -10,29 +10,63 @@ This document describes the current `AMD-refactor` topology: Phase1 orchestratio
 ```mermaid
 flowchart TD
   source["Source URL or local path"]
-  p1["Phase1 orchestrator on MI300X vCPUs"]
-  gcs["Canonical audio/video in GCS"]
+  gcs["GCS canonical audio/video"]
   scribe["ElevenLabs Scribe v2"]
-  visual["Modal L40S RF-DETR visual future"]
-  dispatch["POST /tasks/phase26-enqueue"]
-  q["SQLite queue on Phase26 MI300X"]
-  worker["Phase26 local worker"]
-  llm["SGLang Qwen on :8001"]
-  media["Modal L40S media prep/render"]
-  emb["Vertex embeddings"]
-  sp["Spanner persistence"]
-  out["Artifacts + terminal state"]
+  vertex["Vertex embeddings"]
+  spanner["Spanner persistence"]
+  terminal["Ranked artifacts + terminal state"]
 
-  source --> p1 --> gcs
-  gcs --> scribe --> dispatch
-  gcs --> visual
-  dispatch --> q --> worker
-  worker --> llm
-  worker --> media
-  worker --> emb
-  worker --> sp
-  worker --> out
-  visual --> worker
+  subgraph p1host["MI300X host vCPUs: Phase1"]
+    ingest["Resolve test-bank/local input"]
+    upload["Upload canonical media"]
+    sign["Create signed audio URL"]
+    submitVisual["Submit visual future"]
+    adapt["Adapt Scribe response"]
+    enqueue["Dispatch Phase26 job"]
+  end
+
+  subgraph visual["Modal visual L40S"]
+    visualApi["POST /tasks/visual-extract"]
+    visualJob["visual_extract_job"]
+    decode["NVDEC/CUDA decode + resize"]
+    detect["TensorRT RF-DETR"]
+    track["ByteTrack + YOLO pose validation"]
+    visualResult["tracks + shots + pose anchors"]
+  end
+
+  subgraph p26["MI300X host: Phase26"]
+    dispatch["POST /tasks/phase26-enqueue"]
+    queue["Local SQLite queue"]
+    worker["Phase26 local worker"]
+    qwen["SGLang Qwen :8001"]
+    phase2["Phase2 node construction"]
+    visualJoin["Poll/join visual future"]
+    phase3["Phase3 graph construction"]
+    phase4["Phase4 retrieval + ranking"]
+    phase5["Phase5/frontend grounding gate"]
+    phase6["Phase6 render orchestration"]
+  end
+
+  subgraph media["Modal media L40S"]
+    mediaApi["CPU submit/poll API"]
+    mediaLease["exclusive media_gpu_job lease"]
+    nodePrep["node-media-prep batches"]
+    render["render/export"]
+  end
+
+  source --> ingest --> upload --> gcs
+  sign --> scribe --> adapt
+  gcs --> sign
+  gcs --> submitVisual --> visualApi --> visualJob --> decode --> detect --> track --> visualResult
+  adapt --> enqueue --> dispatch --> queue --> worker
+  worker --> qwen --> phase2
+  phase2 --> mediaApi --> mediaLease --> nodePrep --> worker
+  worker --> vertex --> phase3 --> phase4
+  visualResult --> visualJoin
+  phase4 --> visualJoin --> phase5 --> phase6
+  phase6 --> mediaApi
+  mediaLease --> render --> spanner
+  phase4 --> spanner --> terminal
 ```
 
 Phase26 starts as soon as Scribe audio artifacts are adapted. It does not wait for RF-DETR before Phase2-4, but it must join and fail hard on the visual future before Phase5/frontend grounding or any Phase6 visual use.

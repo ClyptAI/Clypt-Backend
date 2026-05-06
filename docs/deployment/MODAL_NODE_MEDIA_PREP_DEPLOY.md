@@ -7,6 +7,30 @@ There are two GPU pools:
 - **Visual pool:** dedicated RF-DETR worker.
 - **Media pool:** one shared worker for node-media-prep and render/export.
 
+```mermaid
+flowchart TD
+  phase1["Phase1 orchestrator"]
+  phase26["Phase26 worker"]
+
+  subgraph visual["clypt-visual-l40s"]
+    visualApi["CPU visual submit/poll routes"]
+    visualJob["visual_extract_job L40S"]
+    visualPath["NVDEC -> TensorRT RF-DETR -> ByteTrack -> pose validation"]
+  end
+
+  subgraph media["clypt-media-l40s"]
+    prepApi["CPU node-media-prep routes"]
+    renderApi["CPU render-video routes"]
+    lease["shared media_gpu_job L40S lease"]
+    prep["node-media-prep batches"]
+    render["render/export"]
+  end
+
+  phase1 --> visualApi --> visualJob --> visualPath
+  phase26 --> prepApi --> lease --> prep
+  phase26 --> renderApi --> lease --> render
+```
+
 ## 1) Visual RF-DETR App
 
 Source:

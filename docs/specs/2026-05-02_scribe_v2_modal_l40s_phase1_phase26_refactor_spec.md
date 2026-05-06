@@ -100,20 +100,54 @@ This refactor changes the topology instead of continuing to force every Phase1 a
 ### 3.1 Host and Worker Graph
 
 ```mermaid
-flowchart LR
-  USER["Phase1 request / test-bank input"] --> P1["Phase1 orchestrator on MI300X vCPUs"]
-  P1 --> SCRIBE["ElevenLabs Scribe v2 API"]
-  P1 --> VIS["Modal visual L40S: RF-DETR"]
-  SCRIBE --> ADAPT["Scribe adapter"]
-  ADAPT --> P26["Phase26 MI300X dispatch"]
-  P26 --> Q["SQLite queue"]
-  W["Phase26 worker"] --> Q
-  W --> SGL["SGLang Qwen on MI300X"]
-  VIS --> VOUT["visual artifacts"]
-  VOUT --> JOIN["visual hard-join"]
-  SGL --> JOIN
-  W --> MEDIA["Modal media L40S: node-media-prep"]
-  W --> RENDER["Modal media L40S: render/export"]
+flowchart TD
+  USER["Phase1 request / test-bank input"]
+  GCS["GCS canonical audio/video"]
+  SCRIBE["ElevenLabs Scribe v2 API"]
+
+  subgraph P1HOST["MI300X host vCPUs: Phase1"]
+    INGEST["resolve input + canonicalize media"]
+    SIGN["create signed audio URL"]
+    VSUB["submit Modal visual future"]
+    ADAPT["Scribe adapter"]
+    P26POST["POST /tasks/phase26-enqueue"]
+  end
+
+  subgraph VIS["Modal visual L40S"]
+    VAPI["CPU visual submit/poll API"]
+    VJOB["visual_extract_job"]
+    VDECODE["NVDEC/CUDA decode"]
+    VDET["TensorRT RF-DETR"]
+    VTRACK["ByteTrack + pose validation"]
+    VOUT["visual artifacts"]
+  end
+
+  subgraph P26["MI300X host: Phase26"]
+    Q["SQLite queue"]
+    W["Phase26 worker"]
+    SGL["SGLang Qwen on MI300X"]
+    AUD["audio/text graph stages"]
+    JOIN["visual hard-join gate"]
+    RANK["Phase4 ranking"]
+    P56["Phase5/Phase6 boundary"]
+  end
+
+  subgraph MEDIA["Modal media L40S"]
+    MAPI["CPU media submit/poll API"]
+    LEASE["exclusive media_gpu_job lease"]
+    PREP["node-media-prep"]
+    RENDER["render/export"]
+  end
+
+  USER --> INGEST --> GCS
+  GCS --> SIGN --> SCRIBE --> ADAPT --> P26POST --> Q --> W
+  GCS --> VSUB --> VAPI --> VJOB --> VDECODE --> VDET --> VTRACK --> VOUT
+  W --> SGL --> AUD --> RANK
+  VOUT --> JOIN
+  RANK --> JOIN --> P56
+  W --> MAPI --> LEASE --> PREP --> W
+  P56 --> MAPI
+  LEASE --> RENDER
 ```
 
 ### 3.2 Phase1 Audio Graph
@@ -139,19 +173,24 @@ flowchart TD
 ```mermaid
 sequenceDiagram
   participant P1 as Phase1 orchestrator
+  participant GCS as GCS
   participant EL as ElevenLabs Scribe v2
   participant VIS as Modal RF-DETR L40S
   participant P26 as Phase26 MI300X
   participant MED as Modal media L40S
 
-  P1->>EL: submit audio transcription
-  P1->>VIS: submit visual extraction
+  P1->>GCS: upload canonical audio/video
+  P1->>EL: submit signed audio URL
+  P1->>VIS: submit source video GCS URI
+  VIS-->>P1: visual call_id / future
   EL-->>P1: transcript, words, speakers, tags
+  P1->>P1: adapt Scribe to canonical audio artifacts
   P1->>P26: enqueue audio-first Phase26 work
   P26->>P26: run Qwen graph stages that do not require visual
   P26->>VIS: poll visual call at visual-ready point
   VIS-->>P26: visual tracks and shot changes
-  P26->>P26: join visual when ready; block Phase5 until complete
+  P26->>P26: validate + persist visual artifacts
+  P26->>P26: block Phase5/frontend grounding until visual is ready
   P26->>MED: node-media-prep batches
   P26->>MED: render/export when Phase 6 is ready
 ```
@@ -161,20 +200,28 @@ sequenceDiagram
 ```mermaid
 flowchart TD
   subgraph VISPOOL["modal-visual-l40s"]
-    VAPI["CPU submit/poll ASGI"]
+    VAPI["CPU POST /tasks/visual-extract"]
+    VPOLL["CPU GET /tasks/visual-extract/result/{call_id}"]
     VJOB["persistent L40S visual worker min=1 max=1"]
+    VDECODE["NVDEC/CUDA decode + resize"]
+    VRFD["TensorRT RF-DETR"]
+    VTRACK["ByteTrack"]
+    VPOSE["YOLO11s-pose validation"]
     VAPI --> VJOB
-    VJOB --> RFD["RF-DETR + ByteTrack"]
+    VPOLL --> VJOB
+    VJOB --> VDECODE --> VRFD --> VTRACK --> VPOSE
   end
 
   subgraph MEDPOOL["modal-media-l40s"]
-    MAPI["CPU submit/poll ASGI"]
+    PREPAPI["CPU POST /tasks/node-media-prep"]
+    RENDERAPI["CPU POST /tasks/render-video"]
+    MPOLL["CPU result poll APIs"]
     LEASE["exclusive media GPU lease"]
-    PREP["node-media-prep"]
+    PREP["node-media-prep batches"]
     RENDER["render/export"]
-    MAPI --> LEASE
-    LEASE --> PREP
-    LEASE --> RENDER
+    PREPAPI --> LEASE --> PREP
+    RENDERAPI --> LEASE --> RENDER
+    MPOLL --> LEASE
   end
 ```
 

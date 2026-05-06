@@ -91,3 +91,20 @@ Phase1 must enqueue Phase26 as soon as Scribe audio artifacts are adapted. The e
 - source video GCS metadata
 
 Phase26 may run Phase2-4 before RF-DETR is complete, but must join/fail-hard on the visual future before Phase5/frontend grounding or Phase6 visual use.
+
+```mermaid
+flowchart TD
+  input["test-bank URL or source_path"]
+  media["canonical audio/video in GCS"]
+  scribe["ElevenLabs Scribe v2"]
+  visual["Modal visual future"]
+  adapt["Scribe adapter"]
+  enqueue["Phase26 enqueue"]
+  phase26["Phase26 worker starts audio/text stages"]
+  gate["visual hard join before Phase5/visual use"]
+
+  input --> media
+  media --> scribe --> adapt --> enqueue --> phase26 --> gate
+  media --> visual --> enqueue
+  visual --> gate
+```

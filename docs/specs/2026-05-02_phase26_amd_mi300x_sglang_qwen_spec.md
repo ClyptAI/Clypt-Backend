@@ -67,17 +67,37 @@ The AMD switchover should preserve the semantic serving contract while changing 
 ### 3.1 Host Graph
 
 ```mermaid
-flowchart LR
-  subgraph P26["Phase26 MI300X"]
-    P1["Phase1 vCPU orchestrator"] -->|POST /tasks/phase26-enqueue| D["Phase26 dispatch :9300"]
-    D --> Q["SQLite queue"]
-    W["Phase26 worker"] --> Q
-    W --> LLM["LocalOpenAIQwenClient"]
-    LLM --> SG["SGLang ROCm Qwen :8001"]
-    W --> SP["Spanner repository"]
-    W --> MOD["Modal node-media-prep"]
-    W --> RENDER["Modal render/export optional"]
+flowchart TD
+  SCRIBE["ElevenLabs Scribe v2 audio artifacts"]
+  VISF["Persisted Modal visual_future"]
+  VIS["Modal RF-DETR visual result"]
+  MOD["Modal node-media-prep"]
+  RENDER["Modal render/export"]
+  SP["Spanner repository"]
+
+  subgraph P26["Phase26 MI300X host"]
+    P1["Phase1 vCPU orchestrator"]
+    D["Phase26 dispatch :9300"]
+    Q["SQLite queue"]
+    W["Phase26 worker"]
+    LLM["LocalOpenAIQwenClient"]
+    SG["SGLang ROCm Qwen :8001"]
+    TEXT["audio/text graph stages"]
+    JOIN["visual future join gate"]
+    RANK["Phase4 ranking"]
+    P56["Phase5/Phase6 boundary"]
   end
+
+  SCRIBE --> P1
+  VISF --> P1
+  P1 -->|POST /tasks/phase26-enqueue| D --> Q --> W
+  W --> LLM --> SG --> TEXT --> RANK
+  VISF --> JOIN
+  VIS --> JOIN
+  RANK --> JOIN --> P56
+  W --> MOD --> W
+  P56 --> RENDER
+  W --> SP
 ```
 
 ### 3.2 Generation Graph

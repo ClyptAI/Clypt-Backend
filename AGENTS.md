@@ -108,6 +108,7 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - Phase1 submits `POST /tasks/visual-extract` to the dedicated Modal visual L40S service.
   - Phase1 enqueues Phase26 immediately after Scribe audio adaptation completes.
   - Phase26 may run Phase2-4 while RF-DETR continues, but must join/fail-hard on the visual future before Phase5/frontend grounding or Phase6 visual use.
+  - Do not document or draw the MI300X host as a generic fan-out hub. The event flow is: canonical media upload -> parallel Scribe + Modal visual submit -> Scribe audio adaptation -> Phase26 enqueue -> Phase2-4 audio/text work while visual remains pending -> visual hard join before Phase5/visual use -> Modal media prep/render when those stages need it.
 - Current Modal visual settings must stay intact unless the user explicitly approves retuning:
   - `CLYPT_PHASE1_VISUAL_MODEL=nano`
   - Phase1 orchestrator route: `CLYPT_PHASE1_VISUAL_BACKEND=modal_rfdetr`
@@ -160,7 +161,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (4122 symbols, 10398 relationships, 247 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (4139 symbols, 10476 relationships, 251 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

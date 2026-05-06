@@ -34,24 +34,58 @@ Planned next:
 
 ## Current Production Topology
 
-The backend is currently designed around one DigitalOcean AMD GPU host that runs Phase1 orchestration on MI300X vCPUs and Phase26/Qwen on the MI300X GPU, plus two persistent Modal L40S pools.
+The backend is currently designed around one DigitalOcean AMD GPU host that runs Phase1 orchestration on MI300X vCPUs and Phase26/Qwen on the MI300X GPU, plus two persistent Modal L40S pools. The MI300X host is not a generic fan-out hub: Phase1 starts audio and visual futures, dispatches Phase26 only after Scribe audio is adapted, and Phase26 joins visual results later at the first visual-dependent gate.
 
 ```mermaid
-flowchart LR
+flowchart TD
   source["Long-form video"]
-  phase_host["DigitalOcean MI300X host - Phase1 vCPUs + Phase26 GPU"]
+  gcs["GCS canonical audio/video"]
   scribe["ElevenLabs Scribe v2"]
-  visual["Modal L40S - RF-DETR visual"]
-  modal["Modal L40S - media prep/render"]
   vertex["Vertex embeddings"]
-  out["Ranked clip candidates"]
+  spanner["Spanner + GCS artifacts"]
+  ranked["Ranked clip candidates"]
 
-  source --> phase_host
-  phase_host --> scribe
-  phase_host --> visual
-  phase_host --> modal
-  phase_host --> vertex
-  phase_host --> out
+  subgraph host["DigitalOcean MI300X host"]
+    ingress["Phase1 ingress + media prep on vCPUs"]
+    sign["Signed HTTPS audio URL"]
+    visualSubmit["Submit Modal visual future"]
+    adapt["Scribe response adapter"]
+    dispatch["POST /tasks/phase26-enqueue"]
+    queue["Local SQLite queue"]
+    worker["Phase26 worker"]
+    qwen["SGLang ROCm Qwen :8001"]
+    visualJoin["Visual future poll + hard join"]
+    phase24["Phase2-4 graph/ranking runtime"]
+    phase56["Phase5 gate + Phase6 orchestration"]
+  end
+
+  subgraph visualPool["Modal visual L40S"]
+    visualApi["CPU submit/poll API"]
+    visualGpu["visual_extract_job"]
+    decode["NVDEC/CUDA decode"]
+    rfdetr["TensorRT RF-DETR"]
+    track["ByteTrack + pose validation"]
+  end
+
+  subgraph mediaPool["Modal media L40S"]
+    mediaApi["CPU submit/poll API"]
+    lease["exclusive media GPU lease"]
+    prep["node-media-prep batches"]
+    render["render/export"]
+  end
+
+  source --> ingress --> gcs
+  gcs --> sign --> scribe --> adapt
+  gcs --> visualSubmit --> visualApi --> visualGpu --> decode --> rfdetr --> track
+  adapt --> dispatch --> queue --> worker
+  worker --> qwen --> phase24
+  worker --> visualJoin
+  track --> visualJoin
+  phase24 --> mediaApi --> lease --> prep --> worker
+  worker --> vertex --> phase24
+  phase24 --> spanner --> ranked
+  visualJoin --> phase56 --> mediaApi
+  lease --> render --> spanner
 ```
 
 ### Phase 1 orchestrator
@@ -86,28 +120,35 @@ Modal currently handles visual extraction plus media-prep/render:
 - one shared warm media `L40S` worker via `media_gpu_job`
 - timeline-batched ffmpeg GPU path for clip extraction/encoding before multimodal embedding
 
-Current render caveat: the Phase5-less auto-follow render fallback is implemented and produces valid vertical MP4s, but the latest reviewed clips were still unacceptable: tracking/subject selection was poor and crop motion was not smooth enough. Treat that fallback as experimental until the tracking and crop planner are repaired; manual Phase5 grounding remains the expected path for production-quality renders.
+Current render caveat: the Phase5-less auto-follow render fallback is implemented and produces valid vertical MP4s, but the latest reviewed clips were still unacceptable: tracking/subject selection was poor and crop motion was not smooth enough. The current implementation uses `tracklet_follow_9x16_pose_x_dynamic_inside_person`, but it remains experimental until a fresh human render review accepts it; manual Phase5 grounding remains the expected path for production-quality renders.
 
 ## End-to-End Flow
 
 ```mermaid
 flowchart TD
   source["YouTube URL from test bank or local asset"]
-  asr["ElevenLabs Scribe v2"]
-  audio["Scribe adapter"]
-  visual["Modal RF-DETR and ByteTrack"]
-  dispatch["Phase26 enqueue"]
-  nodes["Semantic nodes + boundaries"]
-  prep["Node media prep"]
-  embed["Embeddings"]
-  knowledgeGraph["Knowledge graph"]
-  rank["Candidate review and ranking"]
+  canonical["Canonical media in GCS"]
+  scribeReq["Scribe request via signed audio URL"]
+  visualReq["Modal visual submit"]
+  scribeRaw["Scribe transcript + words + speakers + tags"]
+  audioArtifacts["Canonical Phase1 audio artifacts"]
+  visualFuture["Persisted visual_future / call_id"]
+  enqueue["Phase26 enqueue"]
+  phase2["Phase2 semantic nodes"]
+  mediaPrep["Modal node-media-prep batches"]
+  embed["Vertex multimodal/text embeddings"]
+  phase3["Phase3 knowledge graph"]
+  phase4["Phase4 retrieval + ranking"]
+  visualJoin["Visual hard join before Phase5/visual use"]
+  phase5["Phase5 frontend grounding gate"]
+  phase6["Phase6 render/export via Modal media"]
 
-  source --> asr
-  source --> visual
-  asr --> audio
-  audio --> dispatch
-  dispatch --> nodes --> prep --> embed --> knowledgeGraph --> rank
+  source --> canonical
+  canonical --> scribeReq --> scribeRaw --> audioArtifacts --> enqueue
+  canonical --> visualReq --> visualFuture
+  enqueue --> phase2 --> mediaPrep --> embed --> phase3 --> phase4
+  visualFuture --> visualJoin
+  phase4 --> visualJoin --> phase5 --> phase6
 ```
 
 One important runtime property: Phase26 starts as soon as Scribe audio artifacts are ready. It does **not** wait for RF-DETR; Phase26 joins the visual future before Phase5/frontend grounding or Phase6 visual use.

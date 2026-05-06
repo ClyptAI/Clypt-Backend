@@ -79,6 +79,30 @@ The Phase26 worker now uses a submit-and-poll contract against Modal:
 - the same submit-and-poll shape is used for Phase 6 render/export once the render surface is deployed
 - the render worker now ships with bundled pinned fonts, so `CLYPT_PHASE6_FONT_ASSET_DIR` is optional and only needed to override the default bundle
 
+Runtime service graph:
+
+```mermaid
+flowchart TD
+  p1["Phase1 worker on host vCPUs"]
+  dispatch["Phase26 dispatch :9300"]
+  queue["local SQLite queue"]
+  worker["Phase26 worker"]
+  sglang["SGLang Qwen :8001"]
+  visualFuture["persisted visual_future"]
+  visualPoll["Modal visual poll/join"]
+  mediaPrep["Modal node-media-prep"]
+  render["Modal render/export"]
+  spanner["Spanner/GCS artifacts"]
+
+  p1 --> dispatch --> queue --> worker
+  visualFuture --> worker
+  worker --> sglang
+  worker --> mediaPrep --> worker
+  worker --> visualPoll --> worker
+  worker --> spanner
+  worker --> render --> spanner
+```
+
 Credential requirement:
 
 - `GOOGLE_APPLICATION_CREDENTIALS` must point to a real service-account JSON key with `type=service_account` and a private key.

@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-05-04
+**Last updated:** 2026-05-06
 
 This is the runtime source of truth for the current AMD-refactor state.
 
@@ -75,6 +75,34 @@ Execution invariant:
 6. Phase26 runs Phase2-4 without waiting for RF-DETR.
 7. Phase26 joins/fails-hard on `visual_future` before Phase5/frontend grounding or Phase6 visual use.
 
+Runtime event graph:
+
+```mermaid
+flowchart TD
+  src["source_url/source_path"]
+  media["canonical audio/video upload"]
+  scribeReq["signed URL Scribe request"]
+  visualSubmit["Modal visual submit"]
+  visualFuture["persist visual_future"]
+  scribeRaw["Scribe raw response"]
+  adapter["Phase1 audio adapter"]
+  enqueue["Phase26 enqueue payload"]
+  queue["SQLite queue row"]
+  worker["Phase26 worker lease"]
+  audioStages["audio/text Qwen stages"]
+  visualPoll["poll Modal visual result"]
+  visualValidate["validate tracks + shot_changes"]
+  visualPersist["persist Phase1 visual artifacts"]
+  visualGate["Phase5/Phase6 visual gate"]
+
+  src --> media
+  media --> scribeReq --> scribeRaw --> adapter --> enqueue
+  media --> visualSubmit --> visualFuture --> enqueue
+  enqueue --> queue --> worker --> audioStages
+  visualFuture --> visualPoll --> visualValidate --> visualPersist --> visualGate
+  audioStages --> visualGate
+```
+
 ## 3) Modal Visual Fast Path
 
 Current visual settings are preserved unless explicitly retuned:
@@ -101,6 +129,24 @@ Operationally:
 ```text
 NVDEC/CUDA decode+resize -> hwdownload -> TensorRT FP16 RF-DETR -> ByteTrack
 -> sampled YOLO11s-pose TensorRT subject validation for auto-follow eligibility
+```
+
+Visual worker component graph:
+
+```mermaid
+flowchart LR
+  req["POST /tasks/visual-extract"]
+  callId["Modal call_id"]
+  job["visual_extract_job on L40S"]
+  decode["NVDEC/CUDA decode"]
+  resize["scale_cuda resize"]
+  trt["TensorRT FP16 RF-DETR"]
+  stream["ordered CUDA stream handoff"]
+  tracker["ByteTrack with hard-cut resets"]
+  pose["sampled YOLO11s-pose validation"]
+  payload["tracks + raw detections + shots + pose anchors"]
+
+  req --> callId --> job --> decode --> resize --> trt --> stream --> tracker --> pose --> payload
 ```
 
 The worker fails hard if CUDA ffmpeg support, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, RF-DETR, or YOLO11s-pose validation are unavailable. It must not fall back to software decode or CPU RF-DETR.
@@ -164,6 +210,26 @@ Current Phase26 AMD-refactor baseline is [known-good-phase26-mi300x.env](/Users/
 - node-media-prep requests remain timeline-local batches.
 - Phase26 starts multimodal embedding batch-by-batch as node-media-prep results arrive.
 - Dynamic Phase6 crop motion must use a compact control surface such as FFmpeg `sendcmd`; do not encode long crop paths as nested inline `if(between(t...))` expressions.
+
+Media worker component graph:
+
+```mermaid
+flowchart TD
+  p26["Phase26 worker"]
+  prepReq["POST /tasks/node-media-prep"]
+  renderReq["POST /tasks/render-video"]
+  poll["result poll by call_id"]
+  lease["exclusive media_gpu_job L40S lease"]
+  prep["timeline-local ffmpeg clip batches"]
+  render["Phase6 ffmpeg render/export"]
+  outputs["GCS outputs"]
+
+  p26 --> prepReq --> poll
+  p26 --> renderReq --> poll
+  prepReq --> lease --> prep --> outputs
+  renderReq --> lease --> render --> outputs
+  outputs --> p26
+```
 
 ## 7) Canonical Runtime Files
 
