@@ -272,6 +272,9 @@ class YoloPoseSubjectValidator:
                             frame_idx=frame_idx,
                             has_head_evidence=evidence.has_head_evidence,
                             has_upper_body_anchor=evidence.has_upper_body_anchor,
+                            head_center_xy=evidence.head_center_xy,
+                            shoulder_center_xy=evidence.shoulder_center_xy,
+                            upper_torso_anchor_xy=evidence.upper_torso_anchor_xy,
                         )
                     )
                 crop_batch.clear()

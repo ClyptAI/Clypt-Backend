@@ -70,7 +70,9 @@ The active visual fast path is Modal L40S only:
 - `CLYPT_PHASE1_VISUAL_SHAPE=640`
 - `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
 - sampled YOLO11s-pose TensorRT validation marks `auto_follow_eligible` tracklets and stores source-space pose anchors for Phase5-less render auto-follow
-- Phase5-less render auto-follow locks one pose-qualified subject tracklet per shot and emits a smooth `tracklet_follow_9x16_smooth_inside_person` crop path rather than caption-segment crop jumps
+- Phase5-less render auto-follow uses the two-step subject model: manual/frontend `primary_tracklet_id` wins when present; otherwise the compiler locks one pose-qualified subject tracklet per shot
+- the active auto-follow crop mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`: each crop keyframe is the largest 9:16 rectangle inside that frame's selected person bbox, pose controls horizontal head/face anchoring only, vertical placement is bbox-top anchored, and crop `x/y/w/h` may change per keyframe
+- shot or primary-tracklet changes are hard crop cuts with run-local interpolation only, so the new shot starts already framed on the selected subject instead of animating from the previous shot crop
 - Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt`; the worker sets internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`.
 - ByteTrack buffer `30`
 - ByteTrack match threshold `0.7`
@@ -79,7 +81,7 @@ The worker fails hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT, `trtexec`,
 
 ### Current Render Quality Caveat
 
-The Phase5-less auto-follow render path is implemented but **not accepted as production-quality**. The latest Modal render replay proved that the technical crop/render contract runs end-to-end and emits valid `1080x1920` MP4s, but the clips still looked terrible in review: crop movement was not smooth enough and subject tracking/selection was visibly wrong in places. Treat `tracklet_follow_9x16_smooth_inside_person` as an experimental fallback for Phase5-less demos only. The production path still needs a tracking/crop-quality pass before it can replace manual Phase5 grounding.
+The Phase5-less auto-follow render path is implemented but **not accepted as production-quality**. The latest Modal render replay proved that the technical crop/render contract runs end-to-end and emits valid `1080x1920` MP4s, but the clips still looked terrible in review: crop movement was not smooth enough and subject tracking/selection was visibly wrong in places. Treat `tracklet_follow_9x16_pose_x_dynamic_inside_person` as an experimental fallback for Phase5-less demos only until the next human render review accepts it. Manual Phase5 grounding remains the expected production-quality route.
 
 ## 5) Phase26
 

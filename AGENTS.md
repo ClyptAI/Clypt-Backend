@@ -120,6 +120,7 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - ByteTrack match threshold `0.7`
   - GPU decode through `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
 - Phase5-less render auto-follow is implemented but currently experimental and **not production-quality**:
+  - active mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`: pose-x anchored, bbox-top anchored, dynamic inside-person 9:16 crop keyframes, and hard crop cuts at shot/tracklet boundaries
   - latest reviewed clips still had poor tracking/subject selection and insufficiently smooth crop motion
   - do not treat generated auto-follow renders as accepted visual-quality baselines
   - manual Phase5 grounding remains the production-quality path until tracking/crop planning is repaired and reviewed again

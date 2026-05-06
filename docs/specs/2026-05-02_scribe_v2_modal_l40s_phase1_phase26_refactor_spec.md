@@ -6,6 +6,8 @@
 **Scope:** Refactor the AMD branch topology so Phase26 keeps self-hosted Qwen on one MI300X, Phase1 replaces VibeVoice + NFA + emotion2vec+ + YAMNet with ElevenLabs Scribe v2, and NVIDIA-native visual/media work moves to two persistent Modal L40S pools: one for RF-DETR visual extraction and one shared by node-media-prep plus Phase 6 render/export.
 
 > 2026-05-04 implementation note: the topology, Scribe path, Modal visual path, and Modal media/render submit-poll path are implemented on `AMD-refactor`, but Phase5-less auto-follow render quality is **not accepted**. Latest reviewed clips rendered as valid vertical MP4s, but tracking/subject selection was poor and crop motion was still not smooth enough. Treat auto-follow rendering as an experimental fallback until a dedicated tracking/crop-quality pass lands; manual Phase5 grounding remains the production-quality route.
+>
+> 2026-05-05 crop-plan update: `tracklet_follow_9x16_smooth_inside_person` is superseded by `tracklet_follow_9x16_pose_x_dynamic_inside_person`. The new plan computes per-keyframe 9:16 crops inside the selected person bbox, uses pose only for horizontal head/face anchoring, keeps vertical placement bbox-top anchored, drives dynamic `x/y/w/h` through FFmpeg `sendcmd`, and treats shot or primary-tracklet changes as hard crop cuts instead of animated pans.
 
 ---
 

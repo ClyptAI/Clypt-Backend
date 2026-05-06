@@ -19,6 +19,7 @@ from backend.providers.storage import parse_gcs_uri
 
 _TARGET_WIDTH = 1080
 _TARGET_HEIGHT = 1920
+_DYNAMIC_CROP_MODE = "tracklet_follow_9x16_pose_x_dynamic_inside_person"
 
 
 @dataclass(slots=True)
@@ -110,34 +111,6 @@ def _step_expression(*, cases: list[tuple[float, float, int]], default_value: in
     return expression
 
 
-def _linear_expression(*, keyframes: list[dict[str, Any]], axis: str, default_value: int) -> str:
-    points = [
-        (max(0.0, float(keyframe.get("time_ms") or 0) / 1000.0), float(keyframe.get(axis) or 0.0))
-        for keyframe in keyframes
-    ]
-    points.sort(key=lambda item: item[0])
-    if not points:
-        return str(default_value)
-    if len(points) == 1:
-        return str(_even(points[0][1]))
-
-    expression = f"{points[-1][1]:.3f}"
-    for (start_s, start_value), (end_s, end_value) in reversed(list(zip(points, points[1:]))):
-        if end_s <= start_s:
-            continue
-        delta = end_value - start_value
-        segment = (
-            f"({start_value:.3f}+({delta:.3f})*(t-{start_s:.3f})/"
-            f"{(end_s - start_s):.3f})"
-        )
-        expression = (
-            f"if(between(t\\,{start_s:.3f}\\,{end_s:.3f})\\,"
-            f"{segment}\\,{expression})"
-        )
-    first_s, first_value = points[0]
-    return f"if(lte(t\\,{first_s:.3f})\\,{first_value:.3f}\\,{expression})"
-
-
 def _interpolated_keyframe_value(
     *,
     points: list[tuple[float, float]],
@@ -157,38 +130,136 @@ def _interpolated_keyframe_value(
     return points[-1][1]
 
 
+def _validate_dynamic_crop_plan(crop_plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    mode = str(crop_plan.get("mode") or "").strip()
+    if mode != _DYNAMIC_CROP_MODE:
+        raise ValueError(f"unknown Phase6 crop plan mode {mode!r}")
+    keyframes = [dict(keyframe) for keyframe in crop_plan.get("keyframes") or []]
+    runs = [dict(run) for run in crop_plan.get("runs") or []]
+    if not keyframes:
+        raise ValueError("dynamic Phase6 crop plan requires keyframes")
+    if not runs:
+        raise ValueError("dynamic Phase6 crop plan requires run boundaries")
+    required_keyframe_fields = {"time_ms", "x", "y", "w", "h", "run_id", "shot_id"}
+    for keyframe in keyframes:
+        missing = required_keyframe_fields - set(keyframe)
+        if missing:
+            raise ValueError(f"dynamic Phase6 crop keyframe missing fields: {sorted(missing)}")
+        if float(keyframe["w"]) <= 0 or float(keyframe["h"]) <= 0:
+            raise ValueError("dynamic Phase6 crop keyframe width/height must be positive")
+    required_run_fields = {"run_id", "start_ms", "end_ms"}
+    for run in runs:
+        missing = required_run_fields - set(run)
+        if missing:
+            raise ValueError(f"dynamic Phase6 crop run missing fields: {sorted(missing)}")
+    return keyframes, runs
+
+
+def _keyframe_points_for_axis(
+    *,
+    keyframes: list[dict[str, Any]],
+    axis: str,
+    default_value: int,
+) -> list[tuple[float, float]]:
+    points = [
+        (
+            max(0.0, float(keyframe.get("time_ms") or 0) / 1000.0),
+            float(keyframe.get(axis) if keyframe.get(axis) is not None else default_value),
+        )
+        for keyframe in keyframes
+    ]
+    points.sort(key=lambda item: item[0])
+    return points
+
+
+def _command_line_for_dynamic_crop(
+    *,
+    timestamp_s: float,
+    keyframes: list[dict[str, Any]],
+    default_x: int,
+    default_y: int,
+    default_w: int,
+    default_h: int,
+) -> str:
+    w = _even(
+        _interpolated_keyframe_value(
+            points=_keyframe_points_for_axis(keyframes=keyframes, axis="w", default_value=default_w),
+            timestamp_s=timestamp_s,
+            default_value=default_w,
+        )
+    )
+    h = _even(
+        _interpolated_keyframe_value(
+            points=_keyframe_points_for_axis(keyframes=keyframes, axis="h", default_value=default_h),
+            timestamp_s=timestamp_s,
+            default_value=default_h,
+        )
+    )
+    x = _even(
+        _interpolated_keyframe_value(
+            points=_keyframe_points_for_axis(keyframes=keyframes, axis="x", default_value=default_x),
+            timestamp_s=timestamp_s,
+            default_value=default_x,
+        )
+    )
+    y = _even(
+        _interpolated_keyframe_value(
+            points=_keyframe_points_for_axis(keyframes=keyframes, axis="y", default_value=default_y),
+            timestamp_s=timestamp_s,
+            default_value=default_y,
+        )
+    )
+    return f"{timestamp_s:.3f} crop@follow w {w}, crop@follow h {h}, crop@follow x {x}, crop@follow y {y};"
+
+
 def _write_crop_sendcmd_file(
     *,
     keyframes: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
     command_path: Path,
     output_fps: int,
     default_x: int,
     default_y: int,
+    default_w: int,
+    default_h: int,
 ) -> None:
-    x_points = [
-        (max(0.0, float(keyframe.get("time_ms") or 0) / 1000.0), float(keyframe.get("x") or default_x))
-        for keyframe in keyframes
-    ]
-    y_points = [
-        (max(0.0, float(keyframe.get("time_ms") or 0) / 1000.0), float(keyframe.get("y") or default_y))
-        for keyframe in keyframes
-    ]
-    x_points.sort(key=lambda item: item[0])
-    y_points.sort(key=lambda item: item[0])
-    last_time_s = max([point[0] for point in x_points + y_points], default=0.0)
     frame_step_s = 1.0 / max(1, int(output_fps))
-    frame_count = max(1, int(last_time_s / frame_step_s) + 2)
+    by_run: dict[str, list[dict[str, Any]]] = {}
+    for keyframe in keyframes:
+        by_run.setdefault(str(keyframe["run_id"]), []).append(dict(keyframe))
     lines: list[str] = []
-    previous_x: int | None = None
-    previous_y: int | None = None
-    for frame_index in range(frame_count + 1):
-        timestamp_s = min(last_time_s, frame_index * frame_step_s)
-        x = _even(_interpolated_keyframe_value(points=x_points, timestamp_s=timestamp_s, default_value=default_x))
-        y = _even(_interpolated_keyframe_value(points=y_points, timestamp_s=timestamp_s, default_value=default_y))
-        if previous_x == x and previous_y == y and frame_index < frame_count:
-            continue
-        previous_x, previous_y = x, y
-        lines.append(f"{timestamp_s:.3f} crop@follow x {x}, crop@follow y {y};")
+    for run in sorted(runs, key=lambda item: int(item["start_ms"])):
+        run_id = str(run["run_id"])
+        run_keyframes = sorted(by_run.get(run_id, []), key=lambda item: int(item["time_ms"]))
+        if not run_keyframes:
+            raise ValueError(f"dynamic Phase6 crop run {run_id!r} has no keyframes")
+        start_s = max(0.0, float(run_keyframes[0]["time_ms"]) / 1000.0)
+        end_s = max(start_s, float(run_keyframes[-1]["time_ms"]) / 1000.0)
+        timestamps = [start_s]
+        frame_index = 1
+        while True:
+            timestamp_s = start_s + (frame_index * frame_step_s)
+            if timestamp_s >= end_s:
+                break
+            timestamps.append(timestamp_s)
+            frame_index += 1
+        if end_s not in timestamps:
+            timestamps.append(end_s)
+
+        previous_line: str | None = None
+        for timestamp_s in timestamps:
+            line = _command_line_for_dynamic_crop(
+                timestamp_s=timestamp_s,
+                keyframes=run_keyframes,
+                default_x=default_x,
+                default_y=default_y,
+                default_w=default_w,
+                default_h=default_h,
+            )
+            if line == previous_line and timestamp_s < end_s:
+                continue
+            previous_line = line
+            lines.append(line)
     command_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -200,46 +271,36 @@ def _crop_filter_from_plan(
     output_fps: int = 30,
 ) -> str:
     source_width, source_height = source_dimensions
+    mode = str(crop_plan.get("mode") or "").strip()
     keyframes = list(crop_plan.get("keyframes") or [])
     if keyframes:
-        crop_width = _clamp(
-            _even(float(crop_plan.get("crop_width") or 0)),
-            2,
-            source_width,
-        )
-        crop_height = _clamp(
-            _even(float(crop_plan.get("crop_height") or 0)),
-            2,
-            source_height,
-        )
-        default_x = _even((source_width - crop_width) / 2.0)
-        default_y = _even((source_height - crop_height) / 2.0)
+        keyframes, runs = _validate_dynamic_crop_plan(crop_plan)
+        first_w = _clamp(_even(float(keyframes[0]["w"])), 2, source_width)
+        first_h = _clamp(_even(float(keyframes[0]["h"])), 2, source_height)
+        first_x = _clamp(_even(float(keyframes[0]["x"])), 0, source_width - first_w)
+        first_y = _clamp(_even(float(keyframes[0]["y"])), 0, source_height - first_h)
+        default_x = _even((source_width - first_w) / 2.0)
+        default_y = _even((source_height - first_h) / 2.0)
         if crop_command_path is not None:
-            first_x = _even(float(keyframes[0].get("x") or default_x))
-            first_y = _even(float(keyframes[0].get("y") or default_y))
             _write_crop_sendcmd_file(
                 keyframes=keyframes,
+                runs=runs,
                 command_path=crop_command_path,
                 output_fps=output_fps,
                 default_x=default_x,
                 default_y=default_y,
+                default_w=first_w,
+                default_h=first_h,
             )
             return (
                 f"sendcmd=f={crop_command_path},"
-                f"crop@follow={crop_width}:{crop_height}:{first_x}:{first_y},"
+                f"crop@follow={first_w}:{first_h}:{first_x}:{first_y},"
                 f"scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}"
             )
-        x_expr = _linear_expression(
-            keyframes=keyframes,
-            axis="x",
-            default_value=default_x,
-        )
-        y_expr = _linear_expression(
-            keyframes=keyframes,
-            axis="y",
-            default_value=default_y,
-        )
-        return f"crop={crop_width}:{crop_height}:{x_expr}:{y_expr},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}"
+        raise ValueError("dynamic Phase6 crop rendering requires a sendcmd command file")
+
+    if mode:
+        raise ValueError(f"unknown Phase6 crop plan mode {mode!r}")
 
     target_aspect = _TARGET_WIDTH / _TARGET_HEIGHT
     source_aspect = source_width / source_height

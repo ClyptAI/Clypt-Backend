@@ -97,7 +97,7 @@ def test_run_phase6_render_uses_tracklet_crop_plan_when_present(tmp_path, monkey
             path = super().download_file(gcs_uri=gcs_uri, local_path=local_path)
             if gcs_uri.endswith(".json"):
                 path.write_text(
-                    '{"run_id":"run-123","source_context_ref":"source_context.json","caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","clips":[{"clip_id":"clip_001","clip_start_ms":100,"clip_end_ms":900,"caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","caption_segment_ids":["clip_001_seg_001"],"caption_zone":"lower_safe","caption_preset_id":"karaoke_focus","review_needed":false,"review_reasons":[],"overlays":[],"crop_plan":{"mode":"tracklet_follow_9x16","segments":[{"start_ms":0,"end_ms":800,"tracklet_id":"shot_0001:7","shot_id":"shot_0001","bbox_xyxy":[900.0,100.0,1200.0,900.0]}]},"segments":[]}]}',
+                    '{"run_id":"run-123","source_context_ref":"source_context.json","caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","clips":[{"clip_id":"clip_001","clip_start_ms":100,"clip_end_ms":900,"caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","caption_segment_ids":["clip_001_seg_001"],"caption_zone":"lower_safe","caption_preset_id":"karaoke_focus","review_needed":false,"review_reasons":[],"overlays":[],"crop_plan":{"mode":"tracklet_follow_9x16_pose_x_dynamic_inside_person","runs":[{"run_id":"run_0001","shot_id":"shot_0001","tracklet_id":"shot_0001:7","start_ms":0,"end_ms":800}],"keyframes":[{"run_id":"run_0001","shot_id":"shot_0001","time_ms":0,"x":900,"y":100,"w":300,"h":534},{"run_id":"run_0001","shot_id":"shot_0001","time_ms":800,"x":900,"y":100,"w":300,"h":534}]},"segments":[]}]}',
                     encoding="utf-8",
                 )
             return path
@@ -134,13 +134,13 @@ def test_run_phase6_render_uses_tracklet_crop_plan_when_present(tmp_path, monkey
     )
 
     vf_arg = commands[0][commands[0].index("-vf") + 1]
-    assert "crop=608:1080:" in vf_arg
-    assert "if(between(t\\,0.000\\,0.800)" in vf_arg
+    assert "sendcmd=f=" in vf_arg
+    assert "crop@follow=300:534:900:100" in vf_arg
     assert "scale=1080:1920" in vf_arg
     assert "pad=1080:1920" not in vf_arg
 
 
-def test_run_phase6_render_interpolates_smooth_crop_keyframes(tmp_path, monkeypatch) -> None:
+def test_run_phase6_render_interpolates_dynamic_pose_crop_keyframes(tmp_path, monkeypatch) -> None:
     commands: list[list[str]] = []
     command_files: list[str] = []
     font_dir = tmp_path / "fonts"
@@ -153,7 +153,7 @@ def test_run_phase6_render_interpolates_smooth_crop_keyframes(tmp_path, monkeypa
             path = super().download_file(gcs_uri=gcs_uri, local_path=local_path)
             if gcs_uri.endswith(".json"):
                 path.write_text(
-                    '{"run_id":"run-123","source_context_ref":"source_context.json","caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","clips":[{"clip_id":"clip_001","clip_start_ms":100,"clip_end_ms":1100,"caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","caption_segment_ids":["clip_001_seg_001"],"caption_zone":"lower_safe","caption_preset_id":"karaoke_focus","review_needed":false,"review_reasons":[],"overlays":[],"crop_plan":{"mode":"tracklet_follow_9x16_smooth_inside_person","crop_width":360,"crop_height":640,"keyframes":[{"time_ms":0,"x":100,"y":50},{"time_ms":500,"x":220,"y":90},{"time_ms":1000,"x":340,"y":120}]},"segments":[]}]}',
+                    '{"run_id":"run-123","source_context_ref":"source_context.json","caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","clips":[{"clip_id":"clip_001","clip_start_ms":100,"clip_end_ms":1100,"caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","caption_segment_ids":["clip_001_seg_001"],"caption_zone":"lower_safe","caption_preset_id":"karaoke_focus","review_needed":false,"review_reasons":[],"overlays":[],"crop_plan":{"mode":"tracklet_follow_9x16_pose_x_dynamic_inside_person","runs":[{"run_id":"run_0001","shot_id":"shot_1","tracklet_id":"shot_1:track_1","start_ms":0,"end_ms":1000}],"keyframes":[{"run_id":"run_0001","shot_id":"shot_1","time_ms":0,"x":100,"y":50,"w":360,"h":640},{"run_id":"run_0001","shot_id":"shot_1","time_ms":500,"x":220,"y":90,"w":420,"h":746},{"run_id":"run_0001","shot_id":"shot_1","time_ms":1000,"x":340,"y":120,"w":480,"h":854}]},"segments":[]}]}',
                     encoding="utf-8",
                 )
             return path
@@ -197,9 +197,107 @@ def test_run_phase6_render_interpolates_smooth_crop_keyframes(tmp_path, monkeypa
     assert "crop@follow=360:640:100:50" in vf_arg
     assert "scale=1080:1920" in vf_arg
     command_text = command_files[0]
-    assert "0.000 crop@follow x 100, crop@follow y 50;" in command_text
-    assert "0.500 crop@follow x 220, crop@follow y 90;" in command_text
-    assert "1.000 crop@follow x 340, crop@follow y 120;" in command_text
+    assert "0.000 crop@follow w 360, crop@follow h 640, crop@follow x 100, crop@follow y 50;" in command_text
+    assert "0.500 crop@follow w 420, crop@follow h 746, crop@follow x 220, crop@follow y 90;" in command_text
+    assert "1.000 crop@follow w 480, crop@follow h 854, crop@follow x 340, crop@follow y 120;" in command_text
+
+
+def test_run_phase6_render_keeps_crop_interpolation_run_local_at_shot_cut(tmp_path, monkeypatch) -> None:
+    commands: list[list[str]] = []
+    command_files: list[str] = []
+    font_dir = tmp_path / "fonts"
+    font_dir.mkdir()
+    (font_dir / "montserrat_extra_bold_v1.ttf").write_bytes(b"font")
+    monkeypatch.setenv("CLYPT_PHASE6_FONT_ASSET_DIR", str(font_dir))
+
+    class CutCropPlanStorage(_FakeStorageClient):
+        def download_file(self, *, gcs_uri: str, local_path: Path) -> Path:
+            path = super().download_file(gcs_uri=gcs_uri, local_path=local_path)
+            if gcs_uri.endswith(".json"):
+                path.write_text(
+                    '{"run_id":"run-123","source_context_ref":"source_context.json","caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","clips":[{"clip_id":"clip_001","clip_start_ms":0,"clip_end_ms":1000,"caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","caption_segment_ids":["clip_001_seg_001"],"caption_zone":"lower_safe","caption_preset_id":"karaoke_focus","review_needed":false,"review_reasons":[],"overlays":[],"crop_plan":{"mode":"tracklet_follow_9x16_pose_x_dynamic_inside_person","runs":[{"run_id":"run_0001","shot_id":"shot_1","tracklet_id":"shot_1:track_1","start_ms":0,"end_ms":500},{"run_id":"run_0002","shot_id":"shot_2","tracklet_id":"shot_2:track_9","start_ms":500,"end_ms":1000}],"keyframes":[{"run_id":"run_0001","shot_id":"shot_1","time_ms":0,"x":100,"y":50,"w":360,"h":640},{"run_id":"run_0001","shot_id":"shot_1","time_ms":480,"x":140,"y":50,"w":360,"h":640},{"run_id":"run_0002","shot_id":"shot_2","time_ms":500,"x":900,"y":80,"w":420,"h":746},{"run_id":"run_0002","shot_id":"shot_2","time_ms":1000,"x":940,"y":80,"w":420,"h":746}]},"segments":[]}]}',
+                    encoding="utf-8",
+                )
+            return path
+
+    def fake_run(cmd, check, capture_output, text):  # noqa: ARG001
+        commands.append(cmd)
+        vf_arg = cmd[cmd.index("-vf") + 1]
+        command_path = Path(vf_arg.split("sendcmd=f=", maxsplit=1)[1].split(",", maxsplit=1)[0])
+        command_files.append(command_path.read_text(encoding="utf-8"))
+        output_path = Path(cmd[-1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"rendered")
+        return None
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("subprocess.check_output", lambda cmd, text: "1920,1080")  # noqa: ARG005
+
+    request = Phase6RenderRequest.from_payload(
+        {
+            "run_id": "run-123",
+            "source_video_gcs_uri": "gs://bucket/source.mp4",
+            "artifact_gcs_uris": {
+                "render_plan": "gs://bucket/phase14/run-123/render_inputs/render_plan.json",
+                "captions_clip_001.ass": "gs://bucket/phase14/run-123/render_inputs/captions_clip_001.ass",
+            },
+            "clips": [{"clip_id": "clip_001", "clip_start_ms": 0, "clip_end_ms": 1000}],
+        }
+    )
+
+    run_phase6_render(
+        request=request,
+        storage_client=CutCropPlanStorage(tmp_path),
+        scratch_root=tmp_path,
+    )
+
+    command_text = command_files[0]
+    assert "0.500 crop@follow w 420, crop@follow h 746, crop@follow x 900, crop@follow y 80;" in command_text
+    assert "0.480 crop@follow" in command_text
+    assert "0.490 crop@follow" not in command_text
+
+
+def test_run_phase6_render_fails_fast_for_unknown_crop_mode(tmp_path, monkeypatch) -> None:
+    font_dir = tmp_path / "fonts"
+    font_dir.mkdir()
+    (font_dir / "montserrat_extra_bold_v1.ttf").write_bytes(b"font")
+    monkeypatch.setenv("CLYPT_PHASE6_FONT_ASSET_DIR", str(font_dir))
+
+    class BadCropPlanStorage(_FakeStorageClient):
+        def download_file(self, *, gcs_uri: str, local_path: Path) -> Path:
+            path = super().download_file(gcs_uri=gcs_uri, local_path=local_path)
+            if gcs_uri.endswith(".json"):
+                path.write_text(
+                    '{"run_id":"run-123","source_context_ref":"source_context.json","caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","clips":[{"clip_id":"clip_001","clip_start_ms":0,"clip_end_ms":1000,"caption_plan_ref":"caption_plan.json","publish_metadata_ref":"publish_metadata.json","caption_segment_ids":["clip_001_seg_001"],"caption_zone":"lower_safe","caption_preset_id":"karaoke_focus","review_needed":false,"review_reasons":[],"overlays":[],"crop_plan":{"mode":"surprise_pan","keyframes":[{"time_ms":0,"x":100,"y":50,"w":360,"h":640}]},"segments":[]}]}',
+                    encoding="utf-8",
+                )
+            return path
+
+    monkeypatch.setattr("subprocess.check_output", lambda cmd, text: "1920,1080")  # noqa: ARG005
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, check, capture_output, text: None,  # noqa: ARG005
+    )
+    request = Phase6RenderRequest.from_payload(
+        {
+            "run_id": "run-123",
+            "source_video_gcs_uri": "gs://bucket/source.mp4",
+            "artifact_gcs_uris": {
+                "render_plan": "gs://bucket/phase14/run-123/render_inputs/render_plan.json",
+                "captions_clip_001.ass": "gs://bucket/phase14/run-123/render_inputs/captions_clip_001.ass",
+            },
+            "clips": [{"clip_id": "clip_001", "clip_start_ms": 0, "clip_end_ms": 1000}],
+        }
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="unknown Phase6 crop plan mode"):
+        run_phase6_render(
+            request=request,
+            storage_client=BadCropPlanStorage(tmp_path),
+            scratch_root=tmp_path,
+        )
 
 
 def test_run_phase6_render_uses_repo_pinned_fonts_when_env_unset(tmp_path, monkeypatch) -> None:

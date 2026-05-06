@@ -12,11 +12,8 @@ from .presets import load_caption_presets
 
 
 _TARGET_ASPECT = 9.0 / 16.0
-_PERSON_BOX_CROP_SCALE = 0.92
-_CROP_KEYFRAME_MIN_INTERVAL_MS = 650
-_CROP_SMOOTH_ALPHA = 0.32
-_CROP_DEADZONE_PX = 4.0
-_CROP_EMIT_DELTA_PX = 1.5
+_MIN_AUTO_FOLLOW_CROP_WIDTH = 360.0
+_MIN_AUTO_FOLLOW_CROP_HEIGHT = 640.0
 
 
 def _coerce_caption_plan(caption_plan: CaptionPlan | dict[str, Any]) -> CaptionPlan:
@@ -149,6 +146,29 @@ def _tracklet_pose_score(descriptor: Any) -> tuple[int, float, float, float, str
     )
 
 
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+
+
+def _tracklet_meets_auto_crop_guard(points: list[dict[str, Any]]) -> bool:
+    sizes = [
+        _bbox_inside_9x16_size([float(value) for value in point["bbox_xyxy"][:4]])
+        for point in points
+    ]
+    if not sizes:
+        return False
+    return (
+        _median([width for width, _ in sizes]) >= _MIN_AUTO_FOLLOW_CROP_WIDTH
+        and _median([height for _, height in sizes]) >= _MIN_AUTO_FOLLOW_CROP_HEIGHT
+    )
+
+
 def _build_shot_subject_plan(
     *,
     tracklet_descriptors: list[Any],
@@ -170,8 +190,19 @@ def _build_shot_subject_plan(
             descriptor
             for descriptor in descriptors
             if _field(descriptor, "auto_follow_eligible", True) is not False
+            and _tracklet_meets_auto_crop_guard(
+                geometry_by_tracklet.get(str(_field(descriptor, "tracklet_id", "")), [])
+            )
         ]
-        pool = eligible or descriptors
+        pool = eligible or [
+            descriptor
+            for descriptor in descriptors
+            if _tracklet_meets_auto_crop_guard(
+                geometry_by_tracklet.get(str(_field(descriptor, "tracklet_id", "")), [])
+            )
+        ]
+        if not pool:
+            continue
         winner = max(pool, key=_tracklet_pose_score)
         selected[shot_id] = str(_field(winner, "tracklet_id", ""))
     return selected
@@ -228,6 +259,8 @@ def _select_auto_tracklet(
         tracklet_id = str(_field(descriptor, "tracklet_id", ""))
         if not tracklet_id or tracklet_id not in geometry_by_tracklet:
             continue
+        if not _tracklet_meets_auto_crop_guard(geometry_by_tracklet.get(tracklet_id, [])):
+            continue
         overlap = _overlap_ms(
             absolute_start_ms,
             absolute_end_ms,
@@ -268,33 +301,15 @@ def _geometry_points_for_interval(
     ]
 
 
-def _representative_bbox(
-    *,
-    tracklet_id: str,
-    absolute_start_ms: int,
-    absolute_end_ms: int,
-    geometry_by_tracklet: dict[str, list[dict[str, Any]]],
-) -> list[float] | None:
-    points = _geometry_points_for_interval(
-        tracklet_id=tracklet_id,
-        absolute_start_ms=absolute_start_ms,
-        absolute_end_ms=absolute_end_ms,
-        geometry_by_tracklet=geometry_by_tracklet,
-    )
-    if not points:
-        return None
-    return [float(value) for value in points[len(points) // 2]["bbox_xyxy"][:4]]
-
-
 def _bbox_inside_9x16_size(bbox_xyxy: list[float]) -> tuple[float, float]:
     x1, y1, x2, y2 = [float(value) for value in bbox_xyxy[:4]]
     width = max(2.0, x2 - x1)
     height = max(2.0, y2 - y1)
     if width / height >= _TARGET_ASPECT:
-        crop_height = height * _PERSON_BOX_CROP_SCALE
+        crop_height = height
         crop_width = crop_height * _TARGET_ASPECT
     else:
-        crop_width = width * _PERSON_BOX_CROP_SCALE
+        crop_width = width
         crop_height = crop_width / _TARGET_ASPECT
     return max(2.0, crop_width), max(2.0, crop_height)
 
@@ -306,117 +321,115 @@ def _point_xy(point: dict[str, Any], name: str) -> tuple[float, float] | None:
     return float(value[0]), float(value[1])
 
 
-def _anchor_for_point(point: dict[str, Any]) -> tuple[float, float, str]:
-    bbox = [float(value) for value in point["bbox_xyxy"][:4]]
-    head = _point_xy(point, "head_center_xy")
-    shoulders = _point_xy(point, "shoulder_center_xy")
-    torso = _point_xy(point, "upper_torso_anchor_xy")
-    if head and shoulders:
-        return (
-            (head[0] * 0.62) + (shoulders[0] * 0.38),
-            (head[1] * 0.56) + (shoulders[1] * 0.44),
-            "pose",
-        )
-    if head and torso:
-        return (
-            (head[0] * 0.64) + (torso[0] * 0.36),
-            (head[1] * 0.58) + (torso[1] * 0.42),
-            "pose",
-        )
-    if head:
-        return head[0], head[1], "pose"
-    if shoulders:
-        return shoulders[0], shoulders[1], "pose"
-    x1, y1, x2, y2 = bbox
-    return (x1 + x2) / 2.0, y1 + ((y2 - y1) * 0.34), "bbox_upper_third"
-
-
 def _clamp_float(value: float, lower: float, upper: float) -> float:
     if upper < lower:
         return lower
     return max(lower, min(float(value), upper))
 
 
-def _raw_crop_origin_inside_bbox(
+def _pose_x_for_points(points: list[dict[str, Any]]) -> list[tuple[float | None, str]]:
+    raw: list[float | None] = []
+    for point in points:
+        head = _point_xy(point, "head_center_xy")
+        raw.append(head[0] if head else None)
+
+    resolved: list[tuple[float | None, str]] = []
+    for index, value in enumerate(raw):
+        if value is not None:
+            resolved.append((float(value), "pose"))
+            continue
+
+        previous_index = next((idx for idx in range(index - 1, -1, -1) if raw[idx] is not None), None)
+        next_index = next((idx for idx in range(index + 1, len(raw)) if raw[idx] is not None), None)
+        if previous_index is not None and next_index is not None:
+            previous_time = float(points[previous_index]["timestamp_ms"])
+            next_time = float(points[next_index]["timestamp_ms"])
+            current_time = float(points[index]["timestamp_ms"])
+            if next_time > previous_time:
+                progress = (current_time - previous_time) / (next_time - previous_time)
+                interpolated = float(raw[previous_index]) + (
+                    (float(raw[next_index]) - float(raw[previous_index])) * progress
+                )
+                resolved.append((interpolated, "pose_interpolated"))
+                continue
+        if previous_index is not None:
+            resolved.append((float(raw[previous_index]), "pose_hold"))
+            continue
+        if next_index is not None:
+            resolved.append((float(raw[next_index]), "pose_hold"))
+            continue
+        resolved.append((None, "bbox_center"))
+    return resolved
+
+
+def _crop_keyframe_inside_bbox(
     *,
     point: dict[str, Any],
-    crop_width: float,
-    crop_height: float,
-) -> tuple[float, float, str]:
+    clip_start_ms: int,
+    run_id: str,
+    run: dict[str, Any],
+    anchor_x: float | None,
+    anchor_source: str,
+) -> dict[str, Any]:
     bbox = [float(value) for value in point["bbox_xyxy"][:4]]
     x1, y1, x2, y2 = bbox
-    anchor_x, anchor_y, anchor_source = _anchor_for_point(point)
-    raw_x = anchor_x - (crop_width * 0.5)
-    raw_y = anchor_y - (crop_height * 0.36)
+    crop_width, crop_height = _bbox_inside_9x16_size(bbox)
+    if anchor_x is None:
+        anchor_x = (x1 + x2) / 2.0
+    raw_x = float(anchor_x) - (crop_width * 0.5)
     x = _clamp_float(raw_x, x1, x2 - crop_width)
-    y = _clamp_float(raw_y, y1, y2 - crop_height)
-    return x, y, anchor_source
+    y = _clamp_float(y1, y1, y2 - crop_height)
+    return {
+        "run_id": run_id,
+        "shot_id": run["shot_id"],
+        "tracklet_id": str(run["tracklet_id"]),
+        "time_ms": max(0, int(point["timestamp_ms"]) - int(clip_start_ms)),
+        "x": round(x, 3),
+        "y": round(y, 3),
+        "w": round(crop_width, 3),
+        "h": round(crop_height, 3),
+        "anchor_x": round(float(anchor_x), 3),
+        "bbox_xyxy": bbox,
+        "anchor_source": anchor_source,
+    }
 
 
-def _sample_crop_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(points) <= 2:
-        return points
-    sampled = [points[0]]
-    last_ms = int(points[0]["timestamp_ms"])
-    for point in points[1:-1]:
-        timestamp_ms = int(point["timestamp_ms"])
-        if timestamp_ms - last_ms >= _CROP_KEYFRAME_MIN_INTERVAL_MS:
-            sampled.append(point)
-            last_ms = timestamp_ms
-    if sampled[-1] is not points[-1]:
-        sampled.append(points[-1])
-    if len(sampled) == 2 and len(points) > 2:
-        midpoint = points[len(points) // 2]
-        if midpoint is not sampled[0] and midpoint is not sampled[-1]:
-            sampled.insert(1, midpoint)
-    return sampled
+def _points_with_run_boundaries(
+    *,
+    points: list[dict[str, Any]],
+    run: dict[str, Any],
+) -> list[dict[str, Any]]:
+    ordered = sorted((dict(point) for point in points), key=lambda point: int(point["timestamp_ms"]))
+    if not ordered:
+        return []
+    start_ms = int(run["start_ms"])
+    if int(ordered[0]["timestamp_ms"]) > start_ms:
+        first = dict(ordered[0])
+        first["timestamp_ms"] = start_ms
+        ordered.insert(0, first)
+    return ordered
 
 
-def _smooth_crop_keyframes(
+def _dynamic_crop_keyframes_for_run(
     *,
     points: list[dict[str, Any]],
     clip_start_ms: int,
-    crop_width: float,
-    crop_height: float,
+    run: dict[str, Any],
+    run_id: str,
 ) -> list[dict[str, Any]]:
-    keyframes: list[dict[str, Any]] = []
-    previous_x: float | None = None
-    previous_y: float | None = None
-    sampled_points = _sample_crop_points(points)
-    for index, point in enumerate(sampled_points):
-        raw_x, raw_y, anchor_source = _raw_crop_origin_inside_bbox(
+    run_points = _points_with_run_boundaries(points=points, run=run)
+    anchors = _pose_x_for_points(run_points)
+    return [
+        _crop_keyframe_inside_bbox(
             point=point,
-            crop_width=crop_width,
-            crop_height=crop_height,
+            clip_start_ms=clip_start_ms,
+            run_id=run_id,
+            run=run,
+            anchor_x=anchor_x,
+            anchor_source=anchor_source,
         )
-        if previous_x is None or previous_y is None:
-            smooth_x, smooth_y = raw_x, raw_y
-        else:
-            dx = raw_x - previous_x
-            dy = raw_y - previous_y
-            smooth_x = previous_x if abs(dx) < _CROP_DEADZONE_PX else previous_x + (dx * _CROP_SMOOTH_ALPHA)
-            smooth_y = previous_y if abs(dy) < _CROP_DEADZONE_PX else previous_y + (dy * _CROP_SMOOTH_ALPHA)
-        bbox = [float(value) for value in point["bbox_xyxy"][:4]]
-        smooth_x = _clamp_float(smooth_x, bbox[0], bbox[2] - crop_width)
-        smooth_y = _clamp_float(smooth_y, bbox[1], bbox[3] - crop_height)
-        previous_x, previous_y = smooth_x, smooth_y
-        keyframe = {
-            "time_ms": max(0, int(point["timestamp_ms"]) - int(clip_start_ms)),
-            "x": round(smooth_x, 3),
-            "y": round(smooth_y, 3),
-            "bbox_xyxy": bbox,
-            "anchor_source": anchor_source,
-        }
-        if keyframes and index < len(sampled_points) - 1:
-            previous_emitted = keyframes[-1]
-            moved = max(
-                abs(float(previous_emitted["x"]) - float(keyframe["x"])),
-                abs(float(previous_emitted["y"]) - float(keyframe["y"])),
-            )
-            if moved < _CROP_EMIT_DELTA_PX and previous_emitted.get("anchor_source") == anchor_source:
-                continue
-        keyframes.append(keyframe)
-    return keyframes
+        for point, (anchor_x, anchor_source) in zip(run_points, anchors, strict=True)
+    ]
 
 
 def _merge_render_tracklet_runs(
@@ -465,8 +478,7 @@ def _build_crop_plan(
     if not runs:
         return {}
 
-    run_points: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
-    size_candidates: list[tuple[float, float]] = []
+    run_points: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
     for run in runs:
         points = _geometry_points_for_interval(
             tracklet_id=str(run["tracklet_id"]),
@@ -476,27 +488,29 @@ def _build_crop_plan(
         )
         if not points:
             continue
-        run_points.append((run, points))
-        size_candidates.extend(
-            _bbox_inside_9x16_size([float(value) for value in point["bbox_xyxy"][:4]])
-            for point in points
-        )
+        run_id = f"run_{len(run_points) + 1:04d}"
+        run_points.append((run_id, run, points))
 
-    if not run_points or not size_candidates:
+    if not run_points:
         return {}
-
-    crop_width = min(width for width, _ in size_candidates)
-    crop_height = crop_width / _TARGET_ASPECT
-    height_limited = min(height for _, height in size_candidates)
-    if crop_height > height_limited:
-        crop_height = height_limited
-        crop_width = crop_height * _TARGET_ASPECT
 
     keyframes: list[dict[str, Any]] = []
     crop_segments: list[dict[str, Any]] = []
-    for run, points in run_points:
+    crop_runs: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for run_id, run, points in run_points:
+        crop_runs.append(
+            {
+                "run_id": run_id,
+                "shot_id": run["shot_id"],
+                "tracklet_id": str(run["tracklet_id"]),
+                "start_ms": int(run["relative_start_ms"]),
+                "end_ms": int(run["relative_end_ms"]),
+            }
+        )
         crop_segments.append(
             {
+                "run_id": run_id,
                 "start_ms": int(run["relative_start_ms"]),
                 "end_ms": int(run["relative_end_ms"]),
                 "tracklet_id": str(run["tracklet_id"]),
@@ -504,22 +518,28 @@ def _build_crop_plan(
             }
         )
         keyframes.extend(
-            _smooth_crop_keyframes(
+            _dynamic_crop_keyframes_for_run(
                 points=points,
                 clip_start_ms=clip_start_ms,
-                crop_width=crop_width,
-                crop_height=crop_height,
+                run=run,
+                run_id=run_id,
             )
         )
     keyframes.sort(key=lambda keyframe: int(keyframe["time_ms"]))
+    if any(
+        float(keyframe["w"]) < _MIN_AUTO_FOLLOW_CROP_WIDTH
+        or float(keyframe["h"]) < _MIN_AUTO_FOLLOW_CROP_HEIGHT
+        for keyframe in keyframes
+    ):
+        warnings.append("crop_source_size_below_auto_follow_guard")
 
     return {
-        "mode": "tracklet_follow_9x16_smooth_inside_person",
-        "crop_width": int(round(crop_width / 2.0) * 2),
-        "crop_height": int(round(crop_height / 2.0) * 2),
-        "tracklet_ids": _dedupe([str(run["tracklet_id"]) for run, _ in run_points]),
+        "mode": "tracklet_follow_9x16_pose_x_dynamic_inside_person",
+        "tracklet_ids": _dedupe([str(run["tracklet_id"]) for _, run, _ in run_points]),
+        "runs": crop_runs,
         "segments": crop_segments,
         "keyframes": keyframes,
+        "warnings": warnings,
     }
 
 

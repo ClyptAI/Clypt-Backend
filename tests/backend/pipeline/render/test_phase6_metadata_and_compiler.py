@@ -232,6 +232,102 @@ def _tracklet_geometry_two_segments_same_shot() -> TrackletGeometry:
     )
 
 
+def _shot_tracklets_two_shots() -> ShotTrackletIndex:
+    return ShotTrackletIndex(
+        tracklets=[
+            ShotTrackletDescriptor(
+                tracklet_id="tracklet_shot_1",
+                shot_id="shot_1",
+                start_ms=0,
+                end_ms=500,
+                auto_follow_eligible=True,
+                subject_quality={"head_evidence_ratio": 1.0, "upper_body_anchor_ratio": 1.0},
+            ),
+            ShotTrackletDescriptor(
+                tracklet_id="tracklet_shot_2",
+                shot_id="shot_2",
+                start_ms=500,
+                end_ms=1000,
+                auto_follow_eligible=True,
+                subject_quality={"head_evidence_ratio": 1.0, "upper_body_anchor_ratio": 1.0},
+            ),
+        ]
+    )
+
+
+def _tracklet_geometry_two_shots_dynamic() -> TrackletGeometry:
+    return TrackletGeometry(
+        tracklets=[
+            TrackletGeometryEntry(
+                tracklet_id="tracklet_shot_1",
+                shot_id="shot_1",
+                points=[
+                    TrackletGeometryPoint(
+                        frame_index=0,
+                        timestamp_ms=0,
+                        bbox_xyxy=[100.0, 100.0, 900.0, 1100.0],
+                        head_center_xy=[500.0, 180.0],
+                    ),
+                    TrackletGeometryPoint(
+                        frame_index=12,
+                        timestamp_ms=480,
+                        bbox_xyxy=[150.0, 100.0, 950.0, 1100.0],
+                        head_center_xy=[550.0, 180.0],
+                    ),
+                ],
+            ),
+            TrackletGeometryEntry(
+                tracklet_id="tracklet_shot_2",
+                shot_id="shot_2",
+                points=[
+                    TrackletGeometryPoint(
+                        frame_index=13,
+                        timestamp_ms=500,
+                        bbox_xyxy=[1000.0, 120.0, 1800.0, 1120.0],
+                        head_center_xy=[1400.0, 210.0],
+                    ),
+                    TrackletGeometryPoint(
+                        frame_index=24,
+                        timestamp_ms=1000,
+                        bbox_xyxy=[1040.0, 120.0, 1840.0, 1120.0],
+                        head_center_xy=[1440.0, 210.0],
+                    ),
+                ],
+            ),
+        ]
+    )
+
+
+def _tracklet_geometry_pose_x_edges_and_gaps() -> TrackletGeometry:
+    return TrackletGeometry(
+        tracklets=[
+            TrackletGeometryEntry(
+                tracklet_id="tracklet_1",
+                shot_id="shot_1",
+                points=[
+                    TrackletGeometryPoint(
+                        frame_index=0,
+                        timestamp_ms=0,
+                        bbox_xyxy=[500.0, 100.0, 1300.0, 1100.0],
+                        head_center_xy=[1260.0, 180.0],
+                    ),
+                    TrackletGeometryPoint(
+                        frame_index=12,
+                        timestamp_ms=500,
+                        bbox_xyxy=[520.0, 100.0, 1320.0, 1100.0],
+                    ),
+                    TrackletGeometryPoint(
+                        frame_index=24,
+                        timestamp_ms=1000,
+                        bbox_xyxy=[560.0, 100.0, 1360.0, 1100.0],
+                        head_center_xy=[960.0, 180.0],
+                    ),
+                ],
+            )
+        ]
+    )
+
+
 def _caption_plan_two_segments() -> dict:
     return {
         "run_id": "run_phase6",
@@ -546,7 +642,7 @@ def test_compile_render_plan_selects_tracklet_crop_without_camera_intent() -> No
     assert segment["shot_id"] == "shot_1"
     assert segment["layout_mode"] == "auto_follow"
     assert segment["primary_tracklet_id"] == "tracklet_1"
-    assert clip["crop_plan"]["mode"] == "tracklet_follow_9x16_smooth_inside_person"
+    assert clip["crop_plan"]["mode"] == "tracklet_follow_9x16_pose_x_dynamic_inside_person"
     assert clip["crop_plan"]["segments"][0]["tracklet_id"] == "tracklet_1"
     assert clip["crop_plan"]["keyframes"][0]["bbox_xyxy"] == [220.0, 420.0, 820.0, 1520.0]
 
@@ -628,7 +724,7 @@ def test_compile_render_plan_locks_best_pose_subject_for_entire_shot() -> None:
     assert {segment["shot_id"] for segment in segments} == {"shot_1"}
 
 
-def test_compile_render_plan_builds_smooth_person_box_contained_crop_path() -> None:
+def test_compile_render_plan_builds_dynamic_pose_x_inside_person_crop_path() -> None:
     from backend.pipeline.render.compiler import compile_render_plan
 
     render_plan = compile_render_plan(
@@ -640,16 +736,98 @@ def test_compile_render_plan_builds_smooth_person_box_contained_crop_path() -> N
     )
 
     crop_plan = render_plan["clips"][0]["crop_plan"]
-    assert crop_plan["mode"] == "tracklet_follow_9x16_smooth_inside_person"
-    assert crop_plan["crop_width"] < 420
-    assert crop_plan["crop_height"] < 880
+    assert crop_plan["mode"] == "tracklet_follow_9x16_pose_x_dynamic_inside_person"
     assert crop_plan["tracklet_ids"] == ["tracklet_right"]
     assert len(crop_plan["keyframes"]) >= 3
     for keyframe in crop_plan["keyframes"]:
         bbox = keyframe["bbox_xyxy"]
-        assert bbox[0] <= keyframe["x"] <= bbox[2] - crop_plan["crop_width"]
-        assert bbox[1] <= keyframe["y"] <= bbox[3] - crop_plan["crop_height"]
-        assert keyframe["anchor_source"] in {"pose", "bbox_upper_third", "bbox_center"}
+        assert bbox[0] <= keyframe["x"] <= bbox[2] - keyframe["w"]
+        assert keyframe["y"] == pytest.approx(bbox[1])
+        assert keyframe["w"] == pytest.approx(bbox[2] - bbox[0])
+        assert keyframe["h"] == pytest.approx(keyframe["w"] / (9.0 / 16.0))
+        assert keyframe["anchor_source"] in {"pose", "pose_interpolated", "pose_hold", "bbox_center"}
+
+
+def test_compile_render_plan_clamps_pose_x_to_person_box_edge_and_interpolates_missing_pose() -> None:
+    from backend.pipeline.render.compiler import compile_render_plan
+
+    render_plan = compile_render_plan(
+        run_id="run_phase6",
+        caption_plan={
+            "run_id": "run_phase6",
+            "clips": [
+                {
+                    "clip_id": "clip_001",
+                    "clip_start_ms": 0,
+                    "clip_end_ms": 1000,
+                    "preset_id": "karaoke_focus",
+                    "default_zone": "lower_safe",
+                    "segments": [
+                        {
+                            "segment_id": "clip_001_seg_001",
+                            "start_ms": 0,
+                            "end_ms": 1000,
+                            "text": "Nobody saw this coming",
+                            "word_ids": ["w1"],
+                            "speaker_ids": ["SPEAKER_0"],
+                            "turn_ids": ["t1"],
+                            "placement_zone": "lower_safe",
+                            "highlight_mode": "word_highlight",
+                            "review_needed": False,
+                            "review_reason": "",
+                            "active_word_timings": [],
+                        }
+                    ],
+                }
+            ],
+        },
+        publish_metadata=_publish_metadata_basic(),
+        shot_tracklet_index=_shot_tracklets().model_dump(mode="json"),
+        tracklet_geometry=_tracklet_geometry_pose_x_edges_and_gaps().model_dump(mode="json"),
+    )
+
+    keyframes = render_plan["clips"][0]["crop_plan"]["keyframes"]
+    first, middle, last = keyframes
+    assert first["x"] + first["w"] == pytest.approx(first["bbox_xyxy"][2])
+    assert first["y"] == pytest.approx(first["bbox_xyxy"][1])
+    assert middle["anchor_source"] == "pose_interpolated"
+    assert middle["anchor_x"] == pytest.approx(1110.0)
+    assert last["x"] == pytest.approx(960.0 - (last["w"] / 2.0))
+
+
+def test_compile_render_plan_starts_new_shot_already_framed_without_cross_shot_slide() -> None:
+    from backend.pipeline.render.compiler import compile_render_plan
+
+    render_plan = compile_render_plan(
+        run_id="run_phase6",
+        caption_plan=_caption_plan_two_segments(),
+        publish_metadata=_publish_metadata_basic(),
+        shot_tracklet_index=_shot_tracklets_two_shots().model_dump(mode="json"),
+        tracklet_geometry=_tracklet_geometry_two_shots_dynamic().model_dump(mode="json"),
+    )
+
+    crop_plan = render_plan["clips"][0]["crop_plan"]
+    first_shot_last = [kf for kf in crop_plan["keyframes"] if kf["run_id"] == "run_0001"][-1]
+    second_shot_first = [kf for kf in crop_plan["keyframes"] if kf["run_id"] == "run_0002"][0]
+    assert first_shot_last["time_ms"] < second_shot_first["time_ms"]
+    assert second_shot_first["time_ms"] == 500
+    assert second_shot_first["x"] == pytest.approx(1000.0 + ((800.0 - second_shot_first["w"]) / 2.0))
+    assert crop_plan["runs"] == [
+        {
+            "run_id": "run_0001",
+            "shot_id": "shot_1",
+            "tracklet_id": "tracklet_shot_1",
+            "start_ms": 0,
+            "end_ms": 500,
+        },
+        {
+            "run_id": "run_0002",
+            "shot_id": "shot_2",
+            "tracklet_id": "tracklet_shot_2",
+            "start_ms": 500,
+            "end_ms": 1000,
+        },
+    ]
 
 
 def test_run_phase6_fails_fast_for_partial_namespace_timelines_without_canonical_words(tmp_path: Path) -> None:

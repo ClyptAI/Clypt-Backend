@@ -197,6 +197,17 @@ def test_timeline_builders_accept_phase1_payload_models():
                 "y1": 20.0,
                 "x2": 50.0,
                 "y2": 80.0,
+                "auto_follow_eligible": True,
+                "subject_quality": {
+                    "pose_anchor_points": [
+                        {
+                            "frame_idx": 0,
+                            "head_center_xy": [24.0, 30.0],
+                            "shoulder_center_xy": [28.0, 44.0],
+                            "upper_torso_anchor_xy": [27.0, 39.0],
+                        }
+                    ]
+                },
             }
         ],
     )
@@ -221,3 +232,6 @@ def test_timeline_builders_accept_phase1_payload_models():
     assert audio_event_timeline.events[0].event_label == "Laughter"
     assert shot_tracklet_index.tracklets[0].tracklet_id == "shot_0001:Global_Person_0"
     assert tracklet_geometry.tracklets[0].points[0].frame_index == 0
+    assert tracklet_geometry.tracklets[0].points[0].head_center_xy == [24.0, 30.0]
+    assert tracklet_geometry.tracklets[0].points[0].shoulder_center_xy == [28.0, 44.0]
+    assert tracklet_geometry.tracklets[0].points[0].upper_torso_anchor_xy == [27.0, 39.0]

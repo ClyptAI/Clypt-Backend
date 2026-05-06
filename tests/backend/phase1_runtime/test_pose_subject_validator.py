@@ -127,3 +127,67 @@ def test_pose_evidence_maps_crop_keypoints_to_source_coordinates():
     assert evidence.head_center_xy == pytest.approx((110.0, 220.0))
     assert evidence.shoulder_center_xy == pytest.approx((120.0, 260.0))
     assert evidence.upper_torso_anchor_xy == pytest.approx((116.5, 246.0))
+
+
+def test_yolo_pose_validator_preserves_source_pose_anchor_points(monkeypatch):
+    from types import SimpleNamespace
+
+    from backend.phase1_runtime import pose_subject_validator as module
+
+    class FakeModel:
+        def predict(self, crop_batch, imgsz, conf, verbose):  # noqa: ARG002
+            data = np.zeros((1, 17, 3), dtype=np.float32)
+            data[0, 0] = [10.0, 20.0, 0.95]
+            data[0, 5] = [8.0, 60.0, 0.90]
+            data[0, 6] = [32.0, 60.0, 0.90]
+            return [SimpleNamespace(keypoints=SimpleNamespace(data=data)) for _ in crop_batch]
+
+    decoded = SimpleNamespace(
+        frame_idx=7,
+        rgb=np.zeros((240, 320, 3), dtype=np.uint8),
+    )
+
+    monkeypatch.setattr(module, "decode_video_frames", lambda **kwargs: iter([decoded]))
+
+    config = SimpleNamespace(
+        pose_max_samples_per_tracklet=1,
+        pose_imgsz=256,
+        pose_confidence=0.25,
+        pose_keypoint_confidence=0.35,
+        pose_batch_size=4,
+        pose_crop_padding_ratio=0.0,
+        frame_decode_backend="cpu",
+        gpu_decode_backend="none",
+        pose_min_rfdetr_confidence=0.85,
+        pose_min_head_evidence_ratio=0.40,
+        pose_min_upper_body_anchor_ratio=0.25,
+    )
+    validator = module.YoloPoseSubjectValidator(config=config)
+    monkeypatch.setattr(validator, "_load_model", lambda: FakeModel())
+
+    reports = validator(
+        video_path=SimpleNamespace(),
+        tracks=[
+            {
+                "track_id": "track_1",
+                "frame_idx": 7,
+                "x1": 100.0,
+                "y1": 50.0,
+                "x2": 180.0,
+                "y2": 170.0,
+                "confidence": 0.99,
+            }
+        ],
+        metadata={"fps": 30.0},
+        config=config,
+    )
+
+    anchors = reports["track_1"]["subject_quality"]["pose_anchor_points"]
+    assert anchors == [
+        {
+            "frame_idx": 7,
+            "head_center_xy": pytest.approx([110.0, 70.0]),
+            "shoulder_center_xy": pytest.approx([120.0, 110.0]),
+            "upper_torso_anchor_xy": pytest.approx([116.5, 96.0]),
+        }
+    ]
