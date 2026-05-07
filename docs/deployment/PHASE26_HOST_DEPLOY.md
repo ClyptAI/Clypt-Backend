@@ -50,9 +50,9 @@ Required values to set:
 
 Current known-good Modal endpoints:
 
-- Visual RF-DETR-Seg: `https://testifytestprep--clypt-visual-l40s-visual-extract.modal.run/tasks/visual-extract`
-- Node-media-prep: `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/node-media-prep`
-- Phase 6 render/export: `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/render-video`
+- Visual RF-DETR-Seg: `https://rithuuu--clypt-visual-l40s-visual-extract.modal.run/tasks/visual-extract`
+- Node-media-prep: `https://rithuuu--clypt-media-l40s-media-worker.modal.run/tasks/node-media-prep`
+- Phase 6 render/export: `https://rithuuu--clypt-media-l40s-media-worker.modal.run/tasks/render-video`
 
 Active AMD-refactor Phase26 values:
 

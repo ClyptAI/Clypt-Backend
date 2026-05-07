@@ -41,6 +41,9 @@ Set these in `/etc/clypt-phase26/phase26.env` using [known-good-phase26-mi300x.e
 - `CLYPT_PHASE24_DISPATCH_AUTH_TOKEN`
 - `CLYPT_YOUTUBE_DATA_API_KEY` or `YOUTUBE_API_KEY` when using public YouTube `source_url` metadata ingress
 
+If the YouTube key is server/IP restricted, its allowed caller IPs must include
+the current MI300X droplet public IPv4 before `source_url` ingestion will work.
+
 Scribe defaults are intentionally sparse:
 
 - `CLYPT_PHASE1_SCRIBE_MODEL_ID=scribe_v2`

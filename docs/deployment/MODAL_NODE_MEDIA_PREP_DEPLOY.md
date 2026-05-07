@@ -145,9 +145,9 @@ Submit smoke requests with bearer auth and confirm each returns a `call_id` imme
 
 Current known-good deployed endpoints:
 
-- `https://testifytestprep--clypt-visual-l40s-visual-extract.modal.run/tasks/visual-extract`
-- `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/node-media-prep`
-- `https://testifytestprep--clypt-media-l40s-media-worker.modal.run/tasks/render-video`
+- `https://rithuuu--clypt-visual-l40s-visual-extract.modal.run/tasks/visual-extract`
+- `https://rithuuu--clypt-media-l40s-media-worker.modal.run/tasks/node-media-prep`
+- `https://rithuuu--clypt-media-l40s-media-worker.modal.run/tasks/render-video`
 
 For ad hoc live tests, stop the persistent apps when warm GPUs should not remain allocated:
 

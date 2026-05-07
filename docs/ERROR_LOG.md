@@ -7,6 +7,17 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-05-07 - New MI300X host blocked by YouTube Data API key IP restriction
+
+- **Date/Time (UTC):** 2026-05-07 04:51 UTC
+- **Subsystem:** Phase1 YouTube metadata ingress / fresh MI300X host deployment (`/etc/clypt-phase26/phase26.env`, `CLYPT_YOUTUBE_DATA_API_KEY`)
+- **Environment:** DigitalOcean AMD DevCloud droplet `clypt-phase26-mi300x-atl1` at `134.199.205.62`, Modal profile `rithuuu`
+- **Symptom / Error signature:** Direct host probe of `https://www.googleapis.com/youtube/v3/videos?...` failed with HTTP `403` and `API_KEY_IP_ADDRESS_BLOCKED`. Google reported that caller IP `134.199.205.62` violated the existing key's IP address restriction.
+- **Root cause:** The checked-in env baseline correctly required a YouTube Data API key, but the local secret value was restricted to a previous caller IP and was not valid for the new MI300X droplet.
+- **Fix applied:** Created a fresh Google API key restricted to `youtube.googleapis.com` and allowed IP `134.199.205.62`, updated local `.env.local`, installed the key into `/etc/clypt-phase26/phase26.env`, and restarted `clypt-phase1-api.service` plus `clypt-phase1-worker.service`.
+- **Verification evidence:** Host-side YouTube Data API probe returned `items=1` with title `MrBeast Shares TRUTH About Buried Alive Video`; Phase1 API and worker were restarted and active.
+- **Follow-up guardrails:** For every newly provisioned DO host, either use an unrestricted development key temporarily or create/update a server-restricted YouTube Data API key that includes the new droplet public IP before running `source_url` ingestion.
+
 ## 2026-05-04 - Phase5-less auto-follow renders remain visually unacceptable
 
 - **Date/Time (UTC):** 2026-05-04 04:05 UTC
