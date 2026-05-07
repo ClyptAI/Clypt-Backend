@@ -119,12 +119,12 @@ def test_build_tracklet_artifacts_groups_tracks_by_shot():
                 "y1": 20.0,
                 "x2": 50.0,
                 "y2": 80.0,
-                "mask_rle": {
-                    "encoding": "rle_row_major_v1",
-                    "size": [720, 1280],
-                    "counts": [0, 3],
-                    "threshold": 0.5,
-                    "source": "rfdetr_seg_nano_tensorrt",
+                "mask_ref": {
+                    "encoding": "lowres_mask_ref_v1",
+                    "artifact_id": "visual_masks_lowres_v1",
+                    "mask_index": 0,
+                    "frame_idx": 0,
+                    "detection_id": "raw_0_0",
                 },
             },
             {
@@ -154,12 +154,12 @@ def test_build_tracklet_artifacts_groups_tracks_by_shot():
     assert index.tracklets[0].start_ms == 0
     assert index.tracklets[0].end_ms == 500
     assert geometry.tracklets[0].points[1].timestamp_ms == 500
-    assert geometry.tracklets[0].points[0].mask_rle == {
-        "encoding": "rle_row_major_v1",
-        "size": [720, 1280],
-        "counts": [0, 3],
-        "threshold": 0.5,
-        "source": "rfdetr_seg_nano_tensorrt",
+    assert geometry.tracklets[0].points[0].mask_ref == {
+        "encoding": "lowres_mask_ref_v1",
+        "artifact_id": "visual_masks_lowres_v1",
+        "mask_index": 0,
+        "frame_idx": 0,
+        "detection_id": "raw_0_0",
     }
     assert geometry.tracklets[1].shot_id == "shot_0002"
 
@@ -222,12 +222,12 @@ def test_timeline_builders_accept_phase1_payload_models():
                         }
                     ]
                 },
-                "mask_rle": {
-                    "encoding": "rle_row_major_v1",
-                    "size": [720, 1280],
-                    "counts": [0, 3],
-                    "threshold": 0.5,
-                    "source": "rfdetr_seg_nano_tensorrt",
+                "mask_ref": {
+                    "encoding": "lowres_mask_ref_v1",
+                    "artifact_id": "visual_masks_lowres_v1",
+                    "mask_index": 0,
+                    "frame_idx": 0,
+                    "detection_id": "raw_0_0",
                 },
             }
         ],
@@ -256,4 +256,4 @@ def test_timeline_builders_accept_phase1_payload_models():
     assert tracklet_geometry.tracklets[0].points[0].head_center_xy == [24.0, 30.0]
     assert tracklet_geometry.tracklets[0].points[0].shoulder_center_xy == [28.0, 44.0]
     assert tracklet_geometry.tracklets[0].points[0].upper_torso_anchor_xy == [27.0, 39.0]
-    assert tracklet_geometry.tracklets[0].points[0].mask_rle["encoding"] == "rle_row_major_v1"
+    assert tracklet_geometry.tracklets[0].points[0].mask_ref["encoding"] == "lowres_mask_ref_v1"

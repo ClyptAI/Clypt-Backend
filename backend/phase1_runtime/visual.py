@@ -22,7 +22,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .masks import MASK_RLE_ENCODING, encode_mask_rle
+from .masks import (
+    LOWRES_MASK_ARTIFACT_ENCODING,
+    LOWRES_MASK_REF_ENCODING,
+    MaskArtifactWriter,
+)
 from .tracking_post import frame_time_ms, split_tracks_at_shot_boundaries
 
 logger = logging.getLogger(__name__)
@@ -125,10 +129,20 @@ def _shot_cut_frame_indices(
     return sorted(frame_idx for frame_idx in cut_frames if frame_idx > 0)
 
 
-def _serialize_raw_detections(*, frame_idx: int, detections) -> list[dict]:
+def _serialize_raw_detections(
+    *,
+    frame_idx: int,
+    detections,
+    mask_writer: MaskArtifactWriter,
+    source_size: tuple[int, int],
+) -> tuple[list[dict], list[dict]]:
     rows: list[dict] = []
+    mask_refs: list[dict] = []
     if len(detections) == 0:
-        return rows
+        return rows, mask_refs
+    masks = getattr(detections, "mask", None)
+    if masks is None:
+        raise RuntimeError("RF-DETR-Seg detections must include low-resolution masks.")
     for index in range(len(detections)):
         xyxy = detections.xyxy[index]
         confidence = (
@@ -141,16 +155,21 @@ def _serialize_raw_detections(*, frame_idx: int, detections) -> list[dict]:
             if getattr(detections, "class_id", None) is not None
             else 0
         )
-        mask_rle = None
-        masks = getattr(detections, "mask", None)
-        if masks is not None:
-            mask_rle = encode_mask_rle(masks[index])
+        detection_id = f"raw_{int(frame_idx)}_{index}"
+        mask_ref = mask_writer.add(
+            frame_idx=int(frame_idx),
+            detection_id=detection_id,
+            mask=masks[index],
+            bbox_xyxy=[float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])],
+            source_size=source_size,
+        )
+        mask_refs.append(mask_ref)
         rows.append(
             {
                 "frame_idx": int(frame_idx),
                 "local_frame_idx": int(frame_idx),
                 "chunk_idx": 0,
-                "detection_id": f"raw_{int(frame_idx)}_{index}",
+                "detection_id": detection_id,
                 "class_id": class_id,
                 "label": "person" if class_id == 1 else str(class_id),
                 "confidence": confidence,
@@ -160,10 +179,10 @@ def _serialize_raw_detections(*, frame_idx: int, detections) -> list[dict]:
                 "y2": float(xyxy[3]),
                 "source": "rfdetr_raw",
                 "geometry_type": "aabb",
-                **({"mask_rle": mask_rle} if mask_rle is not None else {}),
+                "mask_ref": mask_ref,
             }
         )
-    return rows
+    return rows, mask_refs
 
 
 def _run_rfdetr_tracking_pipeline(
@@ -204,6 +223,8 @@ def _run_rfdetr_tracking_pipeline(
     all_track_rows: list[dict] = []
     all_raw_detection_rows: list[dict] = []
     pipeline_start = time.perf_counter()
+    mask_artifact_path = video_path.parent / "visual_masks_lowres_v1.npz"
+    mask_writer = MaskArtifactWriter(artifact_path=mask_artifact_path)
 
     # Estimate total frames for progress display
     total_frames: int | None = None
@@ -234,14 +255,27 @@ def _run_rfdetr_tracking_pipeline(
 
             detections_list = detector.detect_batch(rgb_arrays, orig_sizes=orig_sizes)
 
-            for frame_idx, detections in zip(frame_indices, detections_list, strict=True):
-                all_raw_detection_rows.extend(
-                    _serialize_raw_detections(frame_idx=frame_idx, detections=detections)
+            for frame_idx, detections, source_size in zip(
+                frame_indices,
+                detections_list,
+                orig_sizes,
+                strict=True,
+            ):
+                raw_rows, mask_refs = _serialize_raw_detections(
+                    frame_idx=frame_idx,
+                    detections=detections,
+                    mask_writer=mask_writer,
+                    source_size=source_size,
                 )
+                all_raw_detection_rows.extend(raw_rows)
                 while next_cut_index < len(cut_frames) and frame_idx >= cut_frames[next_cut_index]:
                     tracker.reset()
                     next_cut_index += 1
-                track_rows = tracker.update(frame_idx=frame_idx, detections=detections)
+                track_rows = tracker.update(
+                    frame_idx=frame_idx,
+                    detections=detections,
+                    mask_refs=mask_refs,
+                )
                 for row in track_rows:
                     width = max(0.0, row.x2 - row.x1)
                     height = max(0.0, row.y2 - row.y1)
@@ -265,7 +299,7 @@ def _run_rfdetr_tracking_pipeline(
                             "height": height,
                             "source": "detector",
                             "geometry_type": "aabb",
-                            **({"mask_rle": row.mask_rle} if row.mask_rle is not None else {}),
+                            **({"mask_ref": row.mask_ref} if row.mask_ref is not None else {}),
                         }
                     )
                 _frames_seen += 1
@@ -291,6 +325,7 @@ def _run_rfdetr_tracking_pipeline(
         detector.unload()
 
     pipeline_elapsed_ms = (time.perf_counter() - pipeline_start) * 1000.0
+    mask_artifact = mask_writer.finalize()
     det_metrics = detector.metrics
     trk_metrics = tracker.metrics
     effective_fps = (
@@ -312,7 +347,17 @@ def _run_rfdetr_tracking_pipeline(
         "tensor_rt_enabled": False,
         "frames_processed": det_metrics.frames_processed,
         "mean_detector_latency_ms": round(det_metrics.mean_detector_latency_ms, 2),
+        "mean_output_copy_latency_ms": round(
+            float(getattr(det_metrics, "mean_output_copy_latency_ms", 0.0)),
+            2,
+        ),
+        "mean_postprocess_latency_ms": round(
+            float(getattr(det_metrics, "mean_postprocess_latency_ms", 0.0)),
+            2,
+        ),
+        "mask_extract_ms": round(float(getattr(det_metrics, "total_mask_extract_ms", 0.0)), 2),
         "mean_tracker_latency_ms": round(trk_metrics.mean_tracker_latency_ms, 2),
+        "mask_association_ms": round(float(getattr(trk_metrics, "total_mask_association_ms", 0.0)), 2),
         "effective_fps": round(effective_fps, 1),
         "warmup_ms": round(det_metrics.warmup_ms, 1),
         "pipeline_elapsed_ms": round(pipeline_elapsed_ms, 1),
@@ -320,10 +365,24 @@ def _run_rfdetr_tracking_pipeline(
         "raw_detection_rows": len(all_raw_detection_rows),
         "segmentation_enabled": True,
         "mask_rows": int(getattr(det_metrics, "mask_rows", 0))
-        or sum(1 for row in all_track_rows if row.get("mask_rle")),
-        "mask_encoding": MASK_RLE_ENCODING,
+        or sum(1 for row in all_track_rows if row.get("mask_ref")),
+        "mask_encoding": LOWRES_MASK_REF_ENCODING,
+        "mask_artifact_encoding": LOWRES_MASK_ARTIFACT_ENCODING,
+        "mask_artifact_write_ms": round(float(getattr(mask_writer, "write_ms", 0.0)), 2),
+        "mask_artifact_bytes": int(getattr(mask_writer, "artifact_bytes", 0)),
+        "mask_artifacts": [mask_artifact] if mask_artifact else [],
         "mask_output_tensor": getattr(det_metrics, "mask_output_tensor", None),
     }
+    runtime_metrics["payload_size_bytes"] = len(
+        json.dumps(
+            {
+                "tracks": all_track_rows,
+                "raw_person_detections": all_raw_detection_rows,
+                "mask_artifacts": runtime_metrics["mask_artifacts"],
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
     return all_track_rows, all_raw_detection_rows, runtime_metrics
 
 
@@ -427,8 +486,8 @@ def _normalize_track_row(*, track: dict, metadata: dict) -> dict:
             "height": float(bbox_norm_xywh.get("height", height / frame_height)),
         },
     }
-    if isinstance(track.get("mask_rle"), dict):
-        normalized["mask_rle"] = dict(track["mask_rle"])
+    if isinstance(track.get("mask_ref"), dict):
+        normalized["mask_ref"] = dict(track["mask_ref"])
     return normalized
 
 
@@ -476,8 +535,8 @@ def _build_person_detections(*, tracks: list[dict], metadata: dict) -> list[dict
                 "source": "person_tracker",
                 "provenance": "v31_visual_extractor",
             }
-            if isinstance(track.get("mask_rle"), dict):
-                timestamped_object["mask_rle"] = dict(track["mask_rle"])
+            if isinstance(track.get("mask_ref"), dict):
+                timestamped_object["mask_ref"] = dict(track["mask_ref"])
             timestamped_objects.append(timestamped_object)
         if not timestamped_objects:
             continue
@@ -690,7 +749,8 @@ class V31VisualExtractor:
             **pose_metrics,
             **self._last_runtime_metrics,
         }
-        return {
+        mask_artifacts = list(tracking_metrics.get("mask_artifacts") or [])
+        result = {
             "video_metadata": metadata,
             "shot_changes": shot_changes,
             "tracks": tracks,
@@ -698,9 +758,14 @@ class V31VisualExtractor:
             "person_detections": person_detections,
             "face_detections": [],
             "visual_identities": visual_identities,
+            "mask_artifacts": mask_artifacts,
             "mask_stability_signals": [],
             "tracking_metrics": tracking_metrics,
         }
+        result["tracking_metrics"]["payload_size_bytes"] = len(
+            json.dumps(result, separators=(",", ":")).encode("utf-8")
+        )
+        return result
 
 
 SimpleVisualExtractor = V31VisualExtractor

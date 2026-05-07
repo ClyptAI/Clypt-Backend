@@ -7,9 +7,11 @@
 
 > 2026-05-04 implementation note: the topology, Scribe path, Modal visual path, and Modal media/render submit-poll path are implemented on `AMD-refactor`, but Phase5-less auto-follow render quality is **not accepted**. Latest reviewed clips rendered as valid vertical MP4s, but tracking/subject selection was poor and crop motion was still not smooth enough. Treat auto-follow rendering as an experimental fallback until a dedicated tracking/crop-quality pass lands; manual Phase5 grounding remains the production-quality route.
 >
-> 2026-05-05 crop-plan update: `tracklet_follow_9x16_smooth_inside_person` is superseded by `tracklet_follow_9x16_pose_x_dynamic_inside_person`. The new plan computes per-keyframe 9:16 crops inside the selected person bbox, uses pose only for horizontal head/face anchoring, keeps vertical placement bbox-top anchored, drives dynamic `x/y/w/h` through FFmpeg `sendcmd`, and treats shot or primary-tracklet changes as hard crop cuts instead of animated pans.
+> 2026-05-05 crop-plan update: `tracklet_follow_9x16_smooth_inside_person` is superseded by `tracklet_follow_9x16_pose_x_dynamic_inside_person`. The compiler computes per-keyframe 9:16 crops inside the selected person bbox, uses pose only for horizontal head/face anchoring, keeps vertical placement bbox-top anchored, and treats shot or primary-tracklet changes as hard crop cuts instead of animated pans.
 >
-> 2026-05-06 visual-model update: the active Modal visual path now targets `RFDETRSegNano` instead of detection-only RF-DETR Nano. The TensorRT pass must expose boxes, scores/classes, and masks; masks are retained as `rle_row_major_v1` artifacts after box-only ByteTrack ID assignment. Segmentation was added for future person-aware captions, motion graphics/overlays inside the short/reel frame, and crop/negative-space decisions. Phase6 crop math and captions do not consume masks yet.
+> 2026-05-07 render-runtime update: the live Modal FFmpeg path does **not** apply dynamic crop `w/h` inside one ffmpeg pass. It renders per-run/per-tracklet fixed-size cropped video pieces, stitches them back into one clip, and applies subtitles in a final pass, because dynamic crop `w/h` wedged ffmpeg/NVENC on real runs.
+>
+> 2026-05-06 visual-model update: the active Modal visual path now targets `RFDETRSegNano` instead of detection-only RF-DETR Nano. The TensorRT pass must expose boxes, scores/classes, and masks; masks are retained once per visual job in a compressed low-resolution `.npz` sidecar artifact, while JSON rows carry `mask_ref` pointers after box-only ByteTrack ID assignment. Segmentation was added for future person-aware captions, motion graphics/overlays inside the short/reel frame, and crop/negative-space decisions. Phase6 crop math and captions do not consume masks yet.
 
 ---
 
@@ -123,7 +125,7 @@ flowchart TD
     VTRACK["ByteTrack boxes"]
     VMASK["mask association"]
     VPOSE["pose validation"]
-    VOUT["visual artifacts + mask_rle"]
+    VOUT["visual artifacts + mask_ref sidecar"]
   end
 
   subgraph P26["MI300X host: Phase26"]
@@ -401,7 +403,7 @@ Responsibilities:
    - TensorRT engine build/load/execute
    - ByteTrack on boxes only
    - same-frame IoU association of segmentation masks back to tracked rows
-   - retained `mask_rle` rows for raw detections, tracks, person detections, and tracklet geometry
+   - retained compressed low-resolution mask sidecar plus `mask_ref` pointers for raw detections, tracks, person detections, and tracklet geometry
 3. Prefer porting the main-branch TensorRT/NVIDIA visual implementation if this branch's AMD visual code has removed or replaced those files.
 4. Upload visual artifacts to GCS.
 5. Return the same logical visual payload expected by Phase1:
@@ -585,7 +587,7 @@ CLYPT_PHASE1_VISUAL_SERVICE_TIMEOUT_S=7200
 CLYPT_PHASE1_VISUAL_MODEL=seg_nano
 CLYPT_PHASE1_VISUAL_BATCH_SIZE=16
 CLYPT_PHASE1_VISUAL_THRESHOLD=0.85
-CLYPT_PHASE1_VISUAL_SHAPE=640
+CLYPT_PHASE1_VISUAL_SHAPE=648
 CLYPT_PHASE1_VISUAL_POSE_VALIDATION=1
 CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH=yolo11s-pose.pt
 ```
@@ -599,7 +601,7 @@ GOOGLE_APPLICATION_CREDENTIALS_JSON=<secret>
 CLYPT_MODAL_VISUAL_MODEL=seg_nano
 CLYPT_MODAL_VISUAL_BATCH_SIZE=16
 CLYPT_MODAL_VISUAL_THRESHOLD=0.85
-CLYPT_MODAL_VISUAL_SHAPE=640
+CLYPT_MODAL_VISUAL_SHAPE=648
 CLYPT_MODAL_VISUAL_BACKEND=tensorrt
 CLYPT_PHASE1_VISUAL_POSE_VALIDATION=1
 CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH=yolo11s-pose.pt

@@ -22,6 +22,9 @@ def _load_app_module():
         def add_local_python_source(self, *_args, **_kwargs):
             return self
 
+        def add_local_dir(self, *_args, **_kwargs):
+            return self
+
         def pip_install(self, *_args, **_kwargs):
             return self
 

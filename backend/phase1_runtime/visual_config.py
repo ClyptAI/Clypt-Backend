@@ -44,6 +44,12 @@ class VisualPipelineConfig:
                 f"{self.detector_model!r}; expected 'seg_nano'. "
                 "Detection-only RF-DETR models are not supported on the active Modal path."
             )
+        if self.detector_resolution % 12 != 0:
+            raise ValueError(
+                "Unsupported CLYPT_PHASE1_VISUAL_SHAPE="
+                f"{self.detector_resolution!r}; RFDETRSegNano requires dimensions "
+                "divisible by patch size 12."
+            )
 
     @classmethod
     def from_env(cls) -> VisualPipelineConfig:
@@ -52,7 +58,7 @@ class VisualPipelineConfig:
             detector_backend=_env("CLYPT_PHASE1_VISUAL_BACKEND", "tensorrt_fp16"),
             detector_batch_size=int(_env("CLYPT_PHASE1_VISUAL_BATCH_SIZE", "16")),
             detection_threshold=float(_env("CLYPT_PHASE1_VISUAL_THRESHOLD", "0.85")),
-            detector_resolution=int(_env("CLYPT_PHASE1_VISUAL_SHAPE", "640")),
+            detector_resolution=int(_env("CLYPT_PHASE1_VISUAL_SHAPE", "648")),
             tracker_backend=_env("CLYPT_PHASE1_VISUAL_TRACKER", "bytetrack"),
             tracker_lost_buffer=int(_env("CLYPT_PHASE1_VISUAL_TRACKER_BUFFER", "30")),
             tracker_match_threshold=float(

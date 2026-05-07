@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -191,6 +192,63 @@ def test_visual_defaults_use_modal_segmentation_model_env(monkeypatch) -> None:
 
     assert os.environ["CLYPT_PHASE1_VISUAL_MODEL"] == "seg_nano"
     assert os.environ["CLYPT_PHASE1_VISUAL_BATCH_SIZE"] == "8"
+
+
+def test_upload_mask_artifacts_replaces_local_paths_with_gcs_uri(tmp_path: Path) -> None:
+    visual_extract_app = _load_app_module()
+    artifact_path = tmp_path / "visual_masks_lowres_v1.npz"
+    artifact_path.write_bytes(b"npz")
+    phase1_visual = {
+        "mask_artifacts": [
+            {
+                "artifact_id": "visual_masks_lowres_v1",
+                "local_path": str(artifact_path),
+                "encoding": "npz_compressed_lowres_binary_v1",
+            }
+        ],
+        "tracking_metrics": {},
+    }
+
+    class _Storage:
+        def upload_file(self, *, local_path, object_name):
+            assert local_path == artifact_path
+            assert object_name == "phase14/run-visual/visual/visual_masks_lowres_v1.npz"
+            return f"gs://bucket/{object_name}"
+
+    visual_extract_app._upload_mask_artifacts(
+        phase1_visual=phase1_visual,
+        run_id="run-visual",
+        storage_client=_Storage(),
+    )
+
+    artifact = phase1_visual["mask_artifacts"][0]
+    assert "local_path" not in artifact
+    assert artifact["gcs_uri"] == "gs://bucket/phase14/run-visual/visual/visual_masks_lowres_v1.npz"
+    assert phase1_visual["tracking_metrics"]["mask_artifacts"] == phase1_visual["mask_artifacts"]
+
+
+def test_upload_phase1_visual_artifact_writes_gzipped_json(tmp_path: Path) -> None:
+    visual_extract_app = _load_app_module()
+    phase1_visual = {"shot_changes": [], "tracks": [{"track_id": "p1"}]}
+    uploaded: dict[str, object] = {}
+
+    class _Storage:
+        def upload_file(self, *, local_path, object_name):
+            uploaded["local_path"] = local_path
+            uploaded["object_name"] = object_name
+            assert local_path.exists()
+            return f"gs://bucket/{object_name}"
+
+    artifact = visual_extract_app._upload_phase1_visual_artifact(
+        phase1_visual_payload=phase1_visual,
+        run_id="run-visual",
+        storage_client=_Storage(),
+    )
+
+    assert artifact["artifact_id"] == "phase1_visual_v1"
+    assert artifact["encoding"] == "json_gzip_v1"
+    assert artifact["gcs_uri"] == "gs://bucket/phase14/run-visual/visual/phase1_visual.json.gz"
+    assert uploaded["object_name"] == "phase14/run-visual/visual/phase1_visual.json.gz"
 
 
 def test_require_visual_runtime_uses_trtexec_help(monkeypatch) -> None:

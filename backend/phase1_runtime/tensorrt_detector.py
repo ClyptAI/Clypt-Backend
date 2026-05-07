@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .masks import resize_mask_nearest
+from .masks import MASK_THRESHOLD
 
 if TYPE_CHECKING:
     import supervision as sv
@@ -34,7 +34,7 @@ COCO_PERSON_CLASS_ID = 1
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 _RFDETR_CHECKPOINT_PE_GRID = {
-    "seg_nano": 24,
+    "seg_nano": 26,
 }
 
 
@@ -67,40 +67,6 @@ def _decode_rfdetr_boxes_to_source_xyxy(
     return xyxy
 
 
-def _nms_xyxy(boxes: np.ndarray, scores: np.ndarray, *, iou_threshold: float = 0.5) -> np.ndarray:
-    if len(boxes) == 0:
-        return np.empty(0, dtype=np.int64)
-    x1 = boxes[:, 0]
-    y1 = boxes[:, 1]
-    x2 = boxes[:, 2]
-    y2 = boxes[:, 3]
-    areas = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
-    order = np.argsort(scores)[::-1]
-    keep: list[int] = []
-    while order.size > 0:
-        current = int(order[0])
-        keep.append(current)
-        if order.size == 1:
-            break
-        rest = order[1:]
-        xx1 = np.maximum(x1[current], x1[rest])
-        yy1 = np.maximum(y1[current], y1[rest])
-        xx2 = np.minimum(x2[current], x2[rest])
-        yy2 = np.minimum(y2[current], y2[rest])
-        inter_w = np.maximum(0.0, xx2 - xx1)
-        inter_h = np.maximum(0.0, yy2 - yy1)
-        intersection = inter_w * inter_h
-        union = areas[current] + areas[rest] - intersection
-        iou = np.divide(
-            intersection,
-            np.maximum(union, 1e-6),
-            out=np.zeros_like(intersection),
-            where=union > 0,
-        )
-        order = rest[iou <= iou_threshold]
-    return np.array(keep, dtype=np.int64)
-
-
 def _frame_masks_for_index(masks: np.ndarray, *, frame_index: int) -> np.ndarray:
     frame_masks = masks[frame_index] if masks.ndim >= 4 else masks
     frame_masks = np.asarray(frame_masks)
@@ -122,6 +88,9 @@ def _frame_masks_for_index(masks: np.ndarray, *, frame_index: int) -> np.ndarray
 class DetectorMetrics:
     frames_processed: int = 0
     total_detector_ms: float = 0.0
+    total_output_copy_ms: float = 0.0
+    total_postprocess_ms: float = 0.0
+    total_mask_extract_ms: float = 0.0
     warmup_ms: float = 0.0
     mask_rows: int = 0
     mask_output_tensor: str | None = None
@@ -131,6 +100,18 @@ class DetectorMetrics:
         if self.frames_processed == 0:
             return 0.0
         return self.total_detector_ms / self.frames_processed
+
+    @property
+    def mean_output_copy_latency_ms(self) -> float:
+        if self.frames_processed == 0:
+            return 0.0
+        return self.total_output_copy_ms / self.frames_processed
+
+    @property
+    def mean_postprocess_latency_ms(self) -> float:
+        if self.frames_processed == 0:
+            return 0.0
+        return self.total_postprocess_ms / self.frames_processed
 
 
 def _require_cuda() -> None:
@@ -299,6 +280,9 @@ class TensorRTDetector:
         self._metrics.warmup_ms = (time.perf_counter() - warmup_start) * 1000.0
         self._metrics.frames_processed = 0
         self._metrics.total_detector_ms = 0.0
+        self._metrics.total_output_copy_ms = 0.0
+        self._metrics.total_postprocess_ms = 0.0
+        self._metrics.total_mask_extract_ms = 0.0
         self._metrics.mask_rows = 0
         logger.info("TensorRT warmup complete in %.1f ms", self._metrics.warmup_ms)
 
@@ -423,25 +407,16 @@ class TensorRTDetector:
                 person_scores = f_scores[person_mask].astype(np.float32)
                 person_class_ids = f_labels[person_mask].astype(np.int32)
                 person_masks = f_masks[person_mask]
-                nms_keep = _nms_xyxy(person_boxes, person_scores)
-                person_boxes = person_boxes[nms_keep]
-                person_scores = person_scores[nms_keep]
-                person_class_ids = person_class_ids[nms_keep]
-                person_masks = person_masks[nms_keep]
-                oh, ow = orig_sizes[i]
-                source_masks = np.stack(
-                    [
-                        resize_mask_nearest(mask, height=int(oh), width=int(ow)) > 0.5
-                        for mask in person_masks
-                    ],
-                    axis=0,
-                ).astype(bool)
+                mask_t0 = time.perf_counter()
+                source_masks = (person_masks > MASK_THRESHOLD).astype(np.uint8, copy=False)
+                self._metrics.total_mask_extract_ms += (
+                    time.perf_counter() - mask_t0
+                ) * 1000.0
             else:
                 person_boxes = np.empty((0, 4), dtype=np.float32)
                 person_scores = np.empty(0, dtype=np.float32)
                 person_class_ids = np.empty(0, dtype=np.int32)
-                oh, ow = orig_sizes[i]
-                source_masks = np.empty((0, int(oh), int(ow)), dtype=bool)
+                source_masks = np.empty((0, 0, 0), dtype=np.uint8)
             det = sv.Detections(
                 xyxy=person_boxes,
                 confidence=person_scores,
@@ -500,10 +475,14 @@ class TensorRTDetector:
             self._stream.synchronize()
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
+            output_copy_t0 = time.perf_counter()
             output_arrays = {}
             for name, info in self._bindings.items():
                 if not info["is_input"]:
                     output_arrays[name] = info["buffer"].cpu().numpy()
+            self._metrics.total_output_copy_ms += (
+                time.perf_counter() - output_copy_t0
+            ) * 1000.0
 
             out_names = sorted(output_arrays.keys())
             if len(out_names) >= 3:
@@ -550,6 +529,7 @@ class TensorRTDetector:
                     f"Expected boxes, scores, and masks from TRT engine, got {len(out_names)} tensors: {out_names}"
                 )
 
+            postprocess_t0 = time.perf_counter()
             dets = self._postprocess(
                 raw_boxes,
                 raw_scores,
@@ -558,6 +538,9 @@ class TensorRTDetector:
                 batch_orig_sizes,
                 actual_batch_len,
             )
+            self._metrics.total_postprocess_ms += (
+                time.perf_counter() - postprocess_t0
+            ) * 1000.0
             all_detections.extend(dets)
 
             self._metrics.frames_processed += actual_batch_len

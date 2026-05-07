@@ -220,7 +220,7 @@ def test_live_phase14_runner_skips_phase2_and_phase3_when_phase3_already_succeed
     assert any(event["phase"] == "phase3" for event in skip_events)
 
 
-def test_live_phase14_runner_short_circuits_when_phase4_already_succeeded(tmp_path: Path, monkeypatch):
+def test_live_phase14_runner_reruns_phase4_and_continues_when_phase4_already_succeeded(tmp_path: Path, monkeypatch):
     repository = _FakeRepository()
     repository.phase_metrics = [
         _phase_metric(run_id="run_003", phase_name="phase2", status="succeeded", started_at=datetime(2026, 4, 8, 12, 0, tzinfo=UTC)),
@@ -239,13 +239,41 @@ def test_live_phase14_runner_short_circuits_when_phase4_already_succeeded(tmp_pa
     paths.render_plan.write_text("{}", encoding="utf-8")
     paths.captions_ass("clip_real").write_text("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello", encoding="utf-8")
 
-    def _unexpected_call(self, **kwargs):
-        raise AssertionError("heavy phase should be skipped when phase4 already succeeded")
+    def _run_phase_1(self, **kwargs):
+        return {
+            "canonical_timeline": SimpleNamespace(turns=[SimpleNamespace(end_ms=1000)]),
+            "speech_emotion_timeline": SimpleNamespace(),
+            "audio_event_timeline": SimpleNamespace(),
+        }
 
-    monkeypatch.setattr(type(runner), "run_phase_1", _unexpected_call)
+    def _unexpected_call(self, **kwargs):
+        raise AssertionError("phase2/phase3 should be skipped when phase4 already succeeded")
+
+    phase4_calls: list[dict[str, object]] = []
+    phase6_calls: list[dict[str, object]] = []
+
+    def _run_phase_4(self, **kwargs):
+        phase4_calls.append(kwargs)
+        assert kwargs["nodes"] == repository.nodes
+        assert kwargs["edges"] == repository.edges
+        return {
+            "candidates": repository.candidates,
+            "final_candidate_count": 2,
+            "seed_count": 0,
+            "subgraph_count": 0,
+            "raw_candidate_count": 0,
+            "deduped_candidate_count": 0,
+        }
+
+    def _run_phase_6(self, **kwargs):
+        phase6_calls.append(kwargs)
+        return {"clip_count": 2, "artifact_paths": {}, "render_outputs": []}
+
+    monkeypatch.setattr(type(runner), "run_phase_1", _run_phase_1)
     monkeypatch.setattr(type(runner), "run_phase_2", _unexpected_call)
     monkeypatch.setattr(type(runner), "run_phase_3", _unexpected_call)
-    monkeypatch.setattr(type(runner), "run_phase_4", _unexpected_call)
+    monkeypatch.setattr(type(runner), "run_phase_4", _run_phase_4)
+    monkeypatch.setattr(type(runner), "run_phase_6", _run_phase_6)
 
     summary = runner.run(
         run_id="run_003",
@@ -254,8 +282,7 @@ def test_live_phase14_runner_short_circuits_when_phase4_already_succeeded(tmp_pa
     )
 
     assert summary.metadata["candidate_count"] == 2
-    assert summary.artifact_paths["source_context"] == str(paths.source_context)
-    assert summary.artifact_paths["captions_clip_real.ass"] == str(paths.captions_ass("clip_real"))
-    assert "captions_clip_001.ass" not in summary.artifact_paths
+    assert phase4_calls
+    assert phase6_calls
     skip_events = [event for event in log_events if event["event"] == "phase_skipped_resume"]
-    assert {event["phase"] for event in skip_events} >= {"phase2", "phase3", "phase4"}
+    assert {event["phase"] for event in skip_events} >= {"phase2", "phase3"}

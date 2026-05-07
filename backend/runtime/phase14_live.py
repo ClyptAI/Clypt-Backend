@@ -520,29 +520,6 @@ class V31LivePhase14Runner:
         )
 
         resume_phase = self._get_resume_phase(run_id=run_id)
-        if resume_phase == "phase4":
-            run_started_at = datetime.now(UTC)
-            run_started = time.perf_counter()
-            self._emit_log(
-                run_id=run_id,
-                job_id=job_id,
-                phase="phase24",
-                event="phase_start",
-                attempt=attempt,
-                status="start",
-            )
-            return self._finish_phase24_success(
-                run_id=run_id,
-                job_id=job_id,
-                attempt=attempt,
-                paths=paths,
-                started_at=run_started_at,
-                started=run_started,
-                phase2_nodes=self._load_resume_nodes(run_id=run_id),
-                phase3_edges=self._load_resume_edges(run_id=run_id),
-                phase4_candidates=self._load_resume_candidates(run_id=run_id),
-                resumed_phases=("phase2", "phase3", "phase4"),
-            )
 
         run_started_at = datetime.now(UTC)
         run_started = time.perf_counter()
@@ -586,7 +563,7 @@ class V31LivePhase14Runner:
 
             phase2_nodes: list[SemanticGraphNode]
             phase3_edges: list[SemanticGraphEdge]
-            if resume_phase in {"phase2", "phase3"}:
+            if resume_phase in {"phase2", "phase3", "phase4"}:
                 phase2_nodes = self._load_resume_nodes(run_id=run_id)
                 self._emit_phase_skipped_resume(
                     run_id=run_id,
@@ -654,7 +631,7 @@ class V31LivePhase14Runner:
                 ),
             )
 
-            if resume_phase == "phase3":
+            if resume_phase in {"phase3", "phase4"}:
                 phase3_edges = self._load_resume_edges(run_id=run_id)
                 self._emit_phase_skipped_resume(
                     run_id=run_id,

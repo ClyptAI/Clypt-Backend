@@ -75,7 +75,9 @@ Required fast-path capabilities:
 - CUDA PyTorch
 - RF-DETR-Seg Nano export/inference with a usable mask output binding
 
-The worker fails hard if any of these are missing. It must not fall back to software decode, CPU RF-DETR, or detection-only RF-DETR. Masks are persisted as `rle_row_major_v1` artifacts for future caption negative-space work; current Phase6 crop/caption code does not consume them.
+The worker fails hard if any of these are missing. It must not fall back to software decode, CPU RF-DETR, or detection-only RF-DETR. Masks are persisted once per visual job in a compressed low-resolution `.npz` sidecar artifact, and JSON rows carry `mask_ref` pointers for future caption negative-space work; current Phase6 crop/caption code does not consume them.
+
+For timing-sensitive E2E runs, deployment success is not enough. Submit a person-containing warmup job through `POST /tasks/visual-extract` and wait for `GET /tasks/visual-extract/result/{call_id}` to return success before submitting the measured Phase1/Phase26 run. The warmup must exercise both RF-DETR-Seg and YOLO11s-pose so model weights, CUDA context, the RF-DETR-Seg TensorRT engine, and the pose TensorRT engine are already built/loaded. A blank synthetic clip can validate the endpoint but is not a valid timing warmup because it can skip pose validation.
 
 ## 2) Shared Media App
 

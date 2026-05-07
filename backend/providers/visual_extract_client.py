@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gzip
 import json
 import random
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -10,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.phase1_runtime.payloads import VisualFuturePayload
+from backend.providers.storage import GCSStorageClient
 
 from ._http_retry import RemoteServiceHTTPError, TRANSIENT_HTTP_STATUS, retry_with_backoff
 from .config import Phase1VisualServiceSettings
@@ -35,9 +38,11 @@ class RemoteVisualExtractClient:
         self,
         *,
         settings: Phase1VisualServiceSettings,
+        storage_client: GCSStorageClient | None = None,
         max_retries: int | None = None,
     ) -> None:
         self.settings = settings
+        self._storage_client = storage_client
         self._max_retries = (
             max(0, int(max_retries))
             if max_retries is not None
@@ -119,6 +124,34 @@ class RemoteVisualExtractClient:
             rng=random.random,
         )
 
+    def _hydrate_phase1_visual_artifact(self, raw: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(raw.get("phase1_visual"), dict):
+            return raw
+        artifact_uri = str(raw.get("phase1_visual_gcs_uri") or "").strip()
+        if not artifact_uri:
+            return raw
+        if self._storage_client is None:
+            raise RemoteVisualExtractError(
+                "visual-extract result returned phase1_visual_gcs_uri but no storage_client is configured"
+            )
+        encoding = str(raw.get("phase1_visual_encoding") or "json_gzip_v1").strip().lower()
+        if encoding != "json_gzip_v1":
+            raise RemoteVisualExtractError(
+                f"unsupported phase1_visual_encoding={encoding!r} for visual-extract result"
+            )
+        with tempfile.TemporaryDirectory(prefix="clypt-visual-result-") as tmp_dir:
+            local_path = Path(tmp_dir) / "phase1_visual.json.gz"
+            self._storage_client.download_file(gcs_uri=artifact_uri, local_path=local_path)
+            with gzip.open(local_path, "rt", encoding="utf-8") as fh:
+                phase1_visual = json.load(fh)
+        if not isinstance(phase1_visual, dict):
+            raise RemoteVisualExtractError(
+                f"phase1_visual artifact must decode to an object, got {type(phase1_visual).__name__}"
+            )
+        hydrated = dict(raw)
+        hydrated["phase1_visual"] = phase1_visual
+        return hydrated
+
     def submit(
         self,
         *,
@@ -180,7 +213,7 @@ class RemoteVisualExtractClient:
                 time.sleep(self._DEFAULT_POLL_INTERVAL_S)
                 continue
             if status in {"", "succeeded", "success", "completed"}:
-                return raw
+                return self._hydrate_phase1_visual_artifact(raw)
             raise RemoteVisualExtractError(
                 f"visual-extract poll for call_id={future.call_id} returned terminal status {status!r}"
             )

@@ -18,7 +18,7 @@ class TestVisualPipelineConfig:
         assert config.detector_backend == "tensorrt_fp16"
         assert config.detector_batch_size == 16
         assert config.detection_threshold == pytest.approx(0.85)
-        assert config.detector_resolution == 640
+        assert config.detector_resolution == 648
         assert config.tracker_backend == "bytetrack"
         assert config.frame_decode_backend == "gpu"
         assert config.gpu_decode_backend == "nvdec"
@@ -58,6 +58,14 @@ class TestVisualPipelineConfig:
         with pytest.raises(ValueError, match="seg_nano"):
             VisualPipelineConfig.from_env()
 
+    def test_from_env_rejects_shape_not_divisible_by_seg_patch_size(self, monkeypatch):
+        from backend.phase1_runtime.visual_config import VisualPipelineConfig
+
+        monkeypatch.setenv("CLYPT_PHASE1_VISUAL_SHAPE", "640")
+
+        with pytest.raises(ValueError, match="patch size 12"):
+            VisualPipelineConfig.from_env()
+
     def test_tensorrt_engine_path_uses_artifact_dir(self, tmp_path: Path):
         from backend.phase1_runtime.visual_config import VisualPipelineConfig
 
@@ -66,7 +74,7 @@ class TestVisualPipelineConfig:
             detector_backend="tensorrt_fp16",
             detector_batch_size=4,
             detection_threshold=0.35,
-            detector_resolution=560,
+            detector_resolution=552,
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
@@ -75,7 +83,7 @@ class TestVisualPipelineConfig:
             detector_artifact_dir=str(tmp_path),
         )
 
-        assert config.tensorrt_engine_path == tmp_path / "rfdetr_seg_nano_b4_r560_fp16.engine"
+        assert config.tensorrt_engine_path == tmp_path / "rfdetr_seg_nano_b4_r552_fp16.engine"
 
 
 class TestFrameDecode:
@@ -216,7 +224,7 @@ class TestTensorRTDetector:
             detector_backend="tensorrt_fp16",
             detector_batch_size=2,
             detection_threshold=0.35,
-            detector_resolution=560,
+            detector_resolution=552,
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
@@ -269,7 +277,7 @@ class TestTensorRTDetector:
 
         assert det._ensure_engine() == config.tensorrt_engine_path
 
-    def test_ensure_engine_preserves_checkpoint_pe_grid_for_640_export(
+    def test_ensure_engine_preserves_checkpoint_pe_grid_for_seg_nano_export(
         self, tmp_path: Path, monkeypatch
     ):
         from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
@@ -280,7 +288,7 @@ class TestTensorRTDetector:
             detector_backend="tensorrt_fp16",
             detector_batch_size=2,
             detection_threshold=0.35,
-            detector_resolution=640,
+            detector_resolution=648,
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
@@ -310,10 +318,10 @@ class TestTensorRTDetector:
 
         assert det._ensure_engine() == config.tensorrt_engine_path
         assert captured["init_kwargs"] == {
-            "resolution": 640,
-            "positional_encoding_size": 24,
+            "resolution": 648,
+            "positional_encoding_size": 26,
         }
-        assert captured["export_kwargs"]["shape"] == (640, 640)
+        assert captured["export_kwargs"]["shape"] == (648, 648)
 
     def test_convert_onnx_to_engine_uses_skip_inference_cli(self, tmp_path: Path, monkeypatch):
         from backend.phase1_runtime.tensorrt_detector import TensorRTDetector
@@ -341,7 +349,9 @@ class TestTensorRTDetector:
         assert not any(arg.startswith("--optShapes=") for arg in captured["cmd"])
         assert not any(arg.startswith("--maxShapes=") for arg in captured["cmd"])
 
-    def test_postprocess_decodes_class_logits_before_thresholding(self, tmp_path: Path, monkeypatch):
+    def test_postprocess_decodes_class_logits_and_keeps_lowres_masks(
+        self, tmp_path: Path, monkeypatch
+    ):
         import types
 
         from backend.phase1_runtime.tensorrt_detector import COCO_PERSON_CLASS_ID, TensorRTDetector
@@ -416,9 +426,9 @@ class TestTensorRTDetector:
         )
 
         assert detections[0].xyxy.tolist() == [[720.0, 270.0, 1200.0, 810.0]]
-        assert detections[0].mask.shape == (1, 1080, 1920)
+        assert detections[0].mask.shape == (1, 560, 560)
 
-    def test_postprocess_applies_person_nms_before_tracking(self, tmp_path: Path, monkeypatch):
+    def test_postprocess_preserves_overlapping_person_queries(self, tmp_path: Path, monkeypatch):
         import types
 
         from backend.phase1_runtime.tensorrt_detector import COCO_PERSON_CLASS_ID, TensorRTDetector
@@ -457,9 +467,9 @@ class TestTensorRTDetector:
             batch_len=1,
         )
 
-        assert detections[0].xyxy.shape == (2, 4)
+        assert detections[0].xyxy.shape == (3, 4)
         assert detections[0].xyxy.tolist()[0] == [720.0, 270.0, 1200.0, 810.0]
-        assert detections[0].mask.shape == (2, 1080, 1920)
+        assert detections[0].mask.shape == (3, 560, 560)
 
     def test_postprocess_fails_hard_without_mask_output(self, tmp_path: Path, monkeypatch):
         import types
@@ -502,7 +512,7 @@ class TestDetectorFactory:
             detector_backend="pytorch_cuda_fp16",
             detector_batch_size=4,
             detection_threshold=0.35,
-            detector_resolution=560,
+            detector_resolution=552,
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
@@ -524,7 +534,7 @@ class TestDetectorFactory:
             detector_backend="tensorrt_fp16",
             detector_batch_size=4,
             detection_threshold=0.35,
-            detector_resolution=560,
+            detector_resolution=552,
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
@@ -545,7 +555,7 @@ class TestRfdetrTrackingPipeline:
             detector_backend="tensorrt_fp16",
             detector_batch_size=16,
             detection_threshold=0.85,
-            detector_resolution=640,
+            detector_resolution=648,
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
@@ -602,8 +612,9 @@ class TestRfdetrTrackingPipeline:
                 events.append(("reset", None))
                 self.metrics.resets += 1
 
-            def update(self, *, frame_idx: int, detections) -> list[TrackRow]:
+            def update(self, *, frame_idx: int, detections, mask_refs=None) -> list[TrackRow]:
                 events.append(("update", frame_idx))
+                mask_refs = list(mask_refs or [])
                 return [
                     TrackRow(
                         frame_idx=frame_idx,
@@ -614,13 +625,7 @@ class TestRfdetrTrackingPipeline:
                         y2=80.0,
                         confidence=0.91,
                         class_id=1,
-                        mask_rle={
-                            "encoding": "rle_row_major_v1",
-                            "size": [1080, 1920],
-                            "counts": [0, 2073600],
-                            "threshold": 0.5,
-                            "source": "rfdetr_seg_nano_tensorrt",
-                        },
+                        mask_ref={**mask_refs[0], "track_id": "track_7"},
                     )
                 ]
 
@@ -668,16 +673,19 @@ class TestRfdetrTrackingPipeline:
         assert [row["frame_idx"] for row in tracks] == [0, 9, 10, 11]
         assert [row["frame_idx"] for row in raw_detections] == [0, 9, 10, 11]
         assert raw_detections[0]["source"] == "rfdetr_raw"
-        assert raw_detections[0]["mask_rle"]["encoding"] == "rle_row_major_v1"
-        assert tracks[0]["mask_rle"]["encoding"] == "rle_row_major_v1"
+        assert raw_detections[0]["mask_ref"]["encoding"] == "lowres_mask_ref_v1"
+        assert tracks[0]["mask_ref"]["encoding"] == "lowres_mask_ref_v1"
+        assert metrics["mask_artifact_encoding"] == "npz_compressed_lowres_binary_v1"
+        assert metrics["mask_artifact_write_ms"] >= 0.0
+        assert metrics["payload_size_bytes"] > 0
         assert metrics["segmentation_enabled"] is True
         assert metrics["mask_rows"] == 4
-        assert metrics["mask_encoding"] == "rle_row_major_v1"
+        assert metrics["mask_encoding"] == "lowres_mask_ref_v1"
         assert metrics["tracker_resets_at_shot_boundaries"] == 1
 
 
 class TestByteTrackMaskAssociation:
-    def test_tracker_passes_box_only_detections_and_recovers_mask_rle(
+    def test_tracker_passes_box_only_detections_and_recovers_mask_ref(
         self, monkeypatch, tmp_path: Path
     ):
         import types
@@ -690,7 +698,7 @@ class TestByteTrackMaskAssociation:
             detector_backend="tensorrt_fp16",
             detector_batch_size=4,
             detection_threshold=0.85,
-            detector_resolution=640,
+            detector_resolution=648,
             tracker_backend="bytetrack",
             tracker_lost_buffer=30,
             tracker_match_threshold=0.8,
@@ -709,12 +717,14 @@ class TestByteTrackMaskAssociation:
                 class_id=None,
                 tracker_id=None,
                 mask=None,
+                data=None,
             ):
                 self.xyxy = np.asarray(xyxy, dtype=np.float32)
                 self.confidence = confidence
                 self.class_id = class_id
                 self.tracker_id = tracker_id
                 self.mask = mask
+                self.data = data or {}
 
             def __len__(self) -> int:
                 return len(self.xyxy)
@@ -747,6 +757,15 @@ class TestByteTrackMaskAssociation:
         runtime.initialize(frame_rate=30.0)
         rows = runtime.update(
             frame_idx=5,
+            mask_refs=[
+                {
+                    "encoding": "lowres_mask_ref_v1",
+                    "artifact_id": "visual_masks_lowres_v1",
+                    "mask_index": 0,
+                    "frame_idx": 5,
+                    "detection_id": "raw_5_0",
+                }
+            ],
             detections=FakeDetections(
                 xyxy=np.array([[10.0, 20.0, 50.0, 80.0]], dtype=np.float32),
                 confidence=np.array([0.91], dtype=np.float32),
@@ -757,12 +776,13 @@ class TestByteTrackMaskAssociation:
 
         assert captured_tracker_input[0].mask is None
         assert rows[0].track_id == 42
-        assert rows[0].mask_rle == {
-            "encoding": "rle_row_major_v1",
-            "size": [4, 4],
-            "counts": [0, 16],
-            "threshold": 0.5,
-            "source": "rfdetr_seg_nano_tensorrt",
+        assert rows[0].mask_ref == {
+            "encoding": "lowres_mask_ref_v1",
+            "artifact_id": "visual_masks_lowres_v1",
+            "mask_index": 0,
+            "frame_idx": 5,
+            "detection_id": "raw_5_0",
+            "track_id": "track_42",
         }
 
 
@@ -804,12 +824,12 @@ class TestVisualExtractorArtifactContract:
                     "x2": 50.0,
                     "y2": 80.0,
                     "confidence": 0.9,
-                    "mask_rle": {
-                        "encoding": "rle_row_major_v1",
-                        "size": [1080, 1920],
-                        "counts": [2, 3, 4],
-                        "threshold": 0.5,
-                        "source": "rfdetr_seg_nano_tensorrt",
+                    "mask_ref": {
+                        "encoding": "lowres_mask_ref_v1",
+                        "artifact_id": "visual_masks_lowres_v1",
+                        "mask_index": 0,
+                        "frame_idx": 0,
+                        "detection_id": "raw_0_0",
                     },
                 }
             ],
@@ -819,8 +839,8 @@ class TestVisualExtractorArtifactContract:
 
         assert len(payload["person_detections"]) == 1
         assert payload["person_detections"][0]["track_id"] == "track_1"
-        assert payload["tracks"][0]["mask_rle"]["encoding"] == "rle_row_major_v1"
+        assert payload["tracks"][0]["mask_ref"]["encoding"] == "lowres_mask_ref_v1"
         assert (
-            payload["person_detections"][0]["timestamped_objects"][0]["mask_rle"]
-            == payload["tracks"][0]["mask_rle"]
+            payload["person_detections"][0]["timestamped_objects"][0]["mask_ref"]
+            == payload["tracks"][0]["mask_ref"]
         )

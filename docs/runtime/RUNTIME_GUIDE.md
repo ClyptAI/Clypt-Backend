@@ -1,7 +1,7 @@
 # RUNTIME GUIDE
 
 **Status:** Active  
-**Last updated:** 2026-05-06
+**Last updated:** 2026-05-07
 
 This is the runtime source of truth for the current AMD-refactor state.
 
@@ -111,7 +111,7 @@ Current visual settings are preserved unless explicitly retuned:
 - `CLYPT_PHASE1_VISUAL_MODEL=seg_nano`
 - `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`
 - `CLYPT_PHASE1_VISUAL_THRESHOLD=0.85`
-- `CLYPT_PHASE1_VISUAL_SHAPE=640`
+- `CLYPT_PHASE1_VISUAL_SHAPE=648`
 - `CLYPT_PHASE1_VISUAL_TRACKER=bytetrack`
 - `CLYPT_PHASE1_VISUAL_TRACKER_BUFFER=30`
 - `CLYPT_PHASE1_VISUAL_TRACKER_MATCH_THRESH=0.7`
@@ -146,20 +146,26 @@ flowchart LR
   tracker["ByteTrack boxes with hard-cut resets"]
   maskAssoc["associate masks back to tracked rows"]
   pose["sampled YOLO11s-pose validation"]
-  payload["tracks + raw detections + masks + shots + pose anchors"]
+  payload["tracks + raw detections + mask_refs + shots + pose anchors"]
 
   req --> callId --> job --> decode --> resize --> trt --> stream --> tracker --> maskAssoc --> pose --> payload
 ```
 
 The worker fails hard if CUDA ffmpeg support, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, RF-DETR-Seg, a usable segmentation mask output binding, or YOLO11s-pose validation are unavailable. It must not fall back to software decode, CPU RF-DETR, or detection-only RF-DETR models.
 
-RF-DETR-Seg masks are retained as `mask_rle` using `rle_row_major_v1` in `raw_person_detections`, `tracks`, `person_detections[].timestamped_objects`, and downstream `TrackletGeometryPoint` records. ByteTrack stays strictly box-based; masks are associated back to tracked rows by same-frame box IoU after identity assignment.
+Benchmark or E2E timing runs must not include first-run engine setup. Before a measured run, submit a person-containing visual warmup through the same Modal visual endpoint and wait for the result endpoint to return success. The warmup must exercise both RF-DETR-Seg and YOLO11s-pose so the RF-DETR-Seg TensorRT engine, YOLO pose TensorRT engine, model weights, CUDA context, and ffmpeg/NVDEC path are already hot. A blank synthetic clip can validate the service surface but is not a valid timing warmup because it may skip pose validation.
+
+RF-DETR-Seg masks are retained once per visual job in a compressed low-resolution `.npz` sidecar artifact. `raw_person_detections`, `tracks`, `person_detections[].timestamped_objects`, and downstream `TrackletGeometryPoint` records carry lightweight `mask_ref` pointers using `lowres_mask_ref_v1`. The active path must not resize every instance mask to source-frame dimensions or inline full-frame `mask_rle` blobs in JSON. ByteTrack stays strictly box-based; mask refs are associated back to tracked rows by same-frame box IoU after identity assignment.
+
+The active TensorRT RF-DETR-Seg path does **not** apply an extra hard box-IoU NMS after thresholding and `person` filtering. It should stay close to RF-DETR upstream semantics: decode logits to per-query scores/labels, threshold, filter to `person`, retain the surviving queries and masks, then hand those detections to ByteTrack.
+
+The worker also keeps the poll/result transport lightweight. It uploads the full validated `phase1_visual` payload as `phase14/<run_id>/visual/phase1_visual.json.gz` and returns only pointer metadata (`phase1_visual_gcs_uri`, `phase1_visual_encoding=json_gzip_v1`) from the HTTP result surface. The colocated host-side `RemoteVisualExtractClient` downloads and inflates that artifact before Phase26 consumes the joined visual result. Large inline visual JSON must not cross the submit/poll surface.
 
 The reason to keep masks in the payload now is future render intelligence: person-aware caption placement, motion graphics/overlays that fit inside the actual short/reel frame, and better crop/negative-space decisions. Current Phase6 crop selection and caption placement do not consume masks yet.
 
 YOLO pose validation does not delete raw RF-DETR/ByteTrack rows. It annotates tracklets with `auto_follow_eligible`, `subject_quality`, and sampled source-space pose anchors; Phase5-less render auto-follow skips pose-ineligible tracklets so high-confidence headless body fragments are not selected as crop targets. The pose anchor coordinates must survive into Phase6 render planning.
 
-Phase5-less render auto-follow is shot-locked: manual/frontend `primary_tracklet_id` wins when present; otherwise the render compiler picks one pose-qualified subject tracklet per shot and every render segment in that shot inherits the same `primary_tracklet_id`. Its active crop mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`. For each selected tracklet keyframe, Phase6 computes the largest 9:16 crop that fits inside that frame's person bbox, uses pose only to horizontally anchor on the best available head/face x-coordinate, falls back through interpolated/held pose x and bbox center x, and clamps the crop to the person bbox edges. Vertical placement is bbox-top anchored; head/face y is intentionally ignored. Crop `x`, `y`, `w`, and `h` may change per keyframe, and FFmpeg `sendcmd` drives all four values.
+Phase5-less render auto-follow is shot-locked: manual/frontend `primary_tracklet_id` wins when present; otherwise the render compiler picks one pose-qualified subject tracklet per shot and every render segment in that shot inherits the same `primary_tracklet_id`. Its active crop mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`. For each selected tracklet keyframe, Phase6 computes the largest 9:16 crop that fits inside that frame's person bbox, uses pose only to horizontally anchor on the best available head/face x-coordinate, falls back through interpolated/held pose x and bbox center x, and clamps the crop to the person bbox edges. Vertical placement is bbox-top anchored; head/face y is intentionally ignored. On the live Modal FFmpeg path, the renderer does **not** animate crop `w/h` inside one ffmpeg pass; instead it renders per-run/per-tracklet fixed-size cropped video pieces, concatenates them back into one clip, and applies subtitles in a final pass. Dynamic `x/y` still use `sendcmd` inside each per-run render piece.
 
 Shot and primary-tracklet changes are hard crop discontinuities. The compiler emits a first crop keyframe at each shot-run start, and renderer interpolation is run-local only, so the frame after a visual cut is already framed on the new subject instead of sliding from the previous shot's crop.
 
@@ -177,6 +183,7 @@ Current caveat: the Phase5-less auto-follow render path is **not production-read
 - pending visual payloads require a configured Modal visual client before Phase2 starts
 - malformed visual results missing `shot_changes` or `tracks` fail hard
 - joined visual result metadata is persisted as Phase1/visual artifacts before Phase6
+- if a run resumes after a visual-join failure, Phase2/Phase3 may reuse persisted artifacts but the worker must rerun Phase4 and then retry the visual join; it must not mark the run terminal solely because Phase4 metrics already exist
 
 Default crash mode remains fail-fast:
 
@@ -216,6 +223,7 @@ Current Phase26 AMD-refactor baseline is [known-good-phase26-mi300x.env](/Users/
 - node-media-prep requests remain timeline-local batches.
 - Phase26 starts multimodal embedding batch-by-batch as node-media-prep results arrive.
 - Dynamic Phase6 crop motion must use a compact control surface such as FFmpeg `sendcmd`; do not encode long crop paths as nested inline `if(between(t...))` expressions.
+- On the active live path, `sendcmd` should drive crop `x/y` only within each per-run render piece. Do not re-enable dynamic crop `w/h` in a single ffmpeg render pass without a fresh live proof that ffmpeg/NVENC can handle it without wedging.
 
 Media worker component graph:
 

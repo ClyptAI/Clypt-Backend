@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/../lib/preamble.sh"
 REPO_DIR="${REPO_DIR:-/opt/clypt-phase26/repo}"
 ENV_FILE="${ENV_FILE:-/etc/clypt-phase26/phase26.env}"
 PHASE26_VENV_DIR="${PHASE26_VENV_DIR:-/opt/clypt-phase26/venvs/phase26}"
+OPS_VENV_DIR="${OPS_VENV_DIR:-/opt/clypt-phase26/venvs/ops}"
 SG_MODEL_ENV_FILE="${SG_MODEL_ENV_FILE:-/etc/clypt-phase26/sg-model.env}"
 SG_STAGE_DROPIN_DIR="/etc/systemd/system/clypt-phase26-sglang-qwen.service.d"
 SG_STAGE_DROPIN_FILE="$SG_STAGE_DROPIN_DIR/10-launch-profile.conf"
@@ -302,10 +303,36 @@ python3 -m venv "$PHASE26_VENV_DIR"
 python -m pip install --upgrade pip wheel
 python -m pip install -r requirements-do-phase26-mi300x.txt
 python -m pip install -r requirements-phase1-orchestrator.txt
+deactivate
+
+# Keep host-side GCS tooling isolated from the application runtime dependencies.
+python3 -m venv "$OPS_VENV_DIR"
+. "$OPS_VENV_DIR/bin/activate"
+python -m pip install --upgrade pip wheel
+python -m pip install "gsutil>=5.35,<6"
+deactivate
+cat >/usr/local/bin/gsutil <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+ENV_FILE="\${CLYPT_PHASE26_ENV_FILE:-$ENV_FILE}"
+if [[ -z "\${GOOGLE_APPLICATION_CREDENTIALS:-}" && -f "\$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "\$ENV_FILE"
+  set +a
+fi
+if [[ -z "\${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+  echo "[deploy-phase26-mi300x] ERROR: GOOGLE_APPLICATION_CREDENTIALS is required for gsutil." >&2
+  exit 1
+fi
+exec "$OPS_VENV_DIR/bin/gsutil" -o "Credentials:gs_service_key_file=\${GOOGLE_APPLICATION_CREDENTIALS}" "\$@"
+EOF
+chmod 0755 /usr/local/bin/gsutil
 
 install -d -m 0755 "$HF_HOME" "$TORCH_HOME" "$PYTORCH_KERNEL_CACHE_PATH"
 install -d -m 0755 /opt/clypt-phase26/test-bank-cache/audio /opt/clypt-phase26/test-bank-cache/videos
 install -d -m 0755 /var/lib/clypt/phase1 /var/lib/clypt/phase1/work /var/log/clypt/phase1/logs
+. "$PHASE26_VENV_DIR/bin/activate"
 HF_HOME="$HF_HOME" HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_OFFLINE=0 HOME=/opt/clypt-phase26 \
   SG_MODEL="$SG_MODEL" SG_MODEL_REVISION="$SG_MODEL_REVISION" SG_MODEL_ENV_FILE="$SG_MODEL_ENV_FILE" \
   python - <<'PY'

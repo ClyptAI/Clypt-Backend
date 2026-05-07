@@ -72,3 +72,46 @@ def test_visual_extract_submit_and_poll_use_modal_contract(monkeypatch: pytest.M
     assert future.call_id == "fc-visual"
     assert future.source_video_sha256 == "sha256:abc"
     assert result["phase1_visual"] == {"shot_changes": [], "tracks": []}
+
+
+def test_visual_extract_poll_downloads_phase1_visual_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    artifact_path = tmp_path / "phase1_visual.json.gz"
+
+    class _Storage:
+        def download_file(self, *, gcs_uri, local_path):
+            assert gcs_uri == "gs://bucket/phase14/run-1/visual/phase1_visual.json.gz"
+            local_path.write_bytes(artifact_path.read_bytes())
+            return local_path
+
+    import gzip
+
+    with gzip.open(artifact_path, "wt", encoding="utf-8") as fh:
+        json.dump({"shot_changes": [], "tracks": [{"track_id": "p1"}]}, fh)
+
+    def fake_urlopen(req, timeout):  # noqa: ARG001
+        if req.get_method() == "POST":
+            return _FakeResponse(json.dumps({"call_id": "fc-visual"}).encode("utf-8"), status=202)
+        return _FakeResponse(
+            json.dumps(
+                {
+                    "status": "succeeded",
+                    "phase1_visual_gcs_uri": "gs://bucket/phase14/run-1/visual/phase1_visual.json.gz",
+                    "phase1_visual_encoding": "json_gzip_v1",
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = RemoteVisualExtractClient(
+        settings=Phase1VisualServiceSettings(
+            service_url="https://modal.visual/tasks/visual-extract",
+            auth_token="visual-token",
+        ),
+        storage_client=_Storage(),
+        max_retries=0,
+    )
+    future = client.submit(run_id="run-1", video_gcs_uri="gs://bucket/source.mp4")
+    result = client.wait_for_result(visual_future=future)
+
+    assert result["phase1_visual"] == {"shot_changes": [], "tracks": [{"track_id": "p1"}]}

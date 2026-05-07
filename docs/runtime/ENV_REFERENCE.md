@@ -60,7 +60,7 @@ Modal visual routing:
 | `CLYPT_PHASE1_VISUAL_MODEL` | `seg_nano` | Active RF-DETR-Seg Nano model; detection-only RF-DETR values are rejected. |
 | `CLYPT_PHASE1_VISUAL_BATCH_SIZE` | `16` | Preserve current fast path. |
 | `CLYPT_PHASE1_VISUAL_THRESHOLD` | `0.85` | Current high-confidence RF-DETR tracking test threshold. |
-| `CLYPT_PHASE1_VISUAL_SHAPE` | `640` | Preserve current input shape. |
+| `CLYPT_PHASE1_VISUAL_SHAPE` | `648` | Active RF-DETR-Seg input shape. Must be divisible by Seg Nano's patch size `12`. |
 | `CLYPT_PHASE1_VISUAL_POSE_VALIDATION` | `1` | Run sampled YOLO11s-pose validation after RF-DETR/ByteTrack. |
 | `CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH` | `yolo11s-pose.pt` | YOLO pose source model for TensorRT export. |
 | `CLYPT_PHASE1_VISUAL_POSE_MIN_HEAD_EVIDENCE_RATIO` | `0.40` | Auto-follow requires head/face/ear/nose evidence in at least this share of sampled frames. |
@@ -138,13 +138,13 @@ Fast path:
 CLYPT_MODAL_VISUAL_MODEL=seg_nano
 CLYPT_MODAL_VISUAL_BATCH_SIZE=16
 CLYPT_MODAL_VISUAL_THRESHOLD=0.85
-CLYPT_MODAL_VISUAL_SHAPE=640
+CLYPT_MODAL_VISUAL_SHAPE=648
 CLYPT_MODAL_VISUAL_BACKEND=tensorrt
 CLYPT_PHASE1_VISUAL_POSE_VALIDATION=1
 CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH=yolo11s-pose.pt
 ```
 
-The Modal visual worker must fail hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT Python runtime, `trtexec`, CUDA PyTorch, RF-DETR-Seg, or a usable mask output binding are unavailable. The worker retains `mask_rle` rows for future person-aware captions, motion graphics/overlays, and crop/negative-space decisions, but Phase6 crop/caption placement does not consume masks yet.
+The Modal visual worker must fail hard if CUDA ffmpeg hwaccel, `scale_cuda`, TensorRT Python runtime, `trtexec`, CUDA PyTorch, RF-DETR-Seg, or a usable mask output binding are unavailable. The worker retains masks in one compressed low-resolution `.npz` sidecar artifact and emits JSON `mask_ref` pointers; it must not inline full-frame mask RLE blobs. These masks exist for future person-aware captions, motion graphics/overlays, and crop/negative-space decisions, but Phase6 crop/caption placement does not consume masks yet.
 The deployed Modal image is pinned to Python `3.12` because the CUDA PyTorch
 and TensorRT wheels used by the visual fast path are not available for every
 new default Python runtime.

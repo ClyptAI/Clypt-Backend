@@ -56,7 +56,10 @@ def build_default_phase1_job_runner(*, working_root: str | Path | None = None) -
     if settings.elevenlabs_scribe is None:
         raise ValueError("ELEVENLABS_API_KEY is required for ElevenLabs Scribe v2.")
     scribe_provider = ElevenLabsScribeClient(settings=settings.elevenlabs_scribe)
-    visual_extractor = RemoteVisualExtractClient(settings=settings.phase1_visual_service)
+    visual_extractor = RemoteVisualExtractClient(
+        settings=settings.phase1_visual_service,
+        storage_client=storage_client,
+    )
 
     phase14_repository = _build_phase14_repository(settings=settings)
     phase24_task_queue_client = RemotePhase26DispatchClient(

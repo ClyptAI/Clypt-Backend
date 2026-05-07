@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from .masks import encode_mask_rle
-
 if TYPE_CHECKING:
     import supervision as sv
 
@@ -30,6 +28,7 @@ logger = logging.getLogger(__name__)
 class TrackerMetrics:
     frames_processed: int = 0
     total_tracker_ms: float = 0.0
+    total_mask_association_ms: float = 0.0
     total_detections_in: int = 0
     total_tracked_out: int = 0
     resets: int = 0
@@ -39,6 +38,12 @@ class TrackerMetrics:
         if self.frames_processed == 0:
             return 0.0
         return self.total_tracker_ms / self.frames_processed
+
+    @property
+    def mean_mask_association_latency_ms(self) -> float:
+        if self.frames_processed == 0:
+            return 0.0
+        return self.total_mask_association_ms / self.frames_processed
 
 
 @dataclass(slots=True)
@@ -53,7 +58,7 @@ class TrackRow:
     y2: float
     confidence: float
     class_id: int = 0
-    mask_rle: dict[str, Any] | None = None
+    mask_ref: dict[str, Any] | None = None
 
 
 def _box_iou_one_to_many(box: np.ndarray, boxes: np.ndarray) -> np.ndarray:
@@ -117,7 +122,13 @@ class ByteTrackTrackerRuntime:
         self._tracker = self._create_tracker(frame_rate=self._frame_rate)
         self._metrics.resets += 1
 
-    def update(self, *, frame_idx: int, detections: sv.Detections) -> list[TrackRow]:
+    def update(
+        self,
+        *,
+        frame_idx: int,
+        detections: sv.Detections,
+        mask_refs: list[dict[str, Any]] | None = None,
+    ) -> list[TrackRow]:
         """Feed one frame's detections into the tracker and return track rows.
 
         Must be called in chronological frame order.
@@ -129,6 +140,12 @@ class ByteTrackTrackerRuntime:
         source_masks = getattr(detections, "mask", None)
         if source_masks is None:
             raise RuntimeError("RF-DETR-Seg detections must include masks before ByteTrack.")
+        source_mask_refs = list(mask_refs or [])
+        if len(source_mask_refs) != len(detections):
+            raise RuntimeError(
+                "RF-DETR-Seg mask refs must align one-to-one with detections before ByteTrack "
+                f"(detections={len(detections)}, mask_refs={len(source_mask_refs)})."
+            )
 
         t0 = time.perf_counter()
         import supervision as sv
@@ -149,6 +166,7 @@ class ByteTrackTrackerRuntime:
         if tracked.tracker_id is None or len(tracked) == 0:
             return rows
 
+        association_t0 = time.perf_counter()
         for i in range(len(tracked)):
             tid = tracked.tracker_id[i]
             if tid is None:
@@ -160,6 +178,8 @@ class ByteTrackTrackerRuntime:
                     "RF-DETR-Seg mask association failed: tracked row has no same-frame source mask."
                 )
             mask_index = int(np.argmax(ious))
+            mask_ref = dict(source_mask_refs[mask_index])
+            mask_ref["track_id"] = f"track_{int(tid)}"
             conf = float(tracked.confidence[i]) if tracked.confidence is not None else 0.0
             cid = int(tracked.class_id[i]) if tracked.class_id is not None else 0
             rows.append(
@@ -172,10 +192,13 @@ class ByteTrackTrackerRuntime:
                     y2=float(xyxy[3]),
                     confidence=conf,
                     class_id=cid,
-                    mask_rle=encode_mask_rle(source_masks[mask_index]),
+                    mask_ref=mask_ref,
                 )
             )
 
+        self._metrics.total_mask_association_ms += (
+            time.perf_counter() - association_t0
+        ) * 1000.0
         self._metrics.total_tracked_out += len(rows)
         return rows
 

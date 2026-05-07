@@ -572,8 +572,12 @@ def build_default_phase24_worker_service(*, settings=None) -> Phase24WorkerServi
     # is no in-process fallback. Always wire the remote client.
     node_media_preparer = RemoteNodeMediaPrepClient(settings=settings.node_media_prep)
     phase1_visual_settings = getattr(settings, "phase1_visual_service", None)
+    storage_client = GCSStorageClient(settings=settings.storage)
     visual_result_client = (
-        RemoteVisualExtractClient(settings=phase1_visual_settings)
+        RemoteVisualExtractClient(
+            settings=phase1_visual_settings,
+            storage_client=storage_client,
+        )
         if phase1_visual_settings is not None
         else None
     )
@@ -581,7 +585,7 @@ def build_default_phase24_worker_service(*, settings=None) -> Phase24WorkerServi
     render_executor = (
         RemotePhase6RenderClient(
             settings=phase6_render_settings,
-            storage_client=GCSStorageClient(settings=settings.storage),
+            storage_client=storage_client,
         )
         if phase6_render_settings is not None
         else None
@@ -590,7 +594,7 @@ def build_default_phase24_worker_service(*, settings=None) -> Phase24WorkerServi
         llm_client=llm_client,
         embedding_client=VertexEmbeddingClient(settings=settings.vertex),
         flash_model=local_flash_model,
-        storage_client=GCSStorageClient(settings=settings.storage),
+        storage_client=storage_client,
         node_media_preparer=node_media_preparer,
         render_executor=render_executor,
         visual_result_client=visual_result_client,

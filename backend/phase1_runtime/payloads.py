@@ -35,6 +35,7 @@ class VisualPayload(_StrictModel):
     person_detections: list[dict[str, Any]] = Field(default_factory=list)
     face_detections: list[dict[str, Any]] = Field(default_factory=list)
     visual_identities: list[dict[str, Any]] = Field(default_factory=list)
+    mask_artifacts: list[dict[str, Any]] = Field(default_factory=list)
     mask_stability_signals: list[dict[str, Any]] = Field(default_factory=list)
     tracking_metrics: dict[str, Any] = Field(default_factory=dict)
 

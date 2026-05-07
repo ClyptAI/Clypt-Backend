@@ -129,6 +129,24 @@ def test_pose_evidence_maps_crop_keypoints_to_source_coordinates():
     assert evidence.upper_torso_anchor_xy == pytest.approx((116.5, 246.0))
 
 
+def test_pose_evidence_from_result_rejects_multi_person_pose_batches():
+    from types import SimpleNamespace
+
+    from backend.phase1_runtime.pose_subject_validator import _pose_evidence_from_result
+
+    data = np.zeros((2, 17, 3), dtype=np.float32)
+    data[0, 0] = [10.0, 20.0, 0.95]
+    data[1, 0] = [60.0, 20.0, 0.95]
+    result = SimpleNamespace(keypoints=SimpleNamespace(data=data))
+
+    with pytest.raises(RuntimeError, match="requires exactly one pose instance"):
+        _pose_evidence_from_result(
+            result,
+            keypoint_confidence=0.35,
+            offset_xy=(0, 0),
+        )
+
+
 def test_yolo_pose_validator_preserves_source_pose_anchor_points(monkeypatch):
     from types import SimpleNamespace
 
@@ -189,5 +207,103 @@ def test_yolo_pose_validator_preserves_source_pose_anchor_points(monkeypatch):
             "head_center_xy": pytest.approx([110.0, 70.0]),
             "shoulder_center_xy": pytest.approx([120.0, 110.0]),
             "upper_torso_anchor_xy": pytest.approx([116.5, 96.0]),
+        }
+    ]
+
+
+def test_yolo_pose_validator_uses_track_mask_to_select_single_pose_instance(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from backend.phase1_runtime import pose_subject_validator as module
+    from backend.phase1_runtime.masks import MaskArtifactWriter
+
+    class FakeModel:
+        def predict(self, crop_batch, imgsz, conf, verbose):  # noqa: ARG002
+            data = np.zeros((2, 17, 3), dtype=np.float32)
+            data[0, 0] = [12.0, 20.0, 0.95]
+            data[0, 5] = [10.0, 60.0, 0.90]
+            data[0, 6] = [30.0, 60.0, 0.90]
+            data[1, 0] = [65.0, 22.0, 0.95]
+            data[1, 5] = [55.0, 62.0, 0.90]
+            data[1, 6] = [75.0, 62.0, 0.90]
+            return [SimpleNamespace(keypoints=SimpleNamespace(data=data)) for _ in crop_batch]
+
+    decoded = SimpleNamespace(
+        frame_idx=7,
+        rgb=np.zeros((240, 320, 3), dtype=np.uint8),
+    )
+
+    monkeypatch.setattr(module, "decode_video_frames", lambda **kwargs: iter([decoded]))
+
+    video_path = tmp_path / "source_video.mp4"
+    video_path.write_text("video", encoding="utf-8")
+    mask_writer = MaskArtifactWriter(
+        artifact_path=tmp_path / "visual_masks_lowres_v1.npz",
+    )
+    mask_ref = mask_writer.add(
+        frame_idx=7,
+        detection_id="raw_7_0",
+        mask=np.array(
+            [
+                [0, 0, 0, 0, 1, 1, 1, 1],
+                [0, 0, 0, 0, 1, 1, 1, 1],
+                [0, 0, 0, 0, 1, 1, 1, 1],
+                [0, 0, 0, 0, 1, 1, 1, 1],
+                [0, 0, 0, 0, 1, 1, 1, 1],
+                [0, 0, 0, 0, 1, 1, 1, 1],
+                [0, 0, 0, 0, 1, 1, 1, 1],
+                [0, 0, 0, 0, 1, 1, 1, 1],
+            ],
+            dtype=np.uint8,
+        ),
+        bbox_xyxy=[100.0, 50.0, 180.0, 170.0],
+        source_size=(240, 320),
+    )
+    artifact = mask_writer.finalize()
+    assert artifact is not None
+
+    config = SimpleNamespace(
+        pose_max_samples_per_tracklet=1,
+        pose_imgsz=256,
+        pose_confidence=0.25,
+        pose_keypoint_confidence=0.35,
+        pose_batch_size=4,
+        pose_crop_padding_ratio=0.0,
+        frame_decode_backend="cpu",
+        gpu_decode_backend="none",
+        pose_min_rfdetr_confidence=0.85,
+        pose_min_head_evidence_ratio=0.40,
+        pose_min_upper_body_anchor_ratio=0.25,
+    )
+    validator = module.YoloPoseSubjectValidator(config=config)
+    monkeypatch.setattr(validator, "_load_model", lambda: FakeModel())
+
+    reports = validator(
+        video_path=video_path,
+        tracks=[
+            {
+                "track_id": "track_1",
+                "frame_idx": 7,
+                "x1": 100.0,
+                "y1": 50.0,
+                "x2": 180.0,
+                "y2": 170.0,
+                "confidence": 0.99,
+                "mask_ref": mask_ref,
+            }
+        ],
+        metadata={"fps": 30.0},
+        config=config,
+    )
+
+    anchors = reports["track_1"]["subject_quality"]["pose_anchor_points"]
+    assert anchors == [
+        {
+            "frame_idx": 7,
+            "head_center_xy": pytest.approx([165.0, 72.0]),
+            "shoulder_center_xy": pytest.approx([165.0, 112.0]),
+            "upper_torso_anchor_xy": pytest.approx([165.0, 98.0]),
         }
     ]

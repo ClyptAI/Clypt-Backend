@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import subprocess
@@ -129,7 +130,7 @@ def _set_visual_defaults() -> None:
     )
     os.environ.setdefault(
         "CLYPT_PHASE1_VISUAL_SHAPE",
-        os.environ.get("CLYPT_MODAL_VISUAL_SHAPE", "640"),
+        os.environ.get("CLYPT_MODAL_VISUAL_SHAPE", "648"),
     )
     os.environ.setdefault("CLYPT_PHASE1_VISUAL_TRACKER", "bytetrack")
     os.environ.setdefault("CLYPT_PHASE1_VISUAL_TRACKER_BUFFER", "30")
@@ -162,6 +163,60 @@ def _parse_payload(payload: dict[str, Any]) -> dict[str, str]:
         raise ValueError("run_id is required")
     parse_gcs_uri(video_gcs_uri)
     return {"run_id": run_id, "video_gcs_uri": video_gcs_uri}
+
+
+def _upload_mask_artifacts(
+    *,
+    phase1_visual: dict[str, Any],
+    run_id: str,
+    storage_client: GCSStorageClient,
+) -> None:
+    artifacts = list(phase1_visual.get("mask_artifacts") or [])
+    uploaded: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        local_path_raw = str(artifact.get("local_path") or "").strip()
+        if not local_path_raw:
+            raise RuntimeError("mask artifact is missing local_path before Modal upload")
+        local_path = Path(local_path_raw)
+        if not local_path.exists():
+            raise RuntimeError(f"mask artifact local_path does not exist: {local_path}")
+        object_name = f"phase14/{run_id}/visual/{local_path.name}"
+        gcs_uri = storage_client.upload_file(local_path=local_path, object_name=object_name)
+        clean = dict(artifact)
+        clean.pop("local_path", None)
+        clean["gcs_uri"] = gcs_uri
+        uploaded.append(clean)
+    phase1_visual["mask_artifacts"] = uploaded
+    metrics = dict(phase1_visual.get("tracking_metrics") or {})
+    metrics["mask_artifacts"] = uploaded
+    phase1_visual["tracking_metrics"] = metrics
+
+
+def _upload_phase1_visual_artifact(
+    *,
+    phase1_visual_payload: dict[str, Any],
+    run_id: str,
+    storage_client: GCSStorageClient,
+) -> dict[str, Any]:
+    with tempfile.NamedTemporaryFile(
+        prefix=f"{run_id}-phase1-visual-",
+        suffix=".json.gz",
+        delete=False,
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        with gzip.open(tmp_path, "wt", encoding="utf-8") as fh:
+            json.dump(phase1_visual_payload, fh, ensure_ascii=True, separators=(",", ":"))
+        object_name = f"phase14/{run_id}/visual/phase1_visual.json.gz"
+        gcs_uri = storage_client.upload_file(local_path=tmp_path, object_name=object_name)
+        return {
+            "artifact_id": "phase1_visual_v1",
+            "encoding": "json_gzip_v1",
+            "bytes": tmp_path.stat().st_size,
+            "gcs_uri": gcs_uri,
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 @web_app.on_event("startup")
@@ -246,8 +301,18 @@ def visual_extract_job(payload: dict) -> dict:
             local_path=video_path,
         )
         extractor = V31VisualExtractor(visual_config=VisualPipelineConfig.from_env())
-        visual_payload = VisualPayload.model_validate(
-            extractor.extract(video_path=video_path, workspace=None)
+        phase1_visual = extractor.extract(video_path=video_path, workspace=None)
+        _upload_mask_artifacts(
+            phase1_visual=phase1_visual,
+            run_id=parsed["run_id"],
+            storage_client=storage_client,
+        )
+        visual_payload = VisualPayload.model_validate(phase1_visual)
+        visual_payload_json = visual_payload.model_dump(mode="json")
+        visual_payload_artifact = _upload_phase1_visual_artifact(
+            phase1_visual_payload=visual_payload_json,
+            run_id=parsed["run_id"],
+            storage_client=storage_client,
         )
     return {
         "run_id": parsed["run_id"],
@@ -260,7 +325,9 @@ def visual_extract_job(payload: dict) -> dict:
             if payload.get("submitted_at_ms") is not None
             else None
         ),
-        "phase1_visual": visual_payload.model_dump(mode="json"),
+        "phase1_visual_gcs_uri": visual_payload_artifact["gcs_uri"],
+        "phase1_visual_encoding": visual_payload_artifact["encoding"],
+        "phase1_visual_artifact": visual_payload_artifact,
     }
 
 

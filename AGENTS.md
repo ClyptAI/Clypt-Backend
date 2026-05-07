@@ -108,6 +108,8 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - Phase1 submits `POST /tasks/visual-extract` to the dedicated Modal visual L40S service.
   - Phase1 enqueues Phase26 immediately after Scribe audio adaptation completes.
   - Phase26 may run Phase2-4 while RF-DETR-Seg continues, but must join/fail-hard on the visual future before Phase5/frontend grounding or Phase6 visual use.
+  - Modal visual poll results stay lightweight: the worker uploads the full `phase1_visual` payload as `phase1_visual.json.gz` to GCS and returns pointer fields (`phase1_visual_gcs_uri`, `phase1_visual_encoding=json_gzip_v1`) instead of inlining the full payload over the HTTP result surface.
+  - The colocated host-side `RemoteVisualExtractClient` must hydrate that GCS artifact back into `phase1_visual` before Phase26 consumes the joined result.
   - Do not document or draw the MI300X host as a generic fan-out hub. The event flow is: canonical media upload -> parallel Scribe + Modal visual submit -> Scribe audio adaptation -> Phase26 enqueue -> Phase2-4 audio/text work while visual remains pending -> visual hard join before Phase5/visual use -> Modal media prep/render when those stages need it.
 - Current Modal visual settings must stay intact unless the user explicitly approves retuning:
   - `CLYPT_PHASE1_VISUAL_MODEL=seg_nano`
@@ -115,15 +117,18 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt` and internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`
   - batch size `16`
   - threshold `0.85`
-  - shape `640`
-  - RF-DETR-Seg masks are retained as `rle_row_major_v1` alongside raw detections, tracked rows, person detections, and tracklet geometry. ByteTrack remains box-only; masks are associated back to tracked rows after ID assignment and are not used for identity decisions.
+  - shape `648`
+  - RF-DETR-Seg masks are retained as one compressed low-resolution `.npz` sidecar artifact per visual job. JSON payload rows carry `mask_ref` pointers using `lowres_mask_ref_v1`; full-frame `mask_rle` rows are not emitted on the active path. ByteTrack remains box-only; mask refs are associated back to tracked rows after ID assignment and are not used for identity decisions.
+  - TensorRT RF-DETR-Seg postprocess should stay close to RF-DETR upstream semantics: decode logits, threshold, filter to `person`, and retain surviving person queries. Do **not** add an extra hard box-IoU NMS stage on the active path unless the user explicitly approves it.
   - Segmentation was added to support future person-aware caption placement, motion-graphics/overlay placement, and short/reel crop decisions. Current Phase6 crop planning and caption placement do **not** consume masks yet; those integrations are future-sprint work.
   - sampled YOLO11s-pose TensorRT subject validation enabled for auto-follow eligibility
   - ByteTrack buffer `30`
   - ByteTrack match threshold `0.7`
   - GPU decode through `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
+  - Live timing runs must start only after the Modal visual worker has completed a real person-containing warmup that builds/loads both the RF-DETR-Seg TensorRT engine and the YOLO11s-pose TensorRT engine. A blank/synthetic warmup is insufficient because it can skip pose validation and leave the pose engine build in the measured run.
 - Phase5-less render auto-follow is implemented but currently experimental and **not production-quality**:
-  - active mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`: pose-x anchored, bbox-top anchored, dynamic inside-person 9:16 crop keyframes, and hard crop cuts at shot/tracklet boundaries
+  - active mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`: the compiler emits pose-x anchored, bbox-top anchored, dynamic inside-person 9:16 keyframes with hard crop cuts at shot/tracklet boundaries
+  - the active Modal FFmpeg renderer does **not** apply dynamic crop `w/h` inside a single ffmpeg pass; it renders per-run/per-tracklet fixed-size cropped video segments, stitches them into one clip, and applies subtitles in a final pass
   - latest reviewed clips still had poor tracking/subject selection and insufficiently smooth crop motion
   - do not treat generated auto-follow renders as accepted visual-quality baselines
   - manual Phase5 grounding remains the production-quality path until tracking/crop planning is repaired and reviewed again
@@ -141,6 +146,7 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - `CLYPT_PHASE24_LOCAL_RECLAIM_EXPIRED_LEASES=0`
   - `CLYPT_PHASE24_LOCAL_FAIL_FAST_ON_STALE_RUNNING=1`
 - Comments/trends augmentation is hard-join + fail-fast before Phase 4.
+- Phase26 retry/resume must not mark a run terminal solely because persisted metrics say Phase 4 succeeded. If a run resumes after a visual-join failure, it must reload persisted Phase2/Phase3 artifacts, rerun Phase4, and then attempt the visual join again.
 - Qwen serving target is the SGLang ROCm service on Phase26 `127.0.0.1:8001`.
 - Node-media prep and render/export are always delegated remotely to the shared Modal media L40S. Do not re-introduce an in-process ffmpeg fallback on the Phase26 MI300X host.
 - Historical H200/H100 and Phase1 MI300X/VibeVoice overlays are deleted on AMD-refactor; do not reintroduce or reference `known-good-phase1-h100-backup.env` unless the user explicitly asks for a fresh replacement.

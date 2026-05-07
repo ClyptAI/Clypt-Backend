@@ -1,7 +1,7 @@
 # ARCHITECTURE
 
 **Status:** Active Scribe/Modal + Phase26 MI300X topology
-**Last updated:** 2026-05-06
+**Last updated:** 2026-05-07
 
 This document describes the current `AMD-refactor` topology: Phase1 orchestration colocated on the DigitalOcean MI300X host's vCPUs, Phase26/Qwen on the same MI300X GPU host, and two persistent Modal L40S GPU workers.
 
@@ -33,7 +33,9 @@ flowchart TD
     track["ByteTrack on boxes"]
     maskAssoc["same-frame mask association"]
     pose["YOLO pose validation"]
-    visualResult["tracks + masks + shots + pose anchors"]
+    maskArtifact["visual_masks_lowres_v1.npz"]
+    visualArtifact["phase1_visual.json.gz"]
+    visualPointer["small poll result with GCS pointer"]
   end
 
   subgraph p26["MI300X host: Phase26"]
@@ -43,6 +45,7 @@ flowchart TD
     qwen["SGLang Qwen :8001"]
     phase2["Phase2 node construction"]
     visualJoin["Poll/join visual future"]
+    hydrate["download + inflate phase1_visual"]
     phase3["Phase3 graph construction"]
     phase4["Phase4 retrieval + ranking"]
     phase5["Phase5/frontend grounding gate"]
@@ -59,12 +62,16 @@ flowchart TD
   source --> ingest --> upload --> gcs
   sign --> scribe --> adapt
   gcs --> sign
-  gcs --> submitVisual --> visualApi --> visualJob --> decode --> detect --> track --> maskAssoc --> pose --> visualResult
+  gcs --> submitVisual --> visualApi --> visualJob --> decode --> detect --> track --> maskAssoc --> pose
+  pose --> maskArtifact
+  pose --> visualArtifact --> visualPointer
   adapt --> enqueue --> dispatch --> queue --> worker
   worker --> qwen --> phase2
   phase2 --> mediaApi --> mediaLease --> nodePrep --> worker
   worker --> vertex --> phase3 --> phase4
-  visualResult --> visualJoin
+  visualPointer --> visualJoin --> hydrate
+  maskArtifact --> hydrate
+  hydrate --> phase5
   phase4 --> visualJoin --> phase5 --> phase6
   phase6 --> mediaApi
   mediaLease --> render --> spanner
@@ -103,13 +110,16 @@ The active visual fast path is Modal L40S only:
 - `CLYPT_PHASE1_VISUAL_MODEL=seg_nano`
 - `CLYPT_PHASE1_VISUAL_BATCH_SIZE=16`
 - `CLYPT_PHASE1_VISUAL_THRESHOLD=0.85`
-- `CLYPT_PHASE1_VISUAL_SHAPE=640`
+- `CLYPT_PHASE1_VISUAL_SHAPE=648`
 - `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
-- RF-DETR-Seg masks are retained as `mask_rle` using `rle_row_major_v1` in raw detections, tracked rows, person detections, and tracklet geometry.
+- RF-DETR-Seg masks are retained once in a compressed low-resolution `.npz` sidecar artifact. Raw detections, tracked rows, person detections, and tracklet geometry carry `mask_ref` pointers using `lowres_mask_ref_v1`; the active path does not emit full-frame inline `mask_rle` blobs.
+- The active TensorRT RF-DETR-Seg path stays close to upstream RF-DETR postprocess semantics: decode logits to per-query scores/labels, threshold, filter to `person`, and retain the surviving queries. It does not add a separate hard box-IoU NMS stage on top of that active path.
+- Modal visual does not return the full `phase1_visual` JSON inline. The worker uploads `phase1_visual.json.gz` to GCS, returns a small pointer-bearing poll result, and the colocated host hydrates the artifact before Phase26 uses it. This avoids oversized HTTP result payloads and keeps the Modal poll surface bounded.
 - Segmentation is present to enable future person-aware captions, motion graphics/overlays inside the short/reel frame, and better crop/negative-space decisions. Phase6 crop math and caption placement do not consume masks yet.
 - sampled YOLO11s-pose TensorRT validation marks `auto_follow_eligible` tracklets and stores source-space pose anchors for Phase5-less render auto-follow
 - Phase5-less render auto-follow uses the two-step subject model: manual/frontend `primary_tracklet_id` wins when present; otherwise the compiler locks one pose-qualified subject tracklet per shot
-- the active auto-follow crop mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`: each crop keyframe is the largest 9:16 rectangle inside that frame's selected person bbox, pose controls horizontal head/face anchoring only, vertical placement is bbox-top anchored, and crop `x/y/w/h` may change per keyframe
+- the active auto-follow crop mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`: the compiler computes per-keyframe inside-person 9:16 crops, pose controls horizontal head/face anchoring only, and vertical placement is bbox-top anchored
+- the active Modal FFmpeg renderer does not change crop `w/h` inside one ffmpeg pass; it renders per-run/per-tracklet fixed-size cropped video pieces, stitches them back into one clip, and applies subtitles in a final pass. Within each piece it still drives dynamic `x/y` through `sendcmd`
 - shot or primary-tracklet changes are hard crop cuts with run-local interpolation only, so the new shot starts already framed on the selected subject instead of animating from the previous shot crop
 - Modal worker detector route: `CLYPT_MODAL_VISUAL_BACKEND=tensorrt`; the worker sets internal `CLYPT_PHASE1_VISUAL_BACKEND=tensorrt_fp16`.
 - ByteTrack buffer `30`
@@ -133,7 +143,7 @@ Phase26 owns the downstream queue and graph pipeline:
 - Modal-backed media prep/render
 - Spanner persistence
 
-The worker may process Phase2-4 while the visual future is pending. Pending visual payloads require a configured Modal visual client and malformed or failed visual results fail hard.
+The worker may process Phase2-4 while the visual future is pending. Pending visual payloads require a configured Modal visual client and malformed or failed visual results fail hard. If a run resumes after a visual-join failure, it must not short-circuit to success merely because persisted Phase4 metrics exist; it must rerun Phase4 and then re-attempt the visual join.
 
 ## 6) Removed Paths
 
