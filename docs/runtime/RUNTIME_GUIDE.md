@@ -153,7 +153,15 @@ flowchart LR
 
 The worker fails hard if CUDA ffmpeg support, `scale_cuda`, TensorRT, `trtexec`, CUDA PyTorch, RF-DETR-Seg, a usable segmentation mask output binding, or YOLO11s-pose validation are unavailable. It must not fall back to software decode, CPU RF-DETR, or detection-only RF-DETR models.
 
-Benchmark or E2E timing runs must not include first-run engine setup. Before a measured run, submit a person-containing visual warmup through the same Modal visual endpoint and wait for the result endpoint to return success. The warmup must exercise both RF-DETR-Seg and YOLO11s-pose so the RF-DETR-Seg TensorRT engine, YOLO pose TensorRT engine, model weights, CUDA context, and ffmpeg/NVDEC path are already hot. A blank synthetic clip can validate the service surface but is not a valid timing warmup because it may skip pose validation.
+Benchmark or E2E timing runs must not include first-run engine setup. The dedicated operational path is:
+
+1. deploy the visual app
+2. run `POST /tasks/visual-warmup`
+3. wait for `GET /tasks/visual-warmup/result/{call_id}` to return success
+4. wait for `GET /ready` to return `200`
+5. only then submit the measured run
+
+The canonical warmup asset is `visual_people_warmup_v1`, sourced from `https://youtu.be/64qBE35S0ek?si=bul2StVGVzUE8EL6` and clipped to `694000ms-706000ms`. This warmup must exercise both RF-DETR-Seg and YOLO11s-pose so the RF-DETR-Seg TensorRT engine, YOLO pose TensorRT engine, model weights, CUDA context, and ffmpeg/NVDEC path are already hot. A blank synthetic clip can validate the service surface but is not a valid timing warmup because it may skip pose validation. `/health` proves the ASGI surface is up; `/ready` is the timing-readiness gate.
 
 RF-DETR-Seg masks are retained once per visual job in a compressed low-resolution `.npz` sidecar artifact. `raw_person_detections`, `tracks`, `person_detections[].timestamped_objects`, and downstream `TrackletGeometryPoint` records carry lightweight `mask_ref` pointers using `lowres_mask_ref_v1`. The active path must not resize every instance mask to source-frame dimensions or inline full-frame `mask_rle` blobs in JSON. ByteTrack stays strictly box-based; mask refs are associated back to tracked rows by same-frame box IoU after identity assignment.
 

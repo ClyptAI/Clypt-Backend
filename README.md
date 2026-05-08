@@ -113,12 +113,16 @@ The same MI300X host owns the downstream graph and ranking pipeline. The `Phase2
 Modal currently handles visual extraction plus media-prep/render:
 
 - `POST /tasks/visual-extract`
+- `POST /tasks/visual-warmup`
+- `GET /ready`
 - `POST /tasks/node-media-prep`
 - `POST /tasks/render-video`
 - CPU web submit/poll surface
 - one dedicated warm visual `L40S` worker via `visual_extract_job`
 - one shared warm media `L40S` worker via `media_gpu_job`
 - timeline-batched ffmpeg GPU path for clip extraction/encoding before multimodal embedding
+
+The visual worker now has an explicit setup contract: a dedicated warmup job (`/tasks/visual-warmup`) against one canonical short person-containing clip plus a readiness probe (`/ready`) that checks the live GPU worker state, not just the web surface. Use that path before timing-sensitive runs instead of treating `/health` or a synthetic extract as sufficient.
 
 RF-DETR-Seg masks are retained with the same visual payloads as boxes and tracklets. The immediate runtime still tracks by boxes and renders Phase6 crops from bbox+pose data, but masks create a path for future person-aware caption placement, motion graphics and overlay placement within the same short/reel frame, and improved crop/negative-space decisions. Those mask-consuming render integrations are not implemented yet.
 

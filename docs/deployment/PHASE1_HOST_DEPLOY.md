@@ -81,8 +81,19 @@ Phase1 health is mostly dependency health:
 - Local API: `curl -sf http://127.0.0.1:8080/health`
 - Scribe: `ELEVENLABS_API_KEY` present, synchronous Scribe request succeeds in smoke test.
 - GCS: upload + signed URL generation succeeds.
-- Modal visual: `GET /health` succeeds and `POST /tasks/visual-extract` returns `202` with `call_id`.
+- Modal visual:
+  - `GET /health` succeeds for the web surface
+  - `GET /ready` returns `200` for timing-readiness
+  - `POST /tasks/visual-warmup` returns `202` with `call_id`
+  - `GET /tasks/visual-warmup/result/{call_id}` reaches success before measured runs
 - Phase26 dispatch: `GET http://127.0.0.1:9300/health` succeeds and enqueue returns a local queue task.
+
+Canonical visual warmup asset:
+
+- asset id: `visual_people_warmup_v1`
+- source YouTube URL: `https://youtu.be/64qBE35S0ek?si=bul2StVGVzUE8EL6`
+- canonical GCS clip: `gs://clypt-storage-v3/test-bank/warmups/visual_people_warmup_v1.mp4`
+- clip window: `694000ms-706000ms`
 
 ## 6) Handoff Invariant
 

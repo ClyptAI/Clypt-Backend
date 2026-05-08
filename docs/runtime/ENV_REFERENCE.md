@@ -1,7 +1,7 @@
 # ENV REFERENCE
 
 **Status:** Active  
-**Last updated:** 2026-05-02
+**Last updated:** 2026-05-07
 
 This is the code-backed env catalog for the current AMD-refactor topology:
 
@@ -65,6 +65,15 @@ Modal visual routing:
 | `CLYPT_PHASE1_VISUAL_POSE_MODEL_PATH` | `yolo11s-pose.pt` | YOLO pose source model for TensorRT export. |
 | `CLYPT_PHASE1_VISUAL_POSE_MIN_HEAD_EVIDENCE_RATIO` | `0.40` | Auto-follow requires head/face/ear/nose evidence in at least this share of sampled frames. |
 | `CLYPT_PHASE1_VISUAL_POSE_MIN_UPPER_BODY_ANCHOR_RATIO` | `0.25` | Auto-follow requires shoulder/upper-body evidence in at least this share of sampled frames. |
+| `CLYPT_PHASE1_VISUAL_READY_OBJECT_NAME` | `service-state/modal-visual-l40s/visual_ready_state_v1.json` | GCS object written by warmup/qualifying extract jobs for persisted visual readiness metadata. |
+| `CLYPT_PHASE1_VISUAL_WARMUP_ASSET_ID` | `visual_people_warmup_v1` | Canonical visual warmup asset id. |
+| `CLYPT_PHASE1_VISUAL_WARMUP_SOURCE_TEST_BANK_URL` | `https://youtu.be/64qBE35S0ek?si=bul2StVGVzUE8EL6` | Human-facing source reference for the canonical warmup clip. |
+| `CLYPT_PHASE1_VISUAL_WARMUP_SOURCE_VIDEO_GCS_URI` | `gs://clypt-storage-v3/test-bank/canonical/videos/joeroganflagrant.mp4` | Long-form source used to build the canonical warmup clip. |
+| `CLYPT_PHASE1_VISUAL_WARMUP_GCS_URI` | `gs://clypt-storage-v3/test-bank/warmups/visual_people_warmup_v1.mp4` | Canonical short warmup clip used by `/tasks/visual-warmup`. |
+| `CLYPT_PHASE1_VISUAL_WARMUP_CLIP_START_MS` | `694000` | Canonical warmup clip start offset in the longform source. |
+| `CLYPT_PHASE1_VISUAL_WARMUP_CLIP_END_MS` | `706000` | Canonical warmup clip end offset in the longform source. |
+| `CLYPT_PHASE1_VISUAL_WARMUP_MIN_EMITTED_TRACK_ROWS` | `1` | Warmup validation floor for emitted track rows. |
+| `CLYPT_PHASE1_VISUAL_WARMUP_MIN_POSE_VALIDATED_TRACKLETS` | `1` | Warmup validation floor proving YOLO pose validation actually ran. |
 
 Phase1 handoff invariant:
 
@@ -148,6 +157,7 @@ The Modal visual worker must fail hard if CUDA ffmpeg hwaccel, `scale_cuda`, Ten
 The deployed Modal image is pinned to Python `3.12` because the CUDA PyTorch
 and TensorRT wheels used by the visual fast path are not available for every
 new default Python runtime.
+The visual app now exposes a dedicated setup contract: `POST /tasks/visual-warmup`, `GET /tasks/visual-warmup/result/{call_id}`, and `GET /ready`. `/health` is only a web-surface check; `/ready` is the timing-readiness gate and probes the live GPU worker state.
 
 ### 3.2 Shared Media Worker
 

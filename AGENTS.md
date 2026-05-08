@@ -126,6 +126,10 @@ python -m backend.runtime.run_phase26_worker --worker-id phase26-worker-1
   - ByteTrack match threshold `0.7`
   - GPU decode through `CLYPT_PHASE1_VISUAL_GPU_DECODE_BACKEND=nvdec`
   - Live timing runs must start only after the Modal visual worker has completed a real person-containing warmup that builds/loads both the RF-DETR-Seg TensorRT engine and the YOLO11s-pose TensorRT engine. A blank/synthetic warmup is insufficient because it can skip pose validation and leave the pose engine build in the measured run.
+  - The dedicated warmup contract is `POST /tasks/visual-warmup` plus `GET /tasks/visual-warmup/result/{call_id}`; do not abuse a normal visual extract call for setup readiness.
+  - The dedicated readiness contract is `GET /ready`; use that instead of `/health` when deciding whether the live visual GPU worker is timing-ready.
+  - The canonical warmup asset is `visual_people_warmup_v1`, sourced from `https://youtu.be/64qBE35S0ek?si=bul2StVGVzUE8EL6` and clipped from `694000ms` to `706000ms`.
+  - Canonical warmup helper scripts are `scripts/modal/build_visual_warmup_asset.py` and `scripts/modal/warm_visual_worker.py`.
 - Phase5-less render auto-follow is implemented but currently experimental and **not production-quality**:
   - active mode is `tracklet_follow_9x16_pose_x_dynamic_inside_person`: the compiler emits pose-x anchored, bbox-top anchored, dynamic inside-person 9:16 keyframes with hard crop cuts at shot/tracklet boundaries
   - the active Modal FFmpeg renderer does **not** apply dynamic crop `w/h` inside a single ffmpeg pass; it renders per-run/per-tracklet fixed-size cropped video segments, stitches them into one clip, and applies subtitles in a final pass
@@ -169,7 +173,7 @@ Each entry must include:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Clypt-Backend** (4158 symbols, 10524 relationships, 251 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Clypt-Backend** (4243 symbols, 10733 relationships, 255 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

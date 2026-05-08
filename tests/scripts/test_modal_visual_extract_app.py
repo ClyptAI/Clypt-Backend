@@ -286,3 +286,162 @@ def test_require_visual_runtime_uses_trtexec_help(monkeypatch) -> None:
 
     assert check_output_calls == [["ffmpeg", "-hwaccels"], ["ffmpeg", "-filters"]]
     assert run_calls == [["trtexec", "--help"]]
+
+
+def test_ready_returns_503_when_gpu_probe_is_cold(monkeypatch) -> None:
+    visual_extract_app = _load_app_module()
+    monkeypatch.setattr(visual_extract_app, "_require_ffmpeg", lambda: None)
+    monkeypatch.setattr(visual_extract_app, "_build_storage_client", lambda: object())
+    monkeypatch.setattr(visual_extract_app, "_read_visual_readiness_state", lambda _client: None)
+    monkeypatch.setattr(visual_extract_app, "_compute_visual_runtime_fingerprint", lambda: "fp-1")
+    monkeypatch.setattr(
+        visual_extract_app,
+        "visual_extract_job",
+        types.SimpleNamespace(
+            remote=staticmethod(
+                lambda payload: {  # noqa: ARG005
+                    "status": "cold",
+                    "reason": "gpu_worker_not_warmed",
+                    "runtime_fingerprint": "fp-1",
+                }
+            )
+        ),
+    )
+
+    client = TestClient(visual_extract_app.web_app)
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "cold"
+
+
+def test_ready_returns_200_when_gpu_probe_is_ready(monkeypatch) -> None:
+    visual_extract_app = _load_app_module()
+    monkeypatch.setattr(visual_extract_app, "_require_ffmpeg", lambda: None)
+    monkeypatch.setattr(visual_extract_app, "_build_storage_client", lambda: object())
+    monkeypatch.setattr(visual_extract_app, "_read_visual_readiness_state", lambda _client: None)
+    monkeypatch.setattr(visual_extract_app, "_compute_visual_runtime_fingerprint", lambda: "fp-1")
+    monkeypatch.setattr(
+        visual_extract_app,
+        "visual_extract_job",
+        types.SimpleNamespace(
+            remote=staticmethod(
+                lambda payload: {  # noqa: ARG005
+                    "status": "ready",
+                    "reason": "gpu_worker_warm",
+                    "runtime_fingerprint": "fp-1",
+                    "gpu_container_boot_id": "boot-1",
+                }
+            )
+        ),
+    )
+
+    client = TestClient(visual_extract_app.web_app)
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["persisted_state_status"] == "missing"
+
+
+def test_visual_warmup_submit_returns_call_id_and_records_warming_state(monkeypatch) -> None:
+    visual_extract_app = _load_app_module()
+    monkeypatch.setattr(visual_extract_app, "_require_ffmpeg", lambda: None)
+    monkeypatch.setenv("VISUAL_EXTRACT_AUTH_TOKEN", "visual-token")
+
+    captured: dict[str, object] = {}
+
+    class _FakeSpawnedCall:
+        object_id = "fc-warmup"
+
+    class _FakeJob:
+        @staticmethod
+        def spawn(payload):
+            captured["payload"] = payload
+            return _FakeSpawnedCall()
+
+    monkeypatch.setattr(visual_extract_app, "visual_extract_job", _FakeJob)
+    monkeypatch.setattr(visual_extract_app, "_build_storage_client", lambda: object())
+    monkeypatch.setattr(
+        visual_extract_app,
+        "_write_visual_readiness_state",
+        lambda **kwargs: captured.setdefault("ready_state", kwargs["payload"]),
+    )
+    monkeypatch.setattr(visual_extract_app, "_compute_visual_runtime_fingerprint", lambda: "fp-1")
+
+    client = TestClient(visual_extract_app.web_app)
+    response = client.post(
+        "/tasks/visual-warmup",
+        headers={"Authorization": "Bearer visual-token"},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "call_id": "fc-warmup",
+        "status": "submitted",
+        "result_path": "/tasks/visual-warmup/result/fc-warmup",
+    }
+    assert captured["payload"]["job_kind"] == "warmup"
+    assert captured["ready_state"]["status"] == "warming"
+
+
+def test_visual_extract_job_ready_probe_returns_cold_without_warm_state(monkeypatch) -> None:
+    visual_extract_app = _load_app_module()
+    monkeypatch.setattr(visual_extract_app, "_require_visual_runtime", lambda: None)
+    monkeypatch.setattr(visual_extract_app, "_build_storage_client", lambda: object())
+    monkeypatch.setattr(visual_extract_app, "_compute_visual_runtime_fingerprint", lambda: "fp-1")
+    monkeypatch.setattr(visual_extract_app, "_GPU_CONTAINER_BOOT_ID", "boot-1")
+    monkeypatch.setattr(visual_extract_app, "_GPU_READY_STATE", None)
+
+    response = visual_extract_app.visual_extract_job({"job_kind": "ready_probe"})
+
+    assert response == {
+        "status": "cold",
+        "reason": "gpu_worker_not_warmed",
+        "runtime_fingerprint": "fp-1",
+        "gpu_container_boot_id": "boot-1",
+    }
+
+
+def test_visual_extract_job_warmup_marks_gpu_ready(monkeypatch) -> None:
+    visual_extract_app = _load_app_module()
+    monkeypatch.setattr(visual_extract_app, "_require_visual_runtime", lambda: None)
+    monkeypatch.setattr(visual_extract_app, "_build_storage_client", lambda: object())
+    monkeypatch.setattr(visual_extract_app, "_compute_visual_runtime_fingerprint", lambda: "fp-1")
+    monkeypatch.setattr(visual_extract_app, "_GPU_CONTAINER_BOOT_ID", "boot-1")
+    monkeypatch.setattr(visual_extract_app, "_GPU_READY_STATE", None)
+
+    written: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        visual_extract_app,
+        "_extract_phase1_visual",
+        lambda **kwargs: {  # noqa: ARG005
+            "tracking_metrics": {
+                "emitted_track_rows": 4,
+                "pose_validated_tracklets": 2,
+                "pose_auto_follow_eligible_tracklets": 1,
+            },
+            "tracks": [],
+            "shot_changes": [],
+        },
+    )
+    monkeypatch.setattr(
+        visual_extract_app,
+        "VisualPayload",
+        types.SimpleNamespace(model_validate=staticmethod(lambda payload: payload)),
+    )
+    monkeypatch.setattr(
+        visual_extract_app,
+        "_write_visual_readiness_state",
+        lambda **kwargs: written.setdefault("payload", kwargs["payload"]),
+    )
+
+    response = visual_extract_app.visual_extract_job(
+        {"job_kind": "warmup", "submitted_at_ms": 0.0}
+    )
+
+    assert response["status"] == "succeeded"
+    assert response["warmup"]["pose_validated_tracklets"] == 2
+    assert response["readiness"]["gpu_container_boot_id"] == "boot-1"
+    assert written["payload"]["status"] == "ready"
+    assert visual_extract_app._GPU_READY_STATE["status"] == "ready"

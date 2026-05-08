@@ -7,6 +7,16 @@ Persistent record of major runtime/deployment/pipeline errors and their recoveri
 > `phase1` + `phase26` + Modal cleanup; treat those paths as historical context,
 > not current operator entrypoints.
 
+## 2026-05-07 - Modal visual needed an explicit canonical warmup and live GPU readiness gate
+
+- **Date/Time (UTC):** 2026-05-07 23:58 UTC
+- **Subsystem:** Modal visual L40S deploy/readiness path (`scripts/modal/visual_extract_app.py`, `backend/phase1_runtime/visual_warmup.py`, `scripts/modal/build_visual_warmup_asset.py`, `scripts/modal/warm_visual_worker.py`)
+- **Environment:** AMD-refactor source of truth; local implementation after repeated first-run contamination incidents on the Modal visual worker
+- **Symptom / Error signature:** The visual service had a web-surface `/health` check, but no dedicated GPU-warm readiness gate. Operators had to abuse normal `POST /tasks/visual-extract` calls for warmup, synthetic clips could skip YOLO pose validation, and there was no canonical short person-containing clip or single post-deploy command that guaranteed timing-valid readiness.
+- **Root cause:** The visual deploy path conflated three different things: ASGI surface health, historical proof that some earlier warmup succeeded, and proof that the current live GPU worker had actually exercised both RF-DETR-Seg and YOLO11s-pose under the current runtime fingerprint. Those are not equivalent. The existing workflow lacked a dedicated warmup job type, a canonical warmup asset specification, and a readiness probe that consulted the actual GPU worker pool.
+- **Fix applied:** Added a checked-in canonical warmup spec (`visual_people_warmup_v1`) backed by the Rogan test-bank source at `694000ms-706000ms`, a helper module (`backend/phase1_runtime/visual_warmup.py`), a one-time asset builder (`scripts/modal/build_visual_warmup_asset.py`), a dedicated submit/poll route pair (`POST /tasks/visual-warmup`, `GET /tasks/visual-warmup/result/{call_id}`), and a `/ready` probe that checks the live GPU worker state via the same `visual_extract_job` pool instead of relying on `/health` alone. Successful warmup and qualifying real extract jobs now update both a persisted readiness artifact and the live GPU container's in-memory warm state. Added the canonical operator entrypoint `scripts/modal/warm_visual_worker.py` to submit warmup, poll success, and then wait for `/ready` to return `200`.
+- **Verification evidence:** Local syntax validation passed for the new warmup/readiness modules. Added focused local tests covering `/ready`, warmup submit semantics, GPU-local ready probe behavior, and the operator warmup script. Live Modal verification is pending the next redeploy on a healthy control plane.
+
 ## 2026-05-07 - Modal Phase6 ffmpeg wedged on dynamic crop width/height updates
 
 - **Date/Time (UTC):** 2026-05-07 09:15-09:53 UTC

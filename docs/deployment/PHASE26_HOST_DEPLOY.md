@@ -137,7 +137,10 @@ The deploy script also creates a separate host ops virtualenv at
 `/usr/local/bin/gsutil` as a wrapper that loads `/etc/clypt-phase26/phase26.env`
 and passes `GOOGLE_APPLICATION_CREDENTIALS` into the isolated toolchain.
 Manual GCS clip upload and visual warmup/replay operations should use that host
-wrapper or the ops venv path rather than the Phase26 application virtualenv.
+wrapper or the ops venv path rather than the Phase26 application virtualenv. The
+canonical visual warmup operator entrypoint is
+`python scripts/modal/warm_visual_worker.py`; use that plus the visual app's
+`/ready` endpoint instead of ad hoc extract calls when proving timing-readiness.
 
 ## 4) Health Checks
 

@@ -57,6 +57,9 @@ Required secret/env:
 Public contract:
 
 - `GET /health`
+- `GET /ready`
+- `POST /tasks/visual-warmup` -> `202 Accepted` with `call_id`
+- `GET /tasks/visual-warmup/result/{call_id}` -> `202 pending` or `200` final result
 - `POST /tasks/visual-extract` -> `202 Accepted` with `call_id`
 - `GET /tasks/visual-extract/result/{call_id}` -> `202 pending` or `200` final result
 
@@ -77,7 +80,14 @@ Required fast-path capabilities:
 
 The worker fails hard if any of these are missing. It must not fall back to software decode, CPU RF-DETR, or detection-only RF-DETR. Masks are persisted once per visual job in a compressed low-resolution `.npz` sidecar artifact, and JSON rows carry `mask_ref` pointers for future caption negative-space work; current Phase6 crop/caption code does not consume them.
 
-For timing-sensitive E2E runs, deployment success is not enough. Submit a person-containing warmup job through `POST /tasks/visual-extract` and wait for `GET /tasks/visual-extract/result/{call_id}` to return success before submitting the measured Phase1/Phase26 run. The warmup must exercise both RF-DETR-Seg and YOLO11s-pose so model weights, CUDA context, the RF-DETR-Seg TensorRT engine, and the pose TensorRT engine are already built/loaded. A blank synthetic clip can validate the endpoint but is not a valid timing warmup because it can skip pose validation.
+For timing-sensitive E2E runs, deployment success is not enough. Use the dedicated warmup/readiness path:
+
+```bash
+python scripts/modal/build_visual_warmup_asset.py
+python scripts/modal/warm_visual_worker.py
+```
+
+The canonical warmup asset is `visual_people_warmup_v1`, sourced from `https://youtu.be/64qBE35S0ek?si=bul2StVGVzUE8EL6` and clipped to `694000ms-706000ms`. `warm_visual_worker.py` submits `POST /tasks/visual-warmup`, waits for the result endpoint to succeed, and then refuses to exit until `GET /ready` returns `200`. The warmup must exercise both RF-DETR-Seg and YOLO11s-pose so model weights, CUDA context, the RF-DETR-Seg TensorRT engine, and the pose TensorRT engine are already built/loaded. A blank synthetic clip can validate the endpoint but is not a valid timing warmup because it can skip pose validation.
 
 ## 2) Shared Media App
 
